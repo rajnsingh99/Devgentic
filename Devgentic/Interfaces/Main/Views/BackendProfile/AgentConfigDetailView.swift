@@ -633,7 +633,7 @@ struct AgentConfigDetailView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("File Handling")
                                     .font(theme.fontBody.weight(.semibold))
-                                Text("How attached files and knowledge sources are processed")
+                                Text("How attached files and knowledge sources are delivered to the model")
                                     .font(theme.fontCaption)
                                     .foregroundColor(theme.secondaryText)
                             }

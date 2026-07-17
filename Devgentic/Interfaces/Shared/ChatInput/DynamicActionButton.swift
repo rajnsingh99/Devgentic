@@ -51,8 +51,10 @@ struct DynamicActionButton: View {
     /// Set when a long-press opened the model picker so the release-click that
     /// follows doesn't ALSO fire the tap action (e.g. start recording).
     @State private var suppressNextTap = false
+    /// [Composer parity] Recording pulse (same look as ComposerMicButton).
+    @State private var pulseScale: CGFloat = 1.0
 
-    private let buttonSize: CGFloat = 30
+    private let buttonSize: CGFloat = 28 // matches the ComposerKit buttons
 
     /// Source of determinate progress for the model-download ring. @Observable —
     /// reading downloadProgress in body re-renders as the download advances.
@@ -66,7 +68,6 @@ struct DynamicActionButton: View {
             } else {
                 buttonContent
                     .frame(width: buttonSize, height: buttonSize)
-                    .scaleEffect(isHovering ? 1.05 : 1.0)
             }
         }
         .buttonStyle(PlainButtonStyle())
@@ -120,13 +121,25 @@ struct DynamicActionButton: View {
 
     @ViewBuilder
     private var buttonContent: some View {
-        let canSend = mode == .send && !trimmedInput.isEmpty
-        let isDisabledBySystem = (mode == .send && (voiceInputState == .processing || voiceInputState == .recording))
-
         ZStack {
-            Circle()
-                .fill(backgroundColor(canSend: canSend, isDisabledBySystem: isDisabledBySystem))
-                .shadow(color: backgroundColor(canSend: canSend, isDisabledBySystem: isDisabledBySystem).opacity(0.3), radius: 3, x: 0, y: 2)
+            // [Composer parity] QuickAccess mic look: clear circle with a hover tint normally,
+            // pulsing red ring while recording (was a filled accent/error circle).
+            if mode == .stopVoice {
+                Circle()
+                    .fill(Color.red.opacity(0.15)
+                        .shadow(.drop(color: Color.red.opacity(0.3), radius: 2)))
+                    .scaleEffect(pulseScale)
+                    .onAppear {
+                        guard !reduceMotion else { return }
+                        withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                            pulseScale = 1.25
+                        }
+                    }
+                    .onDisappear { pulseScale = 1.0 }
+            } else {
+                Circle()
+                    .fill(isHovering ? Color.primary.opacity(0.06) : Color.clear)
+            }
 
             // One persistent Image so mode changes morph glyph-to-glyph via symbol
             // replace instead of cross-fading separately stacked views.
@@ -230,14 +243,14 @@ struct DynamicActionButton: View {
         switch mode {
         case .send: return "arrow.up"
         case .stopStreaming: return "square.fill"
-        case .stopVoice: return "stop.circle.fill"
+        case .stopVoice: return "stop.fill" // [Composer parity] QA recording glyph
         case .mic:
             switch voiceInputState {
             case .processing: return "hourglass"
             case .permissionsDeniedMic, .error: return "mic.slash.fill"
             case .requestingPermissions: return "mic.badge.plus"
             case .modelLoading, .modelPreparing: return "arrow.down.circle"
-            default: return "waveform"
+            default: return "mic.fill" // [Composer parity] QA resting glyph (was waveform)
             }
         }
     }
@@ -253,31 +266,20 @@ struct DynamicActionButton: View {
         }
     }
 
-    private func backgroundColor(canSend: Bool, isDisabledBySystem: Bool) -> Color {
-        switch mode {
-        case .send:
-            return (canSend && !isDisabledBySystem) ? theme.controlAccent : theme.secondaryText.opacity(0.2)
-        case .stopVoice:
-            return theme.errorColor.opacity(0.9)
-        case .stopStreaming:
-            return theme.primaryText
-        case .mic:
-            return (isDisabledBySystem || voiceInputState != .available && voiceInputState != .idle) ? theme.controlAccent : theme.secondaryText.opacity(0.2)
-        }
-    }
-
     private var iconForegroundColor: Color {
         switch mode {
-        case .send, .stopVoice, .stopStreaming:
+        case .send, .stopStreaming:
             return .white
+        case .stopVoice:
+            return .red // [Composer parity] QA recording tint (bg is the pulse ring now)
         case .mic:
             switch voiceInputState {
-            case .recording: return .white
+            case .recording: return .red
             case .processing: return theme.controlAccent
             case .permissionsDeniedMic, .error: return theme.errorColor.opacity(0.8)
             case .requestingPermissions: return theme.controlAccent
             case .modelLoading, .modelPreparing: return theme.accentColor
-            default: return theme.primaryText
+            default: return isHovering ? theme.primaryText : theme.secondaryText // [Composer parity]
             }
         }
     }
@@ -297,29 +299,29 @@ struct DynamicActionButton: View {
 
     private var helpText: String {
         switch mode {
-        case .send: return "Send message (Enter)"
-        case .stopVoice: return "Stop recording and transcribe"
-        case .stopStreaming: return "Stop generating response"
+        case .send: return String(localized: "Send message (Enter)")
+        case .stopVoice: return String(localized: "Stop recording and transcribe")
+        case .stopStreaming: return String(localized: "Stop generating response")
         case .mic:
             switch voiceInputState {
             case .available:
-                return "Start voice input (\(inputViewModel.currentSpeechModelName)) — hold or right-click to change model"
+                return String(localized: "Start voice input (\(inputViewModel.currentSpeechModelName)) — hold or right-click to change model")
             case .idle:
-                return "Choose a speech model to enable voice input"
+                return String(localized: "Choose a speech model to enable voice input")
             case .modelLoading:
-                return "Downloading speech model…"
+                return String(localized: "Downloading speech model…")
             case .modelPreparing:
-                return "Preparing speech model…"
+                return String(localized: "Preparing speech model…")
             case .processing:
-                return "Transcribing…"
+                return String(localized: "Transcribing…")
             case .requestingPermissions:
-                return "Requesting microphone access…"
+                return String(localized: "Requesting microphone access…")
             case .permissionsDeniedMic:
-                return "Microphone access denied — click to open System Settings"
+                return String(localized: "Microphone access denied — click to open System Settings")
             case .error:
-                return "Voice input error — click to choose a speech model"
+                return String(localized: "Voice input error — click to choose a speech model")
             default:
-                return "Voice input"
+                return String(localized: "Voice input")
             }
         }
     }
@@ -328,8 +330,8 @@ struct DynamicActionButton: View {
 
     private var whisperAlertTitle: String {
         switch inputViewModel.activeWhisperAlert {
-        case .download: return "Download Required"
-        case .delete: return "Delete Model"
+        case .download: return String(localized: "Download Required")
+        case .delete: return String(localized: "Delete Model")
         case .none: return ""
         }
     }
@@ -339,15 +341,15 @@ struct DynamicActionButton: View {
         case .download:
             if let modelId = inputViewModel.pendingDownloadModelId,
                let model = WhisperModelCatalog.availableModels.first(where: { $0.id == modelId }) {
-                return "The \(model.displayName) model (\(model.size)) needs to be downloaded before use."
+                return String(localized: "The \(model.displayName) model (\(model.size)) needs to be downloaded before use.")
             }
-            return "This model needs to be downloaded before use."
+            return String(localized: "This model needs to be downloaded before use.")
         case .delete:
             if let modelId = inputViewModel.pendingDeleteModelId,
                let model = WhisperModelCatalog.availableModels.first(where: { $0.id == modelId }) {
-                return "Delete the \(model.displayName) model? It will need to be re-downloaded to use again."
+                return String(localized: "Delete the \(model.displayName) model? It will need to be re-downloaded to use again.")
             }
-            return "Delete this model? It will need to be re-downloaded to use again."
+            return String(localized: "Delete this model? It will need to be re-downloaded to use again.")
         case .none:
             return ""
         }

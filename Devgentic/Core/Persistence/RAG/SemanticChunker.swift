@@ -20,14 +20,23 @@ struct SemanticChunker {
     /// The number of characters to overlap between consecutive chunks.
     let overlap: Int
 
+    /// Override for CODE blocks only (`.code` → TreeSitterCodeChunker). Code is
+    /// symbol-dense — WordPiece burns ~3 chars/token and the MiniLM embedder
+    /// head-truncates at ~128 tokens — so code chunks need a smaller target
+    /// (~384) than prose (512) to stay fully visible to semantic search.
+    /// Nil = code uses `maxChunkSize` (legacy behavior).
+    let codeChunkSize: Int?
+
     /// Initializes a new SemanticChunker.
     /// - Parameters:
     ///   - maxChunkSize: The target size for each chunk. Defaults to 512.
     ///   - overlap: The character overlap between chunks. Defaults to 50.
-    init(maxChunkSize: Int = 512, overlap: Int = 50) {
+    ///   - codeChunkSize: Optional smaller target for code blocks.
+    init(maxChunkSize: Int = 512, overlap: Int = 50, codeChunkSize: Int? = nil) {
         precondition(maxChunkSize > overlap, "Chunk size must be greater than overlap.")
         self.maxChunkSize = maxChunkSize
         self.overlap = overlap
+        self.codeChunkSize = codeChunkSize
     }
 
     /// Splits an array of ContentBlocks into vector-ready strings.
@@ -53,13 +62,22 @@ struct SemanticChunker {
                     allChunks.append(contentsOf: chunkText(text))
                 }
 
-            case .listItem(let prefix, let text, _):
-                let listText = "\(prefix) \(text)"
+            case .listItem:
+                // `plainText` recursively flattens the item's child blocks (prefix +
+                // checkbox marker + content). Nested list items arrive as their own
+                // blocks, so each stays an independent chunk.
+                let listText = block.plainText
                 if !listText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     allChunks.append(contentsOf: chunkText(listText))
                 }
 
-            case .table(let headers, let rows):
+            case .blockquote:
+                let quoteText = block.plainText
+                if !quoteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    allChunks.append(contentsOf: chunkText(quoteText))
+                }
+
+            case .table(let headers, let rows, _):
                 let headerText = headers.joined(separator: " | ")
                 let rowsText = rows.map { $0.joined(separator: " | ") }.joined(separator: "\n")
                 let tableText = headerText + "\n" + rowsText
@@ -127,7 +145,7 @@ struct SemanticChunker {
     private func chunkCode(_ code: String, language: String?) -> [String] {
         // [RAG UPGRADE] Offload to the Tree-Sitter aware chunker!
         // This parses the AST to ensure we split at syntactically safe boundaries.
-        let treeSitterChunker = TreeSitterCodeChunker(maxChunkSize: maxChunkSize, overlap: overlap)
+        let treeSitterChunker = TreeSitterCodeChunker(maxChunkSize: codeChunkSize ?? maxChunkSize, overlap: overlap)
         return treeSitterChunker.chunk(code: code, languageName: language ?? "")
     }
     

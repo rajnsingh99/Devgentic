@@ -65,8 +65,8 @@ struct ListDirectoryTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        // FIX: Support Tilde Expansion
-        let resolvedPath = (arguments.path as NSString).expandingTildeInPath
+        // Expand ~ and anchor relative paths to HOME (see FilePathResolver).
+        let resolvedPath = FilePathResolver.resolve(arguments.path)
 
         let fileManager = FileManager.default
         let dirURL = URL(fileURLWithPath: resolvedPath)
@@ -168,8 +168,8 @@ struct ReadFileTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        // FIX: Support Tilde Expansion
-        let resolvedPath = (arguments.path as NSString).expandingTildeInPath
+        // Expand ~ and anchor relative paths to HOME (see FilePathResolver).
+        let resolvedPath = FilePathResolver.resolve(arguments.path)
         let url = URL(fileURLWithPath: resolvedPath)
 
         guard FileManager.default.fileExists(atPath: resolvedPath) else {
@@ -292,14 +292,24 @@ struct WriteFileTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        // FIX: Support Tilde Expansion
-        let resolvedPath = (arguments.path as NSString).expandingTildeInPath
-        let mode = (arguments.append ?? false) ? "append" : "write"
+        // Anchor relative paths to HOME (not the read-only volume root) — see FilePathResolver.
+        let resolvedPath = FilePathResolver.resolve(arguments.path)
+        let verb = (arguments.append ?? false) ? "appended" : "wrote"
 
         do {
             let fileURL = URL(fileURLWithPath: resolvedPath)
             let data = arguments.content.data(using: .utf8) ?? Data()
-            
+
+            // Ensure the containing folder exists. Models frequently write to a path
+            // whose parent hasn't been created yet (e.g. `project/index.html` before
+            // `project/`); without this the atomic write failed with Foundation's
+            // misleading "the folder '<filename>' doesn't exist", which derailed the
+            // agent. Creating intermediates makes write_file self-sufficient.
+            let parent = fileURL.deletingLastPathComponent()
+            if !parent.path.isEmpty {
+                try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+            }
+
             if arguments.append == true {
                 if FileManager.default.fileExists(atPath: resolvedPath) {
                     let handle = try FileHandle(forWritingTo: fileURL)
@@ -315,9 +325,12 @@ struct WriteFileTool: DevgenticTool {
                 try data.write(to: fileURL, options: .atomic)
             }
 
-            return "Successfully \(mode)ed to \(resolvedPath)"
+            return "Successfully \(verb) to \(resolvedPath)"
         } catch {
-            return "Error writing file: \(error.localizedDescription)"
+            // Honest, self-correcting error text. The raw Foundation string for a
+            // missing parent names the leaf as a "folder", which taught the model
+            // the filesystem was read-only; state the real target path instead.
+            return "Error: couldn't write to '\(resolvedPath)' — \(error.localizedDescription)"
         }
     }
 }
@@ -376,8 +389,8 @@ struct DeleteFileTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        // FIX: Support Tilde Expansion
-        let resolvedPath = (arguments.path as NSString).expandingTildeInPath
+        // Expand ~ and anchor relative paths to HOME (see FilePathResolver).
+        let resolvedPath = FilePathResolver.resolve(arguments.path)
         let fm = FileManager.default
 
         if Self.isCriticalPath(resolvedPath) {
@@ -467,8 +480,8 @@ struct MoveFileTool: DevgenticTool {
 
     func call(arguments: Arguments) async throws -> String {
         // FIX: Support Tilde Expansion
-        let resolvedSource = (arguments.source as NSString).expandingTildeInPath
-        let resolvedDest = (arguments.destination as NSString).expandingTildeInPath
+        let resolvedSource = FilePathResolver.resolve(arguments.source)
+        let resolvedDest = FilePathResolver.resolve(arguments.destination)
         
         let fm = FileManager.default
         do {
@@ -552,8 +565,8 @@ struct CopyFileTool: DevgenticTool {
 
     func call(arguments: Arguments) async throws -> String {
         // FIX: Support Tilde Expansion
-        let resolvedSource = (arguments.source as NSString).expandingTildeInPath
-        let resolvedDest = (arguments.destination as NSString).expandingTildeInPath
+        let resolvedSource = FilePathResolver.resolve(arguments.source)
+        let resolvedDest = FilePathResolver.resolve(arguments.destination)
         
         let fm = FileManager.default
         do {
@@ -622,8 +635,8 @@ struct CreateFolderTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        // FIX: Support Tilde Expansion
-        let resolvedPath = (arguments.path as NSString).expandingTildeInPath
+        // Expand ~ and anchor relative paths to HOME (see FilePathResolver).
+        let resolvedPath = FilePathResolver.resolve(arguments.path)
         let fm = FileManager.default
         do {
             if fm.fileExists(atPath: resolvedPath) {

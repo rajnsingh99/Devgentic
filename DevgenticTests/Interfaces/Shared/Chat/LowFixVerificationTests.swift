@@ -102,7 +102,7 @@ final class TokenCountEstimationTests: XCTestCase {
 
     /// Empty content returns 0 tokens.
     func testImageContentReturnsZeroTokens() {
-        let msg = ChatMessage(conversationId: UUID(), sender: .agent, content: .image(url: nil, alt: nil, imageData: nil), backendEntityId: UUID())
+        let msg = ChatMessage(conversationId: UUID(), sender: .agent, content: .mediaArtifact(MediaArtifact(kind: .image, reference: .ephemeralData(Data()), mimeType: "image/png")), backendEntityId: UUID())
         XCTAssertEqual(msg.tokenCountEstimate, 0)
     }
 
@@ -123,13 +123,6 @@ final class TokenCountEstimationTests: XCTestCase {
 // MARK: - LOW #4: Animation Lifecycle
 
 final class AnimationLifecycleTests: XCTestCase {
-
-    /// ThinkingDynamicIsland should be constructable without crash.
-    func testThinkingDynamicIslandInstantiation() {
-        // Structural test: the fix added onDisappear cleanup.
-        // We verify the view can be instantiated without issues.
-        XCTAssertTrue(true, "ThinkingDynamicIsland onDisappear cleanup is a structural SwiftUI fix")
-    }
 
     /// Verify CodeBlockView can be constructed (asyncAfter → Task migration).
     func testCodeBlockViewInstantiation() {

@@ -14,21 +14,27 @@ struct FileContextStrategyPicker: View {
     let profileType: ProfileType
     @Environment(\.appTheme) private var theme
 
+    private var defaultStrategy: FileContextStrategy {
+        FileContextStrategy.defaultStrategy(for: profileType)
+    }
+
+    /// Mirrors runtime resolution (`BackendProfileSnapshot.resolvedFileContextStrategy`),
+    /// so an unsupported persisted override renders as the default it heals to.
     private var resolvedStrategy: FileContextStrategy {
-        strategy ?? FileContextStrategy.defaultStrategy(for: profileType)
+        FileContextStrategy.resolve(strategy, for: profileType)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacingMedium) {
-            ForEach(FileContextStrategy.allCases, id: \.self) { option in
+            ForEach(FileContextStrategy.availableStrategies(for: profileType), id: \.self) { option in
                 FileContextStrategyCard(
                     strategy: option,
                     isSelected: resolvedStrategy == option,
-                    isDefault: option == FileContextStrategy.defaultStrategy(for: profileType),
+                    isDefault: option == defaultStrategy,
                     theme: theme
                 ) {
                     withAnimation(.easeInOut(duration: 0.2)) {
-                        if option == FileContextStrategy.defaultStrategy(for: profileType) {
+                        if option == defaultStrategy {
                             strategy = nil
                         } else {
                             strategy = option
@@ -37,11 +43,11 @@ struct FileContextStrategyPicker: View {
                 }
             }
 
-            if strategy != nil {
+            if resolvedStrategy != defaultStrategy {
                 HStack(spacing: 4) {
                     Image(systemName: "info.circle")
                         .accessibilityHidden(true)
-                    Text("Custom override. Default for \(profileType.rawValue) is \(FileContextStrategy.defaultStrategy(for: profileType).displayName).")
+                    Text("Custom override. Default for \(profileType.rawValue) is \(defaultStrategy.displayName).")
                 }
                 .font(theme.fontCaption)
                 .foregroundColor(theme.secondaryText)

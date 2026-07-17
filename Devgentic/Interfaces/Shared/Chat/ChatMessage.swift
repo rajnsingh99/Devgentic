@@ -87,6 +87,16 @@ enum TimelineEvent: Codable, Equatable, Identifiable {
     // System-level recoverable warnings (rate limits, memory pressure, parse retries, etc.)
     case warning(id: UUID, category: WarningCategory, text: String)
 
+    /// A Plan & Execute run rendered as one structured card: the step list with live
+    /// statuses, each step holding ITS OWN nested timeline (reasoning + tool rows).
+    /// Replaces the flat planGenerated/subtaskStarted/subtaskCompleted milestone chips
+    /// for chat/code agent runs. Updated in place by `CapabilityCardRouter`.
+    case planExecution(PlanRunData)
+
+    /// A Reflexion run rendered as one structured card: attempts with verdicts and the
+    /// evaluator's critique, each attempt holding its own nested timeline.
+    case reflectionRun(ReflectionRunData)
+
     var id: UUID {
         switch self {
         case .thought(let id, _): return id
@@ -95,7 +105,178 @@ enum TimelineEvent: Codable, Equatable, Identifiable {
         case .mediaGeneration(let id, _, _, _): return id
         case .capabilityMilestone(let id, _, _): return id
         case .warning(let id, _, _): return id
+        case .planExecution(let data): return data.id
+        case .reflectionRun(let data): return data.id
         }
+    }
+
+    /// True for the structured capability cards that must survive timeline eviction
+    /// (they hold the run's shape; dropping one deletes whole nested sub-timelines).
+    var isCapabilityCard: Bool {
+        switch self {
+        case .planExecution, .reflectionRun: return true
+        default: return false
+        }
+    }
+
+    /// Depth-first flattening: self plus every event nested inside capability cards
+    /// (plan steps, reflection attempts — including a plan card nested in an attempt
+    /// when both capabilities are stacked). Consumers that semantically want "every
+    /// tool / thought that happened in this run" (episodic memory, native-history
+    /// rebuild, resume reconstruction) iterate this instead of the raw array.
+    var flattenedIncludingNested: [TimelineEvent] {
+        switch self {
+        case .planExecution(let data):
+            return [self] + data.steps.flatMap { $0.events.flatMap(\.flattenedIncludingNested) }
+        case .reflectionRun(let data):
+            return [self] + data.attempts.flatMap { $0.events.flatMap(\.flattenedIncludingNested) }
+        default:
+            return [self]
+        }
+    }
+}
+
+// MARK: - Capability Card Data (Plan & Execute)
+
+/// Live status of one plan step — the UI vocabulary for `PlanStepData`.
+/// (Distinct from `SubTaskStatus`, which belongs to the planner's own model.)
+enum PlanStepStatus: String, Codable, Equatable, Sendable {
+    case pending, running, completed
+    /// Ended early but usable (inner run finished `.completedWithWarnings`, e.g. circuit-breaker abort).
+    case warning
+    case failed
+    case cancelled
+}
+
+/// One step of a plan card: identity + live status + its own nested timeline.
+struct PlanStepData: Codable, Equatable, Identifiable {
+    let id: String            // SubTask.id (stable across review edits)
+    var title: String
+    var toolHints: [String]?
+    var status: PlanStepStatus
+    var summary: String?      // completion summary from the capability (≤150 chars)
+    var durationMs: Int?
+    var events: [TimelineEvent]
+
+    init(
+        id: String,
+        title: String,
+        toolHints: [String]? = nil,
+        status: PlanStepStatus = .pending,
+        summary: String? = nil,
+        durationMs: Int? = nil,
+        events: [TimelineEvent] = []
+    ) {
+        self.id = id
+        self.title = title
+        self.toolHints = toolHints
+        self.status = status
+        self.summary = summary
+        self.durationMs = durationMs
+        self.events = events
+    }
+}
+
+enum PlanRunPhase: String, Codable, Equatable, Sendable {
+    case awaitingApproval, executing, finished
+}
+
+/// The whole Plan & Execute run as one timeline entity, updated in place while streaming.
+struct PlanRunData: Codable, Equatable, Identifiable {
+    let id: UUID
+    var phase: PlanRunPhase
+    var steps: [PlanStepData]
+    var outcome: ExecutionOutcome?    // set when the run finishes
+    var startedAt: Date
+    var finishedAt: Date?
+
+    init(
+        id: UUID = UUID(),
+        phase: PlanRunPhase = .executing,
+        steps: [PlanStepData] = [],
+        outcome: ExecutionOutcome? = nil,
+        startedAt: Date = Date(),
+        finishedAt: Date? = nil
+    ) {
+        self.id = id
+        self.phase = phase
+        self.steps = steps
+        self.outcome = outcome
+        self.startedAt = startedAt
+        self.finishedAt = finishedAt
+    }
+
+    var completedCount: Int {
+        steps.filter { $0.status == .completed || $0.status == .warning }.count
+    }
+    var hasDegradedSteps: Bool {
+        steps.contains { $0.status == .warning || $0.status == .failed }
+    }
+}
+
+// MARK: - Capability Card Data (Reflexion)
+
+enum ReflectionAttemptStatus: String, Codable, Equatable, Sendable {
+    case running
+    case evaluating
+    case rejected     // evaluator said RETRY — critique carries why
+    case accepted     // evaluator said PASS
+    /// Ran to completion without an evaluator verdict (the final trial is never evaluated).
+    case completed
+    case failed
+    case cancelled
+}
+
+/// One Reflexion trial: its verdict, the evaluator's critique, and its nested timeline.
+struct ReflectionAttemptData: Codable, Equatable, Identifiable {
+    var id: Int { trial }
+    let trial: Int
+    var status: ReflectionAttemptStatus
+    var critique: String?
+    var durationMs: Int?
+    var events: [TimelineEvent]
+
+    init(
+        trial: Int,
+        status: ReflectionAttemptStatus = .running,
+        critique: String? = nil,
+        durationMs: Int? = nil,
+        events: [TimelineEvent] = []
+    ) {
+        self.trial = trial
+        self.status = status
+        self.critique = critique
+        self.durationMs = durationMs
+        self.events = events
+    }
+}
+
+/// The whole Reflexion run as one timeline entity, updated in place while streaming.
+struct ReflectionRunData: Codable, Equatable, Identifiable {
+    let id: UUID
+    var maxTrials: Int
+    var attempts: [ReflectionAttemptData]
+    var acceptedTrial: Int?
+    var outcome: ExecutionOutcome?
+    var startedAt: Date
+    var finishedAt: Date?
+
+    init(
+        id: UUID = UUID(),
+        maxTrials: Int,
+        attempts: [ReflectionAttemptData] = [],
+        acceptedTrial: Int? = nil,
+        outcome: ExecutionOutcome? = nil,
+        startedAt: Date = Date(),
+        finishedAt: Date? = nil
+    ) {
+        self.id = id
+        self.maxTrials = maxTrials
+        self.attempts = attempts
+        self.acceptedTrial = acceptedTrial
+        self.outcome = outcome
+        self.startedAt = startedAt
+        self.finishedAt = finishedAt
     }
 }
 
@@ -258,7 +439,7 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     /// of source. Analytics and scratchpad paths can still distinguish the two by
     /// reading `timelineEvents` directly.
     var thoughts: [AgentThought] {
-        timelineEvents.compactMap { event in
+        flattenedTimelineEvents.compactMap { event in
             switch event {
             case .thought(let id, let text):
                 return AgentThought(id: id, text: text)
@@ -269,13 +450,90 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
             }
         }
     }
-    
-    var artifacts: [ToolOutput] {
-        timelineEvents.compactMap { event in
-            if case .toolExecution(let data) = event, !data.isExecuting {
-                return ToolOutput(toolName: data.name, params: data.params, output: data.output ?? "", isSuccess: data.isSuccess ?? false)
+
+    /// The timeline with capability-card sub-timelines flattened in (depth-first, cards
+    /// included as markers). Plan & Execute / Reflexion runs nest their per-step and
+    /// per-attempt events inside `.planExecution` / `.reflectionRun` — consumers that
+    /// want "everything that happened" (episodic memory, native-history rebuild, resume
+    /// reconstruction, tool scans) iterate this instead of `timelineEvents`.
+    var flattenedTimelineEvents: [TimelineEvent] {
+        timelineEvents.flatMap(\.flattenedIncludingNested)
+    }
+
+    /// The most recent COMPLETED image artifact anywhere in the timeline (including
+    /// nested capability-card sub-timelines). An image generation surfaces its result
+    /// ONLY as a `.mediaGeneration` event — nothing sets it as message content — so
+    /// without promoting it the bubble falls through to the "stopped" placeholder and
+    /// the image is invisible. `resolveFinalizedContent` uses this at finalize.
+    var lastCompletedImageArtifact: MediaArtifact? {
+        for event in flattenedTimelineEvents.reversed() {
+            if case .mediaGeneration(_, _, let artifact?, let isComplete) = event,
+               isComplete, artifact.kind == .image {
+                return artifact
             }
-            return nil
+        }
+        return nil
+    }
+
+    /// Resolves the content a finalized (non-throwing) run should display. Prefers the
+    /// streamed text; failing that, a produced image artifact (image generations stream
+    /// no text, so without this they fell through to the placeholder and the image never
+    /// rendered — audit gap #2); failing that, a "stopped" placeholder so an empty run
+    /// doesn't masquerade as a clean completion. Pure + static for testability — the
+    /// finalize path (ActiveStreamManager) and `GeneratedImageRenderGapTests` share it.
+    static func resolveFinalizedContent(streamed: MessageContent?, imageArtifact: MediaArtifact?) -> MessageContent {
+        if let streamed, let text = streamed.textContent,
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return streamed
+        }
+        if let imageArtifact {
+            return .mediaArtifact(imageArtifact)
+        }
+        return .markdownText("*Operation was stopped before a response could be generated.*")
+    }
+
+    /// [G1 resume] Prepares persisted capability cards for a resumed run: drops dangling
+    /// (still-executing / output-less) tool rows inside nested step/attempt timelines and
+    /// closes any card the interruption left unfinished — the resumed continuation streams
+    /// NEW top-level events, never back into the old card, so an open card would spin forever.
+    func sanitizeCapabilityCardsForResume() {
+        func isDangling(_ event: TimelineEvent) -> Bool {
+            if case .toolExecution(let data) = event { return data.isExecuting || data.output == nil }
+            return false
+        }
+        func sanitize(_ plan: inout PlanRunData) {
+            for s in plan.steps.indices {
+                plan.steps[s].events.removeAll(where: isDangling)
+                if plan.steps[s].status == .running { plan.steps[s].status = .cancelled }
+            }
+            if plan.phase != .finished {
+                plan.phase = .finished
+                plan.finishedAt = plan.finishedAt ?? Date()
+            }
+        }
+        for i in timelineEvents.indices {
+            switch timelineEvents[i] {
+            case .planExecution(var plan):
+                sanitize(&plan)
+                timelineEvents[i] = .planExecution(plan)
+            case .reflectionRun(var run):
+                for a in run.attempts.indices {
+                    run.attempts[a].events.removeAll(where: isDangling)
+                    for e in run.attempts[a].events.indices {
+                        if case .planExecution(var nested) = run.attempts[a].events[e] {
+                            sanitize(&nested)
+                            run.attempts[a].events[e] = .planExecution(nested)
+                        }
+                    }
+                    if run.attempts[a].status == .running || run.attempts[a].status == .evaluating {
+                        run.attempts[a].status = .cancelled
+                    }
+                }
+                run.finishedAt = run.finishedAt ?? Date()
+                timelineEvents[i] = .reflectionRun(run)
+            default:
+                break
+            }
         }
     }
 
@@ -301,9 +559,11 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
                 }
             }) {
                 timelineEvents.remove(at: firstNarrativeIndex)
-            } else {
-                // All events are tool/milestone — drop the oldest one
-                timelineEvents.removeFirst()
+            } else if let firstEvictableIndex = timelineEvents.firstIndex(where: { !$0.isCapabilityCard }) {
+                // All narrative gone — drop the oldest tool/milestone, but never a capability
+                // card: it holds whole nested sub-timelines (a plan card sits near the start
+                // of every planned run, so plain removeFirst() would delete the run's shape).
+                timelineEvents.remove(at: firstEvictableIndex)
             }
         }
     }
@@ -313,9 +573,7 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     var tokenUsage: TokenUsage?
 
     // MARK: - Transient UI State (Not Persisted)
-    var thinkingHeadline: String? = nil
     var agentState: AgentState = .idle
-    var isThinkingExpanded: Bool = false
 
     // [HITL/P6] Live HITL state moved entirely to the unified InteractionCenter (single source of
     // truth). The per-message `pendingInteraction` container and its deprecated shims were removed.
@@ -346,7 +604,7 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
             return max(1, text.count / 4)
         case .error(let title, let details, _, _):
             return max(1, ((title?.count ?? 0) + details.count) / 4)
-        case .image, .mediaArtifact:
+        case .mediaArtifact:
             return 0
         case .checkpoint(let summary):
             return max(1, summary.count / 4)
@@ -374,6 +632,15 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
 
     // MARK: - Performance Caching
     @ObservationIgnored var cachedMarkdownBlocks: [ContentBlock]? = nil
+
+    /// Incremental parser used ONLY while this message is streaming — settled
+    /// regions parse once, and each flush re-parses just the trailing block
+    /// instead of the whole accumulated text (the old full-reparse-per-flush was
+    /// O(n²) over a response, on the main thread). Dropped on the first
+    /// non-streaming access, which also forces one authoritative full re-parse
+    /// so the final rendering is exactly what `parseMarkdown` produces.
+    /// Transient — never persisted.
+    @ObservationIgnored private var streamingMarkdownParser: StreamingMarkdownParser? = nil
 
     var attachedTextFiles: [AttachedTextFile]?
     var attachedImageFiles: [AttachedImageFile]?
@@ -408,6 +675,23 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     }
     
     func getOrCreateMarkdownBlocks(from text: String) -> [ContentBlock] {
+        if isStreaming {
+            if let cached = cachedMarkdownBlocks { return cached }
+            let parser = streamingMarkdownParser ?? StreamingMarkdownParser()
+            streamingMarkdownParser = parser
+            let blocks = parser.parse(text)
+            self.cachedMarkdownBlocks = blocks
+            return blocks
+        }
+
+        // First non-streaming access after a stream: drop the incremental state and
+        // invalidate so the full parse below becomes the authoritative final result
+        // (heals any mid-stream boundary cosmetics — see StreamingMarkdownParser).
+        if streamingMarkdownParser != nil {
+            streamingMarkdownParser = nil
+            cachedMarkdownBlocks = nil
+        }
+
         if let cached = cachedMarkdownBlocks { return cached }
         let blocks = parseMarkdown(text)
         self.cachedMarkdownBlocks = blocks
@@ -425,7 +709,7 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
             return getOrCreateMarkdownBlocks(from: text)
         case .codeBlock(let language, let code):
             return [ContentBlock(id: "block-0", type: .code(language: language ?? "text", content: code, fileName: nil))]
-        case .error, .image, .mediaArtifact:
+        case .error, .mediaArtifact:
             return []
         case .checkpoint(let summary):
             return getOrCreateMarkdownBlocks(from: summary)
@@ -454,7 +738,10 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     // LLM's visible monologue from system narration. v2 data decodes unchanged
     // because Swift's automatic Codable-for-enums handles new cases additively;
     // bumping the version is hygiene for future migration decisions.
-    private static let currentSchemaVersion = 3
+    // v4: `TimelineEvent.planExecution` / `.reflectionRun` capability cards added
+    // (nested per-step / per-attempt sub-timelines). Additive — v3 data decodes
+    // unchanged; legacy planning/reflection runs keep their flat milestone chips.
+    private static let currentSchemaVersion = 4
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -500,10 +787,8 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         }
 
         // Transient properties always initialize to defaults
-        self.thinkingHeadline = nil
         self.agentState = .idle
         self.cachedMarkdownBlocks = nil
-        self.isThinkingExpanded = false
     }
 
     func encode(to encoder: Encoder) throws {
@@ -572,7 +857,6 @@ enum MessageContent: Equatable, Codable {
     case markdownText(String)
     case codeBlock(language: String?, code: String)
     case error(title: String?, details: String, category: AgentErrorCategory? = nil, suggestion: String? = nil)
-    case image(url: URL?, alt: String?, imageData: Data?)
     case mediaArtifact(MediaArtifact)
 
     /// A compacted history checkpoint produced by IC-powered summarization.
@@ -607,11 +891,32 @@ enum MessageContent: Equatable, Codable {
             let suggestion = try container.decodeIfPresent(String.self, forKey: .suggestion)
             self = .error(title: title, details: details, category: category, suggestion: suggestion)
         case "image":
+            // Legacy shim (2026-07-17): `.image` was removed as a case — MediaArtifact is
+            // the single image representation, so ONE renderer serves everything. Messages
+            // persisted under the old shape convert here and re-encode as artifacts on the
+            // next save; this branch is decode-only and never written back.
             let urlString = try container.decodeIfPresent(String.self, forKey: .imageUrl)
             let alt = try container.decodeIfPresent(String.self, forKey: .imageAlt)
             let imageData = try container.decodeIfPresent(Data.self, forKey: .imageData)
-            let url = urlString.flatMap { URL(string: $0) }
-            self = .image(url: url, alt: alt, imageData: imageData)
+            if let imageData {
+                self = .mediaArtifact(MediaArtifact(
+                    kind: .image,
+                    reference: .ephemeralData(imageData),
+                    // The legacy case never stored a mime type; sniff the bytes.
+                    mimeType: "image/\(ImageExport.fileExtension(for: imageData))",
+                    label: alt
+                ))
+            } else if let url = urlString.flatMap({ URL(string: $0) }) {
+                // URL-only legacy images rendered "Image Not Available" anyway (remote
+                // references are never auto-fetched); the artifact error card says so too,
+                // just through the live renderer.
+                self = .mediaArtifact(MediaArtifact(
+                    kind: .image, reference: .remoteURL(url),
+                    mimeType: "image/png", label: alt
+                ))
+            } else {
+                self = .plainText("[Image unavailable\(alt.map { ": \($0)" } ?? "")]")
+            }
         case "mediaArtifact":
             let artifact = try container.decode(MediaArtifact.self, forKey: .artifact)
             self = .mediaArtifact(artifact)
@@ -642,11 +947,6 @@ enum MessageContent: Equatable, Codable {
             try container.encode(details, forKey: .details)
             try container.encodeIfPresent(category, forKey: .category)
             try container.encodeIfPresent(suggestion, forKey: .suggestion)
-        case .image(let url, let alt, let imageData):
-            try container.encode("image", forKey: .type)
-            try container.encodeIfPresent(url?.absoluteString, forKey: .imageUrl)
-            try container.encodeIfPresent(alt, forKey: .imageAlt)
-            try container.encodeIfPresent(imageData, forKey: .imageData)
         case .mediaArtifact(let artifact):
             try container.encode("mediaArtifact", forKey: .type)
             try container.encode(artifact, forKey: .artifact)
@@ -662,7 +962,6 @@ enum MessageContent: Equatable, Codable {
         case .markdownText(let text): return text
         case .codeBlock(_, let code): return code
         case .error(let title, let details, _, _): return "\(title ?? "Error"): \(details)"
-        case .image: return nil
         case .mediaArtifact: return nil
         case .checkpoint(let summary): return summary
         }

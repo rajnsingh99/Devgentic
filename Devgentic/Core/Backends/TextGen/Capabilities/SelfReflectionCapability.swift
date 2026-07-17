@@ -72,9 +72,13 @@ actor SelfReflectionExecutorWrapper: Executor {
 
     init(innerExecutor: any Executor, config: SelfReflectionConfig) {
         // SelfReflectionCapability seeds prior trial output into workingMemory.
-        // This only works with executors that consume AgentInput.workingMemory.
-        assert(innerExecutor is ReActAgentExecutor,
-               "SelfReflectionCapability requires an inner executor that consumes workingMemory (e.g., ReActAgentExecutor).")
+        // This only works with executors that consume AgentInput.workingMemory:
+        // ReActAgentExecutor directly, or a PlanningExecutorWrapper (which threads
+        // input.workingMemory into every subtask) when both capabilities stack —
+        // ExecutorFactory builds Reflexion(Planning(ReAct)), so the old ReAct-only
+        // assert crashed every debug run with both toggles on (backends-audit #6).
+        assert(innerExecutor is ReActAgentExecutor || innerExecutor is PlanningExecutorWrapper,
+               "SelfReflectionCapability requires an inner executor that consumes workingMemory (ReActAgentExecutor or PlanningExecutorWrapper).")
         self.innerExecutor = innerExecutor
         self.config = config
     }
@@ -109,6 +113,12 @@ actor SelfReflectionExecutorWrapper: Executor {
                     let executionTrace = input.traceContext
                     let reflectionEvaluator = ReflectionEvaluator()
                     var reflexionMemory = ReflexionMemoryState()
+
+                    // [Loop Safety] ONE interaction memory across all trials: a question the
+                    // user answered in trial 1 replays for an identical re-ask in trial 2
+                    // ("a human's answer stands for the run"). Also inherited by a stacked
+                    // inner Planning wrapper via the same field.
+                    let interactionMemory = input.interactionMemory ?? RunInteractionMemory()
 
                     // --- Start Episode ---
                     sessionState.episodes.append(MemoryEpisode(primaryGoal: input.userInput, status: .active))
@@ -149,9 +159,6 @@ actor SelfReflectionExecutorWrapper: Executor {
                         ))
 
                         continuation.yield(.reflectionTrialStarted(trial: trial, maxTrials: self.config.maxTrials))
-                        if trial > 1 {
-                            continuation.yield(.thought("Starting trial \(trial)/\(self.config.maxTrials) with reflection feedback..."))
-                        }
 
                         // Build trial-scoped input with accumulated critique
                         let trialInstructions: String
@@ -195,8 +202,14 @@ actor SelfReflectionExecutorWrapper: Executor {
                             workingMemory: sessionState.workingMemory
                         )
                         trialInput.workingMemory = seededMemory
+                        trialInput.interactionMemory = interactionMemory
                         trialInput.instructions = trialInstructions.isEmpty ? nil : trialInstructions
                         trialInput.suppressEpisodeManagement = true
+                        // Trial output is intermediate for the evaluator loop (the
+                        // evaluator judges tool results, not the synthesized prose);
+                        // per-trial IC synthesis was pure cost. On the legacy path the
+                        // shipped bestOutput becomes the deterministic summary.
+                        trialInput.suppressLLMSynthesis = true
                         trialInput.traceContext = trialSpan
 
                         // Delegate to inner executor for this trial
@@ -210,8 +223,21 @@ actor SelfReflectionExecutorWrapper: Executor {
                                 switch event {
                                 case .content(let text):
                                     trialOutput += text
-                                case .thought(let thought, _, _):
-                                    continuation.yield(.thought("[Trial \(trial)] \(thought)"))
+                                case .thought(let thought, let id, _):
+                                    // Forwarded verbatim — attribution is structural now (the
+                                    // stream-bridge routes trial events into the reflection
+                                    // card's attempt sub-timeline), so no "[Trial N]" prefix.
+                                    continuation.yield(.thought(thought, id: id))
+                                case .reasoning(let text, let id, _):
+                                    // Model monologue — previously dropped by the default case.
+                                    continuation.yield(.reasoning(text, id: id))
+                                // Stacked capabilities: when the inner executor is a Planning
+                                // wrapper, its plan/subtask events must pass through — dropping
+                                // requestPlanReview would deadlock the run (it suspends waiting
+                                // for a banner the UI never saw).
+                                case .planGenerated, .planApproved, .requestPlanReview,
+                                     .subtaskStarted, .subtaskCompleted:
+                                    continuation.yield(event)
                                 case .toolCall(let name, let params, _, let stepId):
                                     // [G11] Forward tool invocation events so UI shows tool activity during trials.
                                     continuation.yield(.toolCall(name: name, params: params, stepId: stepId))
@@ -243,8 +269,9 @@ actor SelfReflectionExecutorWrapper: Executor {
                                 case .error(let msg):
                                     continuation.yield(.error(msg))
                                 case .warning(let cat, let msg, let relatedPath, _):
-                                    // [G8] Forward warnings so UI surfaces memory-pressure / retry / parse-failure signals during trials.
-                                    continuation.yield(.warning(category: cat, message: "[Trial \(trial)] \(msg)", relatedPath: relatedPath))
+                                    // [G8] Forward warnings so UI surfaces memory-pressure / retry / parse-failure
+                                    // signals during trials. Unprefixed — attribution is structural (reflection card).
+                                    continuation.yield(.warning(category: cat, message: msg, relatedPath: relatedPath))
                                 case .artifactProduced(let artifact):
                                     continuation.yield(.artifactProduced(artifact))
                                 case .tokenUsage(let usage):
@@ -293,7 +320,6 @@ actor SelfReflectionExecutorWrapper: Executor {
                         guard trial < self.config.maxTrials else { break }
 
                         continuation.yield(.reflectionEvaluating(trial: trial))
-                        continuation.yield(.thought("Reflecting on trial \(trial) outcome..."))
 
                         await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
                         try Task.checkCancellation()  // [G7] Catch cancellation before reflection LLM call
@@ -309,14 +335,13 @@ actor SelfReflectionExecutorWrapper: Executor {
                         if reflection.isAcceptable {
                             logger.info("Trial \(trial) accepted by reflection evaluator.")
                             continuation.yield(.reflectionAccepted(trial: trial))
-                            continuation.yield(.thought("Reflection: Trial \(trial) outcome is acceptable."))
                             break
                         }
 
-                        // Not acceptable -- prepare for next trial
+                        // Not acceptable -- prepare for next trial. The full critique travels
+                        // on the structured event; the reflection card renders it verbatim.
                         logger.info("Trial \(trial) rejected. Critique: \(reflection.critique)")
                         continuation.yield(.reflectionRetrying(trial: trial, critique: reflection.critique))
-                        continuation.yield(.thought("Reflection: \(reflection.critique)"))
 
                         reflexionMemory.addReflection(
                             trial: trial,
@@ -340,13 +365,18 @@ actor SelfReflectionExecutorWrapper: Executor {
                     sessionState.closeActiveEpisode(outcome: terminalOutcome, message: bestOutput)
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
 
+                    // Anchor to the EXISTING root span (a never-begun `newSpan()` orphans
+                    // the event — FK failure at flush; same defect class as the Planning
+                    // phase-0 log). The outcome metadata makes the session summary reflect
+                    // the REFLEXION verdict rather than whichever trial reported last.
                     onTraceUpdate(AgentTraceLog(
                         traceID: executionTrace.traceID,
-                        spanID: executionTrace.newSpan().spanID,
+                        spanID: executionTrace.spanID,
                         parentSpanID: executionTrace.parentSpanID,
                         stepNumber: trialsRun,
                         state: .thinking(.finalizing),
-                        content: "Self-reflection complete after \(trialsRun) trial(s)."
+                        content: "Self-reflection complete after \(trialsRun) trial(s).",
+                        metadata: ["outcome": terminalOutcome.rawValue]
                     ))
 
                     continuation.yield(.content(bestOutput))
@@ -366,6 +396,16 @@ actor SelfReflectionExecutorWrapper: Executor {
                     sessionState.cancelActiveEpisode()
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                     continuation.yield(.thought("Cancelled by user."))
+                    // Honest terminal for the session summary: CANCELLED 🚫, not FAIL ❌.
+                    onTraceUpdate(AgentTraceLog(
+                        traceID: input.traceContext.traceID,
+                        spanID: input.traceContext.spanID,
+                        parentSpanID: input.traceContext.parentSpanID,
+                        stepNumber: 0,
+                        state: .thinking(.finalizing),
+                        content: "Cancelled by user.",
+                        metadata: ["outcome": ExecutionOutcome.cancelled.rawValue]
+                    ))
                     // #23: mirror ReActAgentExecutor's cancel placeholder so a cancelled
                     // Reflexion run doesn't leave an empty bubble (trial content is accumulated,
                     // not forwarded, so on a wrapper-level cancel nothing has reached the UI).

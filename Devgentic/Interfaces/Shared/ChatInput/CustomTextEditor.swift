@@ -29,6 +29,12 @@ struct CustomTextEditor: NSViewRepresentable {
     var onNavigateQueryHistory: ((MainApplicationViewModel.QueryNavigationDirection) -> Void)?
     var onTextManuallyChanged: (() -> Void)?
 
+    /// When true, Escape is forwarded to the window instead of NSTextView's default handling
+    /// (which maps Escape → `complete:`, the word-completion popup). The QuickAccess panel needs
+    /// Escape to reach its `cancelOperation` (dismiss / HITL-deny). Default false — the main
+    /// composer keeps standard behavior.
+    var escapePassesThrough: Bool = false
+
     let logger = DGLogger(category: "CustomTextEditor_Input")
 
     struct AttributedTextInsertionAction: Equatable {
@@ -44,7 +50,7 @@ struct CustomTextEditor: NSViewRepresentable {
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.lineSpacing = 4
         return [
-            .font: NSFont.systemFont(ofSize: 14),
+            .font: ComposerStyle.editorNSFont, // [UI audit gap 4] single source (was hardcoded 14)
             .foregroundColor: NSColor.labelColor,
             .paragraphStyle: paragraphStyle
         ]
@@ -171,12 +177,15 @@ struct CustomTextEditor: NSViewRepresentable {
             let currentSelectedRange = textView.selectedRange()
             let attributedString = NSAttributedString(string: self.text, attributes: defaultTypingAttributes)
 
-            textView.textStorage?.replaceCharacters(in: NSRange(location: 0, length: textView.textStorage?.length ?? 0), with: attributedString)
-
             // Use UTF-16 length (NSString) for correct NSRange clamping
             let utf16Length = (self.text as NSString).length
             let newLocation = min(currentSelectedRange.location, utf16Length)
-            textView.setSelectedRange(NSRange(location: newLocation, length: 0))
+
+            // External binding sync (send-clear, query-history nav, draft restore):
+            // replace everything AND drop the now-inconsistent undo history. See
+            // `replaceEntireContents` — without the undo reset, a post-send ⌘Z applies a
+            // stale typing-undo range and crashes (NSRangeException in NSUndoTyping).
+            textView.replaceEntireContents(with: attributedString, selecting: NSRange(location: newLocation, length: 0))
 
             textView.typingAttributes = defaultTypingAttributes
             textView.textColor = NSColor.textColor
@@ -236,6 +245,43 @@ struct CustomTextEditor: NSViewRepresentable {
             self.textContainer?.heightTracksTextView = false
             self.minSize = NSSize(width: 0, height: 0)
             self.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            disableAutomaticTextRewriting()
+        }
+
+        /// macOS rewrites text as you type unless told otherwise, and NSTextView inherits that
+        /// system-wide setting: `"` becomes `“”`, `--` becomes an em dash. In a composer that
+        /// carries code and shell commands that is silent corruption — `npm install --save-dev`
+        /// reaches the model as `—save-dev`, and pasted source arrives with curly quotes that
+        /// won't compile. Prose loses typographic niceties; correctness wins.
+        ///
+        /// AdvancedPromptEditor already does this for the prompt field.
+        func disableAutomaticTextRewriting() {
+            isAutomaticQuoteSubstitutionEnabled = false
+            isAutomaticDashSubstitutionEnabled = false
+            isAutomaticTextReplacementEnabled = false
+            isAutomaticSpellingCorrectionEnabled = false
+        }
+
+        /// Replaces the ENTIRE contents from an external source (the SwiftUI binding
+        /// changing under us: send-clear, query-history navigation, draft restore) and
+        /// then drops the undo history.
+        ///
+        /// The replacement is a direct `textStorage` mutation that bypasses NSTextView's
+        /// own undo registration, so any open typing-coalescing group keeps a range into
+        /// the OLD text. After a send-clear the text is empty, so a subsequent ⌘Z applies
+        /// that stale range and crashes — `NSRangeException`, `Range {0, N} out of bounds;
+        /// string length 0`, inside `-[NSUndoTyping undoRedo:]` (reproduced). These are
+        /// external replacements, not user edits, so there is no meaningful typing-undo to
+        /// preserve; clear it. NB `breakUndoCoalescing()` alone does NOT fix this — the
+        /// stale action is already registered, so the coalescing group must be discarded,
+        /// not merely closed.
+        func replaceEntireContents(with attributed: NSAttributedString, selecting selection: NSRange) {
+            textStorage?.replaceCharacters(
+                in: NSRange(location: 0, length: textStorage?.length ?? 0),
+                with: attributed
+            )
+            setSelectedRange(selection)
+            undoManager?.removeAllActions()
         }
         
         override var intrinsicContentSize: NSSize {
@@ -274,6 +320,17 @@ struct CustomTextEditor: NSViewRepresentable {
             if widthChanged {
                 invalidateIntrinsicContentSize()
                 enclosingScrollView?.invalidateIntrinsicContentSize()
+            }
+        }
+
+        override func cancelOperation(_ sender: Any?) {
+            // NSTextView's default cancelOperation invokes complete: (word completions). When the
+            // host opts in (QuickAccess panel), hand Escape to the window so its cancelOperation
+            // (panel dismiss / HITL-deny) runs instead.
+            if coordinator?.parent.escapePassesThrough == true {
+                self.window?.cancelOperation(sender)
+            } else {
+                super.cancelOperation(sender)
             }
         }
 

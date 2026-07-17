@@ -161,6 +161,12 @@ struct AgentSessionMetrics {
     let sessionID: UUID
     var totalSteps: Int = 0
     var totalIterations: Int = 0
+    /// Sum of the authoritative per-run iteration counts reported by COMPLETED
+    /// inner executor runs. Planning/Reflexion sessions run several ReAct loops;
+    /// each report replaces the event-derived drift for its own run while
+    /// preserving the counts of the runs before it (a plain overwrite displayed
+    /// only the last subtask's count).
+    var confirmedIterations: Int = 0
     var toolCalls: Int = 0
     var parseErrors: Int = 0
     var didFinishSuccessfully: Bool = false

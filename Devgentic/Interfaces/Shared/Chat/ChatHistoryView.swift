@@ -14,9 +14,17 @@ private let logger = DGLogger(category: "ChatHistoryView")
 /// A standard bottom-up chat interface.
 struct ChatHistoryView: View {
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @Environment(MainApplicationViewModel.self) private var mainAppViewModel
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
+
+    /// `nil` under Reduce Motion, which makes `.animation(_:value:)` and `withAnimation`
+    /// apply the change instantly. This is the main content surface — sliding, springing
+    /// scroll on every new message is exactly what the setting exists to stop.
+    private func motionSafe(_ animation: Animation) -> Animation? {
+        reduceMotion ? nil : animation
+    }
 
     // Track the ID of the newest message to handle auto-scrolling for new content.
     @State private var lastNewestMessageID: UUID?
@@ -27,6 +35,17 @@ struct ChatHistoryView: View {
 
     // MARK: - Scroll-to-Bottom FAB State
     @State private var showScrollToBottom: Bool = false
+    /// Content must extend at least this far below the viewport bottom before the
+    /// FAB appears — slack so it doesn't flicker at the exact bottom (bottom
+    /// padding, rubber-banding, sub-pixel layout).
+    private static let scrollToBottomThreshold: CGFloat = 100
+
+    /// Auto-load older messages once the viewport is within this distance of the
+    /// top. Kept small on purpose: after a page loads, the previous-oldest message
+    /// is re-anchored to the viewport top (the prepend-jump workaround), so a large
+    /// prefetch distance would visibly yank the view. Near-zero matches what
+    /// clicking the pill at the top always did.
+    private static let autoLoadTopThreshold: CGFloat = 60
 
     // MARK: - Speech Service
     private var speechService = SpeechService.shared
@@ -38,6 +57,21 @@ struct ChatHistoryView: View {
     // MARK: - Search State
     @State private var searchViewModel = ChatSearchViewModel()
 
+    /// Lightweight identity signature for the message list. Changes when a message is
+    /// added/removed OR when the first/last message identity changes — e.g. an in-place
+    /// replace at an end, or switching to a *same-length* conversation. The cache
+    /// previously keyed only on `.count`, so those cases left a stale reversed array
+    /// (and a stale search index).
+    private struct MessagesToken: Equatable {
+        let count: Int
+        let firstID: UUID?
+        let lastID: UUID?
+    }
+    private var messagesToken: MessagesToken {
+        let m = chatHistoryViewModel.currentChatMessages
+        return MessagesToken(count: m.count, firstID: m.first?.id, lastID: m.last?.id)
+    }
+
     var body: some View {
         GeometryReader { geometry in
             ScrollViewReader { proxy in
@@ -45,27 +79,40 @@ struct ChatHistoryView: View {
                     ScrollView {
                         LazyVStack(spacing: 0) {
 
-                            // "Load Previous" Button
+                            // MARK: - Load-Earlier Pill
+                            // Visible affordance + loading indicator for history pagination.
+                            // Mostly informational: scrolling near the top auto-loads the next
+                            // page (see the onScrollGeometryChange below) — the old gray caption
+                            // text read as a label, not a control, and went unnoticed.
                             if mainAppViewModel.selectedConversationID != nil && chatHistoryViewModel.canLoadMorePages {
-                                Button(action: {
-                                    let anchorID = chatHistoryViewModel.currentChatMessages.last?.id
-                                    Task {
-                                        await chatHistoryViewModel.loadMoreMessages()
-                                        if let anchorID = anchorID {
-                                            DispatchQueue.main.async {
-                                                proxy.scrollTo(anchorID, anchor: .top)
-                                            }
+                                Button {
+                                    loadPreviousPage(proxy: proxy)
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        if chatHistoryViewModel.isLoadingPage {
+                                            ProgressView()
+                                                .controlSize(.small)
+                                            Text("Loading earlier messages…")
+                                        } else {
+                                            Image(systemName: "clock.arrow.circlepath")
+                                                .font(.system(.caption, weight: .semibold))
+                                            Text("Load earlier messages")
                                         }
                                     }
-                                }) {
-                                    Text(chatHistoryViewModel.isLoadingPage ? "Loading..." : "Load Previous Messages")
-                                        .font(.caption)
-                                        .padding(.vertical, 8)
-                                        .frame(maxWidth: .infinity)
-                                        .foregroundColor(.secondary)
+                                    .font(theme.fontCaption.weight(.medium))
+                                    .foregroundColor(theme.secondaryText)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    // MARK: Liquid Glass
+                                    .glassEffect(.regular, in: .capsule)
+                                    .contentShape(Capsule())
                                 }
                                 .buttonStyle(.plain)
+                                .disabled(chatHistoryViewModel.isLoadingPage)
+                                .frame(maxWidth: .infinity)
                                 .padding(.bottom, theme.spacingMedium)
+                                .help("Older messages load automatically when you scroll to the top")
+                                .accessibilityLabel(chatHistoryViewModel.isLoadingPage ? "Loading earlier messages" : "Load earlier messages")
                             }
 
                             if mainAppViewModel.selectedConversationID != nil {
@@ -88,26 +135,62 @@ struct ChatHistoryView: View {
                                             minHeight: isLast ? (geometry.size.height - 115) : nil,
                                             alignment: .top
                                         )
-                                        // Track when the newest message scrolls out of view for FAB visibility
-                                        .onAppear { if isLast { showScrollToBottom = false } }
-                                        .onDisappear { if isLast { showScrollToBottom = true } }
                                 }
                             }
                         }
-                        .frame(maxWidth: 1000)
+                        .frame(maxWidth: ViewLayout.maxContentWidth)
                         .frame(maxWidth: .infinity)
                         .padding(.top, searchViewModel.isSearchActive ? 56 : theme.spacingLarge)
                         .padding(.bottom, theme.spacingLarge)
-                        .animation(.easeInOut(duration: 0.2), value: searchViewModel.isSearchActive)
+                        .animation(motionSafe(.easeInOut(duration: 0.2)), value: searchViewModel.isSearchActive)
                     }
                     .opacity(isContentReady ? 1 : 0)
+                    // MARK: - Scroll-to-Bottom FAB Visibility
+                    // "Content extends below the fold" — distance from the viewport bottom to
+                    // the content bottom. One signal covers BOTH being scrolled up into history
+                    // AND a streaming response growing past the viewport. The previous
+                    // onAppear/onDisappear tracking on the newest bubble missed the latter:
+                    // a taller-than-viewport bubble stays partially visible, so it never
+                    // "disappeared" and the FAB never showed while the tail streamed offscreen.
+                    .onScrollGeometryChange(for: Bool.self) { scrollGeometry in
+                        let distanceFromBottom = scrollGeometry.contentSize.height
+                            - scrollGeometry.contentOffset.y
+                            - scrollGeometry.containerSize.height
+                        return distanceFromBottom > Self.scrollToBottomThreshold
+                    } action: { _, isBelowFold in
+                        if showScrollToBottom != isBelowFold {
+                            showScrollToBottom = isBelowFold
+                        }
+                    }
+                    // MARK: - Auto-Load Older Messages Near the Top
+                    // Standard chat-history pagination: reaching the top loads the next
+                    // page without hunting for a button (the pill above stays as the
+                    // visible affordance + loading indicator). Guards: content revealed,
+                    // no conversation load in flight; loadPreviousPage itself no-ops
+                    // while a page is loading or at the end of history.
+                    .onScrollGeometryChange(for: CGFloat.self) { scrollGeometry in
+                        scrollGeometry.contentOffset.y
+                    } action: { _, offsetY in
+                        guard offsetY < Self.autoLoadTopThreshold,
+                              isContentReady,
+                              !chatHistoryViewModel.isInitiallyLoadingConversation else { return }
+                        loadPreviousPage(proxy: proxy)
+                    }
                     // MARK: - NEW MESSAGE SCROLLING (Animated) + Cache Update
                     // Trigger on count changes (new/removed messages).
-                    .onChange(of: chatHistoryViewModel.currentChatMessages.count) { _, newCount in
-                        // Update cached reversed array to avoid O(n) reversal on every body evaluation
+                    .onChange(of: messagesToken) { _, _ in
+                        // Update cached reversed array to avoid O(n) reversal on every body evaluation.
+                        // Keyed on identity (count + first/last id), so a same-count membership change
+                        // still refreshes the cache.
                         displayMessages = chatHistoryViewModel.currentChatMessages.reversed()
-                        // Rebuild search index when messages change
-                        searchViewModel.rebuildSearchIndex(from: chatHistoryViewModel.currentChatMessages)
+
+                        // Search is query-time (no persistent index). While the search bar is open
+                        // with a query, re-run it so matches track membership changes (new message,
+                        // conversation switch). When the bar is closed this costs nothing — the old
+                        // always-rebuild here re-lowercased the whole history on every append.
+                        if searchViewModel.isSearchActive, !searchViewModel.searchQuery.isEmpty {
+                            searchViewModel.performSearch(in: chatHistoryViewModel.currentChatMessages)
+                        }
 
                         if !chatHistoryViewModel.isLoadingPage && !chatHistoryViewModel.isInitiallyLoadingConversation {
                             let currentNewestID = chatHistoryViewModel.currentChatMessages.first?.id
@@ -146,7 +229,7 @@ struct ChatHistoryView: View {
                     // MARK: - Search Navigation
                     .onChange(of: searchViewModel.currentMatchIndex) { _, _ in
                         if let targetID = searchViewModel.currentMatchMessageID {
-                            withAnimation(.easeInOut(duration: 0.3)) {
+                            withAnimation(motionSafe(.easeInOut(duration: 0.3))) {
                                 proxy.scrollTo(targetID, anchor: .center)
                             }
                         }
@@ -155,7 +238,7 @@ struct ChatHistoryView: View {
                     .onChange(of: searchViewModel.debouncedQuery) { _, _ in
                         searchViewModel.performSearch(in: chatHistoryViewModel.currentChatMessages)
                         if let targetID = searchViewModel.currentMatchMessageID {
-                            withAnimation(.easeInOut(duration: 0.3)) {
+                            withAnimation(motionSafe(.easeInOut(duration: 0.3))) {
                                 proxy.scrollTo(targetID, anchor: .center)
                             }
                         }
@@ -170,31 +253,41 @@ struct ChatHistoryView: View {
                     }
 
                     // MARK: - Scroll-to-Bottom FAB
+                    // Bottom-trailing WITHIN the content lane (same maxContentWidth cap as the
+                    // chat column and the input composer), so it sits at the composer's right
+                    // border — not the window edge, and not bottom-center where the floating
+                    // Chat/Workflow/Code mode switcher lives.
                     if showScrollToBottom && !chatHistoryViewModel.currentChatMessages.isEmpty {
                         VStack {
                             Spacer()
-                            ScrollToBottomFAB {
-                                scrollToBottom(proxy: proxy, animated: true)
+                            HStack {
+                                Spacer()
+                                ScrollToBottomFAB {
+                                    scrollToBottom(proxy: proxy, animated: true)
+                                }
+                                .padding(.trailing, 8)   // small inset from the lane edge
                             }
+                            .frame(maxWidth: ViewLayout.maxContentWidth)
                             .padding(.bottom, 16)
                         }
                         .frame(maxWidth: .infinity)
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
-                        .animation(.easeInOut(duration: 0.2), value: showScrollToBottom)
+                        .animation(motionSafe(.easeInOut(duration: 0.2)), value: showScrollToBottom)
                         .zIndex(ViewZIndex.fab)
                     }
 
-                    // MARK: - Speech Control Island (independent, always above FAB)
+                    // MARK: - Speech Control Island
+                    // Bottom-centered. No longer dodges the FAB — the FAB moved to
+                    // bottom-trailing, so the two occupy different corners.
                     if speechService.isActive {
                         VStack {
                             Spacer()
                             SpeechControlIsland()
-                                .padding(.bottom, showScrollToBottom ? 52 : 16)
+                                .padding(.bottom, 16)
                         }
                         .frame(maxWidth: .infinity)
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
-                        .animation(.spring(response: 0.4, dampingFraction: 0.7), value: speechService.isActive)
-                        .animation(.easeInOut(duration: 0.2), value: showScrollToBottom)
+                        .animation(motionSafe(.spring(response: 0.4, dampingFraction: 0.7)), value: speechService.isActive)
                         .zIndex(ViewZIndex.speechControl)
                     }
 
@@ -226,7 +319,7 @@ struct ChatHistoryView: View {
             // MARK: - Cmd+F Keyboard Shortcut
             .background {
                 Button(action: {
-                    withAnimation(.easeInOut(duration: 0.2)) {
+                    withAnimation(motionSafe(.easeInOut(duration: 0.2))) {
                         searchViewModel.toggleSearch()
                     }
                 }) { EmptyView() }
@@ -266,12 +359,33 @@ struct ChatHistoryView: View {
         .environment(searchViewModel)
     }
 
+    // MARK: - History Pagination
+    /// Loads the next (older) page and re-anchors the previously-oldest message to
+    /// the viewport top so prepending rows doesn't jump the scroll position.
+    /// Shared by the pill button and the near-top auto-load trigger; safe to call
+    /// eagerly — no-ops while a page is in flight or when history is exhausted.
+    private func loadPreviousPage(proxy: ScrollViewProxy) {
+        guard !chatHistoryViewModel.isLoadingPage,
+              chatHistoryViewModel.canLoadMorePages,
+              !chatHistoryViewModel.currentChatMessages.isEmpty else { return }
+
+        let anchorID = chatHistoryViewModel.currentChatMessages.last?.id
+        Task {
+            await chatHistoryViewModel.loadMoreMessages()
+            if let anchorID {
+                DispatchQueue.main.async {
+                    proxy.scrollTo(anchorID, anchor: .top)
+                }
+            }
+        }
+    }
+
     // MARK: - Scroll Helper
     private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {
         guard let newestMessageID = chatHistoryViewModel.currentChatMessages.first?.id else { return }
 
         if animated {
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+            withAnimation(motionSafe(.spring(response: 0.4, dampingFraction: 0.8))) {
                 proxy.scrollTo(newestMessageID, anchor: .bottom)
             }
         } else {
@@ -284,6 +398,7 @@ struct ChatHistoryView: View {
 struct ScrollToBottomFAB: View {
     let action: () -> Void
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovering = false
 
     var body: some View {
@@ -295,7 +410,7 @@ struct ScrollToBottomFAB: View {
                 .background(
                     Circle()
                         .fill(theme.controlBackground)
-                        .shadow(color: Color.black.opacity(0.15), radius: 4, x: 0, y: 2)
+                        .shadow(color: theme.shadowColor, radius: 4, x: 0, y: 2)
                 )
                 .overlay(
                     Circle()
@@ -305,7 +420,7 @@ struct ScrollToBottomFAB: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering in
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+            withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.6)) {
                 isHovering = hovering
             }
         }
@@ -319,6 +434,7 @@ struct ScrollToBottomFAB: View {
 /// Provides contextual guidance so the user knows the conversation is ready for input.
 private struct EmptyConversationPlaceholder: View {
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(MainApplicationViewModel.self) private var mainAppViewModel
 
     /// Whether this conversation was created from a remote source (Telegram, Discord).
@@ -331,7 +447,7 @@ private struct EmptyConversationPlaceholder: View {
     private var conversationTitle: String {
         guard let convID = mainAppViewModel.selectedConversationID,
               let entity = mainAppViewModel.persistenceService.getConversation(withId: convID),
-              let title = entity.userDefinedTitle, !title.isEmpty else { return "New Conversation" }
+              let title = entity.userDefinedTitle, !title.isEmpty else { return String(localized: "New Conversation") }
         return title
     }
 
@@ -371,7 +487,7 @@ private struct EmptyConversationPlaceholder: View {
         }
         .padding(.horizontal, 40)
         .transition(.opacity)
-        .animation(.easeIn(duration: 0.3), value: mainAppViewModel.selectedConversationID)
+        .animation(reduceMotion ? nil : .easeIn(duration: 0.3), value: mainAppViewModel.selectedConversationID)
     }
 
     private func hintRow(icon: String, text: String) -> some View {

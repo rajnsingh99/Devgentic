@@ -60,13 +60,6 @@ struct ConversationRowView: View {
         .padding(.vertical, 6)
         .background(backgroundView)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        // Hover action buttons overlay
-        .overlay(alignment: .trailing) {
-            if isHovering && !isRenaming && !isSelectionMode {
-                hoverActionsView
-                    .transition(.opacity.combined(with: .move(edge: .trailing)))
-            }
-        }
         .contentShape(Rectangle())
         .onTapGesture {
             if !isRenaming {
@@ -85,66 +78,55 @@ struct ConversationRowView: View {
     // MARK: - Standard Content View
     @ViewBuilder
     private var standardContentView: some View {
-        HStack(alignment: .top, spacing: 0) {
-            // Left rail = STATE (origin now lives on the dot below). Amber-pulsing when the run needs
-            // input — shown on ANY row so an unfocused waiting conversation still surfaces; accent when
-            // selected or hovered; absent otherwise for a clean, quiet list.
-            if needsInput || isSelected || isHovering {
+        HStack(alignment: .center, spacing: 0) {
+            // Left rail = STATE: Amber/warning rail only when the run needs user attention (input).
+            if needsInput {
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(
                         LinearGradient(colors: railGradientColors, startPoint: .top, endPoint: .bottom)
                     )
-                    .frame(width: 3)
-                    .padding(.vertical, (isSelected || needsInput) ? 2 : 5)
-                    .padding(.trailing, 4)
+                    .frame(width: 3, height: 14)
+                    .padding(.trailing, 6)
                     .shadow(
-                        color: needsInput
-                            ? theme.warningColor.opacity(needsInputPulse ? 0.85 : 0.2)
-                            : (isSelected ? theme.accentColor.opacity(0.4) : .clear),
-                        radius: needsInput ? (needsInputPulse ? 7 : 2) : (isSelected ? 4 : 0)
+                        color: theme.warningColor.opacity(needsInputPulse ? 0.85 : 0.2),
+                        radius: needsInputPulse ? 7 : 2
                     )
-                    .help(needsInput ? "Needs your input" : "")
-                    .accessibilityLabel(needsInput ? "Needs your input" : "")
-                    .accessibilityHidden(!needsInput)
+                    .help("Needs your input")
+                    .accessibilityLabel("Needs your input")
             } else {
-                Spacer().frame(width: 7)
+                Spacer().frame(width: 9)
             }
 
-            // Content Container
-            VStack(alignment: .leading, spacing: 4) {
-                // Title row with timestamp
-                HStack(spacing: 5) {
-                    // Backend origin dot (theme-aware palette) — decoupled from the state rail.
-                    if hasBackendDot {
-                        Circle()
-                            .fill(theme.backendColor(for: conversation.backendType ?? .none))
-                            .frame(width: 6, height: 6)
-                    }
-
-                    Text(conversation.displayTitle)
-                        .font(theme.fontFootnote.weight(.medium))
-                        .foregroundColor(theme.primaryText)
-                        .lineLimit(1)
-
-                    Spacer()
-
-                    // Streaming indicator or timestamp
-                    if conversation.isStreaming {
-                        StreamingPulseIndicator()
-                    } else {
-                        Text(conversation.relativeTimestamp)
-                            .font(.system(.caption2))
-                            .foregroundColor(theme.tertiaryText)
-                    }
+            // Title row
+            HStack(spacing: 5) {
+                // Backend origin dot (theme-aware palette) — decoupled from the state rail.
+                if hasBackendDot {
+                    Circle()
+                        .fill(theme.backendColor(for: conversation.backendType ?? .none))
+                        .frame(width: 6, height: 6)
                 }
 
-                // Last message preview
-                Text(conversation.lastMessageSnippet)
-                    .font(.system(.caption))
-                    .foregroundColor(theme.secondaryText)
+                Text(conversation.displayTitle)
+                    .font(theme.fontFootnote.weight(.medium))
+                    .foregroundColor(theme.primaryText)
                     .lineLimit(1)
-                    .padding(.leading, hasBackendDot ? 11 : 0)
             }
+
+            Spacer()
+
+            // Streaming indicator, Hover Actions, or Timestamp (mutually exclusive swap to prevent overlaps)
+            Group {
+                if conversation.isStreaming {
+                    StreamingPulseIndicator()
+                } else if isHovering && !isSelectionMode {
+                    hoverActionsView
+                } else {
+                    Text(conversation.relativeTimestamp)
+                        .font(.system(.caption2))
+                        .foregroundColor(theme.tertiaryText)
+                }
+            }
+            .layoutPriority(1)
         }
         // Drive the amber "needs input" pulse from a stable parent so it tracks the state reliably.
         .onChange(of: needsInput, initial: true) { _, active in
@@ -161,7 +143,7 @@ struct ConversationRowView: View {
     // MARK: - Hover Actions
     @ViewBuilder
     private var hoverActionsView: some View {
-        HStack(spacing: 2) {
+        HStack(alignment: .center, spacing: 4) {
             if let onPin = onPin {
                 HoverActionButton(
                     icon: conversation.isPinned ? "pin.slash" : "pin",
@@ -176,7 +158,6 @@ struct ConversationRowView: View {
                 )
             }
         }
-        .padding(.trailing, 8)
     }
 
     // MARK: - Background
@@ -211,13 +192,7 @@ struct ConversationRowView: View {
     /// Left-rail gradient = STATE: amber when the run needs input (highest priority), else the
     /// selection accent — bright when selected, dim on hover.
     private var railGradientColors: [Color] {
-        if needsInput {
-            return [theme.warningColor, theme.warningColor.opacity(0.55)]
-        }
-        if isSelected {
-            return [theme.accentColor, theme.accentColor.opacity(0.45)]
-        }
-        return [theme.accentColor.opacity(0.4), theme.accentColor.opacity(0.15)]   // hover
+        return [theme.warningColor, theme.warningColor.opacity(0.55)]
     }
 }
 

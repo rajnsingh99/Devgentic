@@ -73,6 +73,24 @@ struct AgentCapabilitiesSection: View {
 
                     Divider().background(theme.dividerColor)
 
+                    // Clarify before planning
+                    settingsRow(
+                        title: "Clarify Before Planning",
+                        description: "Let the planner ask you one question when the task is too vague to plan."
+                    ) {
+                        Toggle("", isOn: Binding(
+                            get: { planning.clarifyBeforePlanning },
+                            set: { newVal in
+                                planning.clarifyBeforePlanning = newVal
+                                capabilities.planning = planning
+                            }
+                        ))
+                        .toggleStyle(.checkbox)
+                        .labelsHidden()
+                    }
+
+                    Divider().background(theme.dividerColor)
+
                     // Require plan approval
                     settingsRow(
                         title: "Require Plan Approval",

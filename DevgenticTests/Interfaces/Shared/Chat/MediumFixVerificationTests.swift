@@ -116,6 +116,50 @@ final class DiffUtilityOptimizationTests: XCTestCase {
         }
     }
 
+    // MARK: - Empty-core regressions (pure insertion / deletion → 1...0 trap)
+    //
+    // NB the `testEmpty*` cases above pass `""`, which splits to `[""]` (count 1),
+    // so their core is never truly empty and they never exercised the crash. The
+    // real trap needs the prefix/suffix strip to consume an ENTIRE side, leaving a
+    // zero-length core fed to `lcsCoreDiff`'s `1...n` / `1...m` loops.
+
+    /// Pure append (very common: "add this function to the file") → empty original core.
+    func testPureAppendDoesNotCrashAndMarksAdded() {
+        let diff = DiffUtility.generateDiff(original: "a\nb", modified: "a\nb\nc")
+        let added = diff.filter { $0.type == .added }
+        XCTAssertEqual(added.count, 1, "The appended line should be added")
+        XCTAssertEqual(added.first?.line, "c")
+        XCTAssertEqual(diff.filter { $0.type == .unchanged }.count, 2, "a and b stay unchanged")
+        XCTAssertTrue(diff.allSatisfy { $0.type != .deleted }, "A pure append deletes nothing")
+    }
+
+    /// Mid-file insertion → the changed region is entirely on the modified side (empty original core).
+    func testMidFileInsertionDoesNotCrash() {
+        let diff = DiffUtility.generateDiff(original: "a\nc", modified: "a\nb\nc")
+        let added = diff.filter { $0.type == .added }
+        XCTAssertEqual(added.count, 1)
+        XCTAssertEqual(added.first?.line, "b")
+    }
+
+    /// Pure deletion → empty modified core.
+    func testPureDeletionDoesNotCrashAndMarksDeleted() {
+        let diff = DiffUtility.generateDiff(original: "a\nb\nc", modified: "a\nb")
+        let deleted = diff.filter { $0.type == .deleted }
+        XCTAssertEqual(deleted.count, 1, "The removed line should be deleted")
+        XCTAssertEqual(deleted.first?.line, "c")
+        XCTAssertTrue(diff.allSatisfy { $0.type != .added }, "A pure deletion adds nothing")
+    }
+
+    /// The load-bearing real-world case: a file that ends in a newline (empty final line)
+    /// vs a trailing-trimmed snippet. `CodeDiffView` / the HITL write-approval preview hit
+    /// this on virtually every source file. Core is `[""]` vs `[]` → `m == 0` trap.
+    func testTrailingNewlineDeltaDoesNotCrash() {
+        let diff = DiffUtility.generateDiff(original: "a\nb\n", modified: "a\nb")
+        // Only the phantom trailing empty line differs — one deletion, no additions.
+        XCTAssertEqual(diff.filter { $0.type == .deleted }.count, 1)
+        XCTAssertTrue(diff.allSatisfy { $0.type != .added })
+    }
+
     /// Verify large file fallback doesn't crash.
     func testLargeFileFallbackDoesNotCrash() {
         // Create files where the core (after prefix/suffix strip) is large.
@@ -141,72 +185,17 @@ final class DiffUtilityOptimizationTests: XCTestCase {
 // The fix replaced DispatchQueue.main.asyncAfter with Task.sleep.
 // This is a structural fix — verified by compilation. Smoke test:
 
-final class ImageViewStructuralTests: XCTestCase {
+// ImageViewStructuralTests removed 2026-07-17 with ImageView itself: MediaArtifact is the
+// single image representation and MediaArtifactImageView the single renderer. Its
+// construction/decode contracts are pinned by RenderCostRegressionTests and
+// ImageAccessibilityTests.
 
-    /// Verifies ImageView can be constructed with valid data.
-    func testImageViewInstantiationWithValidData() {
-        // Create a minimal 1x1 PNG
-        let pngData = createMinimalPNGData()
-        let view = ImageView(imageData: pngData)
-        XCTAssertNotNil(view)
-    }
+// MARK: - Fix 3: CodeDocument Value Equality
+// (GapBufferEquatableTests' buffer-specific cases were removed 2026-07-17 with GapBuffer
+// itself: its editing mechanics had zero callers, so `CodeDocument.content` is now a plain
+// String. The value-equality contract below is the part that was ever actually used.)
 
-    /// Verifies ImageView handles invalid data without crash.
-    func testImageViewInstantiationWithInvalidData() {
-        let view = ImageView(imageData: Data([0x00, 0x01, 0x02]))
-        XCTAssertNotNil(view, "Invalid image data should not crash the view")
-    }
-
-    private func createMinimalPNGData() -> Data {
-        // Create a 1x1 red pixel NSImage and convert to PNG
-        let image = NSImage(size: NSSize(width: 1, height: 1))
-        image.lockFocus()
-        NSColor.red.drawSwatch(in: NSRect(x: 0, y: 0, width: 1, height: 1))
-        image.unlockFocus()
-
-        guard let tiffData = image.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiffData),
-              let pngData = bitmap.representation(using: .png, properties: [:]) else {
-            return Data()
-        }
-        return pngData
-    }
-}
-
-// MARK: - Fix 3: GapBuffer Equatable + CodeDocument Value Equality
-
-final class GapBufferEquatableTests: XCTestCase {
-
-    /// GapBuffers with same content should be equal.
-    func testEqualContentIsEqual() {
-        let buf1 = GapBuffer(string: "Hello world")
-        let buf2 = GapBuffer(string: "Hello world")
-        XCTAssertEqual(buf1, buf2, "Same content should be equal")
-    }
-
-    /// GapBuffers with different content should not be equal.
-    func testDifferentContentIsNotEqual() {
-        let buf1 = GapBuffer(string: "Hello")
-        let buf2 = GapBuffer(string: "World")
-        XCTAssertNotEqual(buf1, buf2, "Different content should not be equal")
-    }
-
-    /// GapBuffer string property should return the original content.
-    func testStringPropertyReturnsContent() {
-        let buf = GapBuffer(string: "Test content")
-        XCTAssertEqual(buf.string, "Test content")
-    }
-
-    /// GapBuffer after mutation should reflect changes in equality.
-    func testMutatedBufferReflectsChanges() {
-        var buf1 = GapBuffer(string: "Hello")
-        let buf2 = GapBuffer(string: "Hello")
-        XCTAssertEqual(buf1, buf2)
-
-        buf1.insert("!")
-        XCTAssertNotEqual(buf1, buf2, "Mutated buffer should differ")
-        XCTAssertEqual(buf1.string, "Hello!", "Insert should append at gap position")
-    }
+final class CodeDocumentEqualityTests: XCTestCase {
 
     /// CodeDocument equality uses value comparison (content + language).
     func testCodeDocumentValueEquality() {

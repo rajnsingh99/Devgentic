@@ -26,7 +26,7 @@ struct WebSearchService {
         // A successful response (200) means the key is valid and has the necessary API enabled.
         // An error response (400/403) indicates an invalid key or that the Custom Search API is not enabled for it.
         guard var urlComponents = URLComponents(string: "https://www.googleapis.com/discovery/v1/apis/customsearch/v1/rest") else {
-            let errorMessage = "Failed to create URL components."
+            let errorMessage = String(localized: "Failed to create URL components.")
             logger.error("\(errorMessage)")
             return (false, errorMessage)
         }
@@ -36,7 +36,7 @@ struct WebSearchService {
         ]
         
         guard let url = urlComponents.url else {
-            let errorMessage = "Failed to construct validation URL."
+            let errorMessage = String(localized: "Failed to construct validation URL.")
             logger.error("\(errorMessage)")
             return (false, errorMessage)
         }
@@ -48,7 +48,7 @@ struct WebSearchService {
             let (data, response) = try await URLSession.shared.data(for: request)
             
             guard let httpResponse = response as? HTTPURLResponse else {
-                let errorMessage = "Invalid response from server."
+                let errorMessage = String(localized: "Invalid response from server.")
                 logger.error("\(errorMessage)")
                 return (false, errorMessage)
             }
@@ -56,7 +56,7 @@ struct WebSearchService {
             // A 200 OK response means the key is valid and the API is enabled.
             if httpResponse.statusCode == 200 {
                 logger.info("API Key validation successful with status code 200.")
-                return (true, "API Key is valid.")
+                return (true, String(localized: "API Key is valid."))
             } else {
                 // If the status code is not 200, try to decode the standard Google API error.
                 let decoder = JSONDecoder()
@@ -64,16 +64,16 @@ struct WebSearchService {
                     let errorResponse = try decoder.decode(GoogleSearchErrorResponse.self, from: data)
                     let errorMessage = errorResponse.error.message
                     logger.warning("API Key validation failed with status code \(httpResponse.statusCode). Reason: \(errorMessage)")
-                    return (false, "Invalid API Key. Please ensure it is correct and the Custom Search API is enabled in your Google Cloud project.")
+                    return (false, String(localized: "Invalid API Key. Please ensure it is correct and the Custom Search API is enabled in your Google Cloud project."))
                 } catch {
-                    let errorMessage = "Invalid API Key or configuration error. (Status code: \(httpResponse.statusCode))"
+                    let errorMessage = String(localized: "Invalid API Key or configuration error. (Status code: \(httpResponse.statusCode))")
                     logger.error("Could not decode Google error response. Status code: \(httpResponse.statusCode).")
                     return (false, errorMessage)
                 }
             }
             
         } catch {
-            let errorMessage = "Network request failed: \(error.localizedDescription)"
+            let errorMessage = String(localized: "Network request failed: \(error.localizedDescription)")
             logger.error("\(errorMessage)")
             return (false, errorMessage)
         }

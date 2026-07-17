@@ -79,16 +79,8 @@ final class ChatMessageObservableTests: XCTestCase {
         XCTAssertEqual(msg.agentState, .acting(.tool(name: "bash")))
     }
 
-    func testThinkingHeadlineMutation() {
-        let msg = makeAgentMessage()
-        XCTAssertNil(msg.thinkingHeadline)
-
-        msg.thinkingHeadline = "Processing..."
-        XCTAssertEqual(msg.thinkingHeadline, "Processing...")
-
-        msg.thinkingHeadline = nil
-        XCTAssertNil(msg.thinkingHeadline)
-    }
+    // `testThinkingHeadlineMutation` removed 2026-07-17 with `ChatMessage.thinkingHeadline`
+    // — the field existed only to feed ThinkingDynamicIsland, which no longer exists.
 
     // MARK: - Timeline Events
 
@@ -182,17 +174,10 @@ final class ChatMessageObservableTests: XCTestCase {
         XCTAssertEqual(msg.thoughts[1].text, "Second thought")
     }
 
-    func testArtifactsComputedProperty() {
-        let msg = makeAgentMessage()
-        msg.timelineEvents = [
-            .toolExecution(ToolExecutionData(id: UUID(), name: "bash", params: "{}", output: "file.txt", isSuccess: true, isExecuting: false)),
-            .toolExecution(ToolExecutionData(id: UUID(), name: "search", params: "{}", output: nil, isSuccess: nil, isExecuting: true))
-        ]
-
-        // Only completed (non-executing) tools show as artifacts
-        XCTAssertEqual(msg.artifacts.count, 1)
-        XCTAssertEqual(msg.artifacts[0].toolName, "bash")
-    }
+    // `ChatMessage.artifacts` (a computed view of completed .toolExecution events) was
+    // removed 2026-07-17 with the dynamic island: `ToolArtifactsRow` was its only consumer
+    // and was gated on the island variant, so nothing read it once the island went. The
+    // timeline surfaces the same tool executions as its own action rows.
 
     // [HITL/P6] The `ChatMessage.pendingInteraction` property + its deprecated shims were removed in the
     // P6 cutover; pending HITL now lives solely in `InteractionCenter`. The tests for that removed API
@@ -245,13 +230,11 @@ final class ChatMessageObservableTests: XCTestCase {
     func testDecodedTransientPropertiesReset() throws {
         let original = makeAgentMessage()
         original.agentState = .thinking(.planning)
-        original.thinkingHeadline = "Should not persist"
 
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(ChatMessage.self, from: data)
 
         XCTAssertEqual(decoded.agentState, .idle)
-        XCTAssertNil(decoded.thinkingHeadline)
     }
 
     // MARK: - Schema Versioning
@@ -423,7 +406,7 @@ final class ChatMessageObservableTests: XCTestCase {
     }
 
     func testTokenCountEstimateForEmptyContent() {
-        let msg = ChatMessage(conversationId: UUID(), sender: .user, content: .image(url: nil, alt: nil, imageData: nil))
+        let msg = ChatMessage(conversationId: UUID(), sender: .user, content: .mediaArtifact(MediaArtifact(kind: .image, reference: .ephemeralData(Data()), mimeType: "image/png")))
         XCTAssertEqual(msg.tokenCountEstimate, 0)
     }
 

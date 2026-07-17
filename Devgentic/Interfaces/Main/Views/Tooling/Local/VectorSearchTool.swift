@@ -84,15 +84,20 @@ struct VectorSearchTool: DevgenticTool {
         
         let results = VectorStoreService.shared.findNearest(
             to: embedding,
+            queryText: query,
             limit: 3,
             conversationID: conversationID
         )
-        
+
         if results.isEmpty {
             return "No relevant information found in local history."
         }
-        
-        let resultText = results.map { "--- Context ---\n\($0.fullTextContent)" }.joined(separator: "\n\n")
+
+        // Same chunk-centered windowing as the orchestrator's RAG path — a
+        // whole-file document is excerpted around the match, not head-clamped.
+        let resultText = results
+            .map { "--- Context ---\n" + RAGRetrievalBudget.window(for: $0.parent.fullTextContent, anchor: $0.bestChunkText, budget: RAGRetrievalBudget.perParent) }
+            .joined(separator: "\n\n")
         return resultText
     }
 }

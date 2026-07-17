@@ -406,6 +406,7 @@ struct TokenizingTextEditor: NSViewRepresentable {
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
         textView.allowsUndo = true
         
         textView.textContainerInset = NSSize(width: 8, height: 8)

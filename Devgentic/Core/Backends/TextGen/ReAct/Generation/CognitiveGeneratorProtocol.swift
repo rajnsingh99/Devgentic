@@ -136,7 +136,8 @@ enum PromptBuilder {
         layerConfig: PromptLayerConfig = .agent,
         userMessagePrefix: String? = nil,
         wrapping: PromptWrapping = .xml,
-        includeWorkingMemory: Bool = true
+        includeWorkingMemory: Bool = true,
+        includeAttachmentContext: Bool = true
     ) -> [[String: String]] {
 
         // =====================================================================
@@ -178,6 +179,14 @@ enum PromptBuilder {
         - Paths: use absolute paths; user folders are under \(context.environmentFacts.homeDirectory) (Desktop, Documents, Downloads)
         """
         systemContent += "\n\n" + wrapping.section("environment", content: envContent)
+
+        // Layer 5.5: CONTEXT — Profile knowledge base (static reference material).
+        // Payload is strategy-shaped upstream: extracted content (directInjection)
+        // or a read_file path manifest (stateless). Byte-stable per profile so the
+        // system prefix stays prompt-cache / KV-cache friendly.
+        if let knowledgeBase = context.knowledgeBaseContext, !knowledgeBase.isEmpty {
+            systemContent += "\n\n" + wrapping.section("knowledge_base", content: knowledgeBase)
+        }
 
         // Layer 6: CONTEXT — RAG grounding (configurable)
         if layerConfig.includeRAG {
@@ -251,12 +260,23 @@ enum PromptBuilder {
         // from it using this call's own `wrapping`. This is what lets every
         // generator inherit workflow behavior for free — no per-generator code.
         var userContent = ""
+
+        // Current-turn attachments lead the user message (file text or stateless
+        // path note), ahead of the query/prefix — mirroring how a person pastes a
+        // file then asks about it. The native-turn executor passes
+        // `includeAttachmentContext: false` and composes them into its kickoff
+        // turn instead (same rationale as `includeWorkingMemory`).
+        if includeAttachmentContext, let attachments = context.attachmentContext, !attachments.isEmpty {
+            userContent += attachments
+        }
+
         let resolvedPrefix: String? = {
             if let explicit = userMessagePrefix { return explicit }
             if let wf = context.workflowContext { return wf.userMessagePrefix(wrapping: wrapping) }
             return nil
         }()
         if let prefix = resolvedPrefix {
+            if !userContent.isEmpty { userContent += "\n\n" }
             userContent += prefix
         }
 
@@ -289,7 +309,8 @@ extension CognitiveGenerator {
         layerConfig: PromptLayerConfig = .agent,
         userMessagePrefix: String? = nil,
         wrapping: PromptWrapping = .xml,
-        includeWorkingMemory: Bool = true
+        includeWorkingMemory: Bool = true,
+        includeAttachmentContext: Bool = true
     ) -> [[String: String]] {
         PromptBuilder.buildStandardMessages(
             context: context,
@@ -298,7 +319,8 @@ extension CognitiveGenerator {
             layerConfig: layerConfig,
             userMessagePrefix: userMessagePrefix,
             wrapping: wrapping,
-            includeWorkingMemory: includeWorkingMemory
+            includeWorkingMemory: includeWorkingMemory,
+            includeAttachmentContext: includeAttachmentContext
         )
     }
 }

@@ -334,15 +334,36 @@ struct PlanningCapabilityConfig: Codable, Hashable, Sendable {
     var parallelSubtasks: Bool
     var subtaskToolFiltering: Bool
     var requiresPlanApproval: Bool
+    /// When true, the planner may ask the user ONE clarifying question before
+    /// producing the plan (a vague task otherwise forces it to guess the plan's
+    /// shape). Capped at a single round; the answer is recorded into the run's
+    /// interaction memory so identical `ask_user` re-asks during execution replay it.
+    var clarifyBeforePlanning: Bool
 
     // parallelSubtasks default changed to false: parallel execution serializes at the
     // LLM layer (single GPU for local, rate-limited for cloud) making it illusory.
     // Field retained for future batch inference / multi-model routing support.
-    init(maxSubtasks: Int = 5, parallelSubtasks: Bool = false, subtaskToolFiltering: Bool = true, requiresPlanApproval: Bool = false) {
+    init(maxSubtasks: Int = 5, parallelSubtasks: Bool = false, subtaskToolFiltering: Bool = true, requiresPlanApproval: Bool = false, clarifyBeforePlanning: Bool = true) {
         self.maxSubtasks = maxSubtasks
         self.parallelSubtasks = parallelSubtasks
         self.subtaskToolFiltering = subtaskToolFiltering
         self.requiresPlanApproval = requiresPlanApproval
+        self.clarifyBeforePlanning = clarifyBeforePlanning
+    }
+
+    // Backward-compat: persisted configs predating `clarifyBeforePlanning` decode
+    // with its default (same tolerant pattern as AgentDelegationConfig).
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.maxSubtasks = (try? container.decode(Int.self, forKey: .maxSubtasks)) ?? 5
+        self.parallelSubtasks = (try? container.decode(Bool.self, forKey: .parallelSubtasks)) ?? false
+        self.subtaskToolFiltering = (try? container.decode(Bool.self, forKey: .subtaskToolFiltering)) ?? true
+        self.requiresPlanApproval = (try? container.decode(Bool.self, forKey: .requiresPlanApproval)) ?? false
+        self.clarifyBeforePlanning = (try? container.decode(Bool.self, forKey: .clarifyBeforePlanning)) ?? true
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case maxSubtasks, parallelSubtasks, subtaskToolFiltering, requiresPlanApproval, clarifyBeforePlanning
     }
 }
 

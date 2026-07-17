@@ -36,19 +36,23 @@ struct WorkflowDedicatedView: View {
     @State private var validationIssues: [WorkflowValidationIssue] = []
     @State private var isHoveringFix = false
 
+    /// Cached workflow layout.
+    ///
+    /// `displayData` is a computed property read during `body`, and `body`
+    /// re-evaluates on every streamed workflow event (`executionState` is
+    /// `@Observable`) — so loading the layout there ran an UNCACHED SwiftData fetch +
+    /// JSON blob decode at streaming frequency, on the main thread, for the whole run.
+    /// The layout only changes via the canvas builder, so it's loaded at the few
+    /// moments it can actually change (appear / profile switch / return from canvas —
+    /// the same points validation already refreshes) and read from here otherwise.
+    /// `nil` until the first load; the display adapter treats a nil layout as
+    /// "started nodes only", which is its documented fallback.
+    @State private var cachedLayout: WorkflowLayout?
+
     enum ViewMode {
         case canvas
         case execution
     }
-
-    /// [UI-REDESIGN PROTOTYPE] Which execution layout to render. Flip to `.original` to restore
-    /// the classic horizontal card strip + output panel (both paths stay compiled); `.timelineA`
-    /// renders the vertical execution-timeline prototype (WorkflowExecutionTimelineView).
-    private enum ExecutionLayout {
-        case original
-        case timelineA
-    }
-    private let executionLayout: ExecutionLayout = .timelineA
 
     /// The live execution state for this conversation's workflow run.
     private var executionState: WorkflowExecutionState? {
@@ -69,9 +73,12 @@ struct WorkflowDedicatedView: View {
         validationIssues.filter { $0.severity == .error }
     }
 
-    /// Refreshes validation issues from the current layout + profile store.
-    private func refreshValidation() {
+    /// Loads the layout from the store ONCE and refreshes everything derived from it:
+    /// the `cachedLayout` used by `displayData`, and the validation issues. Called at
+    /// the only points the layout can change (see `cachedLayout`).
+    private func refreshLayoutAndValidation() {
         let layout = WorkflowLayoutStore.shared.load(for: workflowProfileID)
+        cachedLayout = layout
         let profileMap = Dictionary(
             profileService.profiles.map { ($0.id, $0) },
             uniquingKeysWith: { first, _ in first }
@@ -106,8 +113,7 @@ struct WorkflowDedicatedView: View {
         if record.status == .running,
            let state = executionState,
            state.runRecordID == historicalID {
-            let layout = WorkflowLayoutStore.shared.load(for: workflowProfileID)
-            return .from(live: state, layout: layout)
+            return .from(live: state, layout: cachedLayout)
         }
         // For finalized records that still match the in-memory execution state
         // (run just completed, executionState not yet cleared), pull per-node
@@ -121,8 +127,7 @@ struct WorkflowDedicatedView: View {
         }()
         // Pass the current layout so the adapter can resolve node kinds and hide
         // the Timeline tab for single-shot nodes (bots etc.).
-        let layout = WorkflowLayoutStore.shared.load(for: workflowProfileID)
-        return .from(record: record, liveTimelines: liveTimelines, layout: layout)
+        return .from(record: record, liveTimelines: liveTimelines, layout: cachedLayout)
     }
 
     /// Auto-selects the in-flight run's record when it exists but nothing is
@@ -206,13 +211,20 @@ struct WorkflowDedicatedView: View {
             }
         }
         .onAppear {
-            refreshValidation()
+            refreshLayoutAndValidation()
             // If we mount with an in-flight run already in memory (e.g. user
             // switched away and came back), surface it.
             autoSelectLiveRunIfNeeded()
         }
         .onChange(of: viewMode) { _, newMode in
-            if newMode == .execution { refreshValidation() }
+            // Returning from the canvas is the one path that can have edited the
+            // layout — reload it (and revalidate) rather than trusting the cache.
+            if newMode == .execution { refreshLayoutAndValidation() }
+        }
+        .onChange(of: workflowProfileID) { _, _ in
+            // A different workflow entirely — its layout has nothing to do with the
+            // cached one.
+            refreshLayoutAndValidation()
         }
         .onChange(of: conversationID) { _, _ in
             // Switching to a different conversation invalidates any selection
@@ -294,12 +306,12 @@ struct WorkflowDedicatedView: View {
 
                 Divider()
 
-                switch executionLayout {
-                case .timelineA:
-                    // [UI-REDESIGN PROTOTYPE A] One vertical execution timeline — absorbs the
-                    // status strip (its run-state + total time live in the timeline header),
-                    // the card strip, and the output panel. Selection semantics unchanged.
-                    WorkflowExecutionTimelineView(
+                // One vertical execution timeline — absorbs the status strip (its
+                // run-state + total time live in the timeline header), the card strip,
+                // and the output panel. Was one arm of an `executionLayout` prototype
+                // switch; the `.original` strip+output layout and its four views were
+                // deleted 2026-07-17 after shipping timeline-only.
+                WorkflowExecutionTimelineView(
                         displayData: data,
                         selectedNodeID: pinningSelectionBinding,
                         awaitingNodeIDs: awaitingNodeIDs(for: data),
@@ -315,35 +327,13 @@ struct WorkflowDedicatedView: View {
                         } : nil
                     )
 
-                case .original:
-                    // Status strip: ✓ Completed | Total time 13.3s
-                    executionStatusStrip(data: data)
-
-                    Divider().opacity(0.4)
-
-                    // Agent cards strip with status-aware connectors. Awaiting-input badges (D2)
-                    // are driven by the unified InteractionCenter; the HITL request itself now
-                    // renders in the shared above-input banner (P4 removed the in-canvas panel).
-                    WorkflowOutcomeStripView(
-                        displayData: data,
-                        selectedNodeID: pinningSelectionBinding,
-                        awaitingNodeIDs: awaitingNodeIDs(for: data),
-                        onAwaitingTap: { viewModel.interactionCenter.pulseBanner() }
-                    )
-
-                    Divider().opacity(0.4)
-
-                    // Output area: selected node detail or final output
-                    WorkflowOutputView(displayData: data, selectedNodeID: selectedNodeID)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
             } else {
                 emptyExecutionState
             }
         }
         .frame(maxWidth: ViewLayout.maxContentWidth)
         .frame(maxWidth: .infinity)
-        .background(theme.primaryBackground)
+        .background(Color.clear)
     }
 
     // MARK: - Title Bar
@@ -375,10 +365,15 @@ struct WorkflowDedicatedView: View {
                     .background(Circle().fill(theme.surfaceOverlay))
             }
             .buttonStyle(.plain)
+            // The primary way out of this view, and it announced as "button" — a glyph is
+            // not a name.
+            .help("Back to chat")
+            .accessibilityLabel("Back to chat")
 
             Text("Workflow execution")
                 .font(theme.fontTitle3.weight(.semibold))
                 .foregroundColor(theme.primaryText)
+                .accessibilityAddTraits(.isHeader)
 
             // Historical badge — only shown for historical runs.
             if !data.isLive {
@@ -405,7 +400,13 @@ struct WorkflowDedicatedView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(theme.secondaryBackground)
+        .background(theme.secondaryBackground.opacity(0.4))
+        .overlay(
+            Rectangle()
+                .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
+                .frame(height: 0.5),
+            alignment: .bottom
+        )
     }
 
     @ViewBuilder
@@ -417,73 +418,17 @@ struct WorkflowDedicatedView: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(Capsule().fill(theme.surfaceOverlay))
+                // VoiceOver reads "1/5" literally, as "one slash five". The badge stays
+                // terse on screen; only what's spoken changes.
+                .accessibilityLabel("Viewing run \(pos.index) of \(pos.total)")
         } else if data.isLive && !runHistory.isEmpty {
             Text("Live")
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.green)
+                .foregroundColor(theme.successColor)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(Capsule().fill(Color.green.opacity(0.12)))
+                .background(Capsule().fill(theme.successColor.opacity(0.12)))
         }
-    }
-
-    // MARK: - Status Strip
-
-    private func executionStatusStrip(data: WorkflowRunDisplayData) -> some View {
-        HStack(spacing: 10) {
-            statusStripIndicator(data: data)
-
-            if data.duration > 0 || data.isRunning {
-                Rectangle()
-                    .fill(theme.tertiaryText.opacity(0.3))
-                    .frame(width: 1, height: 12)
-
-                Text("Total time \(formatDuration(data.duration))")
-                    .font(.system(size: 12))
-                    .foregroundColor(theme.secondaryText)
-            }
-
-            Spacer()
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(theme.primaryBackground)
-    }
-
-    @ViewBuilder
-    private func statusStripIndicator(data: WorkflowRunDisplayData) -> some View {
-        let (icon, color, label) = stripStatusFor(data: data)
-        HStack(spacing: 6) {
-            if data.isRunning {
-                ProgressView()
-                    .controlSize(.mini)
-                    .tint(color)
-            } else {
-                Image(systemName: icon)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(color)
-            }
-            Text(label)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(theme.primaryText)
-        }
-    }
-
-    private func stripStatusFor(data: WorkflowRunDisplayData) -> (icon: String, color: Color, label: String) {
-        if data.isRunning {
-            return ("circle.fill", .blue, "Running")
-        }
-        if data.workflowError != nil {
-            return ("xmark.circle.fill", .red, "Failed")
-        }
-        let failedCount = data.nodeResults.filter { $0.status == .failed }.count
-        if failedCount > 0 {
-            return ("exclamationmark.triangle.fill", .orange, "\(failedCount) Failed")
-        }
-        if data.nodeResults.isEmpty {
-            return ("circle.dotted", .gray, "Waiting")
-        }
-        return ("checkmark.circle.fill", .green, "Completed")
     }
 
     // MARK: - Run Picker Menu
@@ -507,26 +452,40 @@ struct WorkflowDedicatedView: View {
                         selectedHistoricalRunID = record.id
                         selectedNodeID = nil
                     } label: {
-                        HStack {
-                            Image(systemName: statusIcon(for: record.status))
-                            // Prominent timer is the run duration. The previous
-                            // `Text(record.timestamp, style: .relative)` rendered an
-                            // auto-updating since-then string that kept growing for
-                            // the lifetime of the view — meaningless for an already
-                            // finished run.
-                            Text(formatDuration(record.duration))
-                        }
+                        // `Label` (like the "Live Run" item above) rather than a raw
+                        // HStack: a Label's icon is decorative and its TEXT is what gets
+                        // read, so the symbol name stops leaking as "xmark.circle.fill".
+                        //
+                        // Status and time are in the text because they weren't anywhere a
+                        // reader could get them: status lived only in the glyph, and with
+                        // duration alone every item said "12.4 seconds" with no way — for
+                        // anyone — to tell which run you were picking.
+                        //
+                        // Prominent timer is the run duration. The previous
+                        // `Text(record.timestamp, style: .relative)` rendered an
+                        // auto-updating since-then string that kept growing for
+                        // the lifetime of the view — meaningless for an already
+                        // finished run.
+                        Label(
+                            "\(record.status.label) · \(DurationFormat.seconds(record.duration)) · \(record.timestamp.formatted(date: .omitted, time: .shortened))",
+                            systemImage: record.status.icon
+                        )
                     }
                 }
             }
         } label: {
             HStack(spacing: 4) {
+                // Both glyphs are decoration — one is a category hint, the other says
+                // "this is a menu", which VoiceOver already announces. Unhidden they were
+                // read aloud as "clock.arrow.circlepath, Live, chevron.down".
                 Image(systemName: "clock.arrow.circlepath")
                     .font(.system(size: 11))
+                    .accessibilityHidden(true)
                 Text(selectedHistoricalRunID == nil ? "Live" : "History")
                     .font(.system(size: 11, weight: .medium))
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8))
+                    .accessibilityHidden(true)
             }
             .foregroundColor(theme.primaryText)
             .padding(.horizontal, 10)
@@ -535,6 +494,11 @@ struct WorkflowDedicatedView: View {
                 Capsule().fill(theme.surfaceOverlay)
             )
         }
+        // "Live" alone doesn't say what the control DOES, and the label has to carry that
+        // — the visible text is one word of state, not a name.
+        .accessibilityLabel(selectedHistoricalRunID == nil
+                            ? "Run picker, showing the live run"
+                            : "Run picker, showing a past run")
     }
 
     // MARK: - Validation Summary Card
@@ -544,10 +508,12 @@ struct WorkflowDedicatedView: View {
             HStack(spacing: 8) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 13, weight: .bold))
-                    .foregroundColor(.red)
+                    .foregroundColor(theme.errorColor)
+                    .accessibilityHidden(true)
                 Text("\(validationErrors.count) configuration issue\(validationErrors.count == 1 ? "" : "s")")
                     .font(theme.fontSubheadline.weight(.bold))
                     .foregroundColor(theme.primaryText)
+                    .accessibilityAddTraits(.isHeader)
                 Spacer()
                 Button {
                     withAnimation { viewMode = .canvas }
@@ -568,7 +534,7 @@ struct WorkflowDedicatedView: View {
                 ForEach(validationErrors.prefix(5)) { issue in
                     HStack(spacing: 6) {
                         Circle()
-                            .fill(Color.red)
+                            .fill(theme.errorColor)
                             .frame(width: 4, height: 4)
                         Text("**\(issue.nodeName)**: \(issue.message)")
                             .font(.system(size: 11))
@@ -595,7 +561,7 @@ struct WorkflowDedicatedView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(
                     LinearGradient(
-                        colors: [Color.red.opacity(0.12), Color.red.opacity(0.04)],
+                        colors: [theme.errorColor.opacity(0.12), theme.errorColor.opacity(0.04)],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
@@ -603,7 +569,7 @@ struct WorkflowDedicatedView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.red.opacity(0.2), lineWidth: 0.5)
+                .stroke(theme.errorColor.opacity(0.2), lineWidth: 0.5)
         )
     }
 
@@ -619,10 +585,13 @@ struct WorkflowDedicatedView: View {
                         .foregroundColor(theme.accentColor.opacity(0.45))
                         .padding(20)
                         .background(Circle().fill(theme.accentColor.opacity(0.08)))
+                        // Hero decoration; the heading right below says the same thing.
+                        .accessibilityHidden(true)
 
                     Text("Workflow Ready")
                         .font(.title2.weight(.bold))
                         .foregroundColor(theme.primaryText)
+                        .accessibilityAddTraits(.isHeader)
 
                     Text("Type your input below and run the workflow.\nSwitch mode to Canvas to edit the pipeline.")
                         .font(.subheadline)
@@ -646,11 +615,13 @@ struct WorkflowDedicatedView: View {
                     Image(systemName: "point.3.connected.trianglepath.dotted")
                         .font(.system(size: 20, weight: .semibold))
                         .foregroundColor(theme.accentColor.opacity(0.85))
+                        .accessibilityHidden(true)
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Workflow Ready")
                             .font(theme.fontSubheadline.weight(.bold))
                             .foregroundColor(theme.primaryText)
+                            .accessibilityAddTraits(.isHeader)
                         Text("Type your input below to start a new run.")
                             .font(theme.fontCaption)
                             .foregroundColor(theme.secondaryText)
@@ -680,7 +651,7 @@ struct WorkflowDedicatedView: View {
                 )
             }
         }
-        .background(theme.primaryBackground)
+        .background(Color.clear)
     }
 
     // MARK: - Canvas Floating Button
@@ -697,6 +668,7 @@ struct WorkflowDedicatedView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "rectangle.3.group")
                         .font(.system(size: 11, weight: .bold))
+                        .accessibilityHidden(true)
                     Text("Canvas")
                         .font(.system(size: 11, weight: .bold))
                 }
@@ -706,6 +678,10 @@ struct WorkflowDedicatedView: View {
                 .background(Capsule().fill(viewMode == .canvas ? theme.accentColor : Color.clear))
             }
             .buttonStyle(.plain)
+            // Which half is active was encoded ONLY in the capsule fill and the text colour
+            // — invisible to VoiceOver, which read both halves identically.
+            .accessibilityLabel("Canvas view")
+            .accessibilityAddTraits(viewMode == .canvas ? [.isButton, .isSelected] : .isButton)
 
             Button(action: {
                 let binding = $viewMode
@@ -718,6 +694,7 @@ struct WorkflowDedicatedView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "list.bullet.rectangle")
                         .font(.system(size: 11, weight: .bold))
+                        .accessibilityHidden(true)
                     Text("Execution")
                         .font(.system(size: 11, weight: .bold))
                 }
@@ -727,26 +704,12 @@ struct WorkflowDedicatedView: View {
                 .background(Capsule().fill(viewMode == .execution ? theme.accentColor : Color.clear))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Execution view")
+            .accessibilityAddTraits(viewMode == .execution ? [.isButton, .isSelected] : .isButton)
         }
         .padding(3)
         .background(Capsule().fill(theme.surfaceOverlay))
         .shadow(color: Color.black.opacity(0.15), radius: 4, y: 2)
     }
 
-    // MARK: - Helpers
-
-    private func statusIcon(for status: WorkflowRunRecord.RunStatus) -> String {
-        switch status {
-        case .running:   return "circle.fill"
-        case .completed: return "checkmark.circle.fill"
-        case .failed:    return "xmark.circle.fill"
-        case .cancelled: return "stop.circle.fill"
-        }
-    }
-
-    private func formatDuration(_ d: TimeInterval) -> String {
-        if d < 1 { return "<1s" }
-        if d < 60 { return "\(String(format: "%.1f", d))s" }
-        return "\(Int(d / 60))m \(Int(d.truncatingRemainder(dividingBy: 60)))s"
-    }
 }

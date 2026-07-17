@@ -274,7 +274,7 @@ struct WorkflowExecutionView: View {
                 }
             }
         }
-        .background(theme.primaryBackground)
+        .background(Color.clear)
     }
 
     // MARK: - Subviews
@@ -369,7 +369,7 @@ struct WorkflowExecutionView: View {
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(theme.primaryBackground)
+        .background(Color.clear)
     }
 
     private var runningPlaceholderCard: some View {
@@ -442,10 +442,7 @@ struct AgentOutcomeCard: View {
             }
         }
         .frame(width: isExpanded ? 320 : 180, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(theme.controlBackground)
-        )
+        .glassEffect(.regular, in: .rect(cornerRadius: 10))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
                 .stroke(statusColor.opacity(0.3), lineWidth: 1.5)

@@ -81,7 +81,10 @@ final class WorkflowRunRecordSD {
 
     // MARK: - Initializer
 
-    init(record: WorkflowRunRecord, conversation: ConversationSD? = nil) {
+    /// - Parameter blobs: Pre-encoded JSON blobs (see `encodeBlobs(for:)`). Pass them
+    ///   to keep a large encode off the main actor; omit to encode inline.
+    init(record: WorkflowRunRecord, conversation: ConversationSD? = nil, blobs: EncodedBlobs? = nil) {
+        let resolved = blobs ?? Self.encodeBlobs(for: record)
         self.id = record.id
         self.conversation = conversation
         self.conversationID = record.conversationID
@@ -93,9 +96,46 @@ final class WorkflowRunRecordSD {
         self.finalOutput = record.finalOutput
         self.errorMessage = record.error
         self.statusRaw = record.status.rawValue
-        self.nodeResultsData = Self.encodeNodeResults(record.nodeResults)
-        self.variablesData = Self.encodeVariables(record.variables)
+        self.nodeResultsData = resolved.nodeResults
+        self.variablesData = resolved.variables
         self._cachedRecord = record
+    }
+
+    // MARK: - Off-main encoding
+
+    /// Pre-encoded JSON blobs for a record. Lets the (potentially large) encode run
+    /// OFF the main actor while the main-actor SwiftData write only assigns bytes.
+    /// `Sendable` (Data is), so it crosses the actor hop safely.
+    struct EncodedBlobs: Sendable {
+        let nodeResults: Data
+        let variables: Data
+    }
+
+    /// Encodes a record's blobs. Touches no instance state, so it is safe to call from
+    /// any task — see `WorkflowRunHistoryStore.upsertFinalized(_:forConversation:)`.
+    static func encodeBlobs(for record: WorkflowRunRecord) -> EncodedBlobs {
+        EncodedBlobs(
+            nodeResults: encodeNodeResults(record.nodeResults),
+            variables: encodeVariables(record.variables)
+        )
+    }
+
+    /// Rewrites every column from `newValue` using blobs encoded elsewhere, rather
+    /// than re-encoding on the caller's thread.
+    func apply(_ newValue: WorkflowRunRecord, blobs: EncodedBlobs) {
+        _cachedRecord = newValue
+        // `id` and `conversationID` are intentionally not re-assigned —
+        // they're identity fields and should never change post-insert.
+        workflowProfileID = newValue.workflowProfileID
+        workflowName = newValue.workflowName
+        timestamp = newValue.timestamp
+        duration = newValue.duration
+        userInput = newValue.userInput
+        finalOutput = newValue.finalOutput
+        errorMessage = newValue.error
+        statusRaw = newValue.status.rawValue
+        nodeResultsData = blobs.nodeResults
+        variablesData = blobs.variables
     }
 
     // MARK: - Helpers
@@ -120,40 +160,81 @@ final class WorkflowRunRecordSD {
         )
     }
 
+    /// Inline-encoding apply, used by the `record` setter. Prefer
+    /// `apply(_:blobs:)` with off-main-encoded blobs on hot paths.
     private func applyRecord(_ newValue: WorkflowRunRecord) {
-        // `id` and `conversationID` are intentionally not re-assigned —
-        // they're identity fields and should never change post-insert.
-        workflowProfileID = newValue.workflowProfileID
-        workflowName = newValue.workflowName
-        timestamp = newValue.timestamp
-        duration = newValue.duration
-        userInput = newValue.userInput
-        finalOutput = newValue.finalOutput
-        errorMessage = newValue.error
-        statusRaw = newValue.status.rawValue
-        nodeResultsData = Self.encodeNodeResults(newValue.nodeResults)
-        variablesData = Self.encodeVariables(newValue.variables)
+        apply(newValue, blobs: Self.encodeBlobs(for: newValue))
     }
 
     // MARK: - Encode / Decode (blobs)
 
+    /// Current envelope version for the node-results blob. Bump when the on-disk
+    /// shape changes so a future migration can branch on a known discriminator
+    /// instead of guessing from structure.
+    private static let nodeResultsBlobVersion = 1
+
+    /// Versioned wrapper around the node snapshots. Records written before this
+    /// existed store a bare `[WorkflowNodeResultSnapshot]`; `decodeNodeResults`
+    /// falls back to that shape.
+    private struct VersionedNodeResults: Codable {
+        let version: Int
+        let nodes: [WorkflowRunRecord.WorkflowNodeResultSnapshot]
+    }
+
     private static func encodeNodeResults(_ results: [WorkflowRunRecord.WorkflowNodeResultSnapshot]) -> Data {
         do {
-            return try JSONEncoder().encode(results)
+            return try JSONEncoder().encode(VersionedNodeResults(version: nodeResultsBlobVersion, nodes: results))
         } catch {
             logger.fault("Failed to encode node results: \(error.localizedDescription)")
             assertionFailure("Node results encoding should not fail for valid in-memory values.")
-            return Data("[]".utf8)
+            return Data("{\"version\":\(nodeResultsBlobVersion),\"nodes\":[]}".utf8)
         }
     }
 
     private static func decodeNodeResults(from data: Data) -> [WorkflowRunRecord.WorkflowNodeResultSnapshot] {
-        do {
-            return try JSONDecoder().decode([WorkflowRunRecord.WorkflowNodeResultSnapshot].self, from: data)
-        } catch {
-            logger.error("Failed to decode node results: \(error.localizedDescription) — returning [].")
+        let decoder = JSONDecoder()
+        // Current shape: versioned envelope.
+        if let versioned = try? decoder.decode(VersionedNodeResults.self, from: data) {
+            return versioned.nodes
+        }
+        // Legacy shape: bare array (records written before the envelope existed).
+        if let bare = try? decoder.decode([WorkflowRunRecord.WorkflowNodeResultSnapshot].self, from: data) {
+            return bare
+        }
+        // Resilient fallback: decode node-by-node so ONE undecodable node (e.g. a
+        // structural change beyond the lossy nodeTimeline) drops only that node
+        // instead of erasing the whole run's results.
+        return decodeNodeResultsResiliently(from: data)
+    }
+
+    private static func decodeNodeResultsResiliently(from data: Data) -> [WorkflowRunRecord.WorkflowNodeResultSnapshot] {
+        // Pull the raw node array whether the blob is a bare array or an envelope.
+        let root = try? JSONSerialization.jsonObject(with: data)
+        let rawNodes: [Any]
+        if let array = root as? [Any] {
+            rawNodes = array
+        } else if let object = root as? [String: Any], let array = object["nodes"] as? [Any] {
+            rawNodes = array
+        } else {
+            logger.error("Node results blob is neither an array nor a versioned envelope — returning [].")
             return []
         }
+
+        let decoder = JSONDecoder()
+        var survivors: [WorkflowRunRecord.WorkflowNodeResultSnapshot] = []
+        var dropped = 0
+        for element in rawNodes {
+            guard let elementData = try? JSONSerialization.data(withJSONObject: element),
+                  let snapshot = try? decoder.decode(WorkflowRunRecord.WorkflowNodeResultSnapshot.self, from: elementData) else {
+                dropped += 1
+                continue
+            }
+            survivors.append(snapshot)
+        }
+        if dropped > 0 {
+            logger.error("Recovered \(survivors.count) node result(s); dropped \(dropped) undecodable node(s).")
+        }
+        return survivors
     }
 
     private static func encodeVariables(_ variables: [String: String]) -> Data {

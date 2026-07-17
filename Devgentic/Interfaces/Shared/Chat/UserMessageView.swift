@@ -35,7 +35,7 @@ struct UserMessageView: View {
                             .foregroundColor(.secondary)
                             .rotationEffect(.degrees(isExpanded ? 180 : 0))
                             .padding(6)
-                            .background(Color.black.opacity(0.1))
+                            .background(theme.surfaceOverlayStrong)
                             .clipShape(Circle())
                     }
                     .buttonStyle(.plain)
@@ -76,35 +76,15 @@ struct UserMessageView: View {
     private var highlightedText: AttributedString {
         var attrString = AttributedString(text)
         attrString.font = themeManager.chatFont
-
-        let lowercasedText = text.lowercased()
-        let lowercasedQuery = searchQuery.lowercased()
-
-        guard !lowercasedQuery.isEmpty else { return attrString }
-
-        var matchRanges: [Range<String.Index>] = []
-        var searchStart = lowercasedText.startIndex
-        while searchStart < lowercasedText.endIndex,
-              let range = lowercasedText.range(of: lowercasedQuery, range: searchStart..<lowercasedText.endIndex) {
-            matchRanges.append(range)
-            searchStart = range.upperBound
-        }
-
-        let highlightColor = Color.yellow.opacity(0.4)
-        let activeHighlightColor = theme.warningColor.opacity(0.6)
-
-        for (index, range) in matchRanges.enumerated().reversed() {
-            let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
-            let endOffset = text.distance(from: text.startIndex, to: range.upperBound)
-            let attrStart = attrString.index(attrString.startIndex, offsetByCharacters: startOffset)
-            let attrEnd = attrString.index(attrString.startIndex, offsetByCharacters: endOffset)
-            let attrRange = attrStart..<attrEnd
-
-            let isActiveMatch = (activeHighlightIndex == index)
-            attrString[attrRange].backgroundColor = isActiveMatch ? activeHighlightColor : highlightColor
-        }
-
-        return attrString
+        // Shared O(n) forward-cursor highlighter with theme hues (previously an
+        // O(matches·n) reversed pass with its own drifted colors).
+        return SearchHighlighter.highlight(
+            attrString,
+            query: searchQuery,
+            activeMatchIndex: activeHighlightIndex,
+            base: theme.searchHighlight,
+            active: theme.searchHighlightActive
+        )
     }
     
     /// Cached width for which truncation was last computed — avoids re-creating

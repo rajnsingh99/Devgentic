@@ -42,6 +42,23 @@ final class ReflexionCapabilityIntegrationTests: XCTestCase {
         return lines.joined(separator: "\n")
     }
 
+    // MARK: - Structured-event helpers
+    // Trial boundaries / verdicts are STRUCTURED events now (the plan/reflection
+    // cards consume them); the old narrative thoughts ("Starting trial 2…",
+    // "Reflection: <critique>") were removed as duplicates.
+
+    private func trialsStarted(_ events: [AgentStreamEvent]) -> [Int] {
+        events.compactMap { if case .reflectionTrialStarted(let t, _) = $0 { return t }; return nil }
+    }
+
+    private func retryCritiques(_ events: [AgentStreamEvent]) -> [String] {
+        events.compactMap { if case .reflectionRetrying(_, let c) = $0 { return c }; return nil }
+    }
+
+    private func acceptedTrials(_ events: [AgentStreamEvent]) -> [Int] {
+        events.compactMap { if case .reflectionAccepted(let t) = $0 { return t }; return nil }
+    }
+
     // MARK: - Test 1: Single Trial Accepted
 
     func testReflexion_SingleTrialAccepted_NoRetry() async throws {
@@ -74,14 +91,11 @@ final class ReflexionCapabilityIntegrationTests: XCTestCase {
         let content = StreamCollector.contentText(from: events)
         XCTAssertFalse(content.isEmpty, "Should produce final content")
 
-        // Should NOT have trial 2 thoughts (early exit after acceptance)
-        let thoughts = StreamCollector.thoughts(from: events)
-        let hasTrial2 = thoughts.contains { $0.contains("Starting trial 2") }
-        XCTAssertFalse(hasTrial2, "Should not start trial 2 when trial 1 is accepted")
+        // Should NOT start trial 2 (early exit after acceptance)
+        XCTAssertFalse(trialsStarted(events).contains(2), "Should not start trial 2 when trial 1 is accepted")
 
-        // Reflection acceptance thought should be present
-        let hasAcceptance = thoughts.contains { $0.contains("acceptable") }
-        XCTAssertTrue(hasAcceptance, "Should emit acceptance thought")
+        // Structured acceptance event should be present
+        XCTAssertEqual(acceptedTrials(events), [1], "Should emit reflectionAccepted for trial 1")
 
         // Only 2 cognitive step calls (trial 1 only)
         XCTAssertEqual(provider.receivedCognitiveMessages.count, 2,
@@ -146,13 +160,11 @@ final class ReflexionCapabilityIntegrationTests: XCTestCase {
         XCTAssertFalse(content.isEmpty, "Should produce final content from trial 2")
 
         // Trial 2 should have started
-        let thoughts = StreamCollector.thoughts(from: events)
-        let hasTrial2Start = thoughts.contains { $0.contains("Starting trial 2") }
-        XCTAssertTrue(hasTrial2Start, "Should start trial 2 after rejection")
+        XCTAssertTrue(trialsStarted(events).contains(2), "Should start trial 2 after rejection")
 
-        // Rejection critique should be emitted as a thought
-        let hasCritique = thoughts.contains { $0.contains("did not fix") }
-        XCTAssertTrue(hasCritique, "Reflection critique should be emitted as thought")
+        // Rejection critique should be carried on the structured retry event (full text)
+        XCTAssertTrue(retryCritiques(events).contains { $0.contains("did not fix") },
+                      "Reflection critique should be emitted on reflectionRetrying")
 
         // G5 CORE ASSERTION: Cross-trial memory seeding
         // Trial 2's cognitive step messages should contain the prior_trial observation
@@ -234,11 +246,9 @@ final class ReflexionCapabilityIntegrationTests: XCTestCase {
         let events = try await StreamCollector.collect(from: stream)
 
         // All 3 trials should have run
-        let thoughts = StreamCollector.thoughts(from: events)
-        let hasTrial2 = thoughts.contains { $0.contains("Starting trial 2") }
-        let hasTrial3 = thoughts.contains { $0.contains("Starting trial 3") }
-        XCTAssertTrue(hasTrial2, "Trial 2 should start after trial 1 rejection")
-        XCTAssertTrue(hasTrial3, "Trial 3 should start after trial 2 rejection")
+        let started = trialsStarted(events)
+        XCTAssertTrue(started.contains(2), "Trial 2 should start after trial 1 rejection")
+        XCTAssertTrue(started.contains(3), "Trial 3 should start after trial 2 rejection")
 
         // 6 cognitive steps total (2 per trial)
         XCTAssertEqual(provider.receivedCognitiveMessages.count, 6,
@@ -248,11 +258,10 @@ final class ReflexionCapabilityIntegrationTests: XCTestCase {
         XCTAssertEqual(provider.receivedGenerateMessages.count, 2,
                        "Reflection should run after trial 1 and 2, but not trial 3")
 
-        // Both critiques should appear as thoughts
-        let hasCritiqueA = thoughts.contains { $0.contains("CRITIQUE_ALPHA") }
-        let hasCritiqueB = thoughts.contains { $0.contains("CRITIQUE_BETA") }
-        XCTAssertTrue(hasCritiqueA, "Trial 1 critique should be emitted")
-        XCTAssertTrue(hasCritiqueB, "Trial 2 critique should be emitted")
+        // Both critiques should appear on the structured retry events
+        let critiques = retryCritiques(events)
+        XCTAssertTrue(critiques.contains { $0.contains("CRITIQUE_ALPHA") }, "Trial 1 critique should be emitted")
+        XCTAssertTrue(critiques.contains { $0.contains("CRITIQUE_BETA") }, "Trial 2 critique should be emitted")
 
         // Content should be produced
         let content = StreamCollector.contentText(from: events)
@@ -303,13 +312,10 @@ final class ReflexionCapabilityIntegrationTests: XCTestCase {
                        "Only 2 trials should run (4 cognitive steps)")
 
         // Trial 3 should NOT start
-        let thoughts = StreamCollector.thoughts(from: events)
-        let hasTrial3 = thoughts.contains { $0.contains("Starting trial 3") || $0.contains("[Trial 3]") }
-        XCTAssertFalse(hasTrial3, "Trial 3 should not start when trial 2 is accepted")
+        XCTAssertFalse(trialsStarted(events).contains(3), "Trial 3 should not start when trial 2 is accepted")
 
-        // Acceptance thought after trial 2
-        let hasAcceptance = thoughts.contains { $0.contains("acceptable") }
-        XCTAssertTrue(hasAcceptance, "Should emit acceptance thought for trial 2")
+        // Structured acceptance event after trial 2
+        XCTAssertEqual(acceptedTrials(events), [2], "Should emit reflectionAccepted for trial 2")
 
         // Content should be produced
         let content = StreamCollector.contentText(from: events)
@@ -365,9 +371,7 @@ final class ReflexionCapabilityIntegrationTests: XCTestCase {
                        "Both trials should run (4 cognitive steps total)")
 
         // Trial 2 should have started (proving retry occurred)
-        let thoughts = StreamCollector.thoughts(from: events)
-        let hasTrial2Start = thoughts.contains { $0.contains("Starting trial 2") }
-        XCTAssertTrue(hasTrial2Start, "Trial 2 should start after trial 1 rejection")
+        XCTAssertTrue(trialsStarted(events).contains(2), "Trial 2 should start after trial 1 rejection")
     }
 
     // MARK: - Test 6: A1 — a later FAILED trial must not clobber a good earlier one (#18)
@@ -405,8 +409,7 @@ final class ReflexionCapabilityIntegrationTests: XCTestCase {
         let events = try await StreamCollector.collect(from: stream)
 
         // Trial 2 ran (no early exit) but its empty/failed output did NOT clobber trial 1.
-        let thoughts = StreamCollector.thoughts(from: events)
-        XCTAssertTrue(thoughts.contains { $0.contains("Starting trial 2") }, "Trial 2 should run after RETRY")
+        XCTAssertTrue(trialsStarted(events).contains(2), "Trial 2 should run after RETRY")
 
         // The run completes with trial 1's content rather than failing empty.
         let content = StreamCollector.contentText(from: events)
@@ -443,7 +446,7 @@ final class ReflexionCapabilityIntegrationTests: XCTestCase {
         let events = try await StreamCollector.collect(from: stream)
 
         let thoughts = StreamCollector.thoughts(from: events)
-        XCTAssertFalse(thoughts.contains { $0.contains("Starting trial 2") },
+        XCTAssertFalse(trialsStarted(events).contains(2),
                        "Cancellation during reflection must stop the loop, not advance to trial 2")
         XCTAssertEqual(provider.cognitiveCallCount, 2,
                        "Only trial 1's 2 cognitive steps should run; trial 2 must not execute")

@@ -336,7 +336,7 @@ struct CoreIntelligenceSettingsView: View {
             .padding(.bottom, 24)
         }
         .scrollContentBackground(.hidden)
-        .background(theme.primaryBackground)
+        .background(Color.clear)
         .onAppear {
             modelService.refreshInstalledModels()
             updateFitAssessment()

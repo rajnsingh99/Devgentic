@@ -41,12 +41,17 @@ final class TimelineGroupingTests: XCTestCase {
             .thought(id: UUID(), text: "Final summary")
         ]
         let nodes = AgentTimelineView.buildGroupedNodes(from: events, isStreaming: false)
-        // The trailing thought should be removed
+        // The trailing thought should be removed, leaving the lone tool as a plain
+        // `.action` row (a collapsible `.actionGroup` requires 2+ tools by design).
         XCTAssertEqual(nodes.count, 1)
-        if case .actionGroup(let actions) = nodes[0] {
-            XCTAssertEqual(actions.count, 1)
+        if case .action(let event) = nodes[0] {
+            if case .toolExecution(let data) = event {
+                XCTAssertEqual(data.name, "read_file")
+            } else {
+                XCTFail("Expected the surviving node to be the tool execution")
+            }
         } else {
-            XCTFail("Expected action group")
+            XCTFail("Expected a single .action node (single tools don't form groups)")
         }
     }
 

@@ -14,9 +14,13 @@ struct CodeDiffView: View {
     let modifiedCode: String
     @Environment(\.appTheme) private var theme
 
-    private var diffResults: [DiffResult] {
-        return DiffUtility.generateDiff(original: originalCode, modified: modifiedCode)
-    }
+    /// Cached diff, computed ONCE per content change in `.task` (off the main thread) —
+    /// NOT recomputed in `body`. `DiffUtility` allocates an O(n·m) table and does O(n·m)
+    /// comparisons, and `DiffResult.id` is a fresh UUID per row, so the old compute-in-body
+    /// both stalled on large files and forced the LazyVStack to rebuild every row on each
+    /// pass. Caching keeps the rows (and their ids) stable across renders.
+    @State private var diffResults: [DiffResult] = []
+    @State private var isComputingDiff = false
 
     var body: some View {
         ScrollView {
@@ -57,13 +61,43 @@ struct CodeDiffView: View {
                             .padding(.trailing, 8)
                     }
                     .background(rowBackgroundColor(for: result.type))
+                    // Add/delete were encoded by color only — announce the change kind
+                    // so VoiceOver / color-blind users can tell added from removed lines.
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(accessibilityLabel(for: result))
                 }
             }
         }
         .background(theme.textBackground)
+        .overlay {
+            if isComputingDiff && diffResults.isEmpty {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .task(id: DiffInput(original: originalCode, modified: modifiedCode)) {
+            isComputingDiff = true
+            let orig = originalCode
+            let mod = modifiedCode
+            let results = await Task.detached(priority: .userInitiated) {
+                DiffUtility.generateDiff(original: orig, modified: mod)
+            }.value
+            guard !Task.isCancelled else { return }
+            diffResults = results
+            isComputingDiff = false
+        }
     }
 
     // MARK: - Styling Helpers
+
+    private func accessibilityLabel(for result: DiffResult) -> String {
+        let kind: String
+        switch result.type {
+        case .added:     kind = String(localized: "Added line")
+        case .deleted:   kind = String(localized: "Removed line")
+        case .unchanged: kind = String(localized: "Unchanged line")
+        }
+        return "\(kind): \(result.line)"
+    }
 
     private func formatLineNumber(_ number: Int?) -> String {
         guard let number = number else { return "    " }
@@ -109,4 +143,12 @@ struct CodeDiffView: View {
         case .unchanged: return theme.primaryText.opacity(0.9)
         }
     }
+}
+
+/// `.task(id:)` key for the diff: recompute only when the compared text actually changes.
+/// Comparing the two strings each body pass is O(n) — far cheaper than the O(n·m) diff it
+/// gates, and it stops a theme/hover-driven re-render from re-diffing.
+private struct DiffInput: Equatable {
+    let original: String
+    let modified: String
 }

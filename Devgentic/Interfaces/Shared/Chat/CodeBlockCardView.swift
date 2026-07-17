@@ -13,9 +13,13 @@ struct CodeBlockCardView: View {
     let language: String
     let lineCount: Int
     let fileName: String?
+    /// The code itself, so the card can be copied without opening the viewer first.
+    /// The card previously received only its metadata, which is why it had no copy at all.
+    var content: String = ""
     let action: () -> Void
 
     @State private var isHovering = false
+    @State private var didCopy = false
     @Environment(\.appTheme) private var theme
 
     private var title: String {
@@ -59,9 +63,12 @@ struct CodeBlockCardView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 4))
                     .overlay(RoundedRectangle(cornerRadius: 4).stroke(theme.surfaceOverlayStrong, lineWidth: 1))
 
-                Image(systemName: "arrow.up.forward.app")
+                // Doubles as the copy confirmation — the copy itself comes from the context
+                // menu / accessibility action, so this is the only feedback that it landed.
+                Image(systemName: didCopy ? "checkmark" : "arrow.up.forward.app")
                     .font(.caption)
-                    .foregroundColor(theme.secondaryText.opacity(0.5))
+                    .foregroundColor(didCopy ? theme.successColor : theme.secondaryText.opacity(0.5))
+                    .accessibilityHidden(true)
             }
             .padding(12)
             // MARK: Liquid Glass
@@ -81,12 +88,35 @@ struct CodeBlockCardView: View {
         .accessibilityLabel("\(title), \(lineCount) lines")
         .accessibilityHint("Double-tap to open in code viewer")
         .accessibilityAddTraits(.isButton)
+        // Copy without a round trip through the viewer. Deliberately NOT a button inside
+        // the card's Button — nesting them makes the inner one unreliable for mouse and
+        // VoiceOver alike. A context menu is reachable by Control-click AND VO-Shift-M,
+        // and the accessibility action puts it in the VoiceOver actions rotor; neither is
+        // hover-gated, which is what made the image toolbar unreachable earlier today.
+        .contextMenu {
+            Button(action: copyCode) {
+                Label("Copy Code", systemImage: "doc.on.doc")
+            }
+            .disabled(content.isEmpty)
+        }
+        .accessibilityAction(named: "Copy code") { copyCode() }
         .frame(maxWidth: 400, alignment: .leading)
         .padding(.vertical, 8)
         .onHover { hovering in
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                 isHovering = hovering
             }
+        }
+    }
+
+    private func copyCode() {
+        guard !content.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(content, forType: .string)
+        withAnimation(.easeInOut) { didCopy = true }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            withAnimation(.easeInOut) { didCopy = false }
         }
     }
 }

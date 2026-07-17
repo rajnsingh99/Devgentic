@@ -159,4 +159,46 @@ final class ResponseSynthesizerTests: XCTestCase {
         XCTAssertTrue(response.contains("list_directory"), "Fallback must name the failed tool")
         XCTAssertFalse(response.contains("Unverified conclusion"), "No claim recorded → no caveat line")
     }
+
+    // MARK: - Wrapper-Run Suppression (no IC synthesis in Planning/Reflexion inner loops)
+
+    /// A multi-tool summary takes the IC LLM path by default. Wrapper-run inner
+    /// loops (Planning subtasks, Reflexion trials) pass `suppressLLM: true` and
+    /// must route to the deterministic builder instead — even under
+    /// `forceSynthesis: true` (the circuit-breaker abort path), which otherwise
+    /// always attempts an IC load.
+    func testSuppressLLM_MultiToolRun_UsesDeterministicBuilder_EvenWhenForced() async {
+        var summary = ExecutionSummary(originalGoal: "Do two things")
+        summary.record(toolCallId: "1", toolName: "step_one", params: "{}",
+                       output: "first result", isSuccess: true)
+        summary.record(toolCallId: "2", toolName: "step_two", params: "{}",
+                       output: "second result", isSuccess: true)
+        summary.markComplete()
+
+        let expected = ResponseSynthesizer.buildDeterministicFallback(summary: summary)
+        let response = await ResponseSynthesizer.synthesize(
+            summary: summary,
+            originalQuery: "Do two things",
+            isNativeFlow: false,
+            forceSynthesis: true,
+            suppressLLM: true
+        )
+        XCTAssertEqual(response, expected, "Suppressed runs must use the deterministic builder, never IC")
+    }
+
+    /// Suppression must NOT disturb the free paths: a native-flow run with a final
+    /// thought still returns the model's own answer verbatim.
+    func testSuppressLLM_NativeFastPath_Unaffected() async {
+        var summary = ExecutionSummary(originalGoal: "g")
+        summary.finalAgentThought = "Direct native answer."
+        summary.markComplete()
+
+        let response = await ResponseSynthesizer.synthesize(
+            summary: summary,
+            originalQuery: "g",
+            isNativeFlow: true,
+            suppressLLM: true
+        )
+        XCTAssertEqual(response, "Direct native answer.")
+    }
 }

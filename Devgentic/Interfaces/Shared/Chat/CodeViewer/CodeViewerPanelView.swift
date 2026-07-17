@@ -8,8 +8,10 @@
 import SwiftUI
 import CodeEditSourceEditor
 import CodeEditLanguages
-import Combine
 import UniformTypeIdentifiers
+import os
+
+private let logger = DGLogger(category: "CodeViewerPanel")
 
 // MARK: - SyntaxTheme → EditorTheme Bridge
 
@@ -76,65 +78,6 @@ extension NSColor {
     }
 }
 
-// MARK: - GapBuffer Data Structure
-struct GapBuffer: Equatable {
-    private var buffer: [Character]
-    private var gapStart: Int
-    private var gapEnd: Int
-
-    /// Equatable compares the logical string content (excluding gap internals).
-    static func == (lhs: GapBuffer, rhs: GapBuffer) -> Bool {
-        lhs.string == rhs.string
-    }
-
-    var string: String {
-        return String(buffer[0..<gapStart] + buffer[gapEnd..<buffer.count])
-    }
-
-    init(string: String) {
-        self.buffer = Array(string)
-        self.gapStart = buffer.count
-        self.gapEnd = buffer.count
-    }
-
-    mutating func moveGap(to position: Int) {
-        guard position != gapStart else { return }
-
-        if position < gapStart {
-            let distance = gapStart - position
-            let gapSize = gapEnd - gapStart
-            buffer.replaceSubrange(position..<position+gapSize, with: buffer[position..<gapStart])
-            gapStart = position
-            gapEnd = position + gapSize
-        } else {
-            let distance = position - gapStart
-            buffer.replaceSubrange(gapStart..<gapStart+distance, with: buffer[gapEnd..<gapEnd+distance])
-            gapStart = position
-            gapEnd = position + (gapEnd - gapStart)
-        }
-    }
-
-    mutating func insert(_ char: Character) {
-        ensureGap(ofSize: 1)
-        buffer[gapStart] = char
-        gapStart += 1
-    }
-
-    mutating func delete() {
-        if gapStart > 0 {
-            gapStart -= 1
-        }
-    }
-
-    private mutating func ensureGap(ofSize size: Int) {
-        if gapEnd - gapStart < size {
-            let newGapSize = max(size, 64)
-            buffer.insert(contentsOf: [Character](repeating: " ", count: newGapSize), at: gapStart)
-            gapEnd = gapStart + newGapSize
-        }
-    }
-}
-
 // MARK: - Centralized Data Model
 @Observable
 class CodeDocument: Equatable {
@@ -142,7 +85,13 @@ class CodeDocument: Equatable {
         return lhs.content == rhs.content && lhs.language.id == rhs.language.id
     }
 
-    var content: GapBuffer
+    /// Plain String. This was a `GapBuffer` — a real gap-buffer implementation whose
+    /// editing mechanics (`moveGap`/`insert`/`delete`) had ZERO callers: every live use
+    /// constructed it whole from a String and read `.string` back, so it was a String
+    /// with extra steps (and an untested one — the never-run `moveGap` else-branch
+    /// computed its new gap end from an already-mutated `gapStart`). CodeEditSourceEditor
+    /// owns actual text editing; this document just carries content in and out.
+    var content: String
     var language: CodeLanguage
 
     /// Maps language identifiers not natively supported by CodeEditLanguages
@@ -176,7 +125,7 @@ class CodeDocument: Equatable {
     ]
 
     init(content: String, language: String?) {
-        self.content = GapBuffer(string: content)
+        self.content = content
         let key = language?.lowercased()
         self.language = CodeLanguage.allLanguages.first {
             $0.id.rawValue.lowercased() == key
@@ -195,6 +144,9 @@ struct CodeViewerPanelView: View {
     @Environment(ThemeManager.self) var themeManager
 
     @State private var isHoveringOnDivider = false
+    /// Panel width captured at the start of a divider drag, so the cumulative gesture
+    /// translation is applied to a fixed base rather than the live (already-moved) width.
+    @State private var dragStartWidth: Double? = nil
     @AppStorage("codeEditFontSize") var fontSize: Double = 13
     @AppStorage("codeViewerPanelWidth") private var panelWidth: Double = 600
 
@@ -231,18 +183,18 @@ struct CodeViewerPanelView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
         .transition(.move(edge: .trailing))
         .shadow(color: .black.opacity(0.25), radius: 12, x: -4, y: 0)
-        .onChange(of: chatHistoryViewModel.codeViewerContent?.currentIndex) {
-            let newContent = chatHistoryViewModel.codeViewerContent
-            if let content = newContent {
-                let snippet = content.snippets[content.currentIndex]
-                if currentSnippet?.id != snippet.id {
-                    currentSnippet = snippet
-                    document = CodeDocument(content: snippet.code, language: snippet.language)
-                }
-            } else {
-                currentSnippet = nil
-                document = nil
-            }
+        // `initial: true` is REQUIRED, not cosmetic. This panel is only created once
+        // `codeViewerContent` is ALREADY set (index 0), so a plain `onChange` has no
+        // transition to observe on first appear — `document` stayed nil and the panel
+        // rendered "No Code Selected" until the user navigated, which finally moved
+        // the index. This was the sole assignment to `document` (no onAppear/.task).
+        //
+        // Keyed on the SELECTED SNIPPET'S id rather than `currentIndex`: opening a
+        // different message while the index happens to be unchanged (e.g. 0 → 0) is a
+        // real selection change that an index-keyed observer misses, leaving the
+        // previous message's code on screen.
+        .onChange(of: selectedSnippet?.id, initial: true) { _, _ in
+            loadSelectedSnippet()
         }
         .alert("Save Error", isPresented: Binding(
             get: { saveErrorMessage != nil },
@@ -250,8 +202,47 @@ struct CodeViewerPanelView: View {
         )) {
             Button("OK", role: .cancel) { saveErrorMessage = nil }
         } message: {
-            Text(saveErrorMessage ?? "An unknown error occurred.")
+            Text(saveErrorMessage ?? String(localized: "An unknown error occurred."))
         }
+    }
+
+    // MARK: - Snippet Loading
+
+    /// The snippet the view model currently has selected, or nil when there's no
+    /// selection. Bounds-guarded: an out-of-range `currentIndex` logs and reads as
+    /// "no selection" rather than trapping on the subscript.
+    private var selectedSnippet: CodeSnippet? {
+        guard let content = chatHistoryViewModel.codeViewerContent else { return nil }
+        guard content.snippets.indices.contains(content.currentIndex) else {
+            logger.error("[CodeViewer] currentIndex \(content.currentIndex) out of range for \(content.snippets.count) snippet(s) — rendering empty state.")
+            return nil
+        }
+        return content.snippets[content.currentIndex]
+    }
+
+    /// Syncs `currentSnippet` / `document` to the view model's selection. Idempotent —
+    /// safe to call on every selection change and on first appear.
+    private func loadSelectedSnippet() {
+        guard let snippet = selectedSnippet else {
+            if currentSnippet != nil {
+                logger.info("[CodeViewer] Cleared — no snippet selected.")
+            }
+            currentSnippet = nil
+            document = nil
+            return
+        }
+
+        guard currentSnippet?.id != snippet.id else {
+            logger.debug("[CodeViewer] Snippet already loaded — skipping document rebuild.")
+            return
+        }
+
+        let index = (chatHistoryViewModel.codeViewerContent?.currentIndex ?? 0) + 1
+        let total = chatHistoryViewModel.codeViewerContent?.snippets.count ?? 0
+        let doc = CodeDocument(content: snippet.code, language: snippet.language)
+        currentSnippet = snippet
+        document = doc
+        logger.info("[CodeViewer] Loaded snippet \(index)/\(total) — lang=\(snippet.language ?? "nil") → resolved=\(doc.language.id.rawValue), \(snippet.code.count) chars.")
     }
 
     // MARK: - Resizable Divider
@@ -262,11 +253,19 @@ struct CodeViewerPanelView: View {
             .frame(width: 4)
             .contentShape(Rectangle())
             .gesture(
-                DragGesture(minimumDistance: 1).onChanged { value in
-                    let currentWidth = CGFloat(self.panelWidth)
-                    let newWidth = currentWidth - value.translation.width
-                    self.panelWidth = Double(min(max(newWidth, 400), 1200))
-                }
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        // `translation.width` is cumulative from the gesture's START, so it
+                        // must be applied to the width AT THAT START — not to the live
+                        // `panelWidth`, which we're already moving. Subtracting the cumulative
+                        // translation from an already-moved width compounds quadratically and
+                        // the panel races to the clamp on a small drag. Capture the start once.
+                        let start = dragStartWidth ?? panelWidth
+                        if dragStartWidth == nil { dragStartWidth = start }
+                        let newWidth = CGFloat(start) - value.translation.width
+                        panelWidth = Double(min(max(newWidth, 400), 1200))
+                    }
+                    .onEnded { _ in dragStartWidth = nil }
             )
             .onHover { hovering in
                 isHoveringOnDivider = hovering
@@ -310,6 +309,18 @@ struct CodeViewerPanelView: View {
         }
         .frame(width: panelWidth)
         .background(panelBackground)
+        // Surfaces an Apply-Changes failure (missing file, on-disk drift, I/O error).
+        // On a subview separate from the Save-error alert on `body` so the two alert
+        // modifiers don't contend on the same view. Cleared by the VM on the next
+        // successful apply.
+        .alert("Couldn't Apply Changes", isPresented: Binding(
+            get: { chatHistoryViewModel.codeApplyError != nil },
+            set: { if !$0 { chatHistoryViewModel.codeApplyError = nil } }
+        )) {
+            Button("OK", role: .cancel) { chatHistoryViewModel.codeApplyError = nil }
+        } message: {
+            Text(chatHistoryViewModel.codeApplyError ?? String(localized: "An unknown error occurred."))
+        }
     }
 
     // MARK: - Panel Header
@@ -323,7 +334,7 @@ struct CodeViewerPanelView: View {
                         .font(.system(.caption, weight: .medium))
                         .foregroundColor(accentTint)
 
-                    Text(currentSnippet?.language?.capitalized ?? "Code Viewer")
+                    Text(currentSnippet?.language?.capitalized ?? String(localized: "Code Viewer"))
                         .font(.system(size: 12, weight: .semibold, design: .rounded)) // Fixed size: monospaced rounded badge
                         .foregroundColor(textColor)
                 }
@@ -340,7 +351,7 @@ struct CodeViewerPanelView: View {
                         CodeViewerHeaderButton(
                             action: { chatHistoryViewModel.applyChanges(for: snippet) },
                             icon: "checkmark.circle.fill",
-                            helpText: "Apply Changes to File",
+                            helpText: String(localized: "Apply Changes to File"),
                             foregroundColor: Color(nsColor: resolvedSyntax.strings),
                             hoverBackground: selectionColor
                         )
@@ -352,7 +363,7 @@ struct CodeViewerPanelView: View {
                                 withAnimation { chatHistoryViewModel.toggleDiffView(for: snippet) }
                             },
                             icon: chatHistoryViewModel.isShowingDiff ? "doc.text.fill" : "arrow.left.arrow.right",
-                            helpText: chatHistoryViewModel.isShowingDiff ? "Show Final Code" : "Show Changes",
+                            helpText: chatHistoryViewModel.isShowingDiff ? String(localized: "Show Final Code") : String(localized: "Show Changes"),
                             foregroundColor: chatHistoryViewModel.isShowingDiff ? accentTint : secondaryTextColor,
                             hoverBackground: selectionColor
                         )
@@ -365,7 +376,7 @@ struct CodeViewerPanelView: View {
                             Task { @MainActor in try? await Task.sleep(for: .seconds(2)); didCopy = false }
                         },
                         icon: didCopy ? "checkmark" : "doc.on.doc",
-                        helpText: "Copy code to clipboard",
+                        helpText: String(localized: "Copy code to clipboard"),
                         foregroundColor: didCopy ? Color(nsColor: resolvedSyntax.strings) : secondaryTextColor,
                         hoverBackground: selectionColor
                     )
@@ -375,7 +386,7 @@ struct CodeViewerPanelView: View {
                     CodeViewerHeaderButton(
                         action: saveCodeToFile,
                         icon: "square.and.arrow.down",
-                        helpText: "Save code to a file",
+                        helpText: String(localized: "Save code to a file"),
                         foregroundColor: secondaryTextColor,
                         hoverBackground: selectionColor
                     )
@@ -384,7 +395,7 @@ struct CodeViewerPanelView: View {
                     CodeViewerHeaderButton(
                         action: chatHistoryViewModel.hideCodeViewer,
                         icon: "xmark",
-                        helpText: "Close viewer",
+                        helpText: String(localized: "Close viewer"),
                         foregroundColor: secondaryTextColor,
                         hoverBackground: selectionColor
                     )
@@ -444,7 +455,7 @@ struct CodeViewerPanelView: View {
         } ?? .default
 
         savePanel.nameFieldStringValue = "snippet.\(language.extensions.first ?? "txt")"
-        savePanel.title = "Save Code Snippet"
+        savePanel.title = String(localized: "Save Code Snippet")
 
         if let utType = UTType(tag: language.extensions.first ?? "", tagClass: .filenameExtension, conformingTo: .text) {
             savePanel.allowedContentTypes = [utType]
@@ -457,7 +468,7 @@ struct CodeViewerPanelView: View {
                 do {
                     try snippet.code.write(to: url, atomically: true, encoding: .utf8)
                 } catch {
-                    saveErrorMessage = "Failed to save file: \(error.localizedDescription)"
+                    saveErrorMessage = String(localized: "Failed to save file: \(error.localizedDescription)")
                 }
             }
         }
@@ -562,6 +573,12 @@ fileprivate struct CodeViewerHeaderButton: View {
         }
         .buttonStyle(.plain)
         .help(helpText)
+        // On macOS `.help()` populates AX *help*, NOT the AX label — so every button in
+        // this header (Apply Changes, Show Changes, Save, Close) announced as a bare
+        // "button" despite already carrying perfectly good text. The rest of the codebase
+        // pairs the two; this component was the outlier, and fixing it here covers all
+        // five call sites at once.
+        .accessibilityLabel(helpText)
         .onHover { self.isHovering = $0 }
     }
 }
@@ -601,7 +618,6 @@ private struct HighPerformanceCodeViewRepresentable: NSViewControllerRepresentab
 class HighPerformanceCodeViewController: NSViewController {
 
     private var document: CodeDocument
-    private var cancellables = Set<AnyCancellable>()
 
     private var hostingController: NSHostingController<SourceEditor>?
     private var currentFontSize: Double = 14
@@ -661,15 +677,32 @@ class HighPerformanceCodeViewController: NSViewController {
         )
     }
 
-    private func setupEditorView() {
-        let contentBinding = Binding<String>(
-            get: { self.document.content.string },
-            set: { newString in
-                if self.document.content.string != newString {
-                    self.document.content = GapBuffer(string: newString)
+    /// Two-way binding to the document's text.
+    ///
+    /// `[weak self]` is REQUIRED, not stylistic. The binding is stored in the
+    /// `SourceEditor`, which is the `hostingController`'s `rootView`, and this
+    /// controller OWNS `hostingController` — so a strong capture closes the loop
+    ///
+    ///     self ─▶ hostingController ─▶ rootView ─▶ contentBinding ─▶ self
+    ///
+    /// and the controller can never deallocate, leaking the whole CodeEdit stack
+    /// (editor, text storage, highlighting state, document) on every panel
+    /// open/close. Factored into one place so `setupEditorView` and
+    /// `updatePresentationView` can't drift back to a strong capture.
+    private func makeContentBinding() -> Binding<String> {
+        Binding<String>(
+            get: { [weak self] in self?.document.content ?? "" },
+            set: { [weak self] newString in
+                guard let self else { return }
+                if self.document.content != newString {
+                    self.document.content = newString
                 }
             }
         )
+    }
+
+    private func setupEditorView() {
+        let contentBinding = makeContentBinding()
 
         let font = NSFont.monospacedSystemFont(ofSize: currentFontSize, weight: .regular)
         let editorView = SourceEditor(
@@ -697,14 +730,7 @@ class HighPerformanceCodeViewController: NSViewController {
     private func updatePresentationView() {
         let font = NSFont.monospacedSystemFont(ofSize: self.currentFontSize, weight: .regular)
 
-        let contentBinding = Binding<String>(
-            get: { self.document.content.string },
-            set: { newString in
-                if self.document.content.string != newString {
-                    self.document.content = GapBuffer(string: newString)
-                }
-            }
-        )
+        let contentBinding = makeContentBinding()
 
         let newEditorView = SourceEditor(
             contentBinding,

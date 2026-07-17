@@ -18,7 +18,7 @@ private let logger = DGLogger(category: "MarkdownParser")
 func preprocessStreamResilientMarkdown(_ text: String) -> String {
     var unclosedCodeBlock = false
     let lines = text.components(separatedBy: .newlines)
-    
+
     for line in lines {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         // A standard code block marker. We ignore inline backticks by checking the prefix.
@@ -26,7 +26,7 @@ func preprocessStreamResilientMarkdown(_ text: String) -> String {
             unclosedCodeBlock.toggle()
         }
     }
-    
+
     // If we reach the end of the stream and a code block is still open, artificially close it.
     if unclosedCodeBlock {
         return text + "\n```\n"
@@ -36,14 +36,14 @@ func preprocessStreamResilientMarkdown(_ text: String) -> String {
 
 func preprocessMarkdownText(_ text: String) -> String {
     var processed = text.replacingOccurrences(of: "<br>", with: "\n")
-    
+
     // If the text looks like a list of paths but isn't properly formatted as a markdown list,
     // we can try to force double newlines to ensure readability in the UI.
     let lines = processed.components(separatedBy: .newlines)
     if lines.count > 3 && lines.filter({ $0.contains("/") }).count > lines.count / 2 {
         processed = lines.joined(separator: "\n\n")
     }
-    
+
     return processed
 }
 
@@ -52,86 +52,21 @@ func preprocessMarkdownText(_ text: String) -> String {
 func parseMarkdown(_ markdown: String) -> [ContentBlock] {
     // 1. Apply the stream-resilient preprocessor to ensure safe parsing
     let safeMarkdown = preprocessStreamResilientMarkdown(markdown)
-    
-    // 2. Generate AST using Apple's swift-markdown
-    let document = Document(parsing: safeMarkdown)
-    
-    var blocks: [ContentBlock] = []
+
+    // 2. Generate AST using Apple's swift-markdown.
+    //
+    // `.disableSmartOpts`: cmark's smart punctuation is ON by default and rewrites what
+    // the model actually said — `"` → `“”`, `--` → `—`, `...` → `…` — in PROSE. In a chat
+    // that carries code and shell commands outside fences (models do this constantly),
+    // that's silent corruption: `print("hi")` rendered and RAG-indexed as `print(“hi”)`,
+    // so exact-match retrieval on quoted code missed. Prose loses typographic quotes;
+    // fidelity to the source wins. (This is also what turned `--- Start of file ---`
+    // markers into em dashes — see consumedFileMarker, which still matches both.)
+    let document = Document(parsing: safeMarkdown, options: [.disableSmartOpts])
+
+    // 3. Map top-level AST nodes to ContentBlocks
     var pendingFileName: String? = nil
-
-    // Helper function to append blocks with stable structural identity
-    func appendBlock(_ type: ContentBlock.BlockType) {
-        blocks.append(ContentBlock(id: "block-\(blocks.count)", type: type))
-    }
-
-    // 3. Traverse the top-level AST nodes
-    for child in document.children {
-        // Format the entire block back to string for simple text nodes
-        let text = child.format().trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // --- Custom File Markers ---
-        if let match = text.firstMatch(of: /---\s*Start of file:\s*(.*?)\s*---/) {
-            pendingFileName = String(match.1)
-            continue
-        }
-        if text.contains("--- End of file:") {
-            pendingFileName = nil
-            continue
-        }
-
-        // --- Image parsing ---
-        // Standalone images are often wrapped inside a single Paragraph node
-        if let paragraph = child as? Paragraph,
-           paragraph.childCount == 1,
-           let image = paragraph.child(at: 0) as? Markdown.Image {
-            appendBlock(.image(url: image.source ?? "", altText: image.plainText))
-            continue
-        }
-
-        // --- Standard AST Node Mapping ---
-        if let paragraph = child as? Paragraph {
-            appendBlock(.paragraph(preprocessMarkdownText(text)))
-        }
-        else if let codeBlock = child as? CodeBlock {
-            appendBlock(.code(language: codeBlock.language ?? "", content: codeBlock.code, fileName: pendingFileName))
-            pendingFileName = nil
-        }
-        else if let heading = child as? Heading {
-            appendBlock(.heading(level: heading.level, text: heading.plainText))
-        }
-        else if let thematicBreak = child as? ThematicBreak {
-            appendBlock(.horizontalRule)
-        }
-        else if let list = child as? UnorderedList {
-            for item in list.listItems {
-                // Join children formatting to keep inline styling (bold, italic, etc) intact
-                let itemText = item.children.map { $0.format() }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-                appendBlock(.listItem(prefix: "•", text: preprocessMarkdownText(itemText), indentation: 0))
-            }
-        }
-        else if let list = child as? OrderedList {
-            for (i, item) in list.listItems.enumerated() {
-                let index = list.startIndex + UInt(i)
-                let itemText = item.children.map { $0.format() }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-                appendBlock(.listItem(prefix: "\(index).", text: preprocessMarkdownText(itemText), indentation: 0))
-            }
-        }
-        else if let table = child as? Markdown.Table {
-            let headers: [String] = table.head.cells.map { cell in
-                cell.children.map { $0.format() }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            let rows: [[String]] = table.body.rows.map { row in
-                row.cells.map { cell in
-                    cell.children.map { $0.format() }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-            }
-            appendBlock(.table(headers: headers, rows: rows))
-        }
-        else {
-            // Fallback for BlockQuotes, HTML blocks, or other unknown types
-            appendBlock(.paragraph(preprocessMarkdownText(text)))
-        }
-    }
+    var blocks = buildContentBlocks(from: document, idOffset: 0, pendingFileName: &pendingFileName)
 
     // If the AST produced zero blocks but the input was non-empty, the parser silently
     // dropped everything (e.g., deeply malformed markdown). Fall back to rendering the
@@ -143,4 +78,304 @@ func parseMarkdown(_ markdown: String) -> [ContentBlock] {
     }
 
     return blocks
+}
+
+/// Maps a parsed document's top-level nodes to `ContentBlock`s.
+///
+/// `idOffset` keeps the positional `"block-N"` identities globally consistent when the
+/// streaming parser stitches separately-parsed regions together. `pendingFileName`
+/// threads the `--- Start of file: X ---` marker across calls for the same reason —
+/// the marker paragraph and its code block may settle in different regions.
+///
+/// Performance: `format()` (re-serializing an AST node back to markdown) runs ONLY for
+/// the nodes whose rendering needs it — paragraphs and the unknown-node fallback.
+/// The previous implementation formatted EVERY node up front, so a streamed code-heavy
+/// answer re-serialized its entire code body on every flush and then ignored the result
+/// (code blocks read `codeBlock.code`). That also let a code block whose *content*
+/// contained a file-marker line be mistaken for the marker and swallowed entirely.
+fileprivate func buildContentBlocks(
+    from document: Document,
+    idOffset: Int,
+    pendingFileName: inout String?
+) -> [ContentBlock] {
+    var builder = BlockBuilder(
+        makeID: { index in "block-\(idOffset + index)" },
+        pendingFileName: pendingFileName
+    )
+    builder.append(children: Array(document.children))
+    pendingFileName = builder.pendingFileName
+    return builder.blocks
+}
+
+/// Maps swift-markdown AST nodes to `ContentBlock`s, recursing into containers
+/// (list items, blockquotes) rather than flattening their children to raw markdown.
+///
+/// `makeID` produces each block's identity from its sibling index, so top-level blocks
+/// stay `"block-N"` (the streaming parser's settled-region stitching and its tests
+/// depend on that) while nested blocks get `"<parent>.N"`.
+private struct BlockBuilder {
+    let makeID: (Int) -> String
+    var blocks: [ContentBlock] = []
+    /// Threads the `--- Start of file: X ---` marker across siblings (and across
+    /// separately-parsed streaming regions) so the next code block can claim it.
+    var pendingFileName: String?
+
+    init(makeID: @escaping (Int) -> String, pendingFileName: String?) {
+        self.makeID = makeID
+        self.pendingFileName = pendingFileName
+    }
+
+    private mutating func append(_ type: ContentBlock.BlockType) {
+        blocks.append(ContentBlock(id: makeID(blocks.count), type: type))
+    }
+
+    /// File-marker handling for text-bearing nodes. Returns true when the node WAS a
+    /// marker (already consumed — the caller should skip it).
+    ///
+    /// Matches `---` OR an em dash `—`, and BOTH branches are load-bearing:
+    /// - `---` is what arrives now that parsing passes `.disableSmartOpts` (and what the
+    ///   backend literally injects).
+    /// - `—` is what a marker became in the smart-punctuation era — cmark rewrote `---`
+    ///   during parsing, which silently broke the original `---`-only regex — and it
+    ///   still arrives via user text typed while the composer had smart dashes enabled.
+    ///   Dropping that branch would orphan those messages' filename badges.
+    private mutating func consumedFileMarker(_ text: String) -> Bool {
+        if let match = text.firstMatch(of: /(?:---|—)\s*Start of file:\s*(.*?)\s*(?:---|—)/) {
+            pendingFileName = String(match.1)
+            return true
+        }
+        if text.contains("--- End of file:") || text.contains("— End of file:") {
+            pendingFileName = nil
+            return true
+        }
+        return false
+    }
+
+    mutating func append(children: [Markup]) {
+        for child in children {
+            append(node: child)
+        }
+    }
+
+    private mutating func append(node child: Markup) {
+        if let paragraph = child as? Paragraph {
+            // Standalone images are often wrapped inside a single Paragraph node
+            if paragraph.childCount == 1,
+               let image = paragraph.child(at: 0) as? Markdown.Image {
+                append(.image(url: image.source ?? "", altText: image.plainText))
+                return
+            }
+            // Marker detection uses plainText, NOT format(): the formatter escapes a
+            // leading "---" (to `\-\-\-`, since re-parsing it would read as a thematic
+            // break), which silently defeated the regex ever since the AST migration.
+            if consumedFileMarker(paragraph.plainText.trimmingCharacters(in: .whitespacesAndNewlines)) { return }
+            let text = paragraph.format().trimmingCharacters(in: .whitespacesAndNewlines)
+            append(.paragraph(preprocessMarkdownText(text)))
+        }
+        else if let codeBlock = child as? CodeBlock {
+            append(.code(language: codeBlock.language ?? "", content: codeBlock.code, fileName: pendingFileName))
+            pendingFileName = nil
+        }
+        else if let heading = child as? Heading {
+            append(.heading(level: heading.level, text: heading.plainText))
+        }
+        else if child is ThematicBreak {
+            append(.horizontalRule)
+        }
+        else if let list = child as? UnorderedList {
+            append(listItems: Array(list.listItems), ordered: false, start: 1)
+        }
+        else if let list = child as? OrderedList {
+            append(listItems: Array(list.listItems), ordered: true, start: Int(list.startIndex))
+        }
+        else if let quote = child as? BlockQuote {
+            // Previously fell through to the `else` fallback below, which stringified
+            // the whole quote via format(); AttributedString then ate the `>` markers
+            // and the quote rendered as indistinguishable body prose.
+            let id = makeID(blocks.count)
+            var nested = BlockBuilder(makeID: { "\(id).\($0)" }, pendingFileName: pendingFileName)
+            nested.append(children: Array(quote.children))
+            pendingFileName = nested.pendingFileName
+            blocks.append(ContentBlock(id: id, type: .blockquote(blocks: nested.blocks)))
+        }
+        else if let table = child as? Markdown.Table {
+            let headers: [String] = table.head.cells.map { cell in
+                cell.children.map { $0.format() }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            let rows: [[String]] = table.body.rows.map { row in
+                row.cells.map { cell in
+                    cell.children.map { $0.format() }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            }
+            // cmark parsed `:--` / `:-:` / `--:` all along; we simply never read it, so an
+            // author's right-aligned numbers rendered left. `nil` = unspecified, which GFM
+            // renders leading.
+            let alignments: [ContentBlock.ColumnAlignment] = table.columnAlignments.map { alignment in
+                switch alignment {
+                case .left:   return .leading
+                case .center: return .center
+                case .right:  return .trailing
+                case nil:     return .leading
+                }
+            }
+            append(.table(headers: headers, rows: rows, alignments: alignments))
+        }
+        else {
+            // Fallback for HTML blocks or other unknown types
+            let text = child.format().trimmingCharacters(in: .whitespacesAndNewlines)
+            if consumedFileMarker(text) { return }
+            append(.paragraph(preprocessMarkdownText(text)))
+        }
+    }
+
+    /// Emits one `.listItem` per item, carrying EVERYTHING the item contains as child
+    /// blocks in DOCUMENT ORDER — including any nested list, which recurses naturally
+    /// through `append(children:)` back into this method.
+    ///
+    /// An earlier version split the children into "own content" vs "nested lists" and
+    /// emitted the own content first, flattening nested items to siblings. That
+    /// reordered the output: a fence written *after* the sub-bullets rendered *above*
+    /// them. Preserving the AST's child order is the whole point.
+    private mutating func append(listItems: [ListItem], ordered: Bool, start: Int) {
+        for (offset, item) in listItems.enumerated() {
+            let id = makeID(blocks.count)
+            var nested = BlockBuilder(makeID: { "\(id).\($0)" }, pendingFileName: pendingFileName)
+            nested.append(children: Array(item.children))
+            pendingFileName = nested.pendingFileName
+
+            let checkbox: ContentBlock.Checkbox? = item.checkbox.map { $0 == .checked ? .checked : .unchecked }
+            // A task item's marker is the checkbox itself; keep the bullet for the rest.
+            let prefix = ordered ? "\(start + offset)." : "•"
+
+            blocks.append(ContentBlock(
+                id: id,
+                type: .listItem(prefix: prefix, blocks: nested.blocks, checkbox: checkbox)
+            ))
+        }
+    }
+}
+
+// MARK: - Incremental Streaming Parser
+
+/// Incremental markdown parser for a message that is still streaming.
+///
+/// The full-reparse-per-flush pipeline was O(n²) over a response: every flush
+/// (~0.05–0.2s) rebuilt the swift-markdown AST for the ENTIRE accumulated text on
+/// the main thread. But streamed text only ever grows by appending, so markdown
+/// already delivered can't change — with one caveat: the block containing the
+/// insertion point can. This parser exploits that:
+///
+///  - Regions ending at a **blank line outside any code fence** are *settled*:
+///    they're parsed once, their blocks cached, and never touched again.
+///  - Only the trailing *active* region (after the last such boundary — typically
+///    the one block currently being streamed) re-parses on each flush.
+///  - Positional `"block-N"` ids stay globally stable, so `ContentBlockView`'s
+///    `.equatable()` memoization skips every settled block.
+///
+/// Known mid-stream cosmetic deviations from a full parse (all self-healing —
+/// callers MUST run one full `parseMarkdown` when streaming ends, which
+/// `ChatMessage.getOrCreateMarkdownBlocks` does):
+///  - an indented (4-space) code block or multi-blank-line HTML block spanning a
+///    blank line renders as two blocks until completion;
+///  - a reference-style link whose `[id]: url` definition hasn't streamed in yet
+///    renders literally until completion.
+///
+/// Not thread-safe; used from the main-actor render path only.
+final class StreamingMarkdownParser {
+
+    private var consumedPrefix: String = ""
+    /// Cached `consumedPrefix.count` — `String.count` is O(n), and we need it per flush.
+    private var consumedPrefixCharCount: Int = 0
+    private var prefixBlocks: [ContentBlock] = []
+    /// File-marker state carried across settled regions (marker paragraph and its
+    /// code block may arrive in different flushes).
+    private var pendingFileName: String? = nil
+
+    /// Parses the full accumulated text, reusing blocks for already-settled regions.
+    /// Safe for arbitrary input: if `fullText` is not an append to what was consumed
+    /// before (regeneration, error replacement), the parser resets and starts over.
+    func parse(_ fullText: String) -> [ContentBlock] {
+        if !fullText.hasPrefix(consumedPrefix) {
+            reset()
+        }
+
+        var tailStart = fullText.index(fullText.startIndex, offsetBy: consumedPrefixCharCount)
+
+        // Advance the settled boundary to the last blank line (outside a code fence)
+        // in the unconsumed tail. Everything before it can never re-parse differently
+        // under our flattened block model, so parse it once and lock it in.
+        if let cut = Self.lastSafeBoundary(in: fullText[tailStart...]) {
+            let settled = String(fullText[tailStart..<cut])
+            if !settled.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // Fences inside a settled region are balanced by construction (the
+                // boundary scanner never cuts inside one), so no preprocessor needed.
+                let document = Document(parsing: settled, options: [.disableSmartOpts])
+                prefixBlocks += buildContentBlocks(
+                    from: document,
+                    idOffset: prefixBlocks.count,
+                    pendingFileName: &pendingFileName
+                )
+            }
+            consumedPrefix += settled
+            consumedPrefixCharCount += settled.count
+            tailStart = cut
+        }
+
+        // Re-parse only the active region. Copy the marker state — the active region
+        // is transient and will be parsed again next flush (or settle later).
+        let active = String(fullText[tailStart...])
+        var activeBlocks: [ContentBlock] = []
+        if !active.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            var transientFileName = pendingFileName
+            let document = Document(parsing: preprocessStreamResilientMarkdown(active), options: [.disableSmartOpts])
+            activeBlocks = buildContentBlocks(
+                from: document,
+                idOffset: prefixBlocks.count,
+                pendingFileName: &transientFileName
+            )
+        }
+
+        var result = prefixBlocks + activeBlocks
+
+        // Mirror parseMarkdown's non-empty-input fallback so a malformed stream
+        // still shows raw text instead of a blank bubble.
+        if result.isEmpty && !fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            result = [ContentBlock(id: "block-0", type: .paragraph(fullText))]
+        }
+        return result
+    }
+
+    private func reset() {
+        consumedPrefix = ""
+        consumedPrefixCharCount = 0
+        prefixBlocks = []
+        pendingFileName = nil
+    }
+
+    /// Index just past the last completed blank line that sits outside any ``` fence,
+    /// or nil if the tail contains no safe boundary yet. Uses the same fence heuristic
+    /// as `preprocessStreamResilientMarkdown` (trimmed `hasPrefix("```")` toggles) so
+    /// the two stages can't disagree about what's inside a fence.
+    static func lastSafeBoundary(in tail: Substring) -> Substring.Index? {
+        var inFence = false
+        var lastCut: Substring.Index? = nil
+        var lineStart = tail.startIndex
+
+        while lineStart < tail.endIndex {
+            let newlineIndex = tail[lineStart...].firstIndex(of: "\n")
+            let lineContentEnd = newlineIndex ?? tail.endIndex
+            let nextLineStart = newlineIndex.map { tail.index(after: $0) } ?? tail.endIndex
+
+            let trimmed = tail[lineStart..<lineContentEnd].trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                inFence.toggle()
+            } else if trimmed.isEmpty, !inFence, newlineIndex != nil {
+                // A COMPLETED blank line (has its newline) outside any fence.
+                lastCut = nextLineStart
+            }
+
+            lineStart = nextLineStart
+        }
+        return lastCut
+    }
 }

@@ -117,14 +117,25 @@ enum AgentStreamEvent: Sendable {
 
     // MARK: - Capability Events (Planning, Self-Reflection, Delegation)
 
-    /// Planning capability: a plan has been generated with N subtasks.
-    case planGenerated(subtaskCount: Int)
+    /// Planning capability: a plan has been generated. Carries the full structured plan
+    /// so the UI can render a live plan card (step list + statuses), not just a count.
+    case planGenerated(subtasks: [SubTask])
+
+    /// Planning capability: the user approved the plan (possibly edited in review).
+    /// Carries the FINAL plan that will execute — the UI replaces its step list with
+    /// this, since review edits can add/remove/reword steps.
+    case planApproved(subtasks: [SubTask])
 
     /// Planning capability: a subtask has started execution.
-    case subtaskStarted(index: Int, total: Int, description: String)
+    /// - id: the SubTask.id — stable join key for the plan card's step row.
+    case subtaskStarted(id: String, index: Int, total: Int, description: String)
 
-    /// Planning capability: a subtask has completed.
-    case subtaskCompleted(index: Int, total: Int, summary: String)
+    /// Planning capability: a subtask has finished.
+    /// - outcome: the inner run's terminal outcome (nil = clean completion assumed);
+    ///   `.completedWithWarnings` marks a forced-termination (degraded) step,
+    ///   `.failed` a hard failure — drives the step row's status icon honestly.
+    /// - durationMs: wall-clock for the step, measured by the capability.
+    case subtaskCompleted(id: String, index: Int, total: Int, summary: String, outcome: ExecutionOutcome? = nil, durationMs: Int? = nil)
 
     /// Self-Reflection capability: a new trial has started.
     case reflectionTrialStarted(trial: Int, maxTrials: Int)

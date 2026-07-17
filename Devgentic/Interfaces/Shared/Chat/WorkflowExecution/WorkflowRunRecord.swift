@@ -75,7 +75,11 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
             duration = try c.decode(TimeInterval.self, forKey: .duration)
             input = try c.decodeIfPresent(String.self, forKey: .input)
             inputSourceLabel = try c.decodeIfPresent(String.self, forKey: .inputSourceLabel)
-            nodeTimeline = try c.decodeIfPresent([TimelineEvent].self, forKey: .nodeTimeline)
+            // Lossy on purpose: a future `TimelineEvent` Codable-shape change drops only
+            // this node's trace, not the node itself (its status/detail/duration survive).
+            // Paired with WorkflowRunRecordSD's per-element decode, one bad node can't
+            // erase the whole run.
+            nodeTimeline = (try? c.decodeIfPresent([TimelineEvent].self, forKey: .nodeTimeline)) ?? nil
             hasWarnings = try c.decodeIfPresent(Bool.self, forKey: .hasWarnings)
         }
 
@@ -150,7 +154,11 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
             return .completed
         }()
 
-        let totalDuration = state.nodeResults.reduce(0.0) { $0 + $1.duration }
+        // Wall-clock duration (start→finish), matching the live display's computation
+        // (WorkflowRunDisplayData.from(live:)). Summing per-node durations disagreed with
+        // the live value for parallel/gapped runs, so "Total time" visibly jumped when a
+        // run flipped live→historical. (Records frozen before this fix keep their old value.)
+        let totalDuration = (state.completedAt ?? Date()).timeIntervalSince(state.startedAt)
 
         return WorkflowRunRecord(
             id: UUID(),

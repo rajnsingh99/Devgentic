@@ -194,6 +194,38 @@ final class PlanGeneratorStrategyTests: XCTestCase {
         XCTAssertEqual(result[0].description, "Complete the user's request directly")
     }
 
+    func testParse_Fallback_UsesProvidedDescription() {
+        // generatePlan passes the ORIGINAL QUERY here — a placeholder description
+        // became the subtask's ENTIRE task (observed live: gemma4 asked "Please
+        // provide a request so I can assist you.").
+        let result = strategy.parsePlan(
+            from: "",
+            availableToolNames: sampleTools,
+            fallbackDescription: "Create devgentic_test in /tmp with two files"
+        )
+
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].description, "Create devgentic_test in /tmp with two files")
+    }
+
+    func testParse_ToolOnlySteps_KeepBracketContentAsDescription() {
+        // Observed live (gemma4): every step was bracket-only → all descriptions
+        // emptied after the strip → the whole multi-step plan collapsed to the
+        // single-task fallback. The bracket content must survive as the description.
+        let input = """
+        1. [file_search]
+        2. [run_command]
+        """
+
+        let result = strategy.parsePlan(from: input, availableToolNames: sampleTools)
+
+        XCTAssertEqual(result.count, 2, "Tool-only steps must not vanish")
+        XCTAssertEqual(result[0].description, "file_search")
+        XCTAssertEqual(result[0].toolHints, ["file_search"])
+        XCTAssertEqual(result[1].description, "run_command")
+        XCTAssertEqual(result[1].toolHints, ["run_command"])
+    }
+
     // MARK: - OutputSanitizer Integration
 
     func testParse_MarkdownFenced_StillParses() {

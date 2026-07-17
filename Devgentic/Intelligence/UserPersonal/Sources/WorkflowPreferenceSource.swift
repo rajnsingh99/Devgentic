@@ -141,11 +141,6 @@ final class WorkflowPreferenceSource: UserPersonalSource, @unchecked Sendable {
             }
         }
 
-        // Agent view preference
-        if let variant = UserDefaults.standard.string(forKey: AppSettings.agentViewVariantKey) {
-            observations.append("- Preferred agent view: \(variant)")
-        }
-
         return observations.joined(separator: "\n")
     }
 }

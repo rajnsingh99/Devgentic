@@ -50,20 +50,22 @@ class OllamaModelStoreViewModel {
 
     init() {
         setupBindings()
-        // Bootstrap probe is skipped when the shared `OllamaService` already holds
-        // fresh data from a prior view-model lifetime. This prevents the repeated
-        // `Checking Ollama server status` log floods and redundant `/api/show`
-        // fan-outs whenever SwiftUI re-creates `OllamaModelStoreContainerView`
-        // (which happens every time the user toggles into/out of this destination
-        // since layer 2 of `MainApplicationView` is `if !router.isShowingChat`-gated).
-        //
-        // If Ollama has never been probed, or was previously disconnected, the
-        // cooldown-respecting `checkServerStatusAndUpdateModels()` handles both
-        // cold start and 30-second failure throttling. The user's explicit refresh
-        // button still hits `forceCheckServerStatus()` via `refresh()`.
+        // Cold start / disconnected: the cooldown-respecting full probe runs
+        // (`checkServerStatusAndUpdateModels` — status check + model load, with
+        // 30-second failure throttling). When the shared `OllamaService` already
+        // holds data from a prior view-model lifetime, we no longer skip entirely —
+        // that made models pulled via the CLI invisible until an explicit refresh.
+        // Instead we revalidate: `loadLocalModels()` is digest-aware
+        // (`LocalModelRefresher`), so a recreation costs one /api/tags +
+        // /api/version round-trip and re-runs /api/show only for new/changed
+        // models. The original concern (status-probe log floods + full /api/show
+        // fan-outs on every `MainApplicationView` layer toggle) stays solved.
+        // The explicit refresh button still forces the full probe via `refresh()`.
         Task { @MainActor [service] in
             if Self.shouldBootstrapProbe(for: service) {
                 await service.checkServerStatusAndUpdateModels()
+            } else {
+                await service.loadLocalModels()
             }
         }
     }

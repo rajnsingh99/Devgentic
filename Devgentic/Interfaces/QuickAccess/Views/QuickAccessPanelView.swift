@@ -37,7 +37,7 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
     /// request. Returns true if it consumed the key (a request was pending and answered).
     private var hitlKeyHandler: ((QuickAccessHITLKeyAction) -> Bool)?
 
-    let collapsedHeight: CGFloat = 95
+    let collapsedHeight: CGFloat = 88 // floor below the full-bleed card's ~90pt natural height
     let initialMinWidth: CGFloat = 500
     let defaultExpandedHeight: CGFloat = 400 // Default height when expanding for the first time
 
@@ -45,6 +45,12 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
     
     private var frameBeforeZoom: NSRect?
     private var isProgrammaticallyResizing = false
+
+    /// [Unified card] Whether the panel is in the EXPANDED state (top bar + transcript visible).
+    /// Set from the content view's explicit resize intent — NOT inferred from frame height.
+    /// Height inference broke once the collapsed input card could grow (multi-line editor,
+    /// attachment chips): a 140pt collapsed card would read as "expanded".
+    private var isExpandedState: Bool
     
     private let shouldResumeSession: Bool
     private let forceExpandVisual: Bool
@@ -69,6 +75,7 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
             shouldResumeSession: shouldResumeSession,
             forceExpandVisual: forceExpandVisual
         )
+        self.isExpandedState = shouldOpenExpanded
         // -------------------------------------------------------------------
         
         logger.debug("Determined final initial state: shouldOpenExpanded=\(shouldOpenExpanded)")
@@ -162,9 +169,14 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
         logger.debug("Setting up ContentView with initialIsExpanded: \(initialIsExpanded)")
         let swiftUIContentView = QuickAccessContentView(
             dismiss: { [weak self] in self?.closePanel() },
-            onResize: { [weak self] newHeight in self?.resizePanelProgrammatically(newHeight: newHeight) },
+            // [Unified card] Explicit intent: the view says WHICH state it wants alongside the
+            // height, so a grown collapsed card is never misread as an expand request.
+            onResize: { [weak self] newHeight, expanded in
+                self?.resizePanelProgrammatically(newHeight: newHeight, expanded: expanded)
+            },
             onToggleZoom: { [weak self] in self?.toggleZoomState() },
             onContinueInMainWindow: { [weak self] convID in self?.continueInMainWindow(convID) },
+            onOpenProfileSettings: { [weak self] profileID in self?.openProfileSettings(profileID) },
             isExpanded: initialIsExpanded,
             // [QA revival P1e] A transfer (forceExpandVisual) must ALWAYS load the conversation
             // the main window just handed over — even if the panel's own session had timed out.
@@ -190,30 +202,33 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
         }
 
         self.setContentSize(self.frame.size)
-        
-        if UserDefaults.standard.object(forKey: UserDefaultsKeys.quickAccessPanelX) == nil {
-            logger.debug("No saved position found; placing on the active screen.")
-            // [L9] Place on the screen under the pointer (where the user is working), not always
-            // NSScreen.main — on a multi-display setup the panel would otherwise pop on the wrong
-            // display.
-            if let screen = QuickAccessPanelView.activeScreen() {
-                let screenFrame = screen.visibleFrame
-                let xPosition = screenFrame.midX - self.frame.width / 2
-                let yPosition = screenFrame.maxY - self.frame.height - (screenFrame.height * 0.15)
-                self.setFrameOrigin(NSPoint(x: xPosition, y: yPosition))
-            } else {
-                self.center()
-            }
+
+        // [Fixed position] Every summon presents at the STANDARD spot — horizontally centered,
+        // bottom edge 30% above the screen bottom — on the screen under the pointer ([L9],
+        // multi-display). Saved X/Y is deliberately no longer consumed (Spotlight-style
+        // predictability); the expanded W/H size memory remains.
+        if let screen = QuickAccessPanelView.activeScreen() {
+            self.setFrameOrigin(standardOrigin(for: self.frame.size, on: screen))
         } else {
-            logger.debug("Restored initial panel position from UserDefaults.")
+            self.center()
         }
     }
+
+    /// [Fixed position] The panel's standard on-screen spot: horizontally centered, bottom edge
+    /// at 30% of the visible screen height. Used on every summon and on expand/collapse
+    /// transitions; a mid-session drag persists only until the next transition or summon.
+    private func standardOrigin(for size: NSSize, on screen: NSScreen) -> NSPoint {
+        let visible = screen.visibleFrame
+        return NSPoint(
+            x: visible.midX - size.width / 2,
+            y: visible.minY + visible.height * 0.30
+        )
+    }
     
-    // calculateInitialFrame remains the same
+    /// SIZE only — the position is always stamped by setupContentView via standardOrigin
+    /// ([Fixed position]: saved X/Y no longer consumed; expanded W/H size memory kept).
     private static func calculateInitialFrame(shouldOpenExpanded: Bool, collapsedHeight: CGFloat, defaultExpandedHeight: CGFloat, minWidth: CGFloat) -> NSRect {
         let defaults = UserDefaults.standard
-        let savedX = defaults.double(forKey: UserDefaultsKeys.quickAccessPanelX)
-        let savedY = defaults.double(forKey: UserDefaultsKeys.quickAccessPanelY)
         var width: CGFloat
         var height: CGFloat
 
@@ -227,11 +242,7 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
             height = collapsedHeight
         }
 
-        if defaults.object(forKey: UserDefaultsKeys.quickAccessPanelX) != nil {
-             return NSRect(x: savedX, y: savedY, width: width, height: height)
-        } else {
-             return NSRect(x: 0, y: 0, width: width, height: height)
-        }
+        return NSRect(x: 0, y: 0, width: width, height: height)
     }
 
     /// [L9] The screen the user is currently working on — the one under the pointer — falling back
@@ -243,8 +254,10 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
             ?? NSScreen.main
     }
 
-    // resizePanelProgrammatically remains the same
-    func resizePanelProgrammatically(newHeight: CGFloat) {
+    /// [Unified card] `expanded` is the view's EXPLICIT state intent — previously inferred from
+    /// `newHeight > collapsedHeight`, which broke once the collapsed card could grow (multi-line
+    /// editor / chips): a tall collapsed card would jump to the saved 400pt+ expanded frame.
+    func resizePanelProgrammatically(newHeight: CGFloat, expanded: Bool) {
         // [L9] Operate on the panel's current screen (multi-display), not always NSScreen.main.
         guard let screen = self.screen ?? Self.activeScreen() else { return }
         let defaults = UserDefaults.standard
@@ -253,33 +266,39 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
         var targetX = currentFrame.origin.x
         var targetY = currentFrame.origin.y
         var heightToSet: CGFloat
-        
-        if newHeight > collapsedHeight { // Expanding
-            heightToSet = newHeight
-            
+
+        let wasExpanded = isExpandedState
+        isExpandedState = expanded
+
+        if expanded {
+            // Size memory kept (user-resized W/H); position is always the standard spot.
             if defaults.object(forKey: UserDefaultsKeys.quickAccessPanelWidth) != nil {
                 let savedWidth = defaults.double(forKey: UserDefaultsKeys.quickAccessPanelWidth)
                 let savedHeight = defaults.double(forKey: UserDefaultsKeys.quickAccessPanelHeight)
-                let savedX = defaults.double(forKey: UserDefaultsKeys.quickAccessPanelX)
-                let savedY = defaults.double(forKey: UserDefaultsKeys.quickAccessPanelY)
-
                 targetWidth = max(savedWidth, initialMinWidth)
                 heightToSet = max(newHeight, max(savedHeight, defaultExpandedHeight))
-                targetX = savedX
-                targetY = savedY
             } else {
                 targetWidth = max(currentFrame.width, initialMinWidth)
                 heightToSet = max(newHeight, defaultExpandedHeight)
-                targetX = screen.visibleFrame.origin.x + (screen.visibleFrame.width - targetWidth) / 2
-                targetY = currentFrame.origin.y + (currentFrame.height - heightToSet)
             }
+            // [Fixed position] Expand presents at the standard spot (centered, bottom at 30%).
+            let origin = standardOrigin(for: NSSize(width: targetWidth, height: heightToSet), on: screen)
+            targetX = origin.x
+            targetY = origin.y
             if !styleMask.contains(.resizable) { styleMask.insert(.resizable) }
-        } else { // Collapsing
-             targetWidth = max(currentFrame.width, initialMinWidth)
-             heightToSet = collapsedHeight
-             targetX = screen.visibleFrame.origin.x + (screen.visibleFrame.width - targetWidth) / 2
-             targetY = currentFrame.origin.y + (currentFrame.height - heightToSet)
-             if styleMask.contains(.resizable) { styleMask.remove(.resizable) }
+        } else {
+            // Collapsed: height follows the input card (it grows with multi-line text / chips).
+            targetWidth = max(currentFrame.width, initialMinWidth)
+            heightToSet = max(newHeight, collapsedHeight)
+            if wasExpanded {
+                // [Fixed position] Explicit expand→collapse returns to the standard spot.
+                let origin = standardOrigin(for: NSSize(width: targetWidth, height: heightToSet), on: screen)
+                targetX = origin.x
+                targetY = origin.y
+            }
+            // else: content-driven growth — origin.y unchanged = bottom edge anchored (the card
+            // grows UPWARD from the 30% line) and no sideways recentering on a keystroke.
+            if styleMask.contains(.resizable) { styleMask.remove(.resizable) }
         }
 
         var finalFrame = NSRect(x: targetX, y: targetY, width: targetWidth, height: heightToSet)
@@ -291,7 +310,7 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
             self.animator().setFrame(finalFrame, display: true)
         }, completionHandler: { [weak self] in
              self?.isProgrammaticallyResizing = false
-             if newHeight > self?.collapsedHeight ?? 0 && defaults.object(forKey: UserDefaultsKeys.quickAccessPanelWidth) == nil {
+             if expanded && defaults.object(forKey: UserDefaultsKeys.quickAccessPanelWidth) == nil {
                  self?.saveFrameToUserDefaults(frame: finalFrame)
              }
         })
@@ -320,28 +339,29 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
         return adjustedFrame
     }
 
-    // NSWindowDelegate Methods remain the same
+    // NSWindowDelegate Methods — [Unified card] expanded checks use the explicit state flag,
+    // not frame-height inference (a grown collapsed card is taller than collapsedHeight).
     func windowDidResize(_ notification: Notification) {
-        if !isProgrammaticallyResizing && self.frame.height > collapsedHeight && frameBeforeZoom == nil {
+        if !isProgrammaticallyResizing && isExpandedState && frameBeforeZoom == nil {
             saveFrameToUserDefaults(frame: self.frame)
         }
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
-         if self.frame.height > collapsedHeight && frameBeforeZoom == nil {
+         if isExpandedState && frameBeforeZoom == nil {
              saveFrameToUserDefaults(frame: self.frame)
          }
     }
-    
+
     func windowDidMove(_ notification: Notification) {
-        if self.frame.height > collapsedHeight && frameBeforeZoom == nil {
+        if isExpandedState && frameBeforeZoom == nil {
              saveFrameToUserDefaults(frame: self.frame)
         }
     }
-    
+
     func windowWillClose(_ notification: Notification) {
         let defaults = UserDefaults.standard
-        let wasExpanded = self.frame.height > self.collapsedHeight && self.frameBeforeZoom == nil
+        let wasExpanded = isExpandedState && self.frameBeforeZoom == nil
         
         defaults.set(Date().timeIntervalSince1970, forKey: GlobalConstants.quickAccessLastCloseTime)
         defaults.set(wasExpanded, forKey: GlobalConstants.quickAccessWasExpandedOnClose)
@@ -362,7 +382,7 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
         defaults.set(frame.origin.x, forKey: UserDefaultsKeys.quickAccessPanelX)
         defaults.set(frame.origin.y, forKey: UserDefaultsKeys.quickAccessPanelY)
         
-        if frame.height > collapsedHeight {
+        if isExpandedState { // [Unified card] explicit state, not height inference
             defaults.set(frame.size.width, forKey: UserDefaultsKeys.quickAccessPanelWidth)
             defaults.set(frame.size.height, forKey: UserDefaultsKeys.quickAccessPanelHeight)
         }
@@ -381,7 +401,7 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
             if let previousFrame = self.frameBeforeZoom {
                 self.animator().setFrame(previousFrame, display: true)
                 self.frameBeforeZoom = nil
-                if !self.styleMask.contains(.resizable) && previousFrame.height > self.collapsedHeight {
+                if !self.styleMask.contains(.resizable) && self.isExpandedState {
                      self.styleMask.insert(.resizable)
                 }
             } else {
@@ -410,6 +430,24 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
     // the next panel open starts fresh — mirrors the forward transfer clearing main selection),
     // post the navigate notification (observed in MainApplicationView), bring the main window
     // forward, and close the panel.
+    // [Advisory] Settings deep-link from the panel's advisory banner: activate the
+    // main window and route it to the profile editor. Mirrors continueInMainWindow's
+    // activate-first guard, but the conversation does NOT transfer — the overlay
+    // pointer stays so a later summon resumes the panel session. The panel closes so
+    // a floating always-on-top window doesn't sit over the settings it just opened.
+    func openProfileSettings(_ profileID: UUID) {
+        guard AppDelegate.shared?.activateMainWindow() == true else {
+            logger.warning("Open-profile-settings aborted — no main window to receive the navigation; keeping the panel open.")
+            return
+        }
+        NotificationCenter.default.post(
+            name: GlobalConstants.openProfileSettingsNotification,
+            object: nil,
+            userInfo: ["profileID": profileID.uuidString]
+        )
+        closePanel()
+    }
+
     func continueInMainWindow(_ conversationID: UUID) {
         // [C8] Only complete the handoff if there's a main window to receive it. The
         // openConversationNotification observer lives in MainApplicationView, so with the main

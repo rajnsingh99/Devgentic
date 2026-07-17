@@ -882,7 +882,7 @@ actor WorkflowExecutor: Executor {
                         case .requestPlanReview:
                             continuation.yield(event)
 
-                        case .planGenerated, .subtaskStarted, .subtaskCompleted,
+                        case .planGenerated, .planApproved, .subtaskStarted, .subtaskCompleted,
                              .reflectionTrialStarted, .reflectionEvaluating, .reflectionRetrying, .reflectionAccepted,
                              .delegationStarted, .delegationCompleted,
                              .compactionStarted, .compactionCompleted,

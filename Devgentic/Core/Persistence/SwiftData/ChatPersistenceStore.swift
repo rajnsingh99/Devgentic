@@ -180,6 +180,23 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         conversation?.timestamp = Date()
         saveContext()
         logger.debug("Upserted \(messages.count) messages for conversation \(conversationId.uuidString).")
+
+        // [Conversation memory] Index USER turns here — the one persistence funnel
+        // every surface flows through (main chat, ChatOps, QuickAccess, scheduler) —
+        // replacing per-coordinator hooks that missed the latter two surfaces.
+        // Assistant turns are indexed in ActiveStreamManager.finalizeMessage once
+        // streaming finishes (this upsert also runs mid-stream with partial
+        // content, hence the sender filter). Re-adds (resume/replay/restore) are
+        // idempotent: replace-on-reindex keys off the message id. Fire-and-forget —
+        // persistence never waits on chunking/embedding.
+        let userMessages = messages.filter { $0.sender == .user }
+        if !userMessages.isEmpty {
+            Task.detached(priority: .background) {
+                for message in userMessages {
+                    await RAGIndexingService.shared.indexSingleMessage(message)
+                }
+            }
+        }
     }
 
     func updateOpenAIThreadID(for conversationId: UUID, with threadId: String) {

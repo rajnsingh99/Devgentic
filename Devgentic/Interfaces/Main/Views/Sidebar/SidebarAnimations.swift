@@ -70,16 +70,21 @@ struct HoverActionButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(.caption, weight: .medium))
-                .foregroundColor(isHovering ? tint : theme.tertiaryText)
-                .frame(width: 22, height: 22)
-                .background(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(isHovering ? theme.surfaceOverlay : Color.clear)
-                )
+            ZStack {
+                Color.clear
+                Image(systemName: icon)
+                    .font(.system(.caption, weight: .medium))
+                    .foregroundColor(isHovering ? tint : theme.tertiaryText)
+                    .offset(y: icon.contains("pin") ? -1.5 : 0)
+            }
+            .frame(width: 22, height: 22)
         }
         .buttonStyle(.plain)
+        .frame(width: 22, height: 22)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(isHovering ? theme.surfaceOverlay : Color.clear)
+        )
         .onHover { isHovering = $0 }
         .accessibilityLabel(label)
     }

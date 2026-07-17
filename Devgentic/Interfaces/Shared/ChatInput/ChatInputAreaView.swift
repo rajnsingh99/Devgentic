@@ -61,7 +61,7 @@ struct ChatInputAreaView: View {
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.lineSpacing = 4
         return [
-            .font: NSFont.systemFont(ofSize: 14),
+            .font: ComposerStyle.editorNSFont, // [UI audit gap 4] single source (was hardcoded 14)
             .foregroundColor: NSColor.labelColor,
             .paragraphStyle: paragraphStyle
         ]
@@ -69,7 +69,7 @@ struct ChatInputAreaView: View {
     
     // Separate property for placeholder font to avoid creating mutable objects during view updates
     private var placeholderFont: Font {
-        Font.system(size: 14)
+        Font.system(size: ComposerStyle.editorFontSize) // [UI audit gap 4] matches the editor
     }
 
     // MARK: - Dynamic UI Properties
@@ -78,18 +78,31 @@ struct ChatInputAreaView: View {
     }
 
     private var profileButtonText: String {
-        selectedProfile?.displayName ?? "Select Backend"
+        selectedProfile?.displayName ?? String(localized: "Select Backend")
     }
 
     private var hasInputText: Bool {
         !inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private var currentDynamicButtonMode: DynamicButtonMode {
-        if inputViewModel.isStreaming { return .stopStreaming }
-        if inputViewModel.voiceInputState == .recording || inputViewModel.voiceInputState == .finalizingSilence { return .stopVoice }
-        if hasInputText { return .send }
-        return .mic
+    // [Composer parity] The voice button is voice-ONLY now (send split into its own button,
+    // matching the QuickAccess panel): .mic or .stopVoice, never .send/.stopStreaming.
+    private var voiceButtonMode: DynamicButtonMode {
+        (inputViewModel.voiceInputState == .recording || inputViewModel.voiceInputState == .finalizingSilence) ? .stopVoice : .mic
+    }
+
+    /// Send-button availability — mirrors the old morphing button's `.send` disabled rule
+    /// (backend selected, non-empty input, not mid-request, voice not busy). Never disabled
+    /// while streaming: the button is the Stop control then.
+    private var sendButtonDisabled: Bool {
+        if inputViewModel.isStreaming { return false }
+        let profileOK = mainViewModel.interfaceMode == .code
+            ? codeSessionManager.isConfigured
+            : backendConfiguration.selectedProfileID != nil
+        let voiceBusy = inputViewModel.voiceInputState == .recording
+            || inputViewModel.voiceInputState == .processing
+            || inputViewModel.voiceInputState == .finalizingSilence
+        return !profileOK || !hasInputText || isSending || voiceBusy
     }
 
     var body: some View {
@@ -146,7 +159,7 @@ struct ChatInputAreaView: View {
                 }
             }
         }
-        .frame(maxWidth: 1000)
+        .frame(maxWidth: ViewLayout.maxContentWidth)
         .frame(maxWidth: .infinity, alignment: .center)
         // MARK: - File Drop Zone (P1)
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
@@ -168,7 +181,15 @@ struct ChatInputAreaView: View {
                 return (candidates, attached)
             }
         }
-        .onChange(of: backendConfiguration.selectedProfileID) { _, newID in updateSelectedProfile(profileID: newID) }
+        .onChange(of: backendConfiguration.selectedProfileID) { _, newID in
+            updateSelectedProfile(profileID: newID)
+            evaluatePreSendFit()
+        }
+        // [Pre-send fit hint] Surface the context-overflow advisory the moment
+        // attachments imply the prompt won't fit — before the turn is spent.
+        // Count-keyed: FileSystemItem isn't Equatable, and adds/removes are the
+        // events that change the estimate.
+        .onChange(of: inputViewModel.attachedFiles.count) { _, _ in evaluatePreSendFit() }
 
         // Refresh files if Explorer/Context changes (Lazy refresh)
         .onChange(of: explorerViewModel.rootItems.count) { _, _ in
@@ -200,6 +221,17 @@ struct ChatInputAreaView: View {
         } else {
             self.selectedProfile = nil
         }
+    }
+
+    /// [Pre-send fit hint] Posts/clears the shared context-overflow advisory from
+    /// composer state (stat-based estimate); the send-time check refines it.
+    private func evaluatePreSendFit() {
+        PreSendFitHint.evaluate(
+            attachedFiles: inputViewModel.attachedFiles,
+            typedText: inputViewModel.userInput,
+            profile: selectedProfile,
+            conversationID: mainViewModel.selectedConversationID
+        )
     }
 
     // MARK: - Main Input Area
@@ -342,27 +374,50 @@ struct ChatInputAreaView: View {
 
     private var placeholderText: String {
         // Code mode uses its own profile via CodeSessionManager — skip the "Select a backend" check.
-        if mainViewModel.interfaceMode != .code && backendConfiguration.selectedProfileID == nil { return "Select a backend..." }
-        if !inputViewModel.attachedFiles.isEmpty { return "Ask about context..." }
+        if mainViewModel.interfaceMode != .code && backendConfiguration.selectedProfileID == nil { return String(localized: "Select a backend...") }
+        if !inputViewModel.attachedFiles.isEmpty { return String(localized: "Ask about context...") }
         if inputViewModel.userInput.isEmpty {
             switch inputViewModel.voiceInputState {
-                case .recording: return "Listening..."
-                case .processing: return "Processing..."
-                case .finalizingSilence: return "Finalizing..."
-                case .error: return "Voice error..."
+                case .recording: return String(localized: "Listening...")
+                case .processing: return String(localized: "Processing...")
+                case .finalizingSilence: return String(localized: "Finalizing...")
+                case .error: return String(localized: "Voice error...")
                 default:
                     switch mainViewModel.interfaceMode {
-                    case .workflow: return "Enter workflow input..."
-                    case .code:     return "Ask about your code..."
-                    case .chat:     return "Type a message..."
+                    case .workflow: return String(localized: "Enter workflow input...")
+                    case .code:     return String(localized: "Ask about your code...")
+                    case .chat:     return String(localized: "Type a message...")
                     }
             }
         }
         return ""
     }
 
+    // [Composer parity] Matches the QuickAccess panel's arrangement: profile chip LEADS,
+    // then the action icons, then a spacer, then SPLIT voice + send buttons (the single
+    // morphing mic/send button is now voice-only; send is the shared accent button).
     private var toolbarArea: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
+            if mainViewModel.interfaceMode == .code {
+                CodeModelPickerButton()
+                    .disabled(!isInputEnabled)
+                    .opacity(isInputEnabled ? 1.0 : 0.5)
+            } else {
+                BackendPickerButton(
+                    profileThemeColor: profileThemeColor,
+                    profileButtonText: profileButtonText,
+                    backendConfiguration: backendConfiguration,
+                    allowedProfileTypes: mainViewModel.interfaceMode.allowedProfileTypes,
+                    showingPopup: $showingBackendSelectorPopup
+                )
+                .disabled(!isInputEnabled)
+                .opacity(isInputEnabled ? 1.0 : 0.5)
+
+                // Quick planning / self-reflection toggles for the selected agent profile
+                // (self-gates to agent profiles; renders nothing for bot/workflow/imageGen).
+                CapabilityToolbarButtons(profile: $selectedProfile, isEnabled: isInputEnabled)
+            }
+
             InputToolbarView(
                 isInputEnabled: isInputEnabled,
                 selectedProfile: selectedProfile,
@@ -388,24 +443,11 @@ struct ChatInputAreaView: View {
 
             Spacer()
 
-            if mainViewModel.interfaceMode == .code {
-                CodeModelPickerButton()
-                    .disabled(!isInputEnabled)
-                    .opacity(isInputEnabled ? 1.0 : 0.5)
-            } else {
-                BackendPickerButton(
-                    profileThemeColor: profileThemeColor,
-                    profileButtonText: profileButtonText,
-                    backendConfiguration: backendConfiguration,
-                    allowedProfileTypes: mainViewModel.interfaceMode.allowedProfileTypes,
-                    showingPopup: $showingBackendSelectorPopup
-                )
-                .disabled(!isInputEnabled)
-                .opacity(isInputEnabled ? 1.0 : 0.5)
-            }
-
+            // Voice — DynamicActionButton retained for its main-only machinery (voice states,
+            // Whisper model picker via long-press/right-click, download-progress ring, alerts),
+            // restyled to the QuickAccess mic look and pinned to voice-only modes.
             DynamicActionButton(
-                mode: currentDynamicButtonMode,
+                mode: voiceButtonMode,
                 isSending: isSending,
                 isStreamingActive: inputViewModel.isStreaming,
                 userInput: inputViewModel.userInput,
@@ -416,36 +458,62 @@ struct ChatInputAreaView: View {
                     ? codeSessionManager.isConfigured
                     : backendConfiguration.selectedProfileID != nil,
                 inputViewModel: inputViewModel,
-                onSend: { attributedString, _ in
-                    // Code mode: intercept if model or folder not configured,
-                    // then point selectedProfileID at the code profile so getRequestConfig resolves.
-                    if mainViewModel.interfaceMode == .code {
-                        if codeSessionManager.modelName.isEmpty {
-                            logger.info("[CODE] Send button intercepted — model not selected, opening model picker")
-                            codeSessionManager.showModelPicker = true
-                            return
-                        }
-                        if codeSessionManager.projectPath == nil {
-                            logger.info("[CODE] Send button intercepted — folder not selected, opening folder picker")
-                            openCodeFolderPicker()
-                            return
-                        }
-                        if let codeID = codeSessionManager.codeProfileID {
-                            backendConfiguration.selectedProfileID = codeID
-                        }
-                    }
-                    guard let config = backendConfiguration.getRequestConfig() else {
-                        logger.error("Send button: Could not get backend config."); return
-                    }
-                    onSendMessage(attributedString, config)
-                    inputViewModel.userInput = ""
-                },
+                onSend: { _, _ in }, // voice-only: send lives on the button below
                 onToggleVoice: { inputViewModel.toggleVoiceInput() },
                 onStopStreaming: { inputViewModel.cancelStreamingResponse() }
+            )
+
+            // Send / stop — the shared accent button (same as the QuickAccess panel).
+            ComposerSendStopButton(
+                isSending: isSending || inputViewModel.isStreaming,
+                isDisabled: sendButtonDisabled,
+                action: {
+                    if inputViewModel.isStreaming {
+                        inputViewModel.cancelStreamingResponse()
+                    } else {
+                        sendViaActionButton()
+                    }
+                }
             )
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 12)
+    }
+
+    /// Send from the toolbar button — pulls the ATTRIBUTED text from the editor (preserves
+    /// rich content, exactly as the old morphing button's send action did), runs the code-mode
+    /// intercepts, and hands off to onSendMessage.
+    private func sendViaActionButton() {
+        let attributedString: NSAttributedString
+        if let textView = editorTextView {
+            attributedString = textView.attributedString()
+        } else {
+            attributedString = NSAttributedString(string: inputViewModel.userInput, attributes: defaultTypingAttributes)
+        }
+        guard !attributedString.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        // Code mode: intercept if model or folder not configured,
+        // then point selectedProfileID at the code profile so getRequestConfig resolves.
+        if mainViewModel.interfaceMode == .code {
+            if codeSessionManager.modelName.isEmpty {
+                logger.info("[CODE] Send button intercepted — model not selected, opening model picker")
+                codeSessionManager.showModelPicker = true
+                return
+            }
+            if codeSessionManager.projectPath == nil {
+                logger.info("[CODE] Send button intercepted — folder not selected, opening folder picker")
+                openCodeFolderPicker()
+                return
+            }
+            if let codeID = codeSessionManager.codeProfileID {
+                backendConfiguration.selectedProfileID = codeID
+            }
+        }
+        guard let config = backendConfiguration.getRequestConfig() else {
+            logger.error("Send button: Could not get backend config."); return
+        }
+        onSendMessage(attributedString, config)
+        inputViewModel.userInput = ""
     }
     
     // MARK: - Handlers
@@ -468,8 +536,8 @@ struct ChatInputAreaView: View {
         openPanel.canChooseFiles = false
         openPanel.canChooseDirectories = true
         openPanel.allowsMultipleSelection = false
-        openPanel.prompt = "Select Project Folder"
-        openPanel.message = "Choose a folder for your Code session."
+        openPanel.prompt = String(localized: "Select Project Folder")
+        openPanel.message = String(localized: "Choose a folder for your Code session.")
 
         openPanel.begin { response in
             if response == .OK, let url = openPanel.url {
@@ -497,8 +565,8 @@ struct ChatInputAreaView: View {
         openPanel.canChooseFiles = true
         openPanel.canChooseDirectories = false
         openPanel.allowsMultipleSelection = true
-        openPanel.prompt = "Attach Files"
-        openPanel.message = "Attach documents, code, or images."
+        openPanel.prompt = String(localized: "Attach Files")
+        openPanel.message = String(localized: "Attach documents, code, or images.")
         openPanel.allowedContentTypes = Self.codeInterfaceAllowedFileTypes
 
         openPanel.begin { response in

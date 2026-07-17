@@ -58,6 +58,11 @@ struct OllamaShowResponse: Codable {
     /// Sending `think: true` to a model that doesn't support it returns HTTP 400,
     /// so this is used at model-selection time to seed `ProviderConfig.thinkingEnabled`.
     var supportsThinking: Bool {
+        // Authoritative: the daemon declares `thinking` directly (Ollama 0.9+).
+        // Renderer-based models (gemma4, qwen3.5, kimi) have no template markers
+        // to sniff — the declaration is the only signal they emit.
+        if capabilities?.contains("thinking") == true { return true }
+
         let templateStr = template?.lowercased() ?? ""
         let familyStr = details?.family?.lowercased() ?? ""
         let familiesArr = details?.families?.map { $0.lowercased() } ?? []
@@ -97,17 +102,28 @@ struct OllamaShowResponse: Codable {
 
     /// Returns the full CognitiveProfile (capability + dialect) for this Ollama model.
     ///
-    /// Resolution priority:
-    /// 1. **Authoritative `capabilities` field** (Ollama 0.3.4+). When present and lacking
-    ///    `"tools"`, forces `.none` — the server will reject any tools-param request
-    ///    with HTTP 400, so no heuristic override should second-guess this.
-    /// 2. **Reasoning-only pattern match** against name + family + families. Catches
-    ///    distilled fine-tunes like deepseek-r1:14b whose reported family is the
-    ///    tool-capable BASE architecture (qwen2) even though the fine-tune stripped
-    ///    tool calling.
-    /// 3. **Existing template/family heuristics**. Unchanged — handles the common case
-    ///    where the model genuinely supports tools and Ollama hasn't shipped the
-    ///    capabilities field yet.
+    /// Resolution, with `toolSupportCaveat` qualifying every non-clean verdict so
+    /// pickers can explain instead of silently hiding:
+    ///
+    /// **Capabilities field present** (Ollama 0.3.4+ — authoritative both ways):
+    /// 1. Lacks `"tools"` → `.none` + `.serverRejectsTools`. The server WILL reject
+    ///    any tools-param request with HTTP 400; no heuristic may second-guess this.
+    /// 2. Contains `"tools"` → `.parallelActions`. That IS the server's contract —
+    ///    it accepts the tools param and normalizes calls to standard JSON regardless
+    ///    of template internals. Renderer-based models (gemma4, qwen3.5, kimi-k2:
+    ///    template is just `{{ .Prompt }}`, unknown family) carry no heuristic signal,
+    ///    so falling through would misclassify them. Reasoning-focused fine-tunes
+    ///    (deepseek-r1, qwq, gpt-oss) additionally get `.reasoningFocused` — they stay
+    ///    selectable (the server accepts tools) but pickers surface a reliability
+    ///    warning; hiding them was a quality judgment expressed as a protocol gate.
+    ///
+    /// **No capabilities field** (legacy daemons):
+    /// 3. Reasoning-only pattern match → `.none` + `.reasoningFocused`. Without the
+    ///    authoritative field we can't verify the server accepts tools for these
+    ///    distilled fine-tunes (deepseek-r1:14b reports the tool-capable BASE family
+    ///    qwen2), so they stay blocked — but visibly, with the reason attached.
+    /// 4. Template/family heuristics, unchanged. A no-signal `.none` result carries
+    ///    `.undetected` so the UI can say "can't verify" rather than nothing.
     ///
     /// - Parameter modelName: The Ollama model identifier (e.g. `"deepseek-r1:14b"`).
     ///   Pass `""` if unavailable — reasoning-only detection will still run against
@@ -122,30 +138,49 @@ struct OllamaShowResponse: Codable {
         // threaded into every return path below (incl. the `.none` short-circuits).
         let modalities = Self.detectVisionModalities(capabilities: capabilities, details: details)
 
-        // Priority 1: Authoritative capabilities field (Ollama 0.3.4+).
-        // Absence of "tools" is a HARD deny — any tools-param request will 400.
+        let isReasoningFocused = ModelCapabilityHeuristics.isReasoningOnly(
+            in: [modelName, familyStr] + familiesArr
+        )
+
+        // --- Capabilities field present: authoritative both ways ---
         if let caps = capabilities {
             if !caps.contains("tools") {
+                // HARD deny — any tools-param request will 400.
                 logger.info("cognitiveProfile: /api/show capabilities=\(caps) lacks 'tools' — forcing .none (authoritative)")
-                return CognitiveProfile(capability: .none, dialect: .heuristicJson, metadata: metadata, modalities: modalities)
+                return CognitiveProfile(capability: .none, dialect: .heuristicJson, metadata: metadata, modalities: modalities, toolSupportCaveat: .serverRejectsTools)
             }
-            // Otherwise tools IS supported — fall through to dialect detection below.
+
+            // Authoritative allow. Heuristics may still contribute a specific dialect
+            // (e.g. <tool_call> templates → .mistralXML), but a no-signal template must
+            // not demote the model. `.nativeJSON` is the honest default label: Ollama's
+            // API returns tool calls as standard JSON whatever the template looks like.
+            // Reasoning-focused fine-tunes stay selectable (the server accepts tools)
+            // and carry the reliability caveat for pickers to surface.
+            let heuristic = computeHeuristicProfile(metadata: metadata)
+            let dialect: ModelDialect = heuristic.dialect == .heuristicJson ? .nativeJSON : heuristic.dialect
+            let caveat: ToolSupportCaveat? = isReasoningFocused ? .reasoningFocused : nil
+            logger.info("cognitiveProfile: /api/show capabilities contains 'tools' — authoritative allow for '\(modelName)' (dialect: \(String(describing: dialect))\(isReasoningFocused ? ", reasoning-focused caveat" : ""))")
+            return CognitiveProfile(capability: .parallelActions, dialect: dialect, metadata: metadata, modalities: modalities, toolSupportCaveat: caveat)
         }
 
-        // Priority 2: Reasoning-only pattern match. Handles older Ollama (no capabilities
-        // field) and distilled fine-tunes where the family reports as the tool-capable
-        // base architecture. `isReasoningOnly` checks model name, family, AND families —
-        // whichever source preserves the reasoning-only identity.
-        if ModelCapabilityHeuristics.isReasoningOnly(
-            in: [modelName, familyStr] + familiesArr
-        ) {
-            logger.info("cognitiveProfile: reasoning-only pattern matched for name='\(modelName)' family='\(familyStr)' — forcing .none")
-            return CognitiveProfile(capability: .none, dialect: .heuristicJson, metadata: metadata, modalities: modalities)
+        // --- No capabilities field: legacy daemon, heuristics only ---
+
+        // Reasoning-only pattern match. Without the authoritative field we can't verify
+        // the server accepts tools for these distilled fine-tunes (family reports the
+        // tool-capable BASE architecture, e.g. qwen2 for deepseek-r1:14b) — blocked,
+        // but with the reason attached so pickers can explain it.
+        if isReasoningFocused {
+            logger.info("cognitiveProfile: reasoning-only pattern matched for name='\(modelName)' family='\(familyStr)' (no capabilities field) — forcing .none")
+            return CognitiveProfile(capability: .none, dialect: .heuristicJson, metadata: metadata, modalities: modalities, toolSupportCaveat: .reasoningFocused)
         }
 
-        // Priority 3: Existing template/family heuristics.
+        // Template/family heuristics. A no-signal .none carries .undetected so the UI
+        // can say "can't verify" rather than silently hiding the model.
         var profile = computeHeuristicProfile(metadata: metadata)
         profile.modalities = modalities
+        if profile.capability == .none {
+            profile.toolSupportCaveat = .undetected
+        }
         return profile
     }
 
@@ -354,9 +389,21 @@ struct OllamaConnect {
 
     // MARK: - Model Management
 
+    /// One `/api/tags` entry: model name plus its blob digest. The digest is the
+    /// cheap change-detector — same digest ⇒ the expensive `/api/show` detection
+    /// result is still valid and can be reused from cache.
+    struct OllamaTagEntry: Equatable, Sendable {
+        let name: String
+        let digest: String?
+    }
+
     static func fetchLocalOllamaModels(baseURL: String) async throws -> [String] {
+        try await fetchLocalOllamaModelTags(baseURL: baseURL).map(\.name)
+    }
+
+    static func fetchLocalOllamaModelTags(baseURL: String) async throws -> [OllamaTagEntry] {
         let (data, response) = try await performRequest(endpoint: "/api/tags", method: "GET", baseURL: baseURL)
-        
+
         guard (200..<300).contains(response.statusCode) else {
             throw URLError(.badServerResponse)
         }
@@ -366,7 +413,27 @@ struct OllamaConnect {
             throw URLError(.cannotParseResponse)
         }
 
-        return modelsArray.compactMap { $0["name"] as? String }
+        return modelsArray.compactMap { entry in
+            guard let name = entry["name"] as? String else { return nil }
+            return OllamaTagEntry(name: name, digest: entry["digest"] as? String)
+        }
+    }
+
+    /// Daemon version from `/api/version`. Used to invalidate cached model detection:
+    /// a daemon upgrade can change what `/api/show` reports (capabilities, template)
+    /// for the SAME model digest. Returns nil on any failure — absence just means
+    /// digest-only revalidation.
+    static func fetchDaemonVersion(baseURL: String) async -> String? {
+        do {
+            let (data, response) = try await performRequest(endpoint: "/api/version", method: "GET", baseURL: baseURL, timeout: 5.0)
+            guard (200..<300).contains(response.statusCode),
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return nil
+            }
+            return json["version"] as? String
+        } catch {
+            return nil
+        }
     }
 
     static func fetchModelDetails(name: String, baseURL: String) async throws -> OllamaShowResponse {

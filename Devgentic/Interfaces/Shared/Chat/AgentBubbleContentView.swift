@@ -7,10 +7,37 @@
 
 import SwiftUI
 
-struct AgentBubbleContentView: View {
+struct AgentBubbleContentView: View, Equatable {
     var message: ChatMessage
     let isAgentic: Bool
     let contentToDisplay: MessageContent
+
+    /// Lets a settled bubble skip its body when a PARENT re-render recreates it — which
+    /// happens to every visible message whenever `ChatHistoryView.body` re-runs (a scroll
+    /// flipping `showScrollToBottom`, a search toggle, the speech island appearing).
+    ///
+    /// It deliberately does NOT try to help while streaming. This view *observes*
+    /// `isStreaming`, `timelineEvents`, `terminalOutcome` and friends, so `@Observable`
+    /// invalidates it directly when they change and the body re-runs regardless of what
+    /// `==` says. Claiming equality mid-stream would buy nothing and risk a stale gate.
+    /// Hence: while either side is streaming, never equal.
+    ///
+    /// Everything compared below is read by `body`'s conditionals. If you add a
+    /// `message.x` read to the body, it belongs here too — otherwise a settled bubble
+    /// can miss the update that a parent re-render would have shown.
+    static func == (lhs: AgentBubbleContentView, rhs: AgentBubbleContentView) -> Bool {
+        guard !lhs.message.isStreaming, !rhs.message.isStreaming else { return false }
+        return lhs.message.id == rhs.message.id
+            && lhs.isAgentic == rhs.isAgentic
+            && lhs.contentToDisplay == rhs.contentToDisplay
+            && lhs.message.lifecycleState == rhs.message.lifecycleState
+            && lhs.message.terminalOutcome == rhs.message.terminalOutcome
+            && lhs.message.terminalReason == rhs.message.terminalReason
+            && lhs.message.tokenUsage == rhs.message.tokenUsage
+            // Only the emptiness gates the timeline, but the count is just as cheap and
+            // catches a post-stream append (a resumed run) that `isEmpty` would miss.
+            && lhs.message.timelineEvents.count == rhs.message.timelineEvents.count
+    }
 
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
     @Environment(MainApplicationViewModel.self) private var mainAppViewModel
@@ -22,12 +49,9 @@ struct AgentBubbleContentView: View {
     // the main window's conversation and no-op on a panel-only message.
     @Environment(\.chatActionsSuppressed) private var chatActionsSuppressed
 
-    @AppStorage(AppSettings.agentViewVariantKey) private var agentViewVariant: AgentViewVariant = .dynamicIsland
-
-    /// Code mode always uses the timeline — its ReAct loops produce many tool calls
-    /// that render better as grouped actions than a dynamic island.
-    private var effectiveVariant: AgentViewVariant {
-        message.profileType == .code ? .timeline : agentViewVariant
+    /// See `ContentBlockView.codeFontSize` — code tracks `chatFontSize`, a step below prose.
+    private var codeFontSize: CGFloat {
+        max(10, themeManager.chatFontSize - 2)
     }
 
     /// True when the bubble's current content is an `.error` card. The error
@@ -44,24 +68,18 @@ struct AgentBubbleContentView: View {
 
             // 1. INDICATORS
             if isAgentic {
-                // Agent: full ThinkingDynamicIsland with reasoning steps, tool calls, etc.
+                // Agent: the timeline, with reasoning steps, tool calls, capability cards.
                 // Gate on `timelineEvents` — covers tool calls, warnings, capability milestones,
                 // and media, not just text thoughts. A tool-heavy response with no narration
                 // should still show its timeline after streaming ends.
+                //
+                // There used to be a second variant here (ThinkingDynamicIsland) chosen by an
+                // `agentViewVariant` setting; it was removed 2026-07-17 and the timeline is now
+                // the only agent view. AgentTimelineView renders its own capability cards, so
+                // the island's compensating ForEach went with it.
                 if message.isStreaming || !message.timelineEvents.isEmpty {
-                    if effectiveVariant == .timeline {
-                        AgentTimelineView(message: message)
-                            .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
-                    } else {
-                        ThinkingDynamicIsland(
-                            thoughts: message.thoughts,
-                            currentHeadline: message.isStreaming ? message.thinkingHeadline : nil,
-                            agentState: message.agentState,
-                            isStreaming: message.isStreaming,
-                            isExpanded: Bindable(message).isThinkingExpanded
-                        )
+                    AgentTimelineView(message: message)
                         .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
-                    }
                 }
             } else if message.isStreaming {
                 // Bot: simple "Generating..." indicator while streaming
@@ -80,13 +98,10 @@ struct AgentBubbleContentView: View {
                 )
             }
 
-            // 2. ARTIFACTS
-            if !message.artifacts.isEmpty && effectiveVariant == .dynamicIsland {
-                ToolArtifactsRow(artifacts: message.artifacts)
-                    .padding(.bottom, 8)
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel("\(message.artifacts.count) tool results")
-            }
+            // 2. ARTIFACTS — removed with the dynamic island (2026-07-17).
+            // `ToolArtifactsRow` was gated on `.dynamicIsland`, so the timeline never showed
+            // it; the timeline surfaces tool calls as its own action rows instead. Nothing a
+            // timeline user could see has changed.
 
             // [HITL/P6] Live HITL now renders exclusively in the shared above-input
             // InteractionBannerStack — the per-bubble request cards were removed with the
@@ -164,13 +179,13 @@ struct AgentBubbleContentView: View {
             }
 
         case .codeBlock(let language, let code):
-            if code.components(separatedBy: .newlines).count > ChatUIConstants.codeBlockLineLimit {
-                CodeBlockCardView(language: language ?? "code", lineCount: code.components(separatedBy: .newlines).count, fileName: nil) {
-                    let snippet = CodeSnippet(language: language, code: code)
+            if CodeSnippet.isLarge(codeBlockContent: code) {
+                CodeBlockCardView(language: language ?? "code", lineCount: CodeSnippet.lineCount(codeBlockContent: code), fileName: nil, content: code) {
+                    let snippet = CodeSnippet(codeBlock: language, content: code)
                     chatHistoryViewModel.openMessageInCodeViewer(message: message, selectedSnippet: snippet)
                 }
             } else {
-                CodeBlockView(language: language ?? "code", content: code)
+                CodeBlockView(language: language ?? "code", content: code, fontSize: codeFontSize)
                     .padding(.bottom, theme.spacingMedium)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -187,21 +202,14 @@ struct AgentBubbleContentView: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Error: \(title ?? "Unknown"). \(details)")
 
-        case .image(_, _, let imageData):
-            if let data = imageData {
-                ImageView(imageData: data)
-                    .padding(.vertical, theme.spacingSmall)
-                    .frame(maxWidth: 500, alignment: .leading)
-                    .accessibilityLabel("Generated image")
-            } else {
-                ErrorMessageView(title: "Image Not Available", details: "The image data could not be loaded.")
-            }
-
+        // NB there is no `.image` case any more (removed 2026-07-17): MediaArtifact is the
+        // single image representation. Legacy persisted "image" messages convert at decode
+        // time — data becomes an `.ephemeralData` artifact, URL-only becomes `.remoteURL`
+        // (whose resolve failure lands in MediaArtifactImageView's error card + Retry).
         case .mediaArtifact(let artifact):
             if artifact.kind == .image {
                 MediaArtifactImageView(artifact: artifact)
                     .padding(.vertical, theme.spacingSmall)
-                    .accessibilityLabel("Media: \(artifact.label ?? artifact.kind.rawValue)")
             } else {
                 Text("[\(artifact.kind.rawValue): \(artifact.label ?? artifact.mimeType)]")
                     .font(theme.fontBody)
@@ -231,80 +239,33 @@ struct AgentBubbleContentView: View {
     private func highlightPlainText(_ text: String) -> AttributedString {
         let query = searchViewModel.isSearchActive ? searchViewModel.searchQuery : ""
         let activeLocalIdx = searchViewModel.activeMatchLocalIndex(for: message.id)
-        return Self.highlightText(text, query: query, activeMatchIndex: activeLocalIdx)
+        // Live UI path: highlight with the theme's tokens (the static wrapper below
+        // is theme-less and only exists for the test suite).
+        return SearchHighlighter.highlight(
+            text,
+            query: query,
+            activeMatchIndex: activeLocalIdx,
+            base: theme.searchHighlight,
+            active: theme.searchHighlightActive
+        )
     }
 
-    /// Highlights search matches in plain text. Optimized to avoid O(n²) repeated
-    /// String.distance calls by tracking character offsets incrementally during the
-    /// match-finding pass and applying highlights in a single forward scan.
-    ///
-    /// Extracted as static for testability and performance benchmarking.
+    /// Thin static wrapper over `SearchHighlighter` retained for unit tests and
+    /// theme-less benchmarking; uses the default highlight hues.
     static func highlightText(_ text: String, query: String, activeMatchIndex: Int? = nil) -> AttributedString {
-        var attrString = AttributedString(text)
-        guard !query.isEmpty else { return attrString }
-
-        let lowercasedText = text.lowercased()
-        let lowercasedQuery = query.lowercased()
-        let queryCharCount = lowercasedQuery.count
-
-        // Single-pass: find matches and record character offsets incrementally.
-        // Each `distance(from: searchStart, to: range.lowerBound)` is short (gap only),
-        // avoiding repeated O(n) `distance(from: startIndex, ...)` calls.
-        struct MatchOffset {
-            let start: Int
-            let end: Int
-        }
-
-        var matchOffsets: [MatchOffset] = []
-        var searchStart = lowercasedText.startIndex
-        var runningOffset = 0
-
-        while searchStart < lowercasedText.endIndex,
-              let range = lowercasedText.range(of: lowercasedQuery, range: searchStart..<lowercasedText.endIndex) {
-            runningOffset += lowercasedText.distance(from: searchStart, to: range.lowerBound)
-            matchOffsets.append(MatchOffset(start: runningOffset, end: runningOffset + queryCharCount))
-            searchStart = range.upperBound
-            runningOffset += queryCharCount
-        }
-
-        guard !matchOffsets.isEmpty else { return attrString }
-
-        // Apply highlights in a single forward pass through the AttributedString.
-        // Cursor advances incrementally — each `index(_:offsetByCharacters:)` is O(gap) not O(n).
-        var cursor = attrString.startIndex
-        var cursorOffset = 0
-
-        for (index, match) in matchOffsets.enumerated() {
-            let advanceToStart = match.start - cursorOffset
-            if advanceToStart > 0 {
-                cursor = attrString.index(cursor, offsetByCharacters: advanceToStart)
-                cursorOffset = match.start
-            }
-            let attrStart = cursor
-
-            let advanceToEnd = match.end - cursorOffset
-            cursor = attrString.index(cursor, offsetByCharacters: advanceToEnd)
-            cursorOffset = match.end
-
-            let isActiveMatch = (activeMatchIndex == index)
-            attrString[attrStart..<cursor].backgroundColor = isActiveMatch
-                ? Color.orange.opacity(0.6) // Static context — no theme access
-                : Color.yellow.opacity(0.4)
-        }
-
-        return attrString
+        SearchHighlighter.highlight(text, query: query, activeMatchIndex: activeMatchIndex)
     }
 
     // MARK: - Accessibility
 
     private var accessibilityDescription: String {
         if message.isStreaming {
-            return "Agent response, generating"
+            return String(localized: "Agent response, generating")
         }
         if let text = contentToDisplay.textContent {
-            return "Agent response: \(String(text.prefix(200)))"
+            return String(localized: "Agent response: \(String(text.prefix(200)))")
         }
-        return "Agent response"
+        return String(localized: "Agent response")
     }
 }
 
@@ -450,13 +411,13 @@ struct TerminalOutcomeChip: View {
         // Degraded success reads the same as the old failed-with-content UX — the answer
         // shipped, but the run stopped early (circuit breaker / iteration budget).
         case .failed, .completedWithWarnings:
-            return "Response may be incomplete — the agent didn't finish cleanly."
+            return String(localized: "Response may be incomplete — the agent didn't finish cleanly.")
         // Neutral wording: `.cancelled` covers both an explicit Stop and a system
         // refusal to resume an interrupted run (unresumable profile / provider drift
         // / etc.). The reason line below states which — the headline must not assert
         // "by user" over a reason that says otherwise.
-        case .cancelled: return "Run stopped."
-        case .completed: return "Completed."
+        case .cancelled: return String(localized: "Run stopped.")
+        case .completed: return String(localized: "Completed.")
         }
     }
 

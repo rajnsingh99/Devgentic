@@ -49,6 +49,13 @@ struct ResponseSynthesizer {
         originalQuery: String,
         isNativeFlow: Bool = false,
         forceSynthesis: Bool = false,
+        // Wrapper-run inner loops (Planning subtasks, Reflexion trials): never pay
+        // for IC synthesis — their output is intermediate; the wrapper composes the
+        // user-facing answer. The free paths above the LLM branch still apply; only
+        // the IC call degrades to the deterministic builder. Deliberately wins over
+        // `forceSynthesis` (a circuit-breaker abort inside a subtask must not load
+        // IC either — the abort reason reaches the wrapper via its terminal event).
+        suppressLLM: Bool = false,
         // Called with an (estimated) token-usage figure ONLY when the LLM synthesis path
         // runs — the native fast-path and deterministic fallbacks are free (D1). Optional
         // so existing callers compile unchanged.
@@ -113,6 +120,15 @@ struct ResponseSynthesizer {
         // Nothing actually ran.
         if case .stalled = summary.completionStatus, summary.toolResults.isEmpty {
             logger.info("🏎️ [Synthesizer] Legacy Fast path — stalled with no tool results.")
+            return buildDeterministicFallback(summary: summary)
+        }
+
+        // --- SUPPRESSED: WRAPPER-RUN INNER LOOP ---
+        // Everything below costs an IC model load/generate/unload. Inner runs
+        // under Planning/Reflexion skip it — deterministic output is a cleaner
+        // intermediate artifact for the wrapper's own synthesis anyway.
+        if suppressLLM {
+            logger.info("⏭️ [Synthesizer] LLM synthesis suppressed (wrapper-run inner loop). Using deterministic builder.")
             return buildDeterministicFallback(summary: summary)
         }
 

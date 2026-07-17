@@ -380,7 +380,9 @@ actor ChatExecutor: Executor {
             skillManifests: nil,
             taskDescription: taskDescription,
             promptLayerConfig: workflowContext != nil ? .workflow : .bot,
-            workflowContext: workflowContext
+            workflowContext: workflowContext,
+            attachmentContext: input.attachmentContext,
+            knowledgeBaseContext: input.knowledgeBaseContext
         )
     }
 }

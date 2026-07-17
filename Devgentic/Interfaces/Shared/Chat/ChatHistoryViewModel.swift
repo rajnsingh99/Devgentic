@@ -10,6 +10,26 @@ import os
 
 private let logger = DGLogger(category: "ChatHistoryViewModel")
 
+/// Why `applyChanges` couldn't write a snippet back to its source file. Surfaced to the
+/// user via `ChatHistoryViewModel.codeApplyError` — previously these were log-only, so a
+/// failed apply was indistinguishable from a successful one.
+enum CodeApplyError: LocalizedError, Sendable {
+    case sourceFileMissing
+    case diskDrift(fileName: String)
+    case writeFailed(fileName: String, underlying: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .sourceFileMissing:
+            return String(localized: "Couldn't find the file these changes belong to — it may have been detached.")
+        case .diskDrift(let name):
+            return String(localized: "\"\(name)\" changed on disk since it was attached, so applying now would overwrite those edits. Re-attach the file and try again.")
+        case .writeFailed(let name, let underlying):
+            return String(localized: "Couldn't save changes to \"\(name)\": \(underlying)")
+        }
+    }
+}
+
 @Observable @MainActor
 final class ChatHistoryViewModel {
 
@@ -21,6 +41,10 @@ final class ChatHistoryViewModel {
     var codeViewerContent: (snippets: [CodeSnippet], currentIndex: Int)? = nil
     var isShowingDiff: Bool = false
     var originalCodeForDiff: String? = nil
+    /// Set when `applyChanges` can't write (missing source file, on-disk drift, or an
+    /// I/O error) so the panel can surface it. These failures were previously log-only,
+    /// leaving the user believing the change had applied.
+    var codeApplyError: String? = nil
 
     // MARK: - State Properties for Chat History
     // OPTIMIZATION: Stores messages in Descending order (Newest -> Oldest).
@@ -69,6 +93,11 @@ final class ChatHistoryViewModel {
     func showCodeInViewer(language: String?, code: String) {
         let snippet = CodeSnippet(language: language, code: code)
         codeViewerContent = (snippets: [snippet], currentIndex: 0)
+        // Reset any diff left over from a previous snippet — otherwise the panel renders
+        // a garbage diff (the OLD baseline vs the NEW snippet) with a live Apply button.
+        // `navigate*`/`hideCodeViewer` already do this; opening fresh content must too.
+        isShowingDiff = false
+        originalCodeForDiff = nil
         logger.info("Code viewer content set for language: \(language ?? "nil")")
     }
 
@@ -132,7 +161,25 @@ final class ChatHistoryViewModel {
 
     // MARK: - Message Actions
 
+    /// The exact bytes to write when applying `snippetCode`: the snippet's (extraction-
+    /// normalised, i.e. whitespace-trimmed) code, re-adding the original file's trailing
+    /// newline when it had one. Without this every apply strips the file's POSIX trailing
+    /// newline and produces spurious "\ No newline at end of file" churn. Pure for testing.
+    static func contentToApply(snippetCode: String, preservingTrailingNewlineOf baseline: String) -> String {
+        (baseline.hasSuffix("\n") && !snippetCode.hasSuffix("\n")) ? snippetCode + "\n" : snippetCode
+    }
+
+    /// Fire-and-forget entry point for the Apply button. Delegates to the awaitable
+    /// `performApplyChanges` (which tests can drive deterministically).
     func applyChanges(for snippet: CodeSnippet) {
+        Task { await performApplyChanges(for: snippet) }
+    }
+
+    /// Writes `snippet` back to its source file. Surfaces every failure via `codeApplyError`
+    /// instead of swallowing it (the old catch was log-only, so a failed write looked
+    /// identical to a successful one). Guards against on-disk drift so applying a diff that
+    /// was captured at attach time can't silently revert edits made to the file since.
+    func performApplyChanges(for snippet: CodeSnippet) async {
         guard let sourceMessageID = snippet.sourceMessageID,
               let sourceFileID = snippet.sourceFileID else {
             logger.warning("Attempted to apply changes for a snippet with no source file link.")
@@ -142,13 +189,57 @@ final class ChatHistoryViewModel {
         guard let originalMessage = self.currentChatMessages.first(where: { $0.id == sourceMessageID }),
               let sourceFile = originalMessage.attachedTextFiles?.first(where: { $0.id == sourceFileID }) else {
             logger.error("Could not find the source file to apply changes.")
+            self.codeApplyError = CodeApplyError.sourceFileMissing.errorDescription
             return
         }
 
         let fileURL = sourceFile.url
-        let newContent = snippet.code
+        let baseline = sourceFile.content
+        let newContent = Self.contentToApply(snippetCode: snippet.code, preservingTrailingNewlineOf: baseline)
+        let fileName = sourceFile.name
 
+        // The write/verify/replace below is blocking filesystem I/O and this class is
+        // @MainActor — running it inline beach-balled the UI for the duration on any
+        // sizeable file. It runs off-main inside `atomicallyWrite`; the state update
+        // after the await is back on the main actor.
         do {
+            try await Self.atomicallyWrite(newContent, to: fileURL, expectingBaseline: baseline, fileName: fileName)
+
+            logger.info("✅ Successfully applied changes to file: \(fileURL.path)")
+            withAnimation {
+                self.isShowingDiff = false
+                self.originalCodeForDiff = nil
+                self.codeApplyError = nil
+                if var content = self.codeViewerContent, content.snippets.indices.contains(content.currentIndex) {
+                    let updatedSnippet = CodeSnippet(language: snippet.language, code: newContent, sourceMessageID: snippet.sourceMessageID, sourceFileID: snippet.sourceFileID)
+                    content.snippets[content.currentIndex] = updatedSnippet
+                    self.codeViewerContent = content
+                }
+            }
+        } catch let error as CodeApplyError {
+            logger.error("❌ Apply changes aborted for \(fileURL.path): \(error.localizedDescription ?? "?")")
+            self.codeApplyError = error.errorDescription
+        } catch {
+            logger.error("❌ Failed to write changes to file: \(fileURL.path). Error: \(error.localizedDescription)")
+            self.codeApplyError = CodeApplyError.writeFailed(fileName: fileName, underlying: error.localizedDescription).errorDescription
+        }
+    }
+
+    /// Transaction-safe file write, off the main actor.
+    ///
+    /// Writes to a temp file in the same directory, reads it back to verify, then
+    /// atomically replaces the original — so a crash or full disk mid-write can't
+    /// corrupt the user's file (the original is only removed once the verified temp
+    /// is in place). `nonisolated` + `Task.detached` keeps every blocking call off
+    /// the main thread; security-scoped access is opened and balanced around the
+    /// whole transaction.
+    nonisolated private static func atomicallyWrite(
+        _ content: String,
+        to fileURL: URL,
+        expectingBaseline baseline: String? = nil,
+        fileName: String = ""
+    ) async throws {
+        try await Task.detached(priority: .userInitiated) {
             let shouldAccess = fileURL.startAccessingSecurityScopedResource()
             defer {
                 if shouldAccess {
@@ -156,16 +247,25 @@ final class ChatHistoryViewModel {
                 }
             }
 
-            // Transaction safety: write to a temp file in the same directory first,
-            // then atomically replace. This prevents partial writes from corrupting
-            // the original if the app crashes or disk fills mid-write.
+            // Disk-drift guard: `baseline` is the file's content when it was attached —
+            // the same content the on-screen diff was computed against. If the file on
+            // disk no longer matches, it was edited since (e.g. in Xcode), and applying
+            // would silently discard those edits. Refuse rather than destroy work. A read
+            // failure (file deleted) falls through to the write, which recreates it —
+            // the same outcome the pre-guard code produced.
+            if let baseline,
+               let onDisk = try? String(contentsOf: fileURL, encoding: .utf8),
+               onDisk != baseline {
+                throw CodeApplyError.diskDrift(fileName: fileName.isEmpty ? fileURL.lastPathComponent : fileName)
+            }
+
             let tempURL = fileURL.deletingLastPathComponent()
                 .appendingPathComponent(".devgentic_tmp_\(UUID().uuidString)")
-            try newContent.write(to: tempURL, atomically: true, encoding: .utf8)
+            try content.write(to: tempURL, atomically: true, encoding: .utf8)
 
             // Verify the temp file was written correctly before replacing
             let verifyContent = try String(contentsOf: tempURL, encoding: .utf8)
-            guard verifyContent == newContent else {
+            guard verifyContent == content else {
                 try? FileManager.default.removeItem(at: tempURL)
                 throw NSError(domain: "ChatHistoryViewModel", code: 1,
                               userInfo: [NSLocalizedDescriptionKey: "Write verification failed — content mismatch"])
@@ -173,20 +273,7 @@ final class ChatHistoryViewModel {
 
             // Atomic replace: original is only removed after temp is in place
             _ = try FileManager.default.replaceItemAt(fileURL, withItemAt: tempURL)
-
-            logger.info("✅ Successfully applied changes to file: \(fileURL.path)")
-            withAnimation {
-                self.isShowingDiff = false
-                self.originalCodeForDiff = nil
-                if var content = self.codeViewerContent, content.snippets.indices.contains(content.currentIndex) {
-                    let updatedSnippet = CodeSnippet(language: snippet.language, code: newContent, sourceMessageID: snippet.sourceMessageID, sourceFileID: snippet.sourceFileID)
-                    content.snippets[content.currentIndex] = updatedSnippet
-                    self.codeViewerContent = content
-                }
-            }
-        } catch {
-            logger.error("❌ Failed to write changes to file: \(fileURL.path). Error: \(error.localizedDescription)")
-        }
+        }.value
     }
 
     func copyMessageContentToClipboard(message: ChatMessage) {
@@ -206,7 +293,7 @@ final class ChatHistoryViewModel {
 
         switch message.content {
         case .codeBlock(let lang, let codeContent):
-            allSnippets = [CodeSnippet(language: lang, code: codeContent)]
+            allSnippets = [CodeSnippet(codeBlock: lang, content: codeContent)]
 
         case .markdownText(let text):
             let extractedInfos = CodeSnippetExtractor.extract(from: text)
@@ -237,19 +324,23 @@ final class ChatHistoryViewModel {
             return
         }
 
-        let largeSnippets = allSnippets.filter {
-            $0.code.components(separatedBy: .newlines).count > ChatUIConstants.codeBlockLineLimit
-        }
+        let largeSnippets = allSnippets.filter(\.isLarge)
 
         let snippetsToShow = !largeSnippets.isEmpty ? largeSnippets : allSnippets
 
         var initialIndex = 0
-        if let selected = selectedSnippet, let index = snippetsToShow.firstIndex(of: selected) {
+        if let selected = selectedSnippet,
+           let index = snippetsToShow.firstIndex(where: { $0.denotesSameBlock(as: selected) }) {
             initialIndex = index
         }
 
         logger.info("Opening message in code viewer. Snippets to show: \(snippetsToShow.count), Selected index: \(initialIndex)")
         self.codeViewerContent = (snippets: snippetsToShow, currentIndex: initialIndex)
+        // Reset any stale diff from a previously-viewed snippet (see showCodeInViewer):
+        // switching content while `isShowingDiff` is true would diff the old baseline
+        // against the new snippet and offer to Apply it.
+        self.isShowingDiff = false
+        self.originalCodeForDiff = nil
     }
     
     private func findMessageWithSourceFile(named fileName: String) -> ChatMessage? {

@@ -123,13 +123,15 @@ final class CapabilityCompositionTests: XCTestCase {
         let content = StreamCollector.contentText(from: events)
         XCTAssertFalse(content.isEmpty, "Should produce final content")
 
-        // Should have reflection/trial activity
-        let thoughts = StreamCollector.thoughts(from: events)
-        let hasTrialActivity = thoughts.contains {
-            $0.contains("Trial") || $0.contains("trial") ||
-            $0.contains("Reflect") || $0.contains("reflect")
+        // Should have reflection/trial activity — STRUCTURED events now (the reflection
+        // card consumes them); the old narrative thoughts were removed as duplicates.
+        let trialsStarted = events.compactMap { event -> Int? in
+            if case .reflectionTrialStarted(let trial, _) = event { return trial }
+            return nil
         }
-        XCTAssertTrue(hasTrialActivity, "Should show trial/reflection activity")
+        XCTAssertEqual(trialsStarted, [1, 2], "Both trials should start (trial 2 after rejection)")
+        let hasRetry = events.contains { if case .reflectionRetrying = $0 { return true }; return false }
+        XCTAssertTrue(hasRetry, "Trial 1's rejection should emit reflectionRetrying with the critique")
 
         // Should have tool calls from trials
         let toolOutputs = StreamCollector.toolOutputs(from: events)

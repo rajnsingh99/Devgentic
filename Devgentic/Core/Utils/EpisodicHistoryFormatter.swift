@@ -280,7 +280,7 @@ struct EpisodicHistoryFormatter {
                 // (userDenied / permissionRejected / notFound) add the tool name to
                 // `negativeConstraints`; soft failures (timeout / executionThrew / invalidArgs / cancelled)
                 // are recorded in the episode for retrieval but do not ban the tool outright.
-                for event in message.timelineEvents {
+                for event in message.flattenedTimelineEvents {
                     if case .toolExecution(let data) = event, !data.isExecuting {
 
                         usedTools.append(data.name)
@@ -663,7 +663,7 @@ struct EpisodicHistoryFormatter {
                 var actions: [MemoryAction] = []
                 var userCorrection: String? = nil
 
-                for event in message.timelineEvents {
+                for event in message.flattenedTimelineEvents {
                     if case .toolExecution(let data) = event, !data.isExecuting {
                         let classification = classify(data)
 

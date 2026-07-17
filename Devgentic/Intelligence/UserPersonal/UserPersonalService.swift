@@ -324,7 +324,7 @@ final class UserPersonalService {
                     agentLengths.append(text.count)
 
                     // Extract tool executions from timeline events
-                    for event in msg.timelineEvents {
+                    for event in msg.flattenedTimelineEvents {
                         if case .toolExecution(let data) = event, !data.isExecuting {
                             let success = data.isSuccess ?? false
                             let denied = data.output?.contains("denied") == true || data.output?.contains("User explicitly") == true

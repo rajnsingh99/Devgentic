@@ -103,11 +103,100 @@ class HybridSearchService {
             contentResults = rawContentResults.filter { !nameSet.contains($0) }
         }
 
+        // Phase 3: Direct filesystem fallback (scoped searches only).
+        // NSMetadataQuery answers from the Spotlight INDEX, and macOS excludes
+        // volatile locations (/private/tmp, /var/folders, …) from it — a scoped
+        // query there "succeeds" with zero rows even when the files exist, which
+        // reads as authoritative absence (observed: an agent created a folder in
+        // /tmp, searched it, was told nothing was there, and looped until the
+        // circuit breaker fired). Fresh writes racing async index ingestion have
+        // the same shape. So before claiming absence for a CONCRETE scope, verify
+        // against the disk with a bounded filename walk — either way the answer
+        // then reflects the disk, which is what a "successful" search must mean.
+        if let specificScope = cleanScope, nameResults.isEmpty, contentResults.isEmpty {
+            let scopeURL = URL(fileURLWithPath: specificScope)
+            let searchTerm = term
+            let walkResults = await Task.detached(priority: .userInitiated) {
+                Self.filesystemScan(term: searchTerm, scopeURL: scopeURL)
+            }.value
+
+            switch walkResults {
+            case .some(let paths) where !paths.isEmpty:
+                return SearchResult(
+                    nameMatches: paths,
+                    contentMatches: [],
+                    permissionNote: permissionNote,
+                    provenanceNote: "[Note: The Spotlight index has no entries for this location (unindexed or not yet indexed) — results come from a direct filename scan of the folder. Content matching wasn't performed.]"
+                )
+            case .some:
+                return SearchResult(
+                    nameMatches: [],
+                    contentMatches: [],
+                    permissionNote: permissionNote,
+                    provenanceNote: "[Note: Verified with a direct filesystem scan — no filename matches on disk in this location either.]"
+                )
+            case .none:
+                return SearchResult(
+                    nameMatches: [],
+                    contentMatches: [],
+                    permissionNote: permissionNote,
+                    provenanceNote: "[Note: The Spotlight index has no entries for this location and it couldn't be scanned directly — absence is NOT verified. Inspect the directory contents directly.]"
+                )
+            }
+        }
+
         return SearchResult(
             nameMatches: nameResults,
             contentMatches: contentResults,
             permissionNote: permissionNote
         )
+    }
+
+    // MARK: - Filesystem Fallback Scan
+
+    /// Bounded, index-free fallback: walks `scopeURL` matching FILENAMES against all
+    /// whitespace-separated tokens (case-insensitive substring per token — mirrors the
+    /// kMDItemFSName wildcard query; directories match too). Hidden files and package
+    /// contents are skipped. Hard caps keep the worst case fixed: `maxScanned` entries
+    /// visited, `maxResults` returned, `maxDepth` levels deep.
+    ///
+    /// - Returns: matched paths; empty = scanned and genuinely found nothing;
+    ///   nil = the scope couldn't be enumerated (absence NOT verified).
+    nonisolated static func filesystemScan(
+        term: String,
+        scopeURL: URL,
+        maxResults: Int = 10,
+        maxScanned: Int = 5_000,
+        maxDepth: Int = 6
+    ) -> [String]? {
+        let tokens = term.lowercased().split(separator: " ").map(String.init)
+        guard !tokens.isEmpty else { return [] }
+
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: scopeURL.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              let enumerator = FileManager.default.enumerator(
+                at: scopeURL,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]
+              ) else { return nil }
+
+        var matches: [String] = []
+        var scanned = 0
+        for case let url as URL in enumerator {
+            scanned += 1
+            if scanned > maxScanned { break }
+            if enumerator.level > maxDepth {
+                enumerator.skipDescendants()
+                continue
+            }
+            let name = url.lastPathComponent.lowercased()
+            if tokens.allSatisfy({ name.contains($0) }) {
+                matches.append(url.path)
+                if matches.count >= maxResults { break }
+            }
+        }
+        return matches
     }
 
     // MARK: - Reusable Query Executor
@@ -208,6 +297,10 @@ class HybridSearchService {
         let nameMatches: [String]
         let contentMatches: [String]
         let permissionNote: String?
+        /// Where the answer came from when it did NOT come from the Spotlight index
+        /// (filesystem-scan fallback, unverifiable scope). Rendered with the output —
+        /// including for EMPTY results — so absence claims carry their evidence level.
+        let provenanceNote: String?
         let error: String?
 
         /// Total number of results across all categories.
@@ -215,10 +308,11 @@ class HybridSearchService {
         var isEmpty: Bool { nameMatches.isEmpty && contentMatches.isEmpty }
         var hasError: Bool { error != nil }
 
-        init(nameMatches: [String] = [], contentMatches: [String] = [], permissionNote: String? = nil, error: String? = nil) {
+        init(nameMatches: [String] = [], contentMatches: [String] = [], permissionNote: String? = nil, provenanceNote: String? = nil, error: String? = nil) {
             self.nameMatches = nameMatches
             self.contentMatches = contentMatches
             self.permissionNote = permissionNote
+            self.provenanceNote = provenanceNote
             self.error = error
         }
 
@@ -226,6 +320,7 @@ class HybridSearchService {
             self.nameMatches = []
             self.contentMatches = []
             self.permissionNote = nil
+            self.provenanceNote = nil
             self.error = error
         }
     }
@@ -236,7 +331,7 @@ class HybridSearchService {
 struct SmartSearchTool: DevgenticTool {
     let name = "fs_smart_search"
     let category = "File System"
-    let description = "Advanced macOS Spotlight Search. Finds files by matching Filename OR Text Content. Supports partial matches and scope limiting."
+    let description = "Advanced macOS Spotlight Search. Finds files by matching Filename OR Text Content. Supports partial matches and scope limiting; scoped searches fall back to a direct filename scan when the Spotlight index has no coverage (e.g. /tmp)."
     
     struct Arguments: Decodable, Sendable {
         let search_term: String
@@ -312,7 +407,14 @@ struct SmartSearchTool: DevgenticTool {
             }
 
             if result.isEmpty {
-                return "No results found matching '\(arguments.search_term)'."
+                var message = "No results found matching '\(arguments.search_term)'."
+                // Absence claims carry their evidence level: an index-only miss and a
+                // disk-verified miss are different answers, and the model must be able
+                // to tell them apart.
+                if let note = result.provenanceNote {
+                    message += "\n\(note)"
+                }
+                return message
             }
 
             // Build structured output with relevance tiers
@@ -332,6 +434,10 @@ struct SmartSearchTool: DevgenticTool {
             }
 
             if let note = result.permissionNote {
+                output += "\n\n\(note)"
+            }
+
+            if let note = result.provenanceNote {
                 output += "\n\n\(note)"
             }
 

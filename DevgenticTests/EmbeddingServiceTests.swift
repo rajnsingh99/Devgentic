@@ -120,6 +120,30 @@ final class EmbeddingServiceTests: XCTestCase {
         }
     }
 
+    func testGenerateEmbedding_RepeatedText_ServedFromCache() async {
+        // Replace-on-reindex re-embeds byte-identical chunks when a file is
+        // re-attached — the cache makes those hits free. Unique text so prior
+        // tests in this suite can't have primed it.
+        let text = "cache probe \(#function) — a deliberately unique sentence."
+        let before = await service.cachedEmbeddingCount
+
+        let first = await service.generateEmbedding(for: text)
+        let afterFirst = await service.cachedEmbeddingCount
+        let second = await service.generateEmbedding(for: text)
+        let afterSecond = await service.cachedEmbeddingCount
+
+        XCTAssertNotNil(first)
+        XCTAssertEqual(first, second, "cached result must be byte-identical")
+        XCTAssertEqual(afterFirst, before + 1, "first call populates the cache")
+        XCTAssertEqual(afterSecond, afterFirst, "second call must hit the cache, not re-embed")
+    }
+
+    func testExpectedDimensions_MatchesHNSWSchemaContract() {
+        // ChildChunkEntity's hnswIndex annotation says dimensions=384 — the
+        // embedder enforces the same number loudly; keep them in lockstep.
+        XCTAssertEqual(EmbeddingService.expectedDimensions, 384)
+    }
+
     func testGenerateEmbedding_EmojiText() async {
         let embedding = await service.generateEmbedding(for: "I love coding! 🚀💻🎉")
         XCTAssertNotNil(embedding, "Emoji text should produce a valid embedding")

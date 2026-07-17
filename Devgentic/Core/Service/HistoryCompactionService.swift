@@ -231,7 +231,6 @@ actor HistoryCompactionService {
             case .plainText(let t), .markdownText(let t): text = t
             case .codeBlock(_, let code): text = code
             case .error(let title, let details, _, _): text = "\(title ?? "Error"): \(details)"
-            case .image(_, let alt, _): text = "[Image: \(alt ?? "image attachment")]"
             case .mediaArtifact(let a): text = "[Media: \(a.label ?? a.kind.rawValue)]"
             case .checkpoint: continue // Already handled above
             }
@@ -240,7 +239,7 @@ actor HistoryCompactionService {
             // Include tool summaries for agent messages
             var toolInfo = ""
             if msg.sender == .agent && !msg.timelineEvents.isEmpty {
-                let tools = msg.timelineEvents.compactMap { event -> String? in
+                let tools = msg.flattenedTimelineEvents.compactMap { event -> String? in
                     if case .toolExecution(let data) = event {
                         let status = (data.isSuccess ?? false) ? "success" : "failed"
                         return "  - \(data.name) [\(status)]"

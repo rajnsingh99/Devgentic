@@ -90,17 +90,10 @@ struct WorkflowExecutionTimelineView: View {
     }
 
     private var runPillLabel: String {
-        if displayData.isRunning { return "Running" }
-        if isCancelled { return "Cancelled" }
-        if hasFailure { return "Failed" }
-        return "Completed"
-    }
-
-    private func durationText(_ d: TimeInterval) -> String {
-        if d <= 0 { return "" }
-        if d < 1 { return "<1s" }
-        if d < 60 { return "\(String(format: "%.1f", d))s" }
-        return "\(Int(d / 60))m \(Int(d.truncatingRemainder(dividingBy: 60)))s"
+        if displayData.isRunning { return String(localized: "Running") }
+        if isCancelled { return String(localized: "Cancelled") }
+        if hasFailure { return String(localized: "Failed") }
+        return String(localized: "Completed")
     }
 
     // MARK: - Body
@@ -208,24 +201,24 @@ struct WorkflowExecutionTimelineView: View {
     /// counter ("step 2 of 2") on a FAILED run would imply the run got through everything.
     private var stepCounterText: String {
         let total = displayData.nodeResults.count
-        let time = durationText(displayData.duration)
+        let time = DurationFormat.seconds(displayData.duration)
         let suffix = time.isEmpty ? "" : " · \(time)"
         guard total > 0 else { return time }
 
         if displayData.isRunning {
-            return "step \(currentStep) of \(total)\(suffix)"
+            return String(localized: "step \(currentStep) of \(total)\(suffix)")
         }
         if isCancelled {
-            return "stopped\(suffix)"
+            return String(localized: "stopped\(suffix)")
         }
         if hasFailure {
             // First genuinely-failed node (skip the not-run cascade) = where it broke.
             let failedIndex = displayData.nodeResults.firstIndex { $0.status == .failed && !isNotRun($0) }
                 ?? displayData.nodeResults.firstIndex { $0.status == .failed }
             if let failedIndex {
-                return "failed at step \(failedIndex + 1) of \(total)\(suffix)"
+                return String(localized: "failed at step \(failedIndex + 1) of \(total)\(suffix)")
             }
-            return "failed\(suffix)"
+            return String(localized: "failed\(suffix)")
         }
         return "\(total) step\(total == 1 ? "" : "s")\(suffix)"
     }
@@ -266,7 +259,7 @@ struct WorkflowExecutionTimelineView: View {
                     nameColor: (node.status == .pending && !isAwaiting) || notRun ? theme.secondaryText : theme.primaryText,
                     tagLabel: isAwaiting ? "Needs your input"
                         : (notRun ? "Not run"
-                        : (degraded ? "Completed · warnings" : tagLabel(for: node.status))),
+                        : (degraded ? "Completed · warnings" : node.status.label)),
                     tagColor: isAwaiting ? theme.warningColor : (node.status == .pending || notRun ? theme.secondaryText : statusColor),
                     tagIcon: isAwaiting ? "hand.raised.fill" : nil,
                     tagAction: isAwaiting ? onAwaitingTap : nil,
@@ -305,6 +298,10 @@ struct WorkflowExecutionTimelineView: View {
             }
         }
         .onTapGesture { selectedNodeID = node.nodeID }
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("\(node.profileName), \(node.status.label)")
+        .accessibilityHint(isSelected ? "Selected step" : "Show step details")
+        .accessibilityAction { selectedNodeID = node.nodeID }
     }
 
     private func collapsedPreview(for node: WorkflowRunDisplayData.NodeDisplayData) -> String? {
@@ -339,7 +336,7 @@ struct WorkflowExecutionTimelineView: View {
                     nameColor: status == .pending ? theme.secondaryText : theme.primaryText,
                     tagLabel: status == .pending && displayData.isRunning
                         ? "Awaiting inputs · \(settledCount)/\(max(displayData.nodeResults.count, 1))"
-                        : tagLabel(for: status),
+                        : status.label,
                     tagColor: status == .pending ? theme.secondaryText : statusColor,
                     tagIcon: nil,
                     tagAction: nil,
@@ -368,6 +365,10 @@ struct WorkflowExecutionTimelineView: View {
             }
         }
         .onTapGesture { selectedNodeID = nil }
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("Final Outcome, \(status.label)")
+        .accessibilityHint(isSelected ? "Selected" : "Show final output")
+        .accessibilityAction { selectedNodeID = nil }
     }
 
     // MARK: - Shared row pieces
@@ -434,7 +435,7 @@ struct WorkflowExecutionTimelineView: View {
             Spacer(minLength: 6)
 
             if let duration, duration > 0 {
-                Text(durationText(duration))
+                Text(DurationFormat.seconds(duration))
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundColor(theme.tertiaryText)
             }
@@ -444,16 +445,6 @@ struct WorkflowExecutionTimelineView: View {
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundColor(theme.tertiaryText)
                 .opacity(showsChevron ? 1 : 0)
-        }
-    }
-
-    private func tagLabel(for status: WorkflowRunDisplayData.NodeDisplayData.NodeStatus) -> String {
-        switch status {
-        case .pending:   return "Waiting"
-        case .running:   return "Running"
-        case .completed: return "Completed"
-        case .failed:    return "Failed"
-        case .skipped:   return "Skipped"
         }
     }
 

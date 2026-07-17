@@ -488,6 +488,15 @@ struct AgentInput: Sendable {
     /// Multimodal user input (images, audio, etc.). Nil for text-only messages.
     var userPayload: Payload?
 
+    /// Current-turn attachment payload destined for the USER message: extracted file
+    /// text (directInjection) or a read_file path note (stateless). Kept separate from
+    /// `userInput` so the system `<task>` block carries only the typed query.
+    var attachmentContext: String? = nil
+
+    /// Static profile knowledge-source payload for the system `<knowledge_base>` layer:
+    /// budgeted content (directInjection) or a path manifest (stateless).
+    var knowledgeBaseContext: String? = nil
+
     // NOTE: Used ONLY by ChatExecutor (Bots). ReActAgentExecutor completely ignores this
     // to enforce the "Zero-History Context" architecture.
     var chatHistory: [ChatMessage]
@@ -536,6 +545,15 @@ struct AgentInput: Sendable {
     /// the wrapping capability (Planning or Reflexion) owns the episode lifecycle.
     var suppressEpisodeManagement: Bool
 
+    /// When true, the inner executor never pays for LLM (IC) response synthesis.
+    /// Wrapper-run loops (Planning subtasks, Reflexion trials) produce INTERMEDIATE
+    /// output that the wrapper consumes and re-synthesizes, so a per-run IC
+    /// load/generate/unload cycle is pure cost (observed: 6 IC loads in one
+    /// 5-subtask MLX run). The synthesizer's free paths (native fast-path,
+    /// deterministic single-tool formatting) still apply — only the IC call
+    /// degrades to the deterministic builder.
+    var suppressLLMSynthesis: Bool
+
     /// Workflow execution context — non-nil when this agent is running as a node
     /// within a workflow DAG. Signals downstream components (generators, executors)
     /// to use the workflow-specific prompt pipeline: no RAG, no history, clean task+input.
@@ -568,6 +586,15 @@ struct AgentInput: Sendable {
     /// 0 = disabled (no compaction) — the default for minimal/test constructors. (#22)
     var nativeContextBudgetChars: Int
 
+    /// [Loop Safety] Shared per-run human-interaction memory. Nil (the default) means
+    /// the executor creates its own — the historical behavior. Capability wrappers
+    /// (Planning, Reflexion) set one instance on every derived sub-input so a
+    /// clarification answered once — including the pre-plan clarification — replays
+    /// for identical `ask_user` re-asks across subtasks and trials instead of
+    /// re-raising the banner. Declaration-level default keeps the memberwise init
+    /// and every existing construction site untouched.
+    var interactionMemory: RunInteractionMemory? = nil
+
     /// Resolved input: multimodal if available, text fallback otherwise.
     var resolvedPayload: Payload {
         userPayload ?? [.text(userInput)]
@@ -576,6 +603,8 @@ struct AgentInput: Sendable {
     init(
         userInput: String,
         userPayload: Payload? = nil,
+        attachmentContext: String? = nil,
+        knowledgeBaseContext: String? = nil,
         chatHistory: [ChatMessage],
         conversationID: UUID,
         tools: [AgentTool],
@@ -595,6 +624,7 @@ struct AgentInput: Sendable {
         responseSynthesisEnabled: Bool = false,
         nativeHistoryTurns: [[String: String]]? = nil,
         suppressEpisodeManagement: Bool = false,
+        suppressLLMSynthesis: Bool = false,
         workflowContext: WorkflowExecutionContext? = nil,
         resumeState: TimelineReconstruction? = nil,
         traceContext: TraceContext,
@@ -603,6 +633,8 @@ struct AgentInput: Sendable {
     ) {
         self.userInput = userInput
         self.userPayload = userPayload
+        self.attachmentContext = attachmentContext
+        self.knowledgeBaseContext = knowledgeBaseContext
         self.chatHistory = chatHistory
         self.conversationID = conversationID
         self.tools = tools
@@ -624,6 +656,7 @@ struct AgentInput: Sendable {
         self.responseSynthesisEnabled = responseSynthesisEnabled
         self.nativeHistoryTurns = nativeHistoryTurns
         self.suppressEpisodeManagement = suppressEpisodeManagement
+        self.suppressLLMSynthesis = suppressLLMSynthesis
         self.workflowContext = workflowContext
         self.resumeState = resumeState
         self.traceContext = traceContext
@@ -694,6 +727,16 @@ struct SemanticContext: Sendable {
     //     prefix from `workflowContext.userMessagePrefix(wrapping:)` so every
     //     generator inherits workflow behavior with zero per-generator code.
     let workflowContext: WorkflowExecutionContext?
+
+    // 11. File-context delivery (2026-07 redesign) — defaulted so construction
+    //     sites that don't carry file context (planning, tests) stay untouched.
+    /// Current-turn attachment payload rendered at the top of the USER message
+    /// (never `<task>`): extracted file text or a stateless read_file path note.
+    var attachmentContext: String? = nil
+
+    /// Profile knowledge-source payload rendered as the system `<knowledge_base>`
+    /// layer: budgeted content (directInjection) or a path manifest (stateless).
+    var knowledgeBaseContext: String? = nil
 }
 
 // MARK: - Agent Failure Reasons

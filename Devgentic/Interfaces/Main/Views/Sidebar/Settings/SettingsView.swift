@@ -119,6 +119,25 @@ struct SettingsView: View {
                 theme.primaryBackground
                     .ignoresSafeArea()
                 
+                // Ambient Aura Glows (Provides texture for Liquid Glass refraction)
+                if theme.id != "one_light" {
+                    GeometryReader { geo in
+                        ZStack {
+                            Circle()
+                                .fill(theme.accentColor.opacity(0.04))
+                                .frame(width: geo.size.width * 0.45, height: geo.size.width * 0.45)
+                                .blur(radius: 120)
+                                .offset(x: -geo.size.width * 0.15, y: -geo.size.height * 0.1)
+                            
+                            Circle()
+                                .fill(Color.orange.opacity(0.025))
+                                .frame(width: geo.size.width * 0.4, height: geo.size.width * 0.4)
+                                .blur(radius: 100)
+                                .offset(x: geo.size.width * 0.35, y: geo.size.height * 0.25)
+                        }
+                    }
+                }
+                
                 if let category = selectedCategory {
                     category.destination
                         .environment(mainApplicationViewModel)

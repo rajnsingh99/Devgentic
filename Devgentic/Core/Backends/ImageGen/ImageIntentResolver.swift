@@ -79,7 +79,7 @@ enum ImageIntentResolver {
                 artifacts.append(artifact)
             }
             // Also check timeline events for media generation
-            for event in message.timelineEvents {
+            for event in message.flattenedTimelineEvents {
                 if case .mediaGeneration(_, _, let artifact, let isComplete) = event,
                    isComplete, let artifact = artifact, artifact.kind == .image {
                     artifacts.append(artifact)

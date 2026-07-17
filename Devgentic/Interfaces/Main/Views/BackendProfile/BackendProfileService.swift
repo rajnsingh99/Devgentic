@@ -55,14 +55,6 @@ final class BackendProfileService {
     /// Saves a given profile to the persistence layer and updates the in-memory array in-place.
     /// Throws `ProfileStoreError` on validation or persistence failure so callers can show errors.
     func saveProfile(_ profile: BackendProfileModel) throws {
-        // Capture old knowledge sources before save for change detection
-        let oldSources: [KnowledgeSource]?
-        if let existing = profiles.first(where: { $0.id == profile.id }) {
-            oldSources = resolveKnowledgeSources(from: existing)
-        } else {
-            oldSources = nil
-        }
-
         try profileStore.saveProfile(profile)
 
         // Update in-place to preserve sidebar ordering
@@ -72,27 +64,10 @@ final class BackendProfileService {
             // New profile — reload to get correct sort order
             loadProfiles()
         }
-
-        // Detect knowledge source changes and notify KnowledgeSourceMonitor
-        let newSources = resolveKnowledgeSources(from: profile)
-        if let old = oldSources, let new = newSources, old != new {
-            Task.detached(priority: .utility) {
-                await KnowledgeSourceMonitor.shared.handleProfileSourcesChanged(
-                    oldSources: old,
-                    newSources: new,
-                    conversationID: UUID() // Synthetic — sources apply across conversations
-                )
-            }
-        }
-    }
-
-    /// Resolves knowledge sources from profile details.
-    private func resolveKnowledgeSources(from profile: BackendProfileModel) -> [KnowledgeSource]? {
-        switch profile.details {
-        case .bot(let config):   return config.knowledgeSources
-        case .agent(let config): return config.knowledgeSources
-        default:                 return nil
-        }
+        // Knowledge sources need no save-time indexing: they're read fresh from disk
+        // and delivered as the <knowledge_base> prompt layer on every request
+        // (2026-07 redesign — the old KnowledgeSourceMonitor vector-indexing path,
+        // which stamped a synthetic conversation ID no retrieval could match, is gone).
     }
 
     /// Deletes a profile using its ID from the persistence layer and reloads the local array.

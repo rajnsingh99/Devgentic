@@ -272,7 +272,11 @@ final class SemanticChunkerTests: XCTestCase {
 
     func testChunk_ListItemBlock_CombinesPrefixAndText() {
         let chunker = SemanticChunker()
-        let blocks = [ContentBlock(id: "b0", type: .listItem(prefix: "•", text: "Buy groceries", indentation: 0))]
+        let blocks = [ContentBlock(id: "b0", type: .listItem(
+            prefix: "•",
+            blocks: [ContentBlock(id: "b0.0", type: .paragraph("Buy groceries"))],
+            checkbox: nil
+        ))]
         let chunks = chunker.chunk(blocks: blocks)
 
         XCTAssertEqual(chunks.count, 1)
@@ -283,7 +287,8 @@ final class SemanticChunkerTests: XCTestCase {
         let chunker = SemanticChunker()
         let blocks = [ContentBlock(id: "b0", type: .table(
             headers: ["Name", "Age"],
-            rows: [["Alice", "30"], ["Bob", "25"]]
+            rows: [["Alice", "30"], ["Bob", "25"]],
+            alignments: []
         ))]
         let chunks = chunker.chunk(blocks: blocks)
 
@@ -330,8 +335,12 @@ final class SemanticChunkerTests: XCTestCase {
         let blocks = [
             ContentBlock(id: "b0", type: .heading(level: 1, text: "Title")),
             ContentBlock(id: "b1", type: .paragraph("Body text.")),
-            ContentBlock(id: "b2", type: .listItem(prefix: "-", text: "Item one", indentation: 0)),
-            ContentBlock(id: "b3", type: .table(headers: ["Col"], rows: [["Val"]])),
+            ContentBlock(id: "b2", type: .listItem(
+                prefix: "-",
+                blocks: [ContentBlock(id: "b2.0", type: .paragraph("Item one"))],
+                checkbox: nil
+            )),
+            ContentBlock(id: "b3", type: .table(headers: ["Col"], rows: [["Val"]], alignments: [])),
             ContentBlock(id: "b4", type: .code(language: "js", content: "console.log(1)", fileName: nil)),
             ContentBlock(id: "b5", type: .horizontalRule),
             ContentBlock(id: "b6", type: .image(url: "img.png", altText: "alt"))

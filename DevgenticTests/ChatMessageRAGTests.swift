@@ -60,7 +60,7 @@ final class ChatMessageRAGTests: XCTestCase {
     }
 
     func testTokenCountEstimate_Image_ReturnsZero() {
-        let msg = makeMessage(content: .image(url: nil, alt: nil, imageData: nil))
+        let msg = makeMessage(content: .mediaArtifact(MediaArtifact(kind: .image, reference: .ephemeralData(Data()), mimeType: "image/png")))
         XCTAssertEqual(msg.tokenCountEstimate, 0)
     }
 
@@ -98,7 +98,7 @@ final class ChatMessageRAGTests: XCTestCase {
     }
 
     func testTextContent_Image_ReturnsNil() {
-        let content = MessageContent.image(url: nil, alt: nil, imageData: nil)
+        let content = MessageContent.mediaArtifact(MediaArtifact(kind: .image, reference: .ephemeralData(Data()), mimeType: "image/png"))
         XCTAssertNil(content.textContent)
     }
 
@@ -153,7 +153,7 @@ final class ChatMessageRAGTests: XCTestCase {
     }
 
     func testGetBlocksForIndexing_Image_ReturnsEmpty() {
-        let msg = makeMessage(content: .image(url: nil, alt: nil, imageData: nil))
+        let msg = makeMessage(content: .mediaArtifact(MediaArtifact(kind: .image, reference: .ephemeralData(Data()), mimeType: "image/png")))
         let blocks = msg.getBlocksForIndexing()
 
         XCTAssertTrue(blocks.isEmpty, "Image messages should not be indexed")

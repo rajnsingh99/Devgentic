@@ -159,9 +159,9 @@ struct APIKeyInputPopup: View {
     
     private var buttonText: String {
         if case .valid = inputViewModel.validationState {
-            return "Save and Enable"
+            return String(localized: "Save and Enable")
         }
-        return "Check Key"
+        return String(localized: "Check Key")
     }
     
     private func handleButtonAction() {

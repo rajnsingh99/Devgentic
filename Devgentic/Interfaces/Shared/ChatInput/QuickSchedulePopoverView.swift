@@ -46,6 +46,9 @@ struct QuickSchedulePopoverView: View {
                             .font(.system(.caption))
                             .foregroundColor(theme.accentColor)
                             .frame(width: 16)
+                            // Decorative: the preset's label says the same thing, and an
+                            // unhidden glyph is read out as its raw symbol name.
+                            .accessibilityHidden(true)
                         Text(preset.label)
                             .font(theme.fontSubheadline)
                             .foregroundColor(theme.primaryText)
@@ -75,6 +78,7 @@ struct QuickSchedulePopoverView: View {
                         .font(.system(.caption))
                         .foregroundColor(theme.secondaryText)
                         .frame(width: 16)
+                        .accessibilityHidden(true)
                     Text("Custom...")
                         .font(theme.fontSubheadline)
                         .foregroundColor(theme.secondaryText)

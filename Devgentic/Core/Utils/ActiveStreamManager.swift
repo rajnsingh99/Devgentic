@@ -127,7 +127,6 @@ final class ActiveStreamManager {
                     // concurrent stream's accurate state in the same conversation.
                     if case .interaction = message.agentState {
                         message.agentState = .thinking(.reflecting)
-                        message.thinkingHeadline = "Processing..."
                     }
                 }
             }
@@ -156,7 +155,6 @@ final class ActiveStreamManager {
                     // concurrent stream's accurate state in the same conversation.
                     if case .interaction = message.agentState {
                         message.agentState = .thinking(.reflecting)
-                        message.thinkingHeadline = "Processing..."
                     }
                 }
             }
@@ -183,7 +181,6 @@ final class ActiveStreamManager {
                 for (_, message) in self.activeStreams where message.conversationId == conversationID && message.isStreaming {
                     if case .interaction = message.agentState {
                         message.agentState = .thinking(.planning)
-                        message.thinkingHeadline = "Executing plan..."
                     }
                 }
             }
@@ -211,7 +208,6 @@ final class ActiveStreamManager {
                 for (_, message) in self.activeStreams where message.conversationId == conversationID && message.isStreaming {
                     if case .interaction = message.agentState {
                         message.agentState = .thinking(.reflecting)
-                        message.thinkingHeadline = "Processing..."
                     }
                 }
             }
@@ -271,12 +267,18 @@ final class ActiveStreamManager {
         // ChatMessage is immediately assigned to SwiftUI state within a view update cycle.
         Task { @MainActor in
             agentMessage.agentState = .thinking(.reasoning)
-            agentMessage.thinkingHeadline = "Processing..."
         }
         
         let streamTask = Task { [weak self] in
             guard let self = self else { return }
-            
+
+            // Structured Plan & Execute / Reflexion cards (chat + code agents only).
+            // Workflow runs keep the legacy flat milestone chips: their capability
+            // events carry no node attribution, and parallel workflow nodes would
+            // interleave segments the ordering-based router can't separate.
+            let capabilityRouter = CapabilityCardRouter(message: agentMessage)
+            let capabilityCardsEnabled = (workflowExecutionState == nil)
+
             do {
                 let traceContext = TraceContext(profile: config.profile, messageID: agentMessage.id)
                 agentMessage.traceID = traceContext.traceID
@@ -340,13 +342,12 @@ final class ActiveStreamManager {
                     switch event {
                     case .thought(let thoughtText, let id, let sourceNodeID):
                         // 1. Handle Thoughts (Update Headline + Append to History using structured ID)
-                        agentMessage.thinkingHeadline = thoughtText
                         agentMessage.agentState = .thinking(.reasoning)
                         let thoughtEvent = TimelineEvent.thought(id: id, text: thoughtText)
                         if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
                             wfState.appendNodeTimelineEvent(thoughtEvent, for: nodeID)
                             logger.debug("[WF_ROUTE] Thought → node timeline [\(nodeID)], count=\(wfState.nodeTimelines[nodeID]?.count ?? 0)")
-                        } else {
+                        } else if !(capabilityCardsEnabled && capabilityRouter.route(thoughtEvent)) {
                             agentMessage.appendTimelineEvent(thoughtEvent)
                         }
 
@@ -354,18 +355,16 @@ final class ActiveStreamManager {
                         // Model-authored monologue (step.reasoning). Same UI handling as
                         // .thought for now (shared ThinkingDynamicIsland + timeline rendering),
                         // but persisted as .reasoning so downstream consumers can distinguish.
-                        agentMessage.thinkingHeadline = text
                         agentMessage.agentState = .thinking(.reasoning)
                         let reasoningEvent = TimelineEvent.reasoning(id: id, text: text)
                         if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
                             wfState.appendNodeTimelineEvent(reasoningEvent, for: nodeID)
                             logger.debug("[WF_ROUTE] Reasoning → node timeline [\(nodeID)], count=\(wfState.nodeTimelines[nodeID]?.count ?? 0)")
-                        } else {
+                        } else if !(capabilityCardsEnabled && capabilityRouter.route(reasoningEvent)) {
                             agentMessage.appendTimelineEvent(reasoningEvent)
                         }
 
                     case .toolCall(let name, let params, let sourceNodeID, let stepId):
-                        agentMessage.thinkingHeadline = "Using tool: \(name)"
                         agentMessage.agentState = .acting(.tool(name: name))
                         let toolEvent = TimelineEvent.toolExecution(
                             ToolExecutionData(id: UUID(), name: name, params: params, output: nil, isSuccess: nil, isExecuting: true, stepId: stepId)
@@ -373,7 +372,7 @@ final class ActiveStreamManager {
                         if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
                             wfState.appendNodeTimelineEvent(toolEvent, for: nodeID)
                             logger.debug("[WF_ROUTE] ToolCall '\(name)' → node timeline [\(nodeID)], count=\(wfState.nodeTimelines[nodeID]?.count ?? 0)")
-                        } else {
+                        } else if !(capabilityCardsEnabled && capabilityRouter.route(toolEvent)) {
                             agentMessage.appendTimelineEvent(toolEvent)
                         }
                         // [G1 Piece 1] Boundary flush — a tool just started; persist so an interrupted
@@ -384,7 +383,6 @@ final class ActiveStreamManager {
                     // Node attribution rides in the banner via the origin; the thinking-island
                     // headline stays generic (the banner carries which node/agent is asking).
                     case .requestConfirmation(let toolName, let params, let operationID, let sourceNodeID):
-                        agentMessage.thinkingHeadline = "Waiting for approval: \(toolName)"
                         agentMessage.agentState = .interaction(.permission(toolName: toolName))
                         // [G1 Piece 1] Park marker + the operationID join key, flushed immediately:
                         // a run parked on approval can sit indefinitely, so this is the prime
@@ -410,7 +408,6 @@ final class ActiveStreamManager {
 
                     // [ASK_USER] Clarification request → unified InteractionCenter.
                     case .requestClarification(let question, let operationID, let sourceNodeID, let options, let multiline):
-                        agentMessage.thinkingHeadline = "Asking you a question..."
                         agentMessage.agentState = .interaction(.clarification)
                         agentMessage.lifecycleState = .parkedHITL(operationID: operationID)
                         await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
@@ -427,7 +424,6 @@ final class ActiveStreamManager {
 
                     // [E1] Workflow Gate request → unified InteractionCenter as a `.gate` interaction.
                     case .requestGate(let prompt, let options, let operationID, let deadline, let sourceNodeID):
-                        agentMessage.thinkingHeadline = "Waiting for your decision..."
                         agentMessage.agentState = .interaction(.gate)
                         agentMessage.lifecycleState = .parkedHITL(operationID: operationID)
                         await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
@@ -444,29 +440,35 @@ final class ActiveStreamManager {
 
                     case .toolSucceeded(let output, let durationMs, let sourceNodeID):
                         agentMessage.agentState = .thinking(.reflecting)
-                        agentMessage.thinkingHeadline = "Processed \(output.toolName)"
-                        Self.completeToolTimelineEvent(
-                            output: output,
-                            failureCategory: nil,
-                            durationMs: durationMs,
-                            sourceNodeID: sourceNodeID,
-                            agentMessage: agentMessage,
-                            workflowExecutionState: workflowExecutionState
-                        )
+                        // Card-nested rows first (plan step / reflection attempt); fall back
+                        // to the top-level / workflow-node completion path.
+                        if !(capabilityCardsEnabled && sourceNodeID == nil
+                             && capabilityRouter.completeTool(output: output, failureCategory: nil, durationMs: durationMs)) {
+                            Self.completeToolTimelineEvent(
+                                output: output,
+                                failureCategory: nil,
+                                durationMs: durationMs,
+                                sourceNodeID: sourceNodeID,
+                                agentMessage: agentMessage,
+                                workflowExecutionState: workflowExecutionState
+                            )
+                        }
                         // [G1 Piece 1] Boundary flush — capture the completed tool's output durably.
                         await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
 
                     case .toolFailed(let output, let category, let suggestion, let sourceNodeID):
                         agentMessage.agentState = .thinking(.reflecting)
-                        agentMessage.thinkingHeadline = "\(category.displayName): \(output.toolName)"
-                        Self.completeToolTimelineEvent(
-                            output: output,
-                            failureCategory: category,
-                            durationMs: nil,
-                            sourceNodeID: sourceNodeID,
-                            agentMessage: agentMessage,
-                            workflowExecutionState: workflowExecutionState
-                        )
+                        if !(capabilityCardsEnabled && sourceNodeID == nil
+                             && capabilityRouter.completeTool(output: output, failureCategory: category, durationMs: nil)) {
+                            Self.completeToolTimelineEvent(
+                                output: output,
+                                failureCategory: category,
+                                durationMs: nil,
+                                sourceNodeID: sourceNodeID,
+                                agentMessage: agentMessage,
+                                workflowExecutionState: workflowExecutionState
+                            )
+                        }
                         // [G1 Piece 1] Boundary flush — capture the failed tool's outcome durably.
                         await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
                         if let s = suggestion {
@@ -478,14 +480,27 @@ final class ActiveStreamManager {
                         // 3. Handle Final Text (Buffered)
                         if agentMessage.agentState != .thinking(.finalizing) {
                             agentMessage.agentState = .thinking(.finalizing)
-                            agentMessage.thinkingHeadline = "Finalizing..."
                         }
                         
                         tokenBuffer += textChunk
                         tokensReceivedInWindow += textChunk.count
 
+                        // Flush on TIME only.
+                        //
+                        // There used to be an `|| tokenBuffer.count > 50` escape hatch, which
+                        // inverted the whole throttle for fast producers: an in-process MLX
+                        // model fills 50 chars far quicker than `adaptiveInterval`, so the
+                        // buffer clause won every time and forced a re-render every ~50 chars
+                        // (~54 for a 2.7k reply) no matter how far behind the UI already was.
+                        // The producer would finish while the consumer was still draining
+                        // buffered tokens one render at a time — the model completed in 15s
+                        // and the bubble kept dripping for ~a minute.
+                        //
+                        // The time clause alone already bounds latency to <= adaptiveInterval
+                        // (0.2s worst case), and it degrades the RIGHT way: the further behind
+                        // we fall, the more tokens coalesce into a single render.
                         let elapsed = -lastUpdateTime.timeIntervalSinceNow
-                        if elapsed >= adaptiveInterval || tokenBuffer.count > 50 {
+                        if elapsed >= adaptiveInterval {
                             self.updateMessageContent(agentMessage, with: tokenBuffer, isRegeneration: isRegeneration)
                             // [G1 Piece 1] Coalesced flush — persist streamed prose at most every
                             // `inFlightFlushInterval`, so a long final answer isn't lost if interrupted.
@@ -532,25 +547,22 @@ final class ActiveStreamManager {
                         }
 
                     case .warning(let category, let message, _, let sourceNodeID):
-                        agentMessage.thinkingHeadline = "⚠️ \(message)"
                         let warningEvent = TimelineEvent.warning(id: UUID(), category: category, text: message)
                         if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
                             wfState.appendNodeTimelineEvent(warningEvent, for: nodeID)
                             logger.debug("[WF_ROUTE] Warning[\(category.rawValue)] → node timeline [\(nodeID)]")
-                        } else {
+                        } else if !(capabilityCardsEnabled && capabilityRouter.route(warningEvent)) {
                             agentMessage.appendTimelineEvent(warningEvent)
                         }
                         logger.warning("Stream Warning [\(category.rawValue)]: \(message)")
 
                     // MARK: Workflow Orchestration Events
                     case .workflowNodeStarted(let nodeID, let profileName, let idx, let total):
-                        agentMessage.thinkingHeadline = "Running \(profileName) (\(idx)/\(total))..."
                         agentMessage.agentState = .acting(.subtask(current: idx, total: total))
                         logger.info("[WF_EVENT] NodeStarted: '\(profileName)' [\(nodeID)] (\(idx)/\(total))")
                         workflowExecutionState?.handleNodeStarted(nodeID: nodeID, profileName: profileName, index: idx, total: total)
 
                     case .workflowNodeCompleted(let nodeID, let profileName, let summary, let nodeHasWarnings):
-                        agentMessage.thinkingHeadline = "\(profileName) completed"
                         let completedId = UUID()
                         // `summary` now carries the node's FULL output (for the per-node
                         // Output panel + persistence via handleNodeCompleted). Keep the
@@ -565,19 +577,16 @@ final class ActiveStreamManager {
                         workflowExecutionState?.handleNodeCompleted(nodeID: nodeID, profileName: profileName, summary: summary, hasWarnings: nodeHasWarnings)
 
                     case .workflowNodeFailed(let nodeID, let profileName, let error, let suggestion):
-                        agentMessage.thinkingHeadline = "\(profileName) failed"
                         let failedId = UUID()
                         agentMessage.appendTimelineEvent(.thought(id: failedId, text: "❌ \(profileName): \(error)"))
                         logger.info("[WF_EVENT] NodeFailed: '\(profileName)' [\(nodeID)] error=\(error)")
                         workflowExecutionState?.handleNodeFailed(nodeID: nodeID, profileName: profileName, error: error, suggestion: suggestion)
 
                     case .workflowProgress(let completed, let total):
-                        agentMessage.thinkingHeadline = "Workflow progress: \(completed)/\(total)"
                         logger.info("[WF_EVENT] Progress: \(completed)/\(total)")
                         workflowExecutionState?.handleProgress(completed: completed, total: total)
 
                     case .workflowLoopIteration(let nodeID, let profileName, let iteration, let maxIterations):
-                        agentMessage.thinkingHeadline = "Loop \(profileName): iteration \(iteration)/\(maxIterations)"
                         let iterationId = UUID()
                         agentMessage.appendTimelineEvent(.thought(id: iterationId, text: "🔄 \(profileName): iteration \(iteration)/\(maxIterations)"))
                         logger.info("[WF_EVENT] LoopIteration: '\(profileName)' [\(nodeID)] \(iteration)/\(maxIterations)")
@@ -585,20 +594,37 @@ final class ActiveStreamManager {
 
                     // MARK: Capability Events (Planning, Self-Reflection, Delegation)
 
-                    case .planGenerated(let count):
-                        agentMessage.thinkingHeadline = "Planned \(count) subtask\(count == 1 ? "" : "s")"
+                    case .planGenerated(let subtasks):
+                        let count = subtasks.count
                         agentMessage.agentState = .thinking(.planning)
-                        agentMessage.appendTimelineEvent(.capabilityMilestone(
-                            id: UUID(), kind: .planGenerated, detail: "Planned \(count) subtask\(count == 1 ? "" : "s")"
-                        ))
+                        if capabilityCardsEnabled {
+                            capabilityRouter.handlePlanGenerated(subtasks)
+                        } else {
+                            agentMessage.appendTimelineEvent(.capabilityMilestone(
+                                id: UUID(), kind: .planGenerated, detail: "Planned \(count) subtask\(count == 1 ? "" : "s")"
+                            ))
+                        }
+
+                    case .planApproved(let subtasks):
+                        agentMessage.agentState = .thinking(.planning)
+                        if capabilityCardsEnabled {
+                            capabilityRouter.handlePlanApproved(subtasks)
+                        } else {
+                            agentMessage.appendTimelineEvent(.capabilityMilestone(
+                                id: UUID(), kind: .planGenerated, detail: "Plan approved (\(subtasks.count) subtask\(subtasks.count == 1 ? "" : "s"))"
+                            ))
+                        }
 
                     case .requestPlanReview(let subtasks, let operationID, let sourceNodeID):
-                        agentMessage.thinkingHeadline = "Plan ready for review"
                         agentMessage.agentState = .interaction(.planReview)
-                        agentMessage.appendTimelineEvent(.capabilityMilestone(
-                            id: UUID(), kind: .planReviewRequested,
-                            detail: "Plan with \(subtasks.count) subtask\(subtasks.count == 1 ? "" : "s") awaiting approval"
-                        ))
+                        if capabilityCardsEnabled {
+                            capabilityRouter.handlePlanReviewRequested()
+                        } else {
+                            agentMessage.appendTimelineEvent(.capabilityMilestone(
+                                id: UUID(), kind: .planReviewRequested,
+                                detail: "Plan with \(subtasks.count) subtask\(subtasks.count == 1 ? "" : "s") awaiting approval"
+                            ))
+                        }
                         self.enqueueHITL(
                             operationID: operationID,
                             kind: .planReview(PendingPlanReview(id: operationID, subtasks: subtasks)),
@@ -610,50 +636,71 @@ final class ActiveStreamManager {
                             traceContext: traceContext
                         )
 
-                    case .subtaskStarted(let index, let total, let description):
-                        agentMessage.thinkingHeadline = "Subtask \(index)/\(total): \(description)"
+                    case .subtaskStarted(let id, let index, let total, let description):
                         agentMessage.agentState = .acting(.subtask(current: index, total: total))
-                        agentMessage.appendTimelineEvent(.capabilityMilestone(
-                            id: UUID(), kind: .subtaskStarted, detail: "Subtask \(index)/\(total): \(description)"
-                        ))
+                        if capabilityCardsEnabled {
+                            capabilityRouter.handleSubtaskStarted(id: id, description: description)
+                        } else {
+                            agentMessage.appendTimelineEvent(.capabilityMilestone(
+                                id: UUID(), kind: .subtaskStarted, detail: "Subtask \(index)/\(total): \(description)"
+                            ))
+                        }
+                        // [G1 Piece 1] Boundary flush — persist the step transition durably.
+                        await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
 
-                    case .subtaskCompleted(let index, let total, let summary):
-                        agentMessage.thinkingHeadline = "Subtask \(index)/\(total) complete"
-                        agentMessage.appendTimelineEvent(.capabilityMilestone(
-                            id: UUID(), kind: .subtaskCompleted, detail: "Subtask \(index)/\(total): \(summary)"
-                        ))
+                    case .subtaskCompleted(let id, let index, let total, let summary, let outcome, let durationMs):
+                        if capabilityCardsEnabled {
+                            capabilityRouter.handleSubtaskCompleted(id: id, summary: summary, outcome: outcome, durationMs: durationMs)
+                        } else {
+                            agentMessage.appendTimelineEvent(.capabilityMilestone(
+                                id: UUID(), kind: .subtaskCompleted, detail: "Subtask \(index)/\(total): \(summary)"
+                            ))
+                        }
+                        await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
 
                     case .reflectionTrialStarted(let trial, let maxTrials):
-                        agentMessage.thinkingHeadline = "Attempt \(trial)/\(maxTrials)"
                         agentMessage.agentState = .thinking(.reasoning)
-                        agentMessage.appendTimelineEvent(.capabilityMilestone(
-                            id: UUID(), kind: .reflectionTrialStarted, detail: "Trial \(trial) of \(maxTrials)"
-                        ))
+                        if capabilityCardsEnabled {
+                            capabilityRouter.handleTrialStarted(trial: trial, maxTrials: maxTrials)
+                        } else {
+                            agentMessage.appendTimelineEvent(.capabilityMilestone(
+                                id: UUID(), kind: .reflectionTrialStarted, detail: "Trial \(trial) of \(maxTrials)"
+                            ))
+                        }
 
                     case .reflectionEvaluating(let trial):
-                        agentMessage.thinkingHeadline = "Evaluating attempt \(trial)..."
                         agentMessage.agentState = .thinking(.reflecting)
-                        agentMessage.appendTimelineEvent(.capabilityMilestone(
-                            id: UUID(), kind: .reflectionEvaluating, detail: "Evaluating trial \(trial)"
-                        ))
+                        if capabilityCardsEnabled {
+                            capabilityRouter.handleTrialEvaluating(trial: trial)
+                        } else {
+                            agentMessage.appendTimelineEvent(.capabilityMilestone(
+                                id: UUID(), kind: .reflectionEvaluating, detail: "Evaluating trial \(trial)"
+                            ))
+                        }
 
                     case .reflectionRetrying(let trial, let critique):
-                        let shortCritique = String(critique.prefix(80))
-                        agentMessage.thinkingHeadline = "Retrying with feedback (\(trial + 1))..."
                         agentMessage.agentState = .thinking(.reflecting)
-                        agentMessage.appendTimelineEvent(.capabilityMilestone(
-                            id: UUID(), kind: .reflectionRetrying, detail: "Retry: \(shortCritique)"
-                        ))
+                        if capabilityCardsEnabled {
+                            // Full critique — the card is the critique's home now; the old
+                            // 80-char milestone truncation lost the evaluator's reasoning.
+                            capabilityRouter.handleTrialRejected(trial: trial, critique: critique)
+                        } else {
+                            agentMessage.appendTimelineEvent(.capabilityMilestone(
+                                id: UUID(), kind: .reflectionRetrying, detail: "Retry: \(String(critique.prefix(80)))"
+                            ))
+                        }
 
                     case .reflectionAccepted(let trial):
-                        agentMessage.thinkingHeadline = "Result accepted (attempt \(trial))"
-                        agentMessage.appendTimelineEvent(.capabilityMilestone(
-                            id: UUID(), kind: .reflectionAccepted, detail: "Accepted on trial \(trial)"
-                        ))
+                        if capabilityCardsEnabled {
+                            capabilityRouter.handleTrialAccepted(trial: trial)
+                        } else {
+                            agentMessage.appendTimelineEvent(.capabilityMilestone(
+                                id: UUID(), kind: .reflectionAccepted, detail: "Accepted on trial \(trial)"
+                            ))
+                        }
 
                     case .delegationStarted(let task):
                         let shortTask = String(task.prefix(60))
-                        agentMessage.thinkingHeadline = "Delegating: \(shortTask)…"
                         agentMessage.agentState = .acting(.tool(name: "call_agent"))
                         agentMessage.appendTimelineEvent(.capabilityMilestone(
                             id: UUID(), kind: .delegationStarted, detail: shortTask
@@ -661,14 +708,12 @@ final class ActiveStreamManager {
 
                     case .delegationCompleted(let summary):
                         let shortSummary = String(summary.prefix(80))
-                        agentMessage.thinkingHeadline = "Agent completed"
                         agentMessage.appendTimelineEvent(.capabilityMilestone(
                             id: UUID(), kind: .delegationCompleted, detail: shortSummary
                         ))
 
                     // MARK: History Compaction Events
                     case .compactionStarted(let turns, let checkpoint):
-                        agentMessage.thinkingHeadline = "Compacting history (\(turns) turns)..."
                         agentMessage.appendTimelineEvent(.capabilityMilestone(
                             id: UUID(), kind: .compactionStarted,
                             detail: "Compacting \(turns) turns into checkpoint #\(checkpoint)"
@@ -676,23 +721,38 @@ final class ActiveStreamManager {
 
                     case .compactionCompleted(let turns, let preview):
                         let shortPreview = String(preview.prefix(100))
-                        agentMessage.thinkingHeadline = nil
                         agentMessage.appendTimelineEvent(.capabilityMilestone(
                             id: UUID(), kind: .compactionCompleted,
                             detail: "History compacted \u{2014} \(turns) turns summarized: \(shortPreview)"
                         ))
 
                     // MARK: Multimodal Events
-                    case .mediaProgress(let toolName, let percent, let status):
-                        agentMessage.thinkingHeadline = "\(toolName): \(status) (\(Int(percent * 100))%)"
+                    case .mediaProgress:
+                        // Deliberately dropped. This only ever drove the dynamic island's headline
+                        // ("imageGen: Step 12/30"), and the island is gone.
+                        //
+                        // Generation is still visible: its only emitter (ImageGenExecutor) yields
+                        // `.thought("Generating image with <model>…")` immediately before the first
+                        // progress event, and that reaches the timeline — followed by the artifact
+                        // itself. What's lost is the live step counter, nothing else.
+                        //
+                        // Restoring it isn't a one-liner and would be a NEW feature rather than a
+                        // repair: the timeline has no progress concept at all, `TimelineEvent`
+                        // carries no percent, and `appendTimelineEvent` only appends — so ticking
+                        // events would either flood the action group ("Produced 47 artifacts") or
+                        // need an upsert plus a change to a persisted enum.
+                        break
 
                     case .artifactProduced(let artifact):
-                        agentMessage.appendTimelineEvent(.mediaGeneration(
+                        let mediaEvent = TimelineEvent.mediaGeneration(
                             id: UUID(),
                             toolName: artifact.label ?? artifact.kind.rawValue,
                             artifact: artifact,
                             isComplete: true
-                        ))
+                        )
+                        if !(capabilityCardsEnabled && capabilityRouter.route(mediaEvent)) {
+                            agentMessage.appendTimelineEvent(mediaEvent)
+                        }
 
                     // MARK: Token Usage
                     case .tokenUsage(let usage):
@@ -704,6 +764,9 @@ final class ActiveStreamManager {
                     case .executionFinished(let outcome, let reason):
                         agentMessage.terminalOutcome = outcome
                         agentMessage.terminalReason = reason
+                        if capabilityCardsEnabled {
+                            capabilityRouter.handleExecutionFinished(outcome: outcome)
+                        }
                         logger.info("[STREAM_TERMINAL] outcome=\(outcome.rawValue), reason=\(reason ?? "nil")")
                     }
                 }
@@ -731,6 +794,11 @@ final class ActiveStreamManager {
                     agentMessage.terminalOutcome = .cancelled
                     agentMessage.terminalReason = agentMessage.terminalReason ?? "Cancelled by user"
                 }
+                // Close any open capability cards so a persisted card never claims to
+                // still be executing (mirrors the terminalOutcome safety net above).
+                if capabilityCardsEnabled {
+                    capabilityRouter.handleExecutionFinished(outcome: agentMessage.terminalOutcome ?? .completed)
+                }
                 await self.finalizeMessage(agentMessage, conversationID: conversationID, error: nil)
 
             } catch is CancellationError {
@@ -740,10 +808,16 @@ final class ActiveStreamManager {
                     agentMessage.terminalOutcome = .cancelled
                     agentMessage.terminalReason = agentMessage.terminalReason ?? "Cancelled by user"
                 }
+                if capabilityCardsEnabled {
+                    capabilityRouter.handleExecutionFinished(outcome: .cancelled)
+                }
                 await self.finalizeMessage(agentMessage, conversationID: conversationID, error: nil)
             } catch {
                 logger.error("[STREAM_ERROR] traceID: \(agentMessage.traceID ?? "?"), messageID: \(agentMessage.id.uuidString.prefix(8)), error: \(error.localizedDescription)")
                 workflowExecutionState?.handleError(error.localizedDescription)
+                if capabilityCardsEnabled {
+                    capabilityRouter.handleExecutionFinished(outcome: .failed)
+                }
                 await self.finalizeMessage(agentMessage, conversationID: conversationID, error: error)
             }
             
@@ -977,7 +1051,6 @@ final class ActiveStreamManager {
         // death that skips finalize leaves a persisted `.streaming` / `.parkedHITL` row behind.
         message.lifecycleState = .final
         lastInFlightFlush.removeValue(forKey: message.id)
-        message.thinkingHeadline = nil // Clear the headline
         message.agentState = .idle
         // [HITL/P5] No center drain here: a normally-finalized stream has no parked HITL (the agent
         // can't complete while waiting), and cancel/error paths route through
@@ -1039,25 +1112,26 @@ final class ActiveStreamManager {
                 message.agentResponse?.variants[agentResponse.selectedVariantIndex].content = errorContent
             }
         } else {
-            if let currentAgentContent = message.currentAgentContent,
-               let text = currentAgentContent.textContent,
-               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                // Stream produced content before finishing/cancellation — keep it
-                message.content = currentAgentContent
-            } else {
-                // No meaningful content was streamed (cancelled before response,
-                // or response was empty whitespace). Show a placeholder so the
-                // user knows the operation was stopped rather than seeing an
-                // empty bubble with action buttons as if it completed normally.
-                let placeholderContent = MessageContent.markdownText("*Operation was stopped before a response could be generated.*")
-                message.content = placeholderContent
-                // Also update the agentResponse variant to stay in sync —
-                // without this, `currentAgentContent` could return a stale
-                // empty variant that the UI reads instead of message.content.
-                if let agentResponse = message.agentResponse,
-                   agentResponse.variants.indices.contains(agentResponse.selectedVariantIndex) {
-                    message.agentResponse?.variants[agentResponse.selectedVariantIndex].content = placeholderContent
-                }
+            // Resolve the display content: streamed text if any; else a generated
+            // image (image runs stream NO text — without this promotion the artifact
+            // stayed only in the timeline as a `.mediaGeneration` event, which the
+            // bubble can't render, so a successful generation showed the placeholder
+            // and the image was invisible — audit gap #2); else the "stopped"
+            // placeholder so an empty/cancelled run doesn't masquerade as a clean
+            // completion. Logic lives in `ChatMessage.resolveFinalizedContent` so it's
+            // unit-testable (GeneratedImageRenderGapTests).
+            let resolvedContent = ChatMessage.resolveFinalizedContent(
+                streamed: message.currentAgentContent,
+                imageArtifact: message.lastCompletedImageArtifact
+            )
+            message.content = resolvedContent
+            // Keep the selected variant in sync so `currentAgentContent` (which the UI
+            // reads) doesn't return a stale empty variant. A no-op when `resolvedContent`
+            // IS the streamed content; load-bearing for the promoted-image / placeholder
+            // cases.
+            if let agentResponse = message.agentResponse,
+               agentResponse.variants.indices.contains(agentResponse.selectedVariantIndex) {
+                message.agentResponse?.variants[agentResponse.selectedVariantIndex].content = resolvedContent
             }
         }
         

@@ -116,7 +116,8 @@ struct QuickAccessSettingsView: View {
             }
             .padding(24)
         }
-        .background(theme.primaryBackground)
+        .scrollContentBackground(.hidden)
+        .background(Color.clear)
         .onAppear {
             profileConfig.selectedProfileID = UserDefaults.standard
                 .string(forKey: GlobalConstants.quickAccessProfileID)

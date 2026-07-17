@@ -112,7 +112,16 @@ struct DiffUtility {
         let n = original.count
         let m = modified.count
 
-        guard n > 0 || m > 0 else { return [] }
+        // A one-sided (or empty) core needs no LCS: an empty original means every
+        // modified line was added; an empty modified means every original line was
+        // deleted. This is identical to what the backtrack below would yield — and,
+        // crucially, it guards the `1...n` / `1...m` loops, which trap on `1...0`
+        // when a dimension is 0. That is reached on ANY pure-insertion or
+        // pure-deletion diff (append lines to a file; a file ending in a newline vs
+        // a trailing-trimmed snippet), i.e. common input, not an edge case. Both-empty
+        // falls out of the first branch as `[]`.
+        if n == 0 { return modified.map { ($0, .added) } }
+        if m == 0 { return original.map { ($0, .deleted) } }
 
         // --- Forward pass: compute LCS lengths with two rows ---
         // We also need the full backtrack info, so store direction pointers.

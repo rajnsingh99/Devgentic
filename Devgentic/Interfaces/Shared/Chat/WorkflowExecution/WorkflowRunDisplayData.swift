@@ -80,11 +80,11 @@ struct WorkflowRunDisplayData {
 
             var label: String {
                 switch self {
-                case .pending:   return "Waiting"
-                case .running:   return "Running..."
-                case .completed: return "Completed"
-                case .failed:    return "Failed"
-                case .skipped:   return "Skipped"
+                case .pending:   return String(localized: "Waiting")
+                case .running:   return String(localized: "Running...")
+                case .completed: return String(localized: "Completed")
+                case .failed:    return String(localized: "Failed")
+                case .skipped:   return String(localized: "Skipped")
                 }
             }
         }
@@ -311,6 +311,40 @@ struct WorkflowRunDisplayData {
         case .completed: return .completed
         case .failed:    return .failed
         case .skipped:   return .skipped
+        }
+    }
+}
+
+// MARK: - Run-level status vocabulary (single source of truth)
+
+/// Canonical icon / color / label for a whole-run status, mirroring
+/// `NodeDisplayData.NodeStatus`. The run history list and the dedicated view's
+/// run picker delegate here instead of each re-deriving the mapping.
+extension WorkflowRunRecord.RunStatus {
+    var icon: String {
+        switch self {
+        case .running:   return "circle.fill"
+        case .completed: return "checkmark.circle.fill"
+        case .failed:    return "xmark.circle.fill"
+        case .cancelled: return "stop.circle.fill"
+        }
+    }
+
+    func color(_ theme: any Theme) -> Color {
+        switch self {
+        case .completed: return theme.successColor
+        case .failed:    return theme.errorColor
+        case .cancelled: return theme.warningColor
+        case .running:   return theme.accentColor
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .running:   return String(localized: "Running")
+        case .completed: return String(localized: "Completed")
+        case .failed:    return String(localized: "Failed")
+        case .cancelled: return String(localized: "Cancelled")
         }
     }
 }

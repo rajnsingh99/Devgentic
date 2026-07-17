@@ -429,7 +429,6 @@ enum BundleExporter {
         let safeKeys: [String] = [
             AppSettings.developerModeKey,
             AppSettings.useStreamingResponseKey,
-            AppSettings.agentViewVariantKey,
             AppSettings.speechModelKey,
             AppSettings.speechLanguageKey,
             AppSettings.speechAutoStopOnSilenceKey,

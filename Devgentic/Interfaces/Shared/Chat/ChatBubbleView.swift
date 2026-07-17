@@ -45,6 +45,10 @@ struct ChatBubbleView: View {
                     isAgentic: isAgentic,
                     contentToDisplay: contentToDisplay
                 )
+                // Settled bubbles skip their body when this view is recreated by a parent
+                // re-render — see AgentBubbleContentView.==, which never claims equality
+                // while streaming.
+                .equatable()
                 .frame(minHeight: applyMinHeight ? ChatUIConstants.streamingBubbleMinHeight : nil, alignment: .topLeading)
             } else {
                 UserBubbleContentView(message: message)
@@ -103,98 +107,27 @@ struct ChatBubbleView: View {
 struct SparkleLoadingView: View {
     var headline: String?
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isAnimating = false
 
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "sparkles")
-                .symbolEffect(.bounce.up.byLayer, options: .repeating, value: isAnimating)
+                // `isActive:` rather than `value:` so Reduce Motion can stop it. A bounce
+                // repeating for as long as the agent is loading is the most motion-heavy
+                // effect in the chat.
+                .symbolEffect(.bounce.up.byLayer, options: .repeating, isActive: isAnimating && !reduceMotion)
                 .font(.system(.body, weight: .semibold))
                 .foregroundColor(theme.accentColor)
 
-            Text(headline ?? "Generating...")
+            Text(headline ?? String(localized: "Generating..."))
                 .font(theme.fontBody.weight(.medium))
                 .foregroundColor(theme.secondaryText)
         }
         .padding(.vertical, 4)
         .onAppear { isAnimating = true }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(headline ?? "Generating response")
-    }
-}
-
-// MARK: - Agent: Tool Artifacts
-struct ToolArtifactsRow: View {
-    let artifacts: [ToolOutput]
-
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(artifacts) { artifact in
-                    ToolChipView(artifact: artifact)
-                }
-            }
-            .padding(.vertical, 4)
-            .padding(.horizontal, 1)
-        }
-    }
-}
-
-struct ToolChipView: View {
-    let artifact: ToolOutput
-    @Environment(\.appTheme) private var theme
-    @State private var showPopover: Bool = false
-
-    var body: some View {
-        Button(action: { showPopover.toggle() }) {
-            HStack(spacing: 6) {
-                Image(systemName: iconForTool(artifact.toolName))
-                    .font(.system(.caption2))
-                    .foregroundColor(artifact.isSuccess ? theme.secondaryText : theme.warningColor)
-                Text(artifact.toolName).font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundColor(theme.primaryText) // Fixed size: monospaced
-                if !artifact.isSuccess {
-                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 8)).foregroundColor(theme.warningColor) // Fixed size: intentional (badge/chip text)
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(theme.surfaceOverlay)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(artifact.isSuccess ? theme.successColor.opacity(0.2) : theme.warningColor.opacity(0.3), lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(artifact.toolName), \(artifact.isSuccess ? "succeeded" : "failed")")
-        .popover(isPresented: $showPopover, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack {
-                    Text("Tool Output: \(artifact.toolName)").font(.headline)
-                    Spacer()
-                    if artifact.isSuccess { Label("Success", systemImage: "checkmark.circle.fill").foregroundColor(theme.successColor) }
-                    else { Label("Failed", systemImage: "xmark.circle.fill").foregroundColor(theme.warningColor) }
-                }
-                .padding()
-                .background(theme.controlBackground)
-                Divider()
-                ScrollView {
-                    Text(artifact.output).font(.system(size: 11, design: .monospaced)).padding().frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) // Fixed size: monospaced
-                }
-            }
-            .frame(width: 400, height: 300)
-        }
-    }
-
-    private func iconForTool(_ name: String) -> String {
-        switch name {
-        case "list_directory": return "folder.fill"
-        case "read_file": return "doc.text.fill"
-        case "write_file": return "pencil.circle.fill"
-        case "delete_file": return "trash.fill"
-        case "execute_shell": return "terminal.fill"
-        case "web_search": return "globe"
-        case "fs_smart_search": return "magnifyingglass"
-        case "ask_user": return "person.fill.questionmark"
-        default: return "hammer.fill"
-        }
+        .accessibilityLabel(headline ?? String(localized: "Generating response"))
     }
 }
 
@@ -372,7 +305,7 @@ struct VariantsSelectionView: View {
                         ForEach(Array(zip(agentResponse.variants.indices, agentResponse.variants)), id: \.0) { index, variant in
                             Button(action: { message.agentResponse?.selectedVariantIndex = index; isPresented = false }) {
                                 HStack {
-                                    Text(variant.content.textContent ?? "Empty Response").lineLimit(3).font(.body).foregroundColor(theme.primaryText).frame(maxWidth: .infinity, alignment: .leading)
+                                    Text(variant.content.textContent ?? String(localized: "Empty Response")).lineLimit(3).font(.body).foregroundColor(theme.primaryText).frame(maxWidth: .infinity, alignment: .leading)
                                     Spacer()
                                     if index == agentResponse.selectedVariantIndex { Image(systemName: "checkmark.circle.fill").foregroundColor(theme.accentColor) }
                                 }

@@ -151,6 +151,8 @@ final class MessagingCoordinator {
             Task { [persistenceService] in
                 await persistenceService.addMessage(userMessage, toConversation: conversationIDToUse)
                 self.logger.debug("User message persisted successfully.")
+                // Conversation-memory indexing happens inside addMessage
+                // (ChatPersistenceStore.addMessages — the funnel all surfaces share).
             }
 
             // Prepare workflow execution state if this is a workflow profile.
@@ -253,8 +255,14 @@ final class MessagingCoordinator {
                                     vm.workflowRunHistory[conversationIDToUse] = Array(vm.workflowRunHistory[conversationIDToUse]!.prefix(20))
                                 }
                             }
-                            WorkflowRunHistoryStore.shared.upsert(record, forConversation: conversationIDToUse)
-                            self.logger.info("Workflow run record finalized: \(record.id) — \(record.status.rawValue)")
+                            // Finalized blobs are large (up to 400 timeline events per
+                            // node); `upsertFinalized` encodes them off-main and hops
+                            // back for the SwiftData write, so completing a big run
+                            // doesn't hitch the UI at the "completed" transition.
+                            Task { @MainActor in
+                                await WorkflowRunHistoryStore.shared.upsertFinalized(record, forConversation: conversationIDToUse)
+                                self.logger.info("Workflow run record finalized: \(record.id) — \(record.status.rawValue)")
+                            }
                         }
                     }
                 }
@@ -413,8 +421,10 @@ final class MessagingCoordinator {
 
         // Rebuild the in-flight state from the persisted timeline. Streaming resume DROPS the dangling
         // tool; parked resume keeps it to re-raise.
+        // Flattened: a run parked inside a plan subtask / reflection trial keeps its tool
+        // and reasoning events nested in the capability card — the reconstructor needs them.
         let reconstruction = TimelineTurnReconstructor.reconstruct(
-            from: agentMessage.timelineEvents,
+            from: agentMessage.flattenedTimelineEvents,
             parkedOperationID: parkedOpID,
             dropDanglingTool: isStreamingResume
         )
@@ -446,6 +456,10 @@ final class MessagingCoordinator {
             if case .toolExecution(let data) = event { return data.isExecuting || data.output == nil }
             return false
         }
+        // Same cleanup one level down: dangling tools nested inside plan/reflection cards,
+        // plus closing any card the interruption left open (the resumed continuation streams
+        // new top-level events, never back into the old card).
+        agentMessage.sanitizeCapabilityCardsForResume()
 
         // Flip back to a live, streaming state — hides the interrupted chip, re-enables indicators.
         agentMessage.isStreaming = true

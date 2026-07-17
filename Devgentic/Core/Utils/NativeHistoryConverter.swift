@@ -207,7 +207,7 @@ struct NativeHistoryConverter {
 
                 // Extract tool names for pointer skeleton
                 var toolNames: [String] = []
-                for event in message.timelineEvents {
+                for event in message.flattenedTimelineEvents {
                     if case .toolExecution(let data) = event, !data.isExecuting {
                         let status = (data.isSuccess ?? false) ? "" : " | Failed"
                         toolNames.append("\(data.name)\(status)")

@@ -194,7 +194,7 @@ final class RAGPipelineDocumentationTests: XCTestCase {
         }
 
         // Assign directly to entity — no converter, no serialisation step
-        let chunk = ChildChunkEntity(chunkText: "HNSW storage test", embedding: embedding, chunkIndex: 0)
+        let chunk = ChildChunkEntity(chunkText: "HNSW storage test", embedding: embedding, chunkIndex: 0, conversationID: "")
 
         // Verify: Exact equality — native floatVector storage has no precision loss
         XCTAssertEqual(chunk.embedding?.count, 384,
@@ -344,7 +344,7 @@ final class RAGPipelineDocumentationTests: XCTestCase {
         // ─── Step 5: Assign to ChildChunkEntity (HNSW native storage) ───
         // ObjectBox stores [Float]? natively as floatVector; no custom converter needed.
         let entities = chunkEmbeddings.enumerated().map { (i, item) in
-            ChildChunkEntity(chunkText: item.text, embedding: item.embedding, chunkIndex: i)
+            ChildChunkEntity(chunkText: item.text, embedding: item.embedding, chunkIndex: i, conversationID: "")
         }
         for (i, entity) in entities.enumerated() {
             XCTAssertEqual(entity.embedding, chunkEmbeddings[i].embedding,

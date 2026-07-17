@@ -412,11 +412,13 @@ struct OllamaModelPickerView: View {
     @Environment(\.appTheme) private var theme
     @State private var models: [String] = []
     @State private var loadedLocalModels: [LocalModel] = [] // Cache to look up capabilities
+    @State private var lastDaemonVersion: String? = nil // Invalidates digest reuse across daemon upgrades
     @State private var isLoading: Bool = false
     @State private var errorMessage: String? = nil
 
     // Alert state for unsupported model selection
     @State private var showUnsupportedAlert: Bool = false
+    @State private var unsupportedReason: String = ""
     @State private var currentFitAssessment: ModelFitAssessment?
 
     var body: some View {
@@ -446,24 +448,16 @@ struct OllamaModelPickerView: View {
                         .foregroundColor(theme.secondaryText)
                         .font(theme.fontCaption)
                 } else {
-                    let visibleModels = filterForTools
-                        ? loadedLocalModels.filter { $0.cognitiveCapability != .none }
-                        : loadedLocalModels
-
-                    if visibleModels.isEmpty && filterForTools {
-                        Text("No tool-capable models found.")
-                            .foregroundColor(theme.warningColor)
-                            .font(theme.fontCaption)
-                    } else {
-                        Picker("Available Models", selection: $selectedModel) {
-                            ForEach(visibleModels, id: \.name) { model in
-                                // Vision badge: flag models that report image-input capability.
-                                Text(model.name + (model.cognitiveProfile.modalities.contains(.visionInput) ? "  👁 Vision" : ""))
-                                    .tag(model.name)
-                            }
+                    // Every installed model is listed — blocked ones carry their reason
+                    // in the row and bounce on selection (handleSelectionChange) instead
+                    // of being silently absent from the list.
+                    Picker("Available Models", selection: $selectedModel) {
+                        ForEach(loadedLocalModels, id: \.name) { model in
+                            Text(rowLabel(for: model))
+                                .tag(model.name)
                         }
-                        .labelsHidden()
                     }
+                    .labelsHidden()
                 }
             }
 
@@ -471,19 +465,76 @@ struct OllamaModelPickerView: View {
             if let assessment = currentFitAssessment, assessment.estimatedRuntimeRAM > 0 {
                 ModelFitInlineView(assessment: assessment)
             }
+
+            // Reliability warning for a selected reasoning-focused model: the daemon
+            // accepts tool requests, but the fine-tune's tool-call quality is suspect.
+            if filterForTools,
+               let selected = loadedLocalModels.first(where: { $0.name == selectedModel }),
+               selected.cognitiveCapability != .none,
+               selected.cognitiveProfile.toolSupportCaveat == .reasoningFocused {
+                Label("Reasoning-focused model — tool calls may be unreliable in agent runs.", systemImage: "exclamationmark.triangle.fill")
+                    .font(theme.fontCaption)
+                    .foregroundColor(theme.warningColor)
+            }
+
+            // Agent profile with zero usable models: every row is blocked, so say so
+            // (selection bouncing alone would read as a broken picker).
+            if filterForTools, !loadedLocalModels.isEmpty,
+               !loadedLocalModels.contains(where: { $0.cognitiveCapability != .none }) {
+                Text("No tool-capable models installed — agent profiles need tool support.")
+                    .font(theme.fontCaption)
+                    .foregroundColor(theme.warningColor)
+            }
         }
         .onAppear(perform: fetchModels)
         .onChange(of: baseURL) { _, _ in
             fetchModels()
         }
-        .onChange(of: selectedModel) { _, newValue in
-            handleSelectionChange(newValue: newValue)
+        .onChange(of: selectedModel) { oldValue, newValue in
+            handleSelectionChange(oldValue: oldValue, newValue: newValue)
         }
         .alert("Unsupported Model", isPresented: $showUnsupportedAlert) {
             Button("OK", role: .cancel) { }
         } message: {
-            Text("You have selected a Chat-Only model. Agent profiles require models with Tool Calling capabilities. Please select a supported model.")
+            Text(unsupportedReason)
         }
+    }
+
+    /// Row badges: blocked models show why they can't back an agent; reasoning-focused
+    /// ones show the reliability flag. Bot pickers keep the plain name + vision badge.
+    private func rowLabel(for model: LocalModel) -> String {
+        var label = model.name
+        if model.cognitiveProfile.modalities.contains(.visionInput) {
+            label += "  👁 Vision"
+        }
+        guard filterForTools else { return label }
+        if model.cognitiveCapability == .none {
+            label += "  🚫 No tools"
+        } else if model.cognitiveProfile.toolSupportCaveat == .reasoningFocused {
+            label += "  ⚠️ Reasoning-focused"
+        }
+        return label
+    }
+
+    /// Human-readable reason a model can't back an agent profile, from its caveat.
+    private static func blockReason(for model: LocalModel) -> String {
+        switch model.cognitiveProfile.toolSupportCaveat {
+        case .serverRejectsTools:
+            return "Ollama reports '\(model.name)' has no tool support — the server rejects tool requests, which agent profiles require."
+        case .reasoningFocused:
+            return "'\(model.name)' is a reasoning-focused model and this Ollama version can't confirm tool support. Upgrade Ollama for authoritative capability data."
+        case .undetected:
+            return "Tool support for '\(model.name)' couldn't be verified on this Ollama version. Upgrade Ollama for authoritative capability detection."
+        case nil:
+            return "'\(model.name)' does not support tool calling, which agent profiles require."
+        }
+    }
+
+    /// Sort band for agent pickers: 0 = clean tool support, 1 = usable with a
+    /// caveat (reasoning-focused), 2 = blocked.
+    private static func agentRank(_ model: LocalModel) -> Int {
+        if model.cognitiveCapability == .none { return 2 }
+        return model.cognitiveProfile.toolSupportCaveat == nil ? 0 : 1
     }
 
     private func fetchModels() {
@@ -495,41 +546,31 @@ struct OllamaModelPickerView: View {
         
         isLoading = true
         errorMessage = nil
-        
+
+        // Snapshot state on the main actor before hopping into the task.
+        let cachedModels = loadedLocalModels
+        let cachedVersion = lastDaemonVersion
+
         Task {
             do {
-                let rawNames = try await OllamaConnect.fetchLocalOllamaModels(baseURL: baseURL)
-                
-                // Fetch rich details to evaluate capabilities
-                var fetchedDetails: [LocalModel] = []
-                await withTaskGroup(of: LocalModel?.self) { group in
-                    for name in rawNames {
-                        group.addTask {
-                            do {
-                                let response = try await OllamaConnect.fetchModelDetails(name: name, baseURL: baseURL)
-                                return LocalModel(name: name, response: response)
-                            } catch {
-                                return nil
-                            }
-                        }
-                    }
-                    for await model in group {
-                        if let m = model {
-                            fetchedDetails.append(m)
-                        }
-                    }
-                }
-                
-                // Sort models: If in Agent mode, put valid models first, chat-only at the bottom.
-                // Then sort alphabetically within those respective groups.
+                // Digest-aware refresh (shared with the model manager): cheap
+                // /api/tags + /api/version probe; /api/show detection re-runs only
+                // for new/changed models. Also fixes a silent-hide path — a model
+                // whose detail fetch failed used to be dropped from the picker
+                // entirely; the refresher degrades it to a bare entry instead.
+                let result = try await LocalModelRefresher.refresh(
+                    baseURL: baseURL,
+                    cached: cachedModels,
+                    cachedDaemonVersion: cachedVersion
+                )
+                let fetchedDetails = result.models
+
+                // Agent mode ordering: clean tool support → usable-with-caveat
+                // (reasoning-focused) → blocked; alphabetical within each band.
                 let sortedModels = fetchedDetails.sorted { m1, m2 in
                     if filterForTools {
-                        let m1Supported = m1.cognitiveCapability != .none
-                        let m2Supported = m2.cognitiveCapability != .none
-                        
-                        if m1Supported != m2Supported {
-                            return m1Supported // Supported models bubble up to the top
-                        }
+                        let r1 = Self.agentRank(m1), r2 = Self.agentRank(m2)
+                        if r1 != r2 { return r1 < r2 }
                     }
                     // Fallback to alphabetical sorting
                     return m1.name < m2.name
@@ -538,6 +579,7 @@ struct OllamaModelPickerView: View {
 
                 await MainActor.run {
                     self.loadedLocalModels = sortedModels
+                    self.lastDaemonVersion = result.daemonVersion
                     self.models = fetchedNames
                     
                     // Smart Selection Logic
@@ -574,9 +616,24 @@ struct OllamaModelPickerView: View {
         }
     }
     
-    /// Updates capability bindings when user changes selection.
-    private func handleSelectionChange(newValue: String) {
+    /// Updates capability bindings when the selection changes. In agent mode a
+    /// blocked model bounces back to the previous selection with an explanation —
+    /// unless nothing usable exists, in which case the selection stands (the
+    /// runtime gate reports the failure honestly rather than trapping the picker).
+    private func handleSelectionChange(oldValue: String, newValue: String) {
         guard !loadedLocalModels.isEmpty else { return }
+
+        if filterForTools,
+           let selected = loadedLocalModels.first(where: { $0.name == newValue }),
+           selected.cognitiveCapability == .none,
+           let previous = loadedLocalModels.first(where: { $0.name == oldValue }),
+           previous.cognitiveCapability != .none {
+            unsupportedReason = Self.blockReason(for: selected)
+            showUnsupportedAlert = true
+            selectedModel = oldValue
+            return
+        }
+
         updateCapabilityLevel(for: newValue)
     }
     

@@ -45,7 +45,11 @@ struct NativeStructuredGenerator: CognitiveGenerator {
             dialectRules: dialectRules,
             isNativeFlow: true,
             layerConfig: context.promptLayerConfig,
-            includeWorkingMemory: false
+            includeWorkingMemory: false,
+            // Like working memory: the native executor delivers attachments in the
+            // kickoff user turn it appends after these seeded messages — rendering
+            // them here too would emit a duplicate consecutive user message.
+            includeAttachmentContext: false
         )
     }
 

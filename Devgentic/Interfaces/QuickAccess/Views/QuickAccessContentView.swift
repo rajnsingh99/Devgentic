@@ -10,15 +10,19 @@
 import SwiftUI
 import AppKit // For NSPasteboard / NSOpenPanel
 import UniformTypeIdentifiers // For .fileURL drag-and-drop
-import AVFoundation // For mic-permission request (voice dictation)
 
 struct QuickAccessContentView: View {
     // --- Callbacks ---
     var dismiss: () -> ()
-    var onResize: ((CGFloat) -> Void)?
+    // [Unified card] (height, expanded) — explicit state intent so the panel's resize machinery
+    // never has to infer expand/collapse from the height (a grown collapsed card broke that).
+    var onResize: ((CGFloat, Bool) -> Void)?
     var onToggleZoom: (() -> Void)?
     // [QA revival P2e] Hand the current conversation back to the main window.
     var onContinueInMainWindow: ((UUID) -> Void)?
+    // [Advisory] Settings deep-link from the panel's advisory banner — reverse-handoff
+    // (activate main window → navigate), since the router isn't in the panel's environment.
+    var onOpenProfileSettings: ((UUID) -> Void)?
     // [M9] Register a handler that maps the panel's ⌘Return / Escape onto a pending HITL request.
     var onRegisterHITLKeyHandler: ((@escaping (QuickAccessHITLKeyAction) -> Bool) -> Void)?
 
@@ -37,17 +41,19 @@ struct QuickAccessContentView: View {
     @State private var inputText: String = ""
     @State private var isExpanded: Bool = false
     @State private var isPanelZoomedToFullScreen: Bool = false
-    // [QA revival P0] Drives first-responder focus so the panel is ready to type the
-    // moment it is summoned. Bound to whichever input field is currently on screen.
-    @FocusState private var isInputFocused: Bool
+    // [Unified card] The one editor instance (CustomTextEditor's NSTextView) — focus is driven
+    // via makeFirstResponder (an NSViewRepresentable doesn't reliably take @FocusState).
+    @State private var editorTextView: CustomTextEditor.CustomNSTextView?
+    // [Unified card] Measured height of the input area (card + its outer padding) — drives the
+    // collapsed window height so the panel grows with multi-line text / attachment chips.
+    @State private var inputAreaMeasuredHeight: CGFloat = 90
     // [QA revival P1b] Profile picker popover state.
     @State private var showingProfilePopup: Bool = false
     // [QA revival P2a] Files attached to the next message (panel-local; passed to send()).
     @State private var attachedFiles: [FileSystemItem] = []
-    // [QA revival P2b] Voice dictation state (drives WhisperRecognitionService.shared directly).
-    @State private var isRecording: Bool = false
-    @State private var voiceBaseText: String = ""
-    @State private var voiceTask: Task<Void, Never>?
+    // [QA revival P2b → Composer P2] Voice dictation via the shared ComposerVoiceController
+    // (per-instance; owns the Whisper session lifecycle incl. the C9 re-entry/cancel guards).
+    @State private var voice = ComposerVoiceController()
     // [QA revival P3] Screen-capture state.
     @State private var isCapturing: Bool = false
     @State private var showCaptureDeniedPopover: Bool = false
@@ -56,6 +62,10 @@ struct QuickAccessContentView: View {
     // [L3] Shown when microphone permission is denied.
     @State private var showMicDeniedPopover: Bool = false
     @State private var isMenuHovered: Bool = false
+
+    // [Composer P1] What this surface offers — drives which shared composer buttons render
+    // (screenshot is a QuickAccess capability; the main composer has it off).
+    private let capabilities = ComposerCapabilities.quickAccess
 
     // --- Styling Constants ---
     // [H3] Chrome colors come from the app theme, not hardcoded white, so the panel stays
@@ -66,8 +76,9 @@ struct QuickAccessContentView: View {
     private var iconColor: Color { theme.secondaryText }
     private var placeholderTextColor: Color { theme.placeholderText }
     private var textColor: Color { theme.primaryText }
-    let inputBarHeight: CGFloat = 95
-    let textFieldHeight: CGFloat = 40
+    let inputBarHeight: CGFloat = 90 // collapsed fallback before the card reports its real height (full-bleed)
+    let editorMinHeight: CGFloat = 38 // one line incl. CustomTextEditor's 10pt vertical insets
+    let editorMaxHeight: CGFloat = 120 // ~4 lines, then the editor scrolls internally
     let buttonRowHeight: CGFloat = 30
     let expandedViewMinHeight: CGFloat = 400
     let topBarHeight: CGFloat = 40
@@ -77,9 +88,10 @@ struct QuickAccessContentView: View {
     let expandedInputAreaMaxAllowedWidth: CGFloat = 700
 
     init(dismiss: @escaping () -> (),
-         onResize: ((CGFloat) -> Void)? = nil,
+         onResize: ((CGFloat, Bool) -> Void)? = nil,
          onToggleZoom: (() -> Void)? = nil,
          onContinueInMainWindow: ((UUID) -> Void)? = nil,
+         onOpenProfileSettings: ((UUID) -> Void)? = nil,
          isExpanded: Bool = false,
          shouldResumeSession: Bool = true,
          mainAppViewModel: MainApplicationViewModel,
@@ -89,6 +101,7 @@ struct QuickAccessContentView: View {
         self.onResize = onResize
         self.onToggleZoom = onToggleZoom
         self.onContinueInMainWindow = onContinueInMainWindow
+        self.onOpenProfileSettings = onOpenProfileSettings
         self.onRegisterHITLKeyHandler = onRegisterHITLKeyHandler
         self.shouldResumeSession = shouldResumeSession
         self.mainAppViewModel = mainAppViewModel
@@ -125,12 +138,43 @@ struct QuickAccessContentView: View {
                         .padding(.bottom, 6)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
-                inputAreaViewContainer
+                // [Advisory] Compact ambient warning — same AdvisoryCenter (and dismissal
+                // suppression) as the main window's banner. Same stacking rule too: HITL
+                // above, advisory anchored next to the input, so transient HITL banners
+                // come and go without displacing it.
+                if let advisory = session.conversationID.flatMap({ AdvisoryCenter.shared.current(for: $0) }) {
+                    QuickAccessAdvisoryBanner(
+                        advisory: advisory,
+                        onOpenProfileSettings: { profileID in onOpenProfileSettings?(profileID) }
+                    )
+                    .environment(\.appTheme, themeManager.currentTheme)
                     .frame(maxWidth: isExpanded ? expandedInputAreaMaxAllowedWidth : .infinity)
+                    .padding(.horizontal, isExpanded ? expandedInputAreaHorizontalMargin : 8)
+                    .padding(.bottom, 6)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+                inputCardView
+                    .frame(maxWidth: isExpanded ? expandedInputAreaMaxAllowedWidth : .infinity)
+                    // [UI audit B] Collapsed = FULL-BLEED: the input fills the glass window (no
+                    // nested card-in-bubble margins); expanded keeps the inset card look.
+                    .padding(.horizontal, isExpanded ? 12 : 0)
+                    .padding(.bottom, isExpanded ? 12 : 0)
                     .padding(.horizontal, isExpanded ? expandedInputAreaHorizontalMargin : 0)
+                    // [Unified card] The collapsed window height IS this measured height (the
+                    // card is the only content). Editor growth / chips appearing re-measure and
+                    // the window follows; expanded ignores it (the card grows into the transcript).
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.size.height
+                    } action: { newHeight in
+                        inputAreaMeasuredHeight = newHeight
+                        if !isExpanded { onResize?(newHeight, false) }
+                    }
             }
         }
         .frame(minWidth: contentViewMinWidth)
+        // [Composer P1] The shared composer buttons (ComposerKit) read \.appTheme — set it once at
+        // the panel root so every child themes correctly (inner injections become redundant).
+        .environment(\.appTheme, themeManager.currentTheme)
         // MARK: Liquid Glass — replace material + stroke + shadow with glassEffect
         .background(.clear)
         .clipShape(RoundedRectangle(cornerRadius: isExpanded ? panelCornerRadius : 20, style: .continuous))
@@ -140,9 +184,14 @@ struct QuickAccessContentView: View {
         // here overshot the window bounds and clipped the glass edge mid-expand.
         .animation(.easeInOut(duration: 0.3), value: isExpanded)
         .animation(.easeInOut(duration: 0.2), value: isPanelZoomedToFullScreen)
+        // [Pre-send fit hint] Same composer-state advisory as the main window —
+        // fires when attachments or the panel's profile change, before a send.
+        .onChange(of: attachedFiles.count) { _, _ in evaluatePreSendFit() }
+        .onChange(of: session.backendConfiguration.selectedProfileID) { _, _ in evaluatePreSendFit() }
         .onChange(of: isExpanded) { _, newValue in
-            let newIdealHeight = newValue ? expandedViewMinHeight : inputBarHeight
-            onResize?(newIdealHeight)
+            // [Unified card] Pass explicit intent; collapsed target = the card's measured height
+            // (geometry re-fires after the transition and fine-corrects if paddings shifted it).
+            onResize?(newValue ? expandedViewMinHeight : inputAreaMeasuredHeight, newValue)
             if !newValue {
                 isPanelZoomedToFullScreen = false
             }
@@ -157,14 +206,18 @@ struct QuickAccessContentView: View {
             handleFileDrop(providers)
         }
         .onAppear {
-             let currentIdealHeight = isExpanded ? expandedViewMinHeight : inputBarHeight
-             onResize?(currentIdealHeight)
-             // [QA revival P0] Summon-and-type: focus the input once the panel has become
-             // key. Deferred a runloop tick so focus lands after the window is shown.
-             DispatchQueue.main.async { isInputFocused = true }
+             onResize?(isExpanded ? expandedViewMinHeight : inputAreaMeasuredHeight, isExpanded)
+             // [QA revival P0] Summon-and-type: focus the editor once the panel has become
+             // key. Retried a few runloop ticks — the NSTextView ref arrives asynchronously.
+             focusEditor()
              // [QA revival P1a/P1e] Load the persisted QuickAccess conversation (if resuming);
              // a timed-out session starts fresh.
              session.prepareSession(resume: shouldResumeSession)
+             // [Composer P2] What THIS surface does with dictation events: mirror the transcript
+             // into the input field, surface a permission denial, refocus after a stop.
+             voice.onTextChange = { inputText = $0 }
+             voice.onPermissionDenied = { showMicDeniedPopover = true } // [L3]
+             voice.onFinished = { focusEditor() }
              // [M9] Map the panel's ⌘Return / Escape onto the pending HITL request, so a keyboard
              // user can answer a tool/plan/clarification/gate — and Escape no longer just closes
              // the panel while a run stays parked.
@@ -194,13 +247,25 @@ struct QuickAccessContentView: View {
         // [C4] Stop any in-flight dictation when the panel goes away, so the shared Whisper
         // service doesn't keep the mic hot (and cross-wire the main window) after the panel closes.
         .onDisappear {
-            if isRecording { stopDictation() }
+            voice.stopIfRecording()
             // [H1] Any still-attached (never-sent) screen captures are orphaned when the panel is
             // rebuilt on the next summon — delete their temp files now.
             for file in attachedFiles {
                 QuickAccessScreenCaptureService.deleteCaptureTempFileIfNeeded(file.url)
             }
         }
+    }
+
+    /// [Pre-send fit hint] Posts/clears the shared context-overflow advisory from
+    /// the panel's composer state — same estimator and dedupe key as the main
+    /// window, so both surfaces and the send-time check drive one banner.
+    private func evaluatePreSendFit() {
+        PreSendFitHint.evaluate(
+            attachedFiles: attachedFiles,
+            typedText: inputText,
+            profile: session.selectedProfile,
+            conversationID: session.conversationID
+        )
     }
 
     func submitQuery() {
@@ -344,6 +409,32 @@ extension QuickAccessContentView {
     // ChatHistoryViewModel bound to the shared ActiveStreamManager.
     @ViewBuilder
     private var transcriptView: some View {
+        if session.chatHistoryViewModel.currentChatMessages.isEmpty {
+            // Empty state — a quiet placeholder instead of a large black void (e.g. the panel
+            // auto-expands when a file is attached before anything was sent). Non-hittable so
+            // drags in the empty area still reach the WindowDragArea (panel move).
+            VStack(spacing: 10) {
+                Image(systemName: "bubble.left.and.bubble.right")
+                    .font(.system(size: 30, weight: .light))
+                    .foregroundColor(theme.tertiaryText.opacity(0.7))
+                Text("New conversation")
+                    .font(theme.fontSubheadline.weight(.medium))
+                    .foregroundColor(theme.secondaryText)
+                Text("Responses will appear here.")
+                    .font(.caption)
+                    .foregroundColor(theme.tertiaryText)
+            }
+            .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+            .allowsHitTesting(false)
+            .accessibilityElement(children: .combine)
+            .transition(.opacity)
+        } else {
+            transcriptScrollView
+        }
+    }
+
+    @ViewBuilder
+    private var transcriptScrollView: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 HStack {
@@ -375,6 +466,15 @@ extension QuickAccessContentView {
             .onChange(of: session.streamingMessageID) { _, _ in
                 scrollToLatest(proxy)
             }
+            // [UI audit B] Scroll depth: fade the top ~16pt of the transcript so messages
+            // dissolve under the top bar instead of hard-clipping at the 1px divider.
+            .mask(
+                VStack(spacing: 0) {
+                    LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 16)
+                    Rectangle().fill(Color.black)
+                }
+            )
         }
         .frame(minHeight: 0, maxHeight: .infinity)
     }
@@ -386,48 +486,14 @@ extension QuickAccessContentView {
         }
     }
 
+    // [Unified card] ONE input structure for both states — collapsed shows just this card,
+    // expanded shows top bar + transcript + this card. One editor identity (focus and drafts
+    // survive expand/collapse), no duplicated layouts for fixes to drift between.
     @ViewBuilder
-    private var inputAreaViewContainer: some View {
-        Group {
-            if isExpanded {
-                expandedInputAreaLayout
-                    .padding(.bottom, 12)
-                    .padding(.horizontal, 12)
-            } else {
-                collapsedInputAreaLayout
-                    .padding(.horizontal, 12)
-                    .frame(height: inputBarHeight)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var expandedInputAreaLayout: some View {
+    private var inputCardView: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // 1. Text Field
-            ZStack(alignment: .topLeading) {
-                if inputText.isEmpty {
-                    Text("Ask anything")
-                        .foregroundColor(placeholderTextColor)
-                        .font(.system(.body))
-                        .padding(.top, 8)
-                        .padding(.horizontal, 12)
-                        .accessibilityHidden(true)
-                }
-                TextField("", text: $inputText, axis: .vertical)
-                    .textFieldStyle(PlainTextFieldStyle())
-                    .foregroundColor(textColor)
-                    .font(.system(.body))
-                    .lineLimit(1...6)
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 12)
-                    .focused($isInputFocused)
-                    .onSubmit { submitQuery() }
-                    .accessibilityLabel("Ask anything")
-            }
-            .frame(minHeight: textFieldHeight)
-
-            // 2. Attached File Chips
+            // 1. Attached File Chips — ABOVE the editor, matching the main composer
+            // (ChatInputAreaView renders AttachedFilesDisplayView above the input area).
             if !attachedFiles.isEmpty {
                 AttachedFilesDisplayView(attachedFiles: attachedFiles) { file in
                     attachedFiles.removeAll { $0.id == file.id }
@@ -435,156 +501,83 @@ extension QuickAccessContentView {
                 }
                 .environment(\.appTheme, themeManager.currentTheme)
                 .padding(.horizontal, 12)
-                .padding(.vertical, 4)
+                .padding(.top, 10)
             }
 
-            // 3. Toolbar Row
+            // 2. Editor — the app's real composer editor: Return sends, Shift/Option+Return
+            // inserts a newline, auto-grows ~1→4 lines (the window follows via onGeometryChange),
+            // list auto-continuation, sanitized paste, real undo. The suggestion/query-history
+            // hooks are inert here (the panel has no prompt-library / @-mention data source);
+            // Escape passes through to the panel (dismiss / HITL-deny) instead of NSTextView's
+            // word-completion.
+            ZStack(alignment: .topLeading) {
+                if inputText.isEmpty {
+                    Text("Ask anything")
+                        .foregroundColor(placeholderTextColor)
+                        .font(.system(size: ComposerStyle.editorFontSize)) // [UI audit gap 4] one token with the editor
+                        .padding(.leading, 12 + 7) // editor h-padding + inset(2)+lineFragmentPadding(5)
+                        .padding(.top, 8 + 10)     // editor top padding + textContainerInset
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+                CustomTextEditor(
+                    text: $inputText,
+                    onCommit: { _ in submitQuery() },
+                    minHeight: editorMinHeight,
+                    maxHeight: editorMaxHeight,
+                    showPromptSuggestions: .constant(false),
+                    suggestionQuery: .constant(""),
+                    activePromptTriggerRange: .constant(nil),
+                    showFileSuggestions: .constant(false),
+                    fileSuggestionQuery: .constant(""),
+                    activeFileMentionTriggerRange: .constant(nil),
+                    attributedTextInsertion: .constant(nil),
+                    textViewRef: { tv in editorTextView = tv },
+                    escapePassesThrough: true
+                )
+                // CONTENT-driven height, not proposal-driven: fixedSize asks the editor for its
+                // ideal height (sizeThatFits clamps it to min…max internally). A
+                // .frame(minHeight:maxHeight:) here was FLEXIBLE — expanded stretched it to the
+                // full maxHeight (huge card), and collapsed clamped it to the fixed window so
+                // typed lines never changed the measured height (no window growth, text
+                // overflowing onto the toolbar row).
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 8)
+                .padding(.horizontal, 12)
+                .accessibilityLabel("Ask anything")
+            }
+
+            // 3. Toolbar Row — shared composer primitives (ComposerKit), capability-gated.
             HStack(spacing: 8) {
                 profilePickerButton
-
-                Button(action: { openFilePicker() }) {
-                    Image(systemName: "paperclip")
-                        .font(.system(.body, weight: .medium))
-                        .foregroundColor(iconColor)
-                        .frame(width: 28, height: 28)
-                        .background(Color.primary.opacity(0.04))
-                        .clipShape(Circle())
-                }
-                .buttonStyle(PlainButtonStyle())
-                .help("Attach files")
-                .accessibilityLabel("Attach files")
-
-                Button(action: { captureScreenshot() }) {
-                    Image(systemName: "camera.viewfinder")
-                        .font(.system(.body, weight: .medium))
-                        .foregroundColor(iconColor)
-                        .frame(width: 28, height: 28)
-                        .background(Color.primary.opacity(0.04))
-                        .clipShape(Circle())
-                }
-                .buttonStyle(PlainButtonStyle())
-                .help("Capture screenshot")
-                .accessibilityLabel("Capture screenshot")
-
+                composerAttachAndCaptureButtons
                 Spacer()
-
-                QuickAccessDictationButton(
-                    isRecording: isRecording,
-                    isVoiceModelReady: isVoiceModelReady,
-                    iconColor: iconColor,
-                    hoverColor: textColor,
-                    action: { toggleDictation() }
-                )
-                .popover(isPresented: $showVoiceModelPopover, arrowEdge: .bottom) {
-                    voiceModelHelpPopover
-                }
-                .popover(isPresented: $showMicDeniedPopover, arrowEdge: .bottom) {
-                    micDeniedPopover
-                }
-
-                QuickAccessSendButton(
-                    isSending: session.isSending,
-                    isDisabled: !session.isSending && inputText.isEmpty && attachedFiles.isEmpty,
-                    iconColor: iconColor,
-                    accentColor: themeManager.currentTheme.accentColor,
-                    action: {
-                        if session.isSending { session.stop() } else { submitQuery() }
-                    }
-                )
+                composerMicAndSendButtons
             }
             .padding(.horizontal, 12)
             .padding(.bottom, 8)
         }
-        .background(Color.primary.opacity(0.03))
+        // [UI audit B] Card chrome only in EXPANDED (inset card over the transcript). Collapsed
+        // is full-bleed: the window's glass IS the container — a nested bg/stroke would read as
+        // a card-inside-a-bubble with mismatched radii.
+        .background(isExpanded ? Color.primary.opacity(0.03) : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(
             RoundedRectangle(cornerRadius: 14)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                .stroke(Color.primary.opacity(isExpanded ? 0.08 : 0), lineWidth: 1)
         )
     }
 
-    @ViewBuilder
-    private var collapsedInputAreaLayout: some View {
-        HStack(spacing: 8) {
-            profilePickerButton
-
-            ZStack(alignment: .leading) {
-                if inputText.isEmpty {
-                    Text("Ask anything")
-                        .foregroundColor(placeholderTextColor)
-                        .font(.system(.body))
-                        .padding(.horizontal, 8)
-                        .accessibilityHidden(true)
-                }
-                TextField("", text: $inputText)
-                    .textFieldStyle(PlainTextFieldStyle())
-                    .foregroundColor(textColor)
-                    .font(.system(.body))
-                    .padding(.horizontal, 8)
-                    .focused($isInputFocused)
-                    .onSubmit { submitQuery() }
-                    .accessibilityLabel("Ask anything")
-            }
-            .frame(height: textFieldHeight)
-
-            HStack(spacing: 6) {
-                Button(action: { openFilePicker() }) {
-                    Image(systemName: "paperclip")
-                        .font(.system(.body, weight: .medium))
-                        .foregroundColor(iconColor)
-                        .frame(width: 28, height: 28)
-                        .background(Color.primary.opacity(0.04))
-                        .clipShape(Circle())
-                }
-                .buttonStyle(PlainButtonStyle())
-                .help("Attach files")
-                .accessibilityLabel("Attach files")
-
-                Button(action: { captureScreenshot() }) {
-                    Image(systemName: "camera.viewfinder")
-                        .font(.system(.body, weight: .medium))
-                        .foregroundColor(iconColor)
-                        .frame(width: 28, height: 28)
-                        .background(Color.primary.opacity(0.04))
-                        .clipShape(Circle())
-                }
-                .buttonStyle(PlainButtonStyle())
-                .help("Capture screenshot")
-                .accessibilityLabel("Capture screenshot")
-
-                QuickAccessDictationButton(
-                    isRecording: isRecording,
-                    isVoiceModelReady: isVoiceModelReady,
-                    iconColor: iconColor,
-                    hoverColor: textColor,
-                    action: { toggleDictation() }
-                )
-                .popover(isPresented: $showVoiceModelPopover, arrowEdge: .bottom) {
-                    voiceModelHelpPopover
-                }
-                .popover(isPresented: $showMicDeniedPopover, arrowEdge: .bottom) {
-                    micDeniedPopover
-                }
-
-                QuickAccessSendButton(
-                    isSending: session.isSending,
-                    isDisabled: !session.isSending && inputText.isEmpty && attachedFiles.isEmpty,
-                    iconColor: iconColor,
-                    accentColor: themeManager.currentTheme.accentColor,
-                    action: {
-                        if session.isSending { session.stop() } else { submitQuery() }
-                    }
-                )
+    /// [Unified card] Focus the editor (summon-and-type, post-dictation, post-capture). The
+    /// NSTextView ref arrives asynchronously from the representable, so retry a few ticks.
+    private func focusEditor(retriesLeft: Int = 4) {
+        DispatchQueue.main.async {
+            if let tv = editorTextView, let window = tv.window {
+                window.makeFirstResponder(tv)
+            } else if retriesLeft > 0 {
+                focusEditor(retriesLeft: retriesLeft - 1)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Color.primary.opacity(0.03))
-        .clipShape(Capsule())
-        .overlay(
-            Capsule()
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-        )
     }
 
     // [QA revival P1b] Compact profile chip. Presents the app's standard ProfileSelectorPopover
@@ -608,7 +601,7 @@ extension QuickAccessContentView {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
-            .overlay(Capsule().stroke(theme.primaryText.opacity(0.18), lineWidth: 1)) // [H3] theme-aware border
+            .overlay(Capsule().stroke(Color.primary.opacity(0.08), lineWidth: 1)) // [UI audit gap 5] uniform stroke weight
         }
         .buttonStyle(PlainButtonStyle())
         .help("Select the chat profile this panel uses")
@@ -644,17 +637,31 @@ extension QuickAccessContentView {
                 defer { isCapturing = false }
                 guard let url = await QuickAccessScreenCaptureService.captureInteractive() else { return }
                 appendAttachments([FileSystemItem(id: url, name: url.lastPathComponent, url: url, isDirectory: false)])
-                isInputFocused = true
+                focusEditor()
             }
         }
     }
 
-    // [QA revival P2b] Voice dictation. Drives WhisperRecognitionService.shared directly (the
-    // app-scoped ChatInputViewModel is single-slot and would cross-wire with the main window).
-    // The model must already be loaded (.loaded); the button is disabled otherwise.
-    private var isVoiceModelReady: Bool {
-        if case .loaded = WhisperRecognitionService.shared.loadingState { return true }
-        return false
+
+    /// Shown when screenshot capture is blocked by a denied Screen-Recording permission.
+    /// (Rebuilt — the original was lost with the old screenCaptureButton in a row refactor.)
+    @ViewBuilder
+    private var captureDeniedPopover: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Screen Recording permission needed", systemImage: "exclamationmark.shield")
+                .font(.system(.subheadline, weight: .semibold))
+            Text("Enable Devgentic under Privacy & Security → Screen Recording, then relaunch the app.")
+                .font(.system(.caption))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Open System Settings") {
+                QuickAccessScreenCaptureService.openSystemSettings()
+                showCaptureDeniedPopover = false
+            }
+            .font(.system(.caption, weight: .semibold))
+        }
+        .padding(14)
+        .frame(width: 280)
     }
 
     @ViewBuilder
@@ -697,67 +704,74 @@ extension QuickAccessContentView {
         .frame(width: 280)
     }
 
+    // MARK: - Shared composer buttons [Composer P1]
+    // ComposerKit primitives, gated on this surface's ComposerCapabilities — e.g. screenshot is
+    // a capability flip, not view surgery. Used by both the expanded and collapsed rows.
+
+    @ViewBuilder
+    private var composerAttachAndCaptureButtons: some View {
+        if capabilities.attachments {
+            ComposerIconButton(systemName: "paperclip", help: "Attach files") { openFilePicker() }
+        }
+        if capabilities.screenshot {
+            ComposerIconButton(systemName: "camera.viewfinder", help: "Capture screenshot") { captureScreenshot() }
+                // Restored: this popover was detached in a row refactor, so a denied
+                // Screen-Recording permission silently did nothing.
+                .popover(isPresented: $showCaptureDeniedPopover, arrowEdge: .bottom) {
+                    captureDeniedPopover
+                }
+        }
+    }
+
+    @ViewBuilder
+    private var composerMicAndSendButtons: some View {
+        if capabilities.voice {
+            ComposerMicButton(
+                isRecording: voice.isRecording,
+                isReady: voice.isModelReady,
+                action: { toggleDictation() }
+            )
+            .popover(isPresented: $showVoiceModelPopover, arrowEdge: .bottom) {
+                voiceModelHelpPopover
+            }
+            .popover(isPresented: $showMicDeniedPopover, arrowEdge: .bottom) {
+                micDeniedPopover
+            }
+        }
+        ComposerSendStopButton(
+            isSending: session.isSending,
+            isDisabled: !session.isSending && inputText.isEmpty && attachedFiles.isEmpty,
+            action: {
+                if session.isSending { session.stop() } else { submitQuery() }
+            }
+        )
+    }
+
+    // [Composer P2] Dictation session logic (C9 re-entry guard, permission flow, VAD auto-stop,
+    // live mirroring) lives in the shared ComposerVoiceController now — the view only decides
+    // WHAT to do with the transcript/denial (callbacks wired in onAppear) and WHEN to toggle.
     private func toggleDictation() {
-        if isRecording {
-            stopDictation()
-        } else if isVoiceModelReady {
-            startDictation()
+        if voice.isRecording {
+            voice.stop()
+        } else if voice.isModelReady {
+            // Blur the editor for the dictation session: CustomTextEditor's updateNSView refuses
+            // external text while the user is mid-edit (isTyping guard, reset on blur), which
+            // would block the live transcript mirror. onFinished refocuses.
+            editorTextView?.window?.makeFirstResponder(nil)
+            voice.start(baseText: inputText.isEmpty ? "" : inputText + " ")
         } else {
             // [L6] No speech model downloaded yet — explain, don't silently do nothing.
             showVoiceModelPopover = true
         }
     }
 
-    private func startDictation() {
-        let svc = WhisperRecognitionService.shared
-        // [C9] Re-entry guard: flip isRecording SYNCHRONOUSLY (this runs on the MainActor from a
-        // Button action) so a rapid second tap toggles to Stop instead of launching a second
-        // concurrent Whisper session on the shared service.
-        guard case .loaded = svc.loadingState, !isRecording else { return }
-        isRecording = true
-        voiceBaseText = inputText.isEmpty ? "" : inputText + " "
-        if !isExpanded { isExpanded = true }
-
-        // One task owns the whole session (permission → stream). @MainActor so the @State
-        // writes below (incl. the voiceTask self-clear) are all main-thread safe.
-        voiceTask = Task { @MainActor in
-            guard await AVAudioApplication.requestRecordPermission() else {
-                isRecording = false
-                voiceTask = nil
-                showMicDeniedPopover = true // [L3] surface the denial instead of silently bailing
-                return
-            }
-            // A stop() during the permission prompt cancels us before the mic ever opens.
-            guard !Task.isCancelled else { isRecording = false; return }
-            // startStreaming BLOCKS until stopStreaming() or VAD auto-stop.
-            try? await svc.startStreaming { state in
-                Task { @MainActor in
-                    // Live transcription mirrors into the input field as it's spoken.
-                    if isRecording { inputText = voiceBaseText + state.fullText }
-                }
-            }
-            // VAD auto-stop path: startStreaming returned on its own.
-            isRecording = false
-            voiceTask = nil
-        }
-    }
-
-    private func stopDictation() {
-        guard isRecording else { return }
-        voiceTask?.cancel() // bail if we're still awaiting the mic-permission prompt
-        voiceTask = nil
-        isRecording = false
-        let base = voiceBaseText
-        Task { @MainActor in
-            let final = await WhisperRecognitionService.shared.stopStreaming()
-            if let final, !final.isEmpty { inputText = base + final }
-            isInputFocused = true
-        }
-    }
-
-    // [QA revival P2a / Q8] File attachment via the shared FileAttachmentPicker.
+    // [QA revival P2a / Q8] File attachment via the shared FileAttachmentPicker. Presented as a
+    // SHEET on the panel — a detached picker opens at normal window level BEHIND this floating
+    // panel (non-activating app, nothing promotes it) and is barely reachable.
     private func openFilePicker() {
-        FileAttachmentPicker.presentOpenPanel { items in appendAttachments(items) }
+        FileAttachmentPicker.presentOpenPanel(attachedTo: editorTextView?.window) { items in
+            appendAttachments(items)
+        }
     }
 
     private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
@@ -830,84 +844,7 @@ struct QuickAccessCloseButton: View {
     }
 }
 
-struct QuickAccessDictationButton: View {
-    let isRecording: Bool
-    let isVoiceModelReady: Bool
-    let iconColor: Color
-    let hoverColor: Color
-    let action: () -> Void
-    @State private var isHovered = false
-    @State private var scale: CGFloat = 1.0
-    
-    var body: some View {
-        Button(action: action) {
-            ZStack {
-                if isRecording {
-                    Circle()
-                        .fill(Color.red.opacity(0.15)
-                            .shadow(.drop(color: Color.red.opacity(0.3), radius: 2)))
-                        .frame(width: 28, height: 28)
-                        .scaleEffect(scale)
-                        .onAppear {
-                            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
-                                scale = 1.25
-                            }
-                        }
-                        .onDisappear {
-                            scale = 1.0
-                        }
-                }
-                
-                Image(systemName: isRecording ? "stop.fill" : "mic.fill")
-                    .font(.system(.body, weight: .medium))
-                    .foregroundColor(isRecording ? .red : (isVoiceModelReady ? (isHovered ? hoverColor : iconColor) : iconColor.opacity(0.3)))
-                    .frame(width: 28, height: 28)
-                    .background(isHovered ? Color.primary.opacity(0.06) : Color.clear)
-                    .clipShape(Circle())
-            }
-        }
-        .buttonStyle(PlainButtonStyle())
-        .onHover { hover in
-            isHovered = hover
-        }
-    }
-}
 
-struct QuickAccessSendButton: View {
-    let isSending: Bool
-    let isDisabled: Bool
-    let iconColor: Color
-    let accentColor: Color
-    let action: () -> Void
-    @State private var isHovered = false
-    
-    var body: some View {
-        Button(action: action) {
-            ZStack {
-                if isSending {
-                    Circle()
-                        .fill(Color.primary.opacity(0.08))
-                        .frame(width: 28, height: 28)
-                    Image(systemName: "stop.fill")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.red)
-                } else {
-                    Circle()
-                        .fill(!isDisabled ? (isHovered ? accentColor.opacity(0.9) : accentColor) : Color.primary.opacity(0.03))
-                        .frame(width: 28, height: 28)
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundColor(!isDisabled ? .white : iconColor.opacity(0.3))
-                }
-            }
-        }
-        .buttonStyle(PlainButtonStyle())
-        .disabled(isDisabled)
-        .onHover { hover in
-            isHovered = hover
-        }
-    }
-}
 
 /// [drag-vs-select fix] An AppKit drag surface for the borderless panel. Placed behind the content
 /// (in front of the glass), it lets the user move the window by dragging empty/chrome areas — a

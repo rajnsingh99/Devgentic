@@ -59,18 +59,32 @@ enum FileAttachmentPicker {
 
     /// Presents an NSOpenPanel (files + folders, multi-select) and delivers the accepted items
     /// on the main thread. `onItems` is not called when the user cancels or picks only excluded files.
+    ///
+    /// `attachedTo`: pass the hosting window to present the picker as a SHEET on it. Required for
+    /// the QuickAccess panel — it floats at `.floating` level in a non-activating app, so a
+    /// detached `begin()` panel opens at normal level BEHIND it and is barely reachable. A sheet
+    /// is guaranteed above its parent and takes keyboard focus. nil = detached (main composer).
     @MainActor
-    static func presentOpenPanel(prompt: String = "Attach", onItems: @escaping ([FileSystemItem]) -> Void) {
+    static func presentOpenPanel(prompt: String = "Attach",
+                                 attachedTo window: NSWindow? = nil,
+                                 onItems: @escaping ([FileSystemItem]) -> Void) {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
         panel.prompt = prompt
-        panel.begin { response in
+
+        let handle: (NSApplication.ModalResponse) -> Void = { response in
             guard response == .OK else { return }
             warnOversized(panel.urls.filter { isOversizedImage($0) }) // [M7] feedback for refused images
             let items = panel.urls.compactMap { item(for: $0) }
             if !items.isEmpty { onItems(items) }
+        }
+
+        if let window {
+            panel.beginSheetModal(for: window, completionHandler: handle)
+        } else {
+            panel.begin(completionHandler: handle)
         }
     }
 

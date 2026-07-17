@@ -129,6 +129,13 @@ struct FolderSelectorPopoverView: View {
         .buttonStyle(.plain)
         .popoverRowHighlight()
         .help(url.path)
+        // Read as a pile ("folder, Devgentic, ~/Documents/…, checkmark") with the ACTIVE
+        // folder marked only by a bare glyph and a cyan tint. `.help()` doesn't fill the
+        // label, so the full path was reachable by mouse hover only.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(url.lastPathComponent)
+        .accessibilityValue(url.path)
+        .accessibilityAddTraits(isActive ? [.isButton, .isSelected] : .isButton)
     }
 
     /// `~/…/parent` style abbreviation so long paths don't overflow the popover.

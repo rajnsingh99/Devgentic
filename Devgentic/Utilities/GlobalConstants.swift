@@ -53,6 +53,11 @@ struct GlobalConstants {
     /// = UUID string). Posted by a notification tap (AppDelegate) and by the panel's
     /// "continue in main window" reverse-handoff. Observed in MainApplicationView.
     static let openConversationNotification = Notification.Name("devgentic.openConversation")
+    /// Navigate the main window to a profile's editor (userInfo["profileID"] = UUID
+    /// string). Posted by surfaces outside the main window's environment — e.g. the
+    /// QuickAccess panel's advisory banner settings action — after activating the
+    /// main window. Observed in MainApplicationView, translated into the router.
+    static let openProfileSettingsNotification = Notification.Name("devgentic.openProfileSettings")
 
     // --- Speech Notifications ---
     static let toggleVoiceInputNotification = Notification.Name("devgentic.toggleVoiceInput")

@@ -208,8 +208,9 @@ extension ParentDocumentEntity: ObjectBox.EntityInspectable {
         try entityBuilder.addProperty(name: "conversationID", type: PropertyType.string, id: 3, uid: 5649271038461280256)
         try entityBuilder.addProperty(name: "fullTextContent", type: PropertyType.string, id: 4, uid: 6102843719584372736)
         try entityBuilder.addProperty(name: "timestamp", type: PropertyType.date, id: 5, uid: 7531926084731928576)
+        try entityBuilder.addProperty(name: "sourceIdentifier", type: PropertyType.string, id: 6, uid: 7936131631944347392)
 
-        try entityBuilder.lastProperty(id: 5, uid: 7531926084731928576)
+        try entityBuilder.lastProperty(id: 6, uid: 7936131631944347392)
     }
 }
 
@@ -244,6 +245,12 @@ extension ParentDocumentEntity {
     ///
     ///     box.query { ParentDocumentEntity.timestamp > 1234 }
     internal static var timestamp: Property<ParentDocumentEntity, Date, Void> { return Property<ParentDocumentEntity, Date, Void>(propertyId: 5, isPrimaryKey: false) }
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { ParentDocumentEntity.sourceIdentifier.startsWith("X") }
+    internal static var sourceIdentifier: Property<ParentDocumentEntity, String, Void> { return Property<ParentDocumentEntity, String, Void>(propertyId: 6, isPrimaryKey: false) }
 
     fileprivate func __setId(identifier: ObjectBox.Id) {
         self.id = Id(identifier)
@@ -291,6 +298,14 @@ extension ObjectBox.Property where E == ParentDocumentEntity {
 
     internal static var timestamp: Property<ParentDocumentEntity, Date, Void> { return Property<ParentDocumentEntity, Date, Void>(propertyId: 5, isPrimaryKey: false) }
 
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { .sourceIdentifier.startsWith("X") }
+
+    internal static var sourceIdentifier: Property<ParentDocumentEntity, String, Void> { return Property<ParentDocumentEntity, String, Void>(propertyId: 6, isPrimaryKey: false) }
+
 }
 
 
@@ -316,12 +331,14 @@ internal final class ParentDocumentEntityBinding: ObjectBox.EntityBinding, Senda
         let propertyOffset_sourceMessageID = propertyCollector.prepare(string: UUIDConverter.convert(entity.sourceMessageID))
         let propertyOffset_conversationID = propertyCollector.prepare(string: UUIDConverter.convert(entity.conversationID))
         let propertyOffset_fullTextContent = propertyCollector.prepare(string: entity.fullTextContent)
+        let propertyOffset_sourceIdentifier = propertyCollector.prepare(string: entity.sourceIdentifier)
 
         propertyCollector.collect(id, at: 2 + 2 * 1)
         propertyCollector.collect(entity.timestamp, at: 2 + 2 * 5)
         propertyCollector.collect(dataOffset: propertyOffset_sourceMessageID, at: 2 + 2 * 2)
         propertyCollector.collect(dataOffset: propertyOffset_conversationID, at: 2 + 2 * 3)
         propertyCollector.collect(dataOffset: propertyOffset_fullTextContent, at: 2 + 2 * 4)
+        propertyCollector.collect(dataOffset: propertyOffset_sourceIdentifier, at: 2 + 2 * 6)
     }
 
     internal func createEntity(entityReader: ObjectBox.FlatBufferReader, store: ObjectBox.Store) -> EntityType {
@@ -332,6 +349,7 @@ internal final class ParentDocumentEntityBinding: ObjectBox.EntityBinding, Senda
         entity.conversationID = UUIDConverter.convert(entityReader.read(at: 2 + 2 * 3))
         entity.fullTextContent = entityReader.read(at: 2 + 2 * 4)
         entity.timestamp = entityReader.read(at: 2 + 2 * 5)
+        entity.sourceIdentifier = entityReader.read(at: 2 + 2 * 6)
 
         return entity
     }

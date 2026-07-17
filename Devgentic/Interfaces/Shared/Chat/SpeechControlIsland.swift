@@ -201,12 +201,15 @@ struct VoicePickerView: View {
 
     @Environment(\.appTheme) private var theme
     @State private var searchText: String = ""
+    /// Cached grouping — rebuilt only when the query changes (see `.onChange` below),
+    /// not on every body pass (filter + group + sort over all system voices is heavy).
+    @State private var groupedVoices: [(locale: String, voices: [VoiceInfo])] = []
 
-    private var groupedVoices: [(locale: String, voices: [VoiceInfo])] {
+    private func buildGroupedVoices(_ search: String) -> [(locale: String, voices: [VoiceInfo])] {
         let allVoices = SpeechService.availableVoices
-        let filtered = searchText.isEmpty
+        let filtered = search.isEmpty
             ? allVoices
-            : allVoices.filter { $0.name.localizedCaseInsensitiveContains(searchText) || $0.locale.localizedCaseInsensitiveContains(searchText) }
+            : allVoices.filter { $0.name.localizedCaseInsensitiveContains(search) || $0.locale.localizedCaseInsensitiveContains(search) }
 
         let grouped = Dictionary(grouping: filtered) { voice in
             localeDisplayName(for: voice.locale)
@@ -289,6 +292,9 @@ struct VoicePickerView: View {
         }
         .frame(width: 240, height: 320)
         .background(theme.controlBackground)
+        .onChange(of: searchText, initial: true) { _, query in
+            groupedVoices = buildGroupedVoices(query)
+        }
     }
 
     private func localeDisplayName(for identifier: String) -> String {

@@ -14,11 +14,31 @@ import SwiftUI
 
 struct WorkflowMarkdownView: View {
     let text: String
+    /// Pre-parsed blocks, used when this view re-enters itself to render the children
+    /// of a list item / blockquote.
+    ///
+    /// Recursion MUST route through this nominal type rather than `renderBlock`
+    /// calling itself: a `@ViewBuilder func` returning `some View` that recurses
+    /// defines its opaque type in terms of itself, which the compiler rejects. Holding
+    /// a `WorkflowMarkdownView` as a subview is fine — the child's `body` type never
+    /// enters the parent's.
+    private var presetBlocks: [ContentBlock]?
+
     @Environment(\.appTheme) private var theme
     @Environment(ThemeManager.self) private var themeManager
 
+    init(text: String) {
+        self.text = text
+        self.presetBlocks = nil
+    }
+
+    private init(blocks: [ContentBlock]) {
+        self.text = ""
+        self.presetBlocks = blocks
+    }
+
     var body: some View {
-        let blocks = parseMarkdown(text)
+        let blocks = presetBlocks ?? parseMarkdown(text)
 
         VStack(alignment: .leading, spacing: 0) {
             ForEach(blocks) { block in
@@ -36,8 +56,8 @@ struct WorkflowMarkdownView: View {
             renderText(text)
                 .padding(.bottom, theme.spacingSmall)
 
-        case .code(let lang, let codeContent, _):
-            CodeBlockView(language: lang, content: codeContent)
+        case .code(let lang, let codeContent, let fileName):
+            CodeBlockView(language: lang, content: codeContent, fileName: fileName)
                 .padding(.bottom, theme.spacingMedium)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -45,24 +65,45 @@ struct WorkflowMarkdownView: View {
             renderText(text, font: fontForHeading(level: level), weight: fontWeightForHeading(level: level))
                 .padding(.top, theme.spacingMedium)
                 .padding(.bottom, theme.spacingXSmall)
+                // Same markdown, same renderer gap — workflow output needs the rotor too.
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityHeading(ContentBlockView.headingLevel(level))
 
-        case .listItem(let prefix, let text, let indentation):
-            HStack(alignment: .top, spacing: theme.spacingSmall) {
-                Text(prefix)
-                    .font(themeManager.chatFont)
-                    .foregroundColor(theme.secondaryText)
-                    .frame(minWidth: 20, alignment: .leading)
-                renderText(text)
+        case .listItem(let prefix, let blocks, let checkbox):
+            HStack(alignment: .firstTextBaseline, spacing: theme.spacingSmall) {
+                if let checkbox {
+                    Image(systemName: checkbox == .checked ? "checkmark.square.fill" : "square")
+                        .font(themeManager.chatFont)
+                        .foregroundColor(checkbox == .checked ? theme.accentColor : theme.secondaryText)
+                        .frame(minWidth: 20, alignment: .leading)
+                } else {
+                    Text(prefix)
+                        .font(themeManager.chatFont)
+                        .foregroundColor(theme.secondaryText)
+                        .frame(minWidth: 20, alignment: .leading)
+                }
+                WorkflowMarkdownView(blocks: blocks)
             }
-            .padding(.leading, CGFloat(indentation * 20))
             .padding(.bottom, theme.spacingXXSmall)
+
+        case .blockquote(let blocks):
+            HStack(alignment: .top, spacing: theme.spacingSmall) {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(theme.accentColor.opacity(0.45))
+                    .frame(width: 3)
+                WorkflowMarkdownView(blocks: blocks)
+                .foregroundColor(theme.secondaryText)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.bottom, theme.spacingSmall)
 
         case .horizontalRule:
             Divider()
                 .padding(.vertical, theme.spacingMedium)
 
-        case .table(let headers, let rows):
-            MarkdownTableView(headers: headers, rows: rows)
+        case .table(let headers, let rows, let alignments):
+            // Matches ContentBlockView: one step below chat body size.
+            MarkdownTableView(headers: headers, rows: rows, alignments: alignments, cellFontSize: max(11, themeManager.chatFontSize - 2))
                 .transaction { $0.animation = nil }
 
         case .image(let url, let altText):
@@ -73,10 +114,15 @@ struct WorkflowMarkdownView: View {
                         image.resizable()
                             .aspectRatio(contentMode: .fit)
                             .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
+                            // Was shown as a caption while loading, then dropped once the
+                            // image — the thing that stays on screen — actually arrived.
+                            .accessibilityLabel(altText?.isEmpty == false ? altText! : String(localized: "Image"))
+                            .accessibilityAddTraits(.isImage)
                     case .failure:
                         Label("Failed to load image", systemImage: "photo.on.rectangle.angled")
                             .font(.caption)
                             .foregroundColor(theme.secondaryText)
+                            .accessibilityLabel(altText?.isEmpty == false ? "Image failed to load: \(altText!)" : "Image failed to load")
                     case .empty:
                         HStack {
                             Spacer()
@@ -94,7 +140,7 @@ struct WorkflowMarkdownView: View {
                     }
                 }
                 .padding(.vertical, theme.spacingSmall)
-                .frame(maxWidth: 500, alignment: .leading)
+                .frame(maxWidth: ChatUIConstants.imageMaxWidth, alignment: .leading)
             }
         }
     }

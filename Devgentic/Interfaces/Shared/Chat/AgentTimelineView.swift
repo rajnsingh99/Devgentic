@@ -86,7 +86,7 @@ struct AgentTimelineView: View {
         if !nodes.isEmpty || showFooter {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(nodes) { node in
-                    TimelineNodeGroupView(node: node, compactReasoning: compactReasoning)
+                    TimelineNodeGroupView(node: node, compactReasoning: compactReasoning, isStreaming: isStreaming)
                 }
                 if let ctx = streamingContext, ctx.shouldDisplay {
                     StreamingTimelineFooter(context: ctx)
@@ -194,6 +194,14 @@ struct AgentTimelineView: View {
             case .warning(let id, let category, let text):
                 flushActions()
                 nodes.append(.warning(id: id, category: category, text: text))
+
+            case .planExecution(let data):
+                flushActions()
+                nodes.append(.planCard(data))
+
+            case .reflectionRun(let data):
+                flushActions()
+                nodes.append(.reflectionCard(data))
             }
         }
 
@@ -257,6 +265,10 @@ enum TimelineNode: Identifiable {
     case actionGroup([TimelineEvent])
     case capabilityMilestone(id: UUID, kind: CapabilityMilestoneKind, detail: String)
     case warning(id: UUID, category: WarningCategory, text: String)
+    /// Structured Plan & Execute card (step checklist with nested sub-timelines).
+    case planCard(PlanRunData)
+    /// Structured Reflexion card (attempt rows with nested sub-timelines).
+    case reflectionCard(ReflectionRunData)
 
     var id: UUID {
         switch self {
@@ -265,6 +277,8 @@ enum TimelineNode: Identifiable {
         case .actionGroup(let a):              return a.first?.id ?? UUID()
         case .capabilityMilestone(let id, _, _): return id
         case .warning(let id, _, _):           return id
+        case .planCard(let data):              return data.id
+        case .reflectionCard(let data):        return data.id
         }
     }
 }
@@ -276,6 +290,9 @@ struct TimelineNodeGroupView: View {
     /// When true, thought/reasoning nodes render in a muted compact row.
     /// See `AgentTimelineView.compactReasoning` for the rationale.
     var compactReasoning: Bool = false
+    /// Threaded to capability cards so their live indicators (ticking elapsed,
+    /// auto-expanded running step) only run while the message is streaming.
+    var isStreaming: Bool = false
 
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -309,6 +326,12 @@ struct TimelineNodeGroupView: View {
 
         case .warning(_, let category, let text):
             WarningRow(category: category, text: text)
+
+        case .planCard(let data):
+            PlanProgressCard(data: data, isStreaming: isStreaming)
+
+        case .reflectionCard(let data):
+            ReflectionAttemptsCard(data: data, isStreaming: isStreaming)
 
         case .action(let event):
             ActionDetailView(event: event)
@@ -396,7 +419,7 @@ struct TimelineNodeGroupView: View {
     /// then rendering "<primary bucket>, <minor>, <minor>..." with natural pluralization.
     /// Mixed groups: "Read 6 files, edited 2 files, used a tool".
     private func generateGroupTitle(_ actions: [TimelineEvent]) -> String {
-        guard !actions.isEmpty else { return "Action Group" }
+        guard !actions.isEmpty else { return String(localized: "Action Group") }
 
         // Bucket tool executions by tool name; ignore media here (titled separately if only media).
         var buckets: [(name: String, count: Int)] = []
@@ -476,7 +499,7 @@ struct ActionDetailView: View {
                         }
 
                         if let dur = data.durationMs, dur >= 100 {
-                            Text(Self.formatDuration(dur))
+                            Text(DurationFormat.milliseconds(dur))
                                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                                 .foregroundColor(theme.tertiaryText)
                                 .padding(.horizontal, 6)
@@ -572,11 +595,6 @@ struct ActionDetailView: View {
         }
     }
 
-    private static func formatDuration(_ ms: Int) -> String {
-        if ms < 1000 { return "\(ms)ms" }
-        let s = Double(ms) / 1000.0
-        return String(format: "%.1fs", s)
-    }
 }
 
 // MARK: - Capability Milestone Row
@@ -618,12 +636,7 @@ struct CapabilityMilestoneRow: View {
     }
 
     private var milestoneColor: Color {
-        switch kind.colorCategory {
-        case .planning:   return .blue
-        case .reflection: return .purple
-        case .delegation: return .green
-        case .compaction: return .orange
-        }
+        theme.capabilityColor(for: kind.colorCategory)
     }
 }
 
@@ -686,6 +699,7 @@ struct InterimReasoningRow: View {
     let text: String
 
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isExpanded = false
     @State private var isAnimating = false
 
@@ -699,7 +713,7 @@ struct InterimReasoningRow: View {
                 .foregroundColor(theme.accentColor.opacity(0.85))
                 .frame(width: 14, alignment: .center)
                 .padding(.top, 3)
-                .symbolEffect(.pulse, options: .repeating, isActive: isAnimating)
+                .symbolEffect(.pulse, options: .repeating, isActive: isAnimating && !reduceMotion)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(flattenedText)
@@ -813,18 +827,19 @@ struct StreamingTimelineFooter: View {
     let context: StreamingContext
 
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "sparkle")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(theme.streamingIndicator.opacity(0.95))
-                .symbolEffect(.pulse, options: .repeating, isActive: context.isStreaming)
+                .symbolEffect(.pulse, options: .repeating, isActive: context.isStreaming && !reduceMotion)
 
             // TimelineView re-renders once per second while visible and stops
             // when off-screen — cheaper than a Timer and auto-cleans on removal.
             TimelineView(.periodic(from: context.startedAt, by: 1.0)) { timeline in
-                Text(Self.formatElapsed(from: context.startedAt, to: timeline.date))
+                Text(DurationFormat.elapsed(from: context.startedAt, to: timeline.date))
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundColor(theme.secondaryText)
                     .monospacedDigit()
@@ -832,16 +847,17 @@ struct StreamingTimelineFooter: View {
         }
         .padding(.horizontal, 4)
         .padding(.top, 2)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Streaming, \(Self.formatElapsed(from: context.startedAt, to: Date()))")
-    }
-
-    private static func formatElapsed(from start: Date, to now: Date) -> String {
-        let seconds = max(0, Int(now.timeIntervalSince(start)))
-        if seconds < 60 { return "\(seconds)s" }
-        let minutes = seconds / 60
-        let remaining = seconds % 60
-        return remaining == 0 ? "\(minutes)m" : "\(minutes)m \(remaining)s"
+        // `.ignore`, and a label with no elapsed time in it. This used to be
+        // `"Streaming, \(elapsed(to: Date()))"` — rebuilt on every body pass, so the label
+        // changed once a second and VoiceOver re-announced the footer for the whole
+        // response. It also read `Date()` instead of the TimelineView's own `timeline.date`,
+        // so the spoken time didn't match the displayed one.
+        //
+        // The elapsed counter stays visual. A duration spoken aloud is stale the moment
+        // it's said, and "Streaming response" is the part that's actually actionable —
+        // same call as the run-history cards.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Streaming response")
     }
 }
 
@@ -871,6 +887,13 @@ enum ToolArgFormatter {
             return plural == 1 ? m.singular : m.plural
         }
         return plural == 1 ? "tool" : "tools"
+    }
+
+    /// SF Symbol for a tool. Single vocabulary for every per-tool glyph, so rendering
+    /// paths can't drift. Superset of the old `ToolChipView.iconForTool` switch, which
+    /// went with the dynamic island in 2026-07.
+    static func icon(tool: String) -> String {
+        iconOverrides[tool] ?? "hammer.fill"
     }
 
     /// The primary argument to surface in the row — filename for fs ops, query for searches,
@@ -1015,6 +1038,39 @@ enum ToolArgFormatter {
         "file_overview":    ("file", "files"),
         "codebase_map":     ("codebase", "codebases"),
         "diff_files":       ("diff", "diffs")
+    ]
+
+    private static let iconOverrides: [String: String] = [
+        "read_file":                   "doc.text.fill",
+        "file_overview":               "doc.text.magnifyingglass",
+        "write_file":                  "square.and.pencil",
+        "edit_file":                   "pencil.circle.fill",
+        "edit_code":                   "pencil.circle.fill",
+        "create_file":                 "doc.badge.plus",
+        "delete_file":                 "trash.fill",
+        "list_directory":              "folder.fill",
+        "codebase_map":                "map.fill",
+        "fs_smart_search":             "magnifyingglass",
+        "fs_read_metadata":            "info.circle.fill",
+        "fs_watch_folder":            "eye.fill",
+        "fs_organize_batch":           "square.grid.3x3.fill",
+        "grep":                        "magnifyingglass",
+        "grep_search":                 "magnifyingglass",
+        "ripgrep":                     "magnifyingglass",
+        "code_search":                 "magnifyingglass",
+        "glob_files":                  "doc.on.doc",
+        "web_search":                  "globe",
+        "execute_shell":               "terminal.fill",
+        "run_shell":                   "terminal.fill",
+        "bash":                        "terminal.fill",
+        "shell":                       "terminal.fill",
+        "batch_command":               "terminal.fill",
+        "ask_user":                    "person.fill.questionmark",
+        "call_agent":                  "person.line.dotted.person.fill",
+        "recall_conversation_history": "clock.arrow.circlepath",
+        "git_tool":                    "arrow.triangle.branch",
+        "find_definition":             "curlybraces",
+        "diff_files":                  "plusminus"
     ]
 
     // MARK: - Helpers

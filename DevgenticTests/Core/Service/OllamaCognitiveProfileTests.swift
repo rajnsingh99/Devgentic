@@ -361,17 +361,19 @@ final class OllamaCognitiveProfileTests: XCTestCase {
 
     // MARK: - Reasoning-only override (deepseek-r1 family with qwen2 base)
 
-    func testReasoningOnly_DeepSeekR1_WithQwen2Family_ForcesNone() {
-        // The exact deepseek-r1:14b case: family reports as the tool-capable base (qwen2),
-        // but the model name carries the reasoning-only identity. Must force .none.
+    func testReasoningOnly_DeepSeekR1_WithQwen2Family_NoCapsField_StaysBlocked() {
+        // Without the authoritative capabilities field we can't verify the server
+        // accepts tools for a distilled fine-tune (family reports the tool-capable
+        // base qwen2) — stays blocked, but with the reason attached for the UI.
         let response = makeResponse(
             template: "{{ .Tools }}",
             family: "qwen2",
             capabilities: nil
         )
         let profile = response.cognitiveProfile(modelName: "deepseek-r1:14b")
-        XCTAssertEqual(profile.capability, .none, "deepseek-r1 name must force .none regardless of qwen2 family")
+        XCTAssertEqual(profile.capability, .none, "no caps field → reasoning-only stays blocked (unverifiable)")
         XCTAssertEqual(profile.dialect, .heuristicJson)
+        XCTAssertEqual(profile.toolSupportCaveat, .reasoningFocused)
     }
 
     func testReasoningOnly_QwQ_ForcesNone() {
@@ -394,5 +396,149 @@ final class OllamaCognitiveProfileTests: XCTestCase {
         let response = makeResponse(family: "deepseek-r1")
         let profile = response.cognitiveProfile  // No modelName
         XCTAssertEqual(profile.capability, .none)
+    }
+
+    // MARK: - Authoritative allow (renderer-based models)
+
+    func testCapabilities_Tools_RendererTemplate_UnknownFamily_AuthoritativeAllow() {
+        // The gemma4 case verified against a live daemon: caps declare tools, but the
+        // template is just "{{ .Prompt }}" and the family matches no heuristic list.
+        // Falling through to heuristics used to misclassify this as .none, hiding the
+        // model from agent pickers.
+        let response = makeResponse(
+            template: "{{ .Prompt }}",
+            family: "gemma4",
+            capabilities: ["completion", "vision", "audio", "tools", "thinking"]
+        )
+        let profile = response.cognitiveProfile(modelName: "gemma4:latest")
+        XCTAssertEqual(profile.capability, .parallelActions, "caps contains 'tools' — authoritative allow must override no-signal heuristics")
+        XCTAssertEqual(profile.dialect, .nativeJSON)
+        XCTAssertTrue(profile.modalities.contains(.visionInput), "caps 'vision' should thread into modalities")
+    }
+
+    func testCapabilities_Tools_NoTemplateNoFamily_AuthoritativeAllow() {
+        // kimi-k2 / qwen3.5 shape: no heuristic signal at all, only the declaration.
+        let response = makeResponse(capabilities: ["completion", "tools"])
+        let profile = response.cognitiveProfile
+        XCTAssertEqual(profile.capability, .parallelActions)
+        XCTAssertEqual(profile.dialect, .nativeJSON)
+    }
+
+    func testCapabilities_Tools_PreservesSpecificDialectHints() {
+        // Authoritative allow settles the capability tier but must not clobber a
+        // template that reveals a specific dialect.
+        let response = makeResponse(
+            template: "<tool_call>{\"name\": \"foo\"}</tool_call>",
+            capabilities: ["completion", "tools"]
+        )
+        let profile = response.cognitiveProfile
+        XCTAssertEqual(profile.capability, .parallelActions)
+        XCTAssertEqual(profile.dialect, .mistralXML)
+    }
+
+    func testCapabilities_Tools_ReasoningFocused_SelectableWithCaveat() {
+        // D: deepseek-r1 declares tools (the server accepts the param), so it is
+        // SELECTABLE — the reasoning-only pattern downgrades from a hard block to a
+        // reliability caveat that pickers surface as a warning.
+        let response = makeResponse(
+            family: "qwen2",
+            capabilities: ["completion", "tools", "thinking"]
+        )
+        let profile = response.cognitiveProfile(modelName: "deepseek-r1:14b")
+        XCTAssertEqual(profile.capability, .parallelActions, "declared tools → usable; quality concern is a caveat, not a block")
+        XCTAssertEqual(profile.toolSupportCaveat, .reasoningFocused)
+    }
+
+    func testCapabilities_Tools_GptOss_SelectableWithCaveat() {
+        // gpt-oss is on the reasoning-only pattern list but declares tools — D makes
+        // it selectable-with-warning like deepseek-r1.
+        let response = makeResponse(
+            template: "{{ .Prompt }}",
+            family: "gptoss",
+            capabilities: ["completion", "tools", "thinking"]
+        )
+        let profile = response.cognitiveProfile(modelName: "gpt-oss:20b")
+        XCTAssertEqual(profile.capability, .parallelActions)
+        XCTAssertEqual(profile.toolSupportCaveat, .reasoningFocused)
+        XCTAssertEqual(profile.dialect, .nativeJSON)
+    }
+
+    // MARK: - supportsThinking: authoritative capabilities
+
+    func testSupportsThinking_AuthoritativeCaps() {
+        let response = makeResponse(
+            template: "{{ .Prompt }}",
+            family: "gemma4",
+            capabilities: ["completion", "tools", "thinking"]
+        )
+        XCTAssertTrue(response.supportsThinking, "caps 'thinking' is authoritative — no template markers needed")
+    }
+
+    func testSupportsThinking_CapsWithoutThinking_HeuristicFallbackStillRuns() {
+        // caps present but without "thinking" — template markers still detect (daemons
+        // reported the caps array before the thinking capability existed).
+        let response = makeResponse(
+            template: "<think>{{ .Prompt }}</think>",
+            capabilities: ["completion", "tools"]
+        )
+        XCTAssertTrue(response.supportsThinking)
+    }
+
+    // MARK: - Tool support caveats (picker explanations)
+
+    func testCaveat_ServerRejectsTools() {
+        let response = makeResponse(family: "gemma", capabilities: ["completion"])
+        let profile = response.cognitiveProfile(modelName: "gemma:2b")
+        XCTAssertEqual(profile.capability, .none)
+        XCTAssertEqual(profile.toolSupportCaveat, .serverRejectsTools)
+    }
+
+    func testCaveat_CleanAuthoritativeAllow_NilCaveat() {
+        let response = makeResponse(
+            template: "{{ .Prompt }}",
+            family: "gemma4",
+            capabilities: ["completion", "vision", "audio", "tools", "thinking"]
+        )
+        let profile = response.cognitiveProfile(modelName: "gemma4:latest")
+        XCTAssertNil(profile.toolSupportCaveat, "clean declared tool support needs no qualification")
+    }
+
+    func testCaveat_HeuristicNone_Undetected() {
+        // Legacy daemon (no caps field), zero heuristic signal — blocked with the
+        // "can't verify" reason rather than silently.
+        let response = makeResponse(template: "{{ .System }}\n{{ .Prompt }}")
+        let profile = response.cognitiveProfile
+        XCTAssertEqual(profile.capability, .none)
+        XCTAssertEqual(profile.toolSupportCaveat, .undetected)
+    }
+
+    func testCaveat_HeuristicCapable_NilCaveat() {
+        // Legacy daemon, template markers found — clean heuristic verdict.
+        let response = makeResponse(template: "{{ .Tools }}", family: "qwen2")
+        let profile = response.cognitiveProfile
+        XCTAssertEqual(profile.capability, .parallelActions)
+        XCTAssertNil(profile.toolSupportCaveat)
+    }
+
+    // MARK: - CognitiveProfile Codable stability
+
+    func testCognitiveProfile_CaveatOmittedWhenNil_AndDecodesAsNil() throws {
+        // nil caveat must encode as an ABSENT key (old persisted profiles stay
+        // byte-stable) and an absent key must decode back to nil.
+        let profile = CognitiveProfile(capability: .parallelActions, dialect: .nativeJSON)
+        let data = try JSONEncoder().encode(profile)
+        let json = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertFalse(json.contains("toolSupportCaveat"), "nil caveat must not appear in encoded JSON")
+
+        let decoded = try JSONDecoder().decode(CognitiveProfile.self, from: data)
+        XCTAssertNil(decoded.toolSupportCaveat)
+        XCTAssertEqual(decoded.capability, .parallelActions)
+    }
+
+    func testCognitiveProfile_CaveatRoundTrips() throws {
+        let profile = CognitiveProfile(capability: .parallelActions, dialect: .nativeJSON, toolSupportCaveat: .reasoningFocused)
+        let data = try JSONEncoder().encode(profile)
+        let decoded = try JSONDecoder().decode(CognitiveProfile.self, from: data)
+        XCTAssertEqual(decoded.toolSupportCaveat, .reasoningFocused)
     }
 }

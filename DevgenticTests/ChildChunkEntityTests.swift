@@ -49,24 +49,24 @@ final class ChildChunkEntityTests: XCTestCase {
     // MARK: - Convenience Initializer
 
     func testConvenienceInit_SetsChunkText() {
-        let entity = ChildChunkEntity(chunkText: "Hello Swift", embedding: [1, 2, 3], chunkIndex: 0)
+        let entity = ChildChunkEntity(chunkText: "Hello Swift", embedding: [1, 2, 3], chunkIndex: 0, conversationID: "")
         XCTAssertEqual(entity.chunkText, "Hello Swift")
     }
 
     func testConvenienceInit_SetsEmbedding() {
         let emb: [Float] = [0.1, 0.2, 0.3]
-        let entity = ChildChunkEntity(chunkText: "test", embedding: emb, chunkIndex: 0)
+        let entity = ChildChunkEntity(chunkText: "test", embedding: emb, chunkIndex: 0, conversationID: "")
         XCTAssertEqual(entity.embedding, emb)
     }
 
     func testConvenienceInit_SetsChunkIndex() {
-        let entity = ChildChunkEntity(chunkText: "chunk", embedding: [1], chunkIndex: 7)
+        let entity = ChildChunkEntity(chunkText: "chunk", embedding: [1], chunkIndex: 7, conversationID: "")
         XCTAssertEqual(entity.chunkIndex, 7)
     }
 
     func testConvenienceInit_ConversationIDRemainsEmpty() {
         // conversationID is not part of the convenience init — it is stamped externally
-        let entity = ChildChunkEntity(chunkText: "chunk", embedding: [1], chunkIndex: 0)
+        let entity = ChildChunkEntity(chunkText: "chunk", embedding: [1], chunkIndex: 0, conversationID: "")
         XCTAssertEqual(entity.conversationID, "")
     }
 
@@ -76,13 +76,13 @@ final class ChildChunkEntityTests: XCTestCase {
     /// Storing a wrong-dimension vector would silently corrupt the index.
     func testEmbedding_Accepts384DArray() {
         let emb = (0..<384).map { Float($0) * 0.001 }
-        let entity = ChildChunkEntity(chunkText: "dim test", embedding: emb, chunkIndex: 0)
+        let entity = ChildChunkEntity(chunkText: "dim test", embedding: emb, chunkIndex: 0, conversationID: "")
         XCTAssertEqual(entity.embedding?.count, 384,
                        "HNSW index declares dimensions=384; embedding count must match")
     }
 
     func testEmbedding_IsOptional_CanBeNilledAfterAssignment() {
-        let entity = ChildChunkEntity(chunkText: "test", embedding: [1, 2, 3], chunkIndex: 0)
+        let entity = ChildChunkEntity(chunkText: "test", embedding: [1, 2, 3], chunkIndex: 0, conversationID: "")
         XCTAssertNotNil(entity.embedding)
         entity.embedding = nil
         XCTAssertNil(entity.embedding)
@@ -93,7 +93,7 @@ final class ChildChunkEntityTests: XCTestCase {
         // HNSW cosine distance is only mathematically valid on unit-length vectors.
         let rawVec: [Float] = [3, 4]
         let normalized = VectorMath.l2Normalize(rawVec) // → [0.6, 0.8]
-        let entity = ChildChunkEntity(chunkText: "norm test", embedding: normalized, chunkIndex: 0)
+        let entity = ChildChunkEntity(chunkText: "norm test", embedding: normalized, chunkIndex: 0, conversationID: "")
 
         let magnitude = VectorMath.magnitude(of: entity.embedding ?? [])
         XCTAssertEqual(magnitude, 1.0, accuracy: 1e-6,
@@ -104,7 +104,7 @@ final class ChildChunkEntityTests: XCTestCase {
         // Unlike the old FloatArrayConverter pattern, HNSW stores [Float]? natively.
         // The value on the entity is the exact value that reaches ObjectBox.
         let original: [Float] = [0.1, -0.5, 0.8, 0.3]
-        let entity = ChildChunkEntity(chunkText: "verbatim", embedding: original, chunkIndex: 0)
+        let entity = ChildChunkEntity(chunkText: "verbatim", embedding: original, chunkIndex: 0, conversationID: "")
         XCTAssertEqual(entity.embedding, original,
                        "Native floatVector storage must preserve exact Float values")
     }
@@ -141,7 +141,7 @@ final class ChildChunkEntityTests: XCTestCase {
         // VectorStoreService.addSemanticDocument() stamps conversationID from the parent:
         //   child.conversationID = parent.conversationID.uuidString
         let parentConversationID = UUID()
-        let entity = ChildChunkEntity(chunkText: "stamped chunk", embedding: [0.1, 0.2], chunkIndex: 0)
+        let entity = ChildChunkEntity(chunkText: "stamped chunk", embedding: [0.1, 0.2], chunkIndex: 0, conversationID: "")
 
         // Simulate stamping
         entity.conversationID = parentConversationID.uuidString
@@ -168,7 +168,7 @@ final class ChildChunkEntityTests: XCTestCase {
 
         for raw in rawCandidates {
             let emb = VectorMath.l2Normalize(raw)
-            let entity = ChildChunkEntity(chunkText: "candidate", embedding: emb, chunkIndex: 0)
+            let entity = ChildChunkEntity(chunkText: "candidate", embedding: emb, chunkIndex: 0, conversationID: "")
 
             let sim = VectorMath.cosineSimilarity(between: query, and: entity.embedding!)
             let dist: Float = 1.0 - sim
@@ -180,7 +180,7 @@ final class ChildChunkEntityTests: XCTestCase {
 
     func testHNSWCosineDistance_IdenticalEmbeddings_ZeroDistance() {
         let emb = VectorMath.l2Normalize((0..<384).map { Float($0) * 0.01 + 0.1 })
-        let entity = ChildChunkEntity(chunkText: "same", embedding: emb, chunkIndex: 0)
+        let entity = ChildChunkEntity(chunkText: "same", embedding: emb, chunkIndex: 0, conversationID: "")
 
         let sim = VectorMath.cosineSimilarity(between: entity.embedding!, and: emb)
         let distance = 1.0 - sim

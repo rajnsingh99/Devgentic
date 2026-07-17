@@ -39,7 +39,10 @@ final class ChildChunkEntity {
     var chunkIndex: Int = 0
 
     /// Denormalised conversation ID (mirrors ParentDocumentEntity.conversationID as a String).
-    /// Stored directly on the child for O(1) post-HNSW conversation scoping without relation traversal.
+    /// The scoped retrieval scan filters on this key, so an EMPTY value makes a chunk
+    /// invisible to every conversation. Required at construction (convenience init) and
+    /// re-stamped from the parent in `VectorStoreService.addSemanticDocument` (the parent
+    /// is the authority) — the "" default exists only for ObjectBox's parameterless `init()`.
     var conversationID: String = ""
 
     /// Relation back to the complete parent document.
@@ -49,9 +52,13 @@ final class ChildChunkEntity {
     init() {}
 
     /// A convenience initializer for creating new ChildChunkEntity instances.
-    init(chunkText: String, embedding: [Float], chunkIndex: Int) {
+    /// `conversationID` is REQUIRED (no default): a writer that forgets it would produce
+    /// chunks silently invisible to scoped retrieval. Pass "" only when scoping is
+    /// genuinely irrelevant (entity-level tests) — explicitly, never by omission.
+    init(chunkText: String, embedding: [Float], chunkIndex: Int, conversationID: String) {
         self.chunkText = chunkText
         self.embedding = embedding
         self.chunkIndex = chunkIndex
+        self.conversationID = conversationID
     }
 }

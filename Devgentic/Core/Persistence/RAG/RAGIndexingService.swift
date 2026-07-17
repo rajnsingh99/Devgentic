@@ -7,6 +7,7 @@
 
 import Foundation
 import os
+import CodeEditLanguages
 
 /// A background worker service responsible for asynchronously processing
 /// chat messages and files into semantic vector embeddings for RAG.
@@ -38,8 +39,10 @@ final class RAGIndexingService: @unchecked Sendable {
         
         // Extract the markdown blocks pre-parsed by the UI model
         let blocks = message.getBlocksForIndexing()
-        
-        let chunker = SemanticChunker(maxChunkSize: 512, overlap: 50)
+
+        // Calibrated per block kind: prose at 512, fenced code blocks at 384 so
+        // their embeddings stay fully inside the ~128-token embedder window.
+        let chunker = SemanticChunker(maxChunkSize: Self.proseChunkSize, overlap: 50, codeChunkSize: Self.codeChunkSize)
         let chunks = chunker.chunk(blocks: blocks)
         
         guard !chunks.isEmpty else {
@@ -56,11 +59,12 @@ final class RAGIndexingService: @unchecked Sendable {
             sourceMessageID: message.id,
             conversationID: message.conversationId,
             fullTextContent: fullText,
-            timestamp: message.timestamp
+            timestamp: message.timestamp,
+            sourceIdentifier: message.id.uuidString
         )
-        
+
         var childEntities: [ChildChunkEntity] = []
-        
+
         // Await EmbeddingService.generateEmbedding() for each chunk
         for (index, rawChunkText) in chunks.enumerated() {
             // Strip think blocks from individual chunks as well
@@ -70,14 +74,18 @@ final class RAGIndexingService: @unchecked Sendable {
                 let child = ChildChunkEntity(
                     chunkText: chunkText,
                     embedding: embedding,
-                    chunkIndex: index
+                    chunkIndex: index,
+                    conversationID: message.conversationId.uuidString
                 )
                 childEntities.append(child)
             }
         }
-        
+
         // Save the ParentDocumentEntity and its associated ChildChunkEntitys to ObjectBox
         if !childEntities.isEmpty {
+            // Replace-on-reindex: a re-finalized message (e.g. a resumed run) replaces
+            // its prior vectors instead of appending a duplicate copy.
+            vectorStoreService.removeDocuments(sourceIdentifier: message.id.uuidString, conversationID: message.conversationId)
             vectorStoreService.addSemanticDocument(parent: parentDoc, children: childEntities)
             logger.info("Successfully indexed message \(message.id.uuidString) into \(childEntities.count) semantic child chunks.")
         } else {
@@ -85,11 +93,39 @@ final class RAGIndexingService: @unchecked Sendable {
         }
     }
 
+    // MARK: - Upload Chunker Routing
+
+    /// Prose chunk target (chars).
+    static let proseChunkSize = 512
+    /// Code chunk target (chars). Code is symbol-dense — WordPiece burns ~3 chars
+    /// per token and the MiniLM embedder head-truncates at ~128 tokens, so code
+    /// chunks stay near 384 chars to keep the WHOLE chunk visible to semantic
+    /// search (a 512-char code chunk's tail is invisible to the embedding).
+    static let codeChunkSize = 384
+
+    /// Routes an uploaded file to the right chunker. Source files become `.code`
+    /// blocks so SemanticChunker hands them to TreeSitterCodeChunker — AST-boundary
+    /// splits with a "[lang Context]:" prefix — instead of chunking code as prose.
+    /// (Previously EVERY upload was wrapped as one `.paragraph`, so the AST chunker
+    /// never ran on real files; functions were sliced mid-body at arbitrary 512-char
+    /// windows.) Markdown and plain text stay on the prose path — paragraph
+    /// boundaries suit them better than a syntax tree. Sizing is uniform across
+    /// message and upload indexing: SemanticChunker's `codeChunkSize` calibrates
+    /// code blocks; prose uses `maxChunkSize`.
+    static func uploadContentBlocks(for url: URL, id: String, text: String) -> [ContentBlock] {
+        let language = CodeLanguage.detectLanguageFrom(url: url)
+        let proseLike: Set<TreeSitterLanguage> = [.plainText, .markdown, .markdownInline]
+        guard !proseLike.contains(language.id) else {
+            return [ContentBlock(id: id, type: .paragraph(text))]
+        }
+        return [ContentBlock(id: id, type: .code(language: language.id.rawValue, content: text, fileName: url.lastPathComponent))]
+    }
+
     // MARK: - Batch File Indexing (Awaitable)
 
-    /// Index multiple attached files for RAG-based retrieval.
-    /// Unlike `indexFileAttachment()`, this is awaitable — the contextualRAG pipeline
-    /// needs indexing to complete before retrieval can return relevant chunks.
+    /// Index multiple attached files for conversation-memory retrieval on LATER
+    /// turns. Runs post-retrieval in the orchestrator (Section 3b), so a file never
+    /// re-surfaces via RAG in the same turn it was injected.
     func indexAttachedFiles(
         files: [FileSystemItem],
         conversationID: UUID,
@@ -120,9 +156,10 @@ final class RAGIndexingService: @unchecked Sendable {
                 continue
             }
 
-            // Chunk the extracted text
-            let blocks = [ContentBlock(id: "file-\(file.id)", type: .paragraph(sanitizedText))]
-            let chunks = SemanticChunker(maxChunkSize: 512, overlap: 50).chunk(blocks: blocks)
+            // Chunk the extracted text — code files route to the AST chunker,
+            // with the same prose/code sizing the message path uses.
+            let blocks = Self.uploadContentBlocks(for: file.url, id: "file-\(file.id)", text: sanitizedText)
+            let chunks = SemanticChunker(maxChunkSize: Self.proseChunkSize, overlap: 50, codeChunkSize: Self.codeChunkSize).chunk(blocks: blocks)
             guard !chunks.isEmpty else { continue }
 
             // Generate embeddings for each chunk
@@ -133,7 +170,8 @@ final class RAGIndexingService: @unchecked Sendable {
                     childEntities.append(ChildChunkEntity(
                         chunkText: chunkText,
                         embedding: embedding,
-                        chunkIndex: index
+                        chunkIndex: index,
+                        conversationID: conversationID.uuidString
                     ))
                 }
             }
@@ -145,62 +183,17 @@ final class RAGIndexingService: @unchecked Sendable {
                 sourceMessageID: messageID,
                 conversationID: conversationID,
                 fullTextContent: "[File: \(file.name)]\n\(sanitizedText)",
-                timestamp: Date()
+                timestamp: Date(),
+                sourceIdentifier: file.url.path
             )
 
+            // Replace-on-reindex: re-attaching the same file in this conversation
+            // replaces its prior vectors instead of appending a duplicate copy that
+            // would crowd the limit-3 retrieval slots.
+            vectorStoreService.removeDocuments(sourceIdentifier: file.url.path, conversationID: conversationID)
             vectorStoreService.addSemanticDocument(parent: parentDoc, children: childEntities)
             logger.info("RAG-indexed attachment: \(file.name) → \(childEntities.count) chunks")
         }
     }
 
-    // MARK: - Single File Attachment Indexing (Fire-and-Forget)
-
-    /// Index attached file content for semantic retrieval.
-    /// Called after successful document extraction to enable RAG search across uploaded documents.
-    func indexFileAttachment(
-        fileURL: URL,
-        extractedText: String,
-        conversationID: UUID,
-        messageID: UUID
-    ) {
-        Task.detached(priority: .utility) { [weak self] in
-            guard let self else { return }
-
-            let sanitizedText = OutputSanitizer.stripThinkBlocksAndTokens(extractedText)
-            guard !sanitizedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-
-            // Chunk the extracted file content using paragraph-based semantic chunking
-            let blocks = [ContentBlock(id: "file-0", type: .paragraph(sanitizedText))]
-            let chunks = SemanticChunker(maxChunkSize: 512, overlap: 50).chunk(blocks: blocks)
-
-            guard !chunks.isEmpty else { return }
-
-            // Generate embeddings for each chunk
-            var childEntities: [ChildChunkEntity] = []
-            for (index, chunkText) in chunks.enumerated() {
-                guard !chunkText.isEmpty else { continue }
-                if let embedding = await embeddingService.generateEmbedding(for: chunkText) {
-                    let child = ChildChunkEntity(
-                        chunkText: chunkText,
-                        embedding: embedding,
-                        chunkIndex: index
-                    )
-                    childEntities.append(child)
-                }
-            }
-
-            guard !childEntities.isEmpty else { return }
-
-            // Create parent document referencing the file
-            let parentDoc = ParentDocumentEntity(
-                sourceMessageID: messageID,
-                conversationID: conversationID,
-                fullTextContent: "[File: \(fileURL.lastPathComponent)]\n\(sanitizedText)",
-                timestamp: Date()
-            )
-
-            vectorStoreService.addSemanticDocument(parent: parentDoc, children: childEntities)
-            self.logger.info("Indexed file attachment: \(fileURL.lastPathComponent) (\(childEntities.count) chunks)")
-        }
-    }
 }

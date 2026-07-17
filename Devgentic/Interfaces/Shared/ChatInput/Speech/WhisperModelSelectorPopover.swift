@@ -93,7 +93,11 @@ private struct ModelRowView: View {
 
                 Spacer()
 
-                // Trash button for downloaded models (visible on hover)
+                // Trash button for downloaded models (visible on hover).
+                // Hover is a MOUSE affordance — VoiceOver and keyboard never set `isHovering`,
+                // so this button doesn't exist in the tree for them. It is not their route to
+                // delete; the accessibility action and context menu below are. (It's also a
+                // Button nested in a Button, which VoiceOver reaches unreliably at best.)
                 if isDownloaded && isHovering {
                     Button(action: onDelete) {
                         Image(systemName: "trash")
@@ -103,21 +107,28 @@ private struct ModelRowView: View {
                     .buttonStyle(.plain)
                     .help("Delete model")
                     .transition(.opacity)
+                    .accessibilityHidden(true)
                 }
 
-                if isSelected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(.body))
-                        .foregroundColor(.accentColor)
-                } else if isDownloaded {
-                    Image(systemName: "checkmark.circle")
-                        .font(.system(.caption))
-                        .foregroundColor(.green.opacity(0.7))
-                } else {
-                    Image(systemName: "arrow.down.circle")
-                        .font(.system(.caption))
-                        .foregroundColor(.secondary.opacity(0.6))
+                // Status is encoded ONLY in these three glyphs. Hidden from VoiceOver and
+                // folded into the row's label instead, so state is spoken rather than
+                // announced as "checkmark.circle.fill".
+                Group {
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(.body))
+                            .foregroundColor(.accentColor)
+                    } else if isDownloaded {
+                        Image(systemName: "checkmark.circle")
+                            .font(.system(.caption))
+                            .foregroundColor(.green.opacity(0.7))
+                    } else {
+                        Image(systemName: "arrow.down.circle")
+                            .font(.system(.caption))
+                            .foregroundColor(.secondary.opacity(0.6))
+                    }
                 }
+                .accessibilityHidden(true)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
@@ -133,5 +144,35 @@ private struct ModelRowView: View {
                 isHovering = hovering
             }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        // Delete WAS mouse-only. These are the non-mouse routes: the VoiceOver actions rotor
+        // (VO-Command-Space) and Control-click / the keyboard context menu.
+        .accessibilityAction(named: "Delete model") {
+            guard isDownloaded else { return }
+            onDelete()
+        }
+        .contextMenu {
+            if isDownloaded {
+                Button(role: .destructive, action: onDelete) {
+                    Label("Delete Model", systemImage: "trash")
+                }
+            }
+        }
+    }
+
+    /// State lives entirely in glyph and colour otherwise — a VoiceOver user heard
+    /// "whisper-small, 466 MB" and was never told which model was actually active.
+    private var accessibilityLabel: String {
+        let state: String
+        if isSelected {
+            state = String(localized: "selected")
+        } else if isDownloaded {
+            state = String(localized: "downloaded")
+        } else {
+            state = String(localized: "not downloaded, activate to download")
+        }
+        return "\(model.displayName), \(model.size), \(state)"
     }
 }

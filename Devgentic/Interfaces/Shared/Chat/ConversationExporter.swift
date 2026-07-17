@@ -86,9 +86,6 @@ struct ConversationExporter {
                     lines.append("> 💡 \(suggestion)")
                 }
 
-            case .image(_, let alt, _):
-                lines.append("*[Image: \(alt ?? "generated image")]*")
-
             case .mediaArtifact(let artifact):
                 lines.append("*[Media: \(artifact.label ?? artifact.kind.rawValue)]*")
 
@@ -110,7 +107,7 @@ struct ConversationExporter {
         let markdown = await toMarkdown(title: title, messages: messages, includeFileContent: includeFileContent)
 
         let savePanel = NSSavePanel()
-        savePanel.title = "Export Conversation"
+        savePanel.title = String(localized: "Export Conversation")
         savePanel.nameFieldStringValue = sanitizeFilename(title) + ".md"
         savePanel.allowedContentTypes = [.plainText]
         savePanel.canCreateDirectories = true
@@ -124,10 +121,10 @@ struct ConversationExporter {
                 logger.error("Failed to export conversation: \(error.localizedDescription)")
                 Task { @MainActor in
                     let alert = NSAlert()
-                    alert.messageText = "Export Failed"
-                    alert.informativeText = "Could not save the conversation: \(error.localizedDescription)"
+                    alert.messageText = String(localized: "Export Failed")
+                    alert.informativeText = String(localized: "Could not save the conversation: \(error.localizedDescription)")
                     alert.alertStyle = .warning
-                    alert.addButton(withTitle: "OK")
+                    alert.addButton(withTitle: String(localized: "OK"))
                     alert.runModal()
                 }
             }

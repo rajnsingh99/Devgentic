@@ -19,6 +19,8 @@ struct MorningBriefCardView: View {
     @Environment(\.appTheme) private var theme
     @State private var appearedInsights: Set<UUID> = []
     @State private var showSystem = false
+    @State private var hoveredInsightID: UUID? = nil
+    @State private var animateSunrise = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -59,6 +61,10 @@ struct MorningBriefCardView: View {
 
             Spacer().frame(height: 16)
         }
+        .task {
+            try? await Task.sleep(for: .seconds(0.3))
+            animateSunrise.toggle()
+        }
         // MARK: Liquid Glass — card with glass treatment
         .background(.clear)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -97,6 +103,12 @@ struct MorningBriefCardView: View {
                                 endPoint: .topTrailing
                             )
                         )
+                        .symbolEffect(.bounce, value: animateSunrise)
+                        .onHover { hovering in
+                            if hovering {
+                                animateSunrise.toggle()
+                            }
+                        }
                 }
                 .accessibilityHidden(true)
 
@@ -148,7 +160,8 @@ struct MorningBriefCardView: View {
     // MARK: - Insight Card
 
     private func insightCard(_ insight: ConversationInsight, index: Int) -> some View {
-        Button(action: {
+        let isHovered = hoveredInsightID == insight.id
+        return Button(action: {
             onNavigate(.conversation(id: insight.conversationID))
         }) {
             VStack(alignment: .leading, spacing: 10) {
@@ -219,15 +232,25 @@ struct MorningBriefCardView: View {
             .padding(12)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(theme.secondaryBackground.opacity(0.5))
+                    .fill(isHovered ? theme.secondaryBackground.opacity(0.8) : theme.secondaryBackground.opacity(0.4))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(theme.surfaceOverlayStrong.opacity(0.6), lineWidth: 0.5)
+                    .stroke(
+                        isHovered ? theme.accentColor.opacity(0.4) : theme.surfaceOverlayStrong.opacity(0.4),
+                        lineWidth: 0.5
+                    )
             )
+            .scaleEffect(isHovered ? 1.005 : 1.0)
+            .shadow(color: theme.primaryText.opacity(isHovered ? 0.05 : 0.0), radius: 8, x: 0, y: 3)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.15)) {
+                hoveredInsightID = hovering ? insight.id : nil
+            }
+        }
     }
 
     // MARK: - System Footer

@@ -47,8 +47,39 @@ struct MainApplicationView: View {
     // MARK: - Body
     var body: some View {
         ZStack(alignment: .leading) {
-            theme.primaryBackground
-                .edgesIgnoringSafeArea(.all)
+            ZStack {
+                theme.primaryBackground
+                
+                // Ambient Aura Glows (Provides texture for Liquid Glass refraction)
+                if theme.id != "one_light" {
+                    GeometryReader { geo in
+                        ZStack {
+                            Circle()
+                                .fill(theme.accentColor.opacity(0.06))
+                                .frame(width: geo.size.width * 0.45, height: geo.size.width * 0.45)
+                                .blur(radius: 130)
+                                .offset(x: -geo.size.width * 0.15, y: -geo.size.height * 0.1)
+                            
+                            Circle()
+                                .fill(Color.orange.opacity(0.035))
+                                .frame(width: geo.size.width * 0.4, height: geo.size.width * 0.4)
+                                .blur(radius: 110)
+                                .offset(x: geo.size.width * 0.35, y: geo.size.height * 0.25)
+                        }
+                    }
+                } else {
+                    GeometryReader { geo in
+                        ZStack {
+                            Circle()
+                                .fill(theme.accentColor.opacity(0.04))
+                                .frame(width: geo.size.width * 0.4, height: geo.size.width * 0.4)
+                                .blur(radius: 100)
+                                .offset(x: -geo.size.width * 0.1, y: -geo.size.height * 0.1)
+                        }
+                    }
+                }
+            }
+            .edgesIgnoringSafeArea(.all)
             
             ZStack {
                 // LAYER 1: Chat — always alive, visibility toggled via opacity
@@ -153,6 +184,13 @@ struct MainApplicationView: View {
             viewModel.navigateToPendingInteraction(conversationID: id, interface: .chat)
             if !router.isShowingChat { router.returnToChat() }
         }
+        // Settings deep-link from outside this window's environment (the QuickAccess
+        // advisory banner's reverse-handoff) — same route the in-window banner uses.
+        .onReceive(NotificationCenter.default.publisher(for: GlobalConstants.openProfileSettingsNotification)) { note in
+            guard let idString = note.userInfo?["profileID"] as? String,
+                  let id = UUID(uuidString: idString) else { return }
+            router.navigate(to: .profileDetail(profileID: id))
+        }
     }
 
     // MARK: - Subviews
@@ -239,6 +277,14 @@ struct MainApplicationView: View {
                 // The legacy StreamingMessageBannerWrapper + the `interfaceMode != .workflow` gate
                 // were removed here in the P4 cutover.
                 InteractionBannerStack()
+                    .environment(viewModel)
+
+                // Ambient, actionable warnings (e.g. context-overflow with a settings
+                // deep-link) — deliberately BELOW the HITL stack: the advisory is
+                // ambient state, so anchoring it next to the input keeps its position
+                // stable while transient HITL banners come and go above it.
+                // Order: HITL (top) → advisory (mid) → chat input (bottom).
+                AdvisoryBannerView()
                     .environment(viewModel)
 
                 ChatInputAreaView(

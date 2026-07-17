@@ -13,6 +13,7 @@ struct ErrorMessageView: View {
     /// distinct lightbulb line below the details when present.
     var suggestion: String? = nil
     @Environment(\.appTheme) private var theme
+    @Environment(ThemeManager.self) private var themeManager
 
     /// SF Symbol chosen by category so a file/doc/image failure reads at a glance,
     /// falling back to the generic error octagon for everything else.
@@ -38,12 +39,15 @@ struct ErrorMessageView: View {
             VStack(alignment: .leading, spacing: 4) {
                 if let title = title, !title.isEmpty {
                     Text(title)
-                        .font(.headline)
+                        .font(.system(size: themeManager.chatFontSize + 1, weight: .semibold))
                         .bold()
                         .foregroundColor(theme.errorColor.opacity(0.95))
                 }
                 Text(details)
-                    .font(theme.fontBody) 
+                    // `theme.fontBody` is a fixed ~13pt, so at 20pt chat the error text
+                    // stayed small while the prose around it grew — exactly the message a
+                    // reader who sized up needs to be able to read.
+                    .font(themeManager.chatFont)
                     .foregroundColor(theme.primaryText.opacity(0.85))
                     .textSelection(.enabled) 
 
@@ -53,7 +57,7 @@ struct ErrorMessageView: View {
                             .font(.callout)
                             .foregroundColor(theme.accentColor.opacity(0.9))
                         Text(suggestion)
-                            .font(.callout)
+                            .font(.system(size: max(10, themeManager.chatFontSize - 2)))
                             .foregroundColor(theme.secondaryText.opacity(0.9))
                             .textSelection(.enabled)
                     }
@@ -79,8 +83,42 @@ struct ErrorMessageView: View {
                 .stroke(theme.errorColor.opacity(0.25), lineWidth: 0.5)
         )
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Error: \(title ?? "Unknown"). \(details)" + (suggestion.map { ". Suggestion: \($0)" } ?? ""))
+        .accessibilityLabel(spokenDescription)
         .accessibilityAddTraits(.isStaticText)
+        // An error card appears wherever the agent happens to be writing, which is rarely
+        // where the VoiceOver cursor is — so the run just went quiet and stayed quiet.
+        // `.polite` rather than `.immediate`: the error has already happened and the card
+        // isn't going anywhere; nothing is lost by waiting for the current utterance.
+        .task(id: spokenDescription) {
+            AccessibilityAnnouncer.announce(spokenDescription, urgency: .polite)
+        }
+        // One-click copy of the WHOLE error for a bug report. `.textSelection` on the
+        // details covers partial selection, but drag-selecting across title + details +
+        // suggestion is fiddly and loses the structure. Lives here so every consumer
+        // (agent errors, image failures, media failures) inherits it identically.
+        .contextMenu {
+            Button(action: copyError) {
+                Label("Copy Error", systemImage: "doc.on.doc")
+            }
+        }
+        .accessibilityAction(named: "Copy error") { copyError() }
+    }
+
+    /// One string for both the label and the announcement — they must never drift.
+    private var spokenDescription: String {
+        let base = String(localized: "Error: \(title ?? String(localized: "Unknown")). \(details)")
+        let hint = suggestion.map { String(localized: ". Suggestion: \($0)") } ?? ""
+        return base + hint
+    }
+
+    /// Clipboard form: structured lines, not the spoken sentence.
+    private func copyError() {
+        var lines: [String] = []
+        if let title, !title.isEmpty { lines.append(title) }
+        lines.append(details)
+        if let suggestion, !suggestion.isEmpty { lines.append("Suggestion: \(suggestion)") }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
     }
 }
 

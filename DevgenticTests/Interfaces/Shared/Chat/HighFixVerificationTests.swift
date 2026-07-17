@@ -5,7 +5,8 @@
 //  Red-green verification tests for the 8 HIGH severity production-readiness fixes.
 //
 //  Fix 1: AgentBubbleContentView — cached markdown during streaming
-//  Fix 2: ChatSearchViewModel — debounced search with pre-computed index
+//  Fix 2: ChatSearchViewModel — debounced, query-time search (extraction at query
+//         time; the earlier pre-computed index went stale on in-place mutations)
 //  Fix 3: MarkdownTableView — large table row virtualization
 //  Fix 4: UserMessageView — cached truncation detection
 //  Fix 5: ChatHistoryView — displayMessages cache invalidation
@@ -135,20 +136,33 @@ final class SearchDebounceTests: XCTestCase {
         XCTAssertTrue(vm.matches.isEmpty, "Empty query should clear matches")
     }
 
-    /// Verifies rebuildSearchIndex pre-computes lowercase index.
-    func testRebuildSearchIndexPopulatesIndex() {
+    /// Regression (2026-07): the old pre-computed index went stale when a message's
+    /// content was mutated in place — a streamed response finalizes without any
+    /// membership change, so the just-completed answer was unsearchable until the
+    /// next message arrived. Search is query-time now: it must see CURRENT content
+    /// and must not match pre-mutation content.
+    func testSearchReflectsInPlaceContentMutation() {
         let vm = ChatSearchViewModel()
-        let messages = [
-            makeMessage(text: "Alpha bravo"),
-            makeMessage(text: "Charlie delta"),
-        ]
+        let msg = makeMessage(text: "placeholder")
+        let messages = [msg]
 
-        vm.rebuildSearchIndex(from: messages)
-
-        // After indexing, search should still work correctly
-        vm.searchQuery = "charlie"
+        // Search once so any caching layer would have captured the old content.
+        vm.searchQuery = "placeholder"
         vm.performSearch(in: messages)
-        XCTAssertEqual(vm.matches.count, 1, "Should find 'charlie' via pre-computed index")
+        XCTAssertEqual(vm.matches.count, 1, "Baseline: original content should match")
+
+        // Mutate in place — same object, same array — exactly what a completing
+        // stream does (updates both `content` and the selected variant).
+        msg.content = .markdownText("The final streamed answer")
+        msg.agentResponse?.variants[0].content = .markdownText("The final streamed answer")
+
+        vm.searchQuery = "streamed"
+        vm.performSearch(in: messages)
+        XCTAssertEqual(vm.matches.count, 1, "Search must see content mutated after a previous search")
+
+        vm.searchQuery = "placeholder"
+        vm.performSearch(in: messages)
+        XCTAssertTrue(vm.matches.isEmpty, "Search must not match pre-mutation content")
     }
 
     /// Verifies case-insensitive search.
@@ -189,7 +203,9 @@ final class SearchDebounceTests: XCTestCase {
         XCTAssertEqual(vm.currentMatchIndex, vm.matches.count - 1, "Should wrap to last match")
     }
 
-    /// Performance: search over 1000 messages should complete in under 100ms.
+    /// Performance: a query-time search over 1000 messages (extraction + lowercase
+    /// + scan all inside performSearch now) should stay well under one debounce
+    /// interval (150ms).
     func testSearchPerformanceWith1000Messages() {
         let vm = ChatSearchViewModel()
         var messages: [ChatMessage] = []
@@ -197,7 +213,6 @@ final class SearchDebounceTests: XCTestCase {
             messages.append(makeMessage(text: "Message number \(i) with some content to search through. The quick brown fox jumps over the lazy dog. This is padding text to simulate realistic message lengths."))
         }
 
-        vm.rebuildSearchIndex(from: messages)
         vm.searchQuery = "quick brown"
 
         measure {

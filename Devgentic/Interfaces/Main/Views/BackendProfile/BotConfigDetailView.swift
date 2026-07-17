@@ -482,24 +482,8 @@ struct BotConfigDetailView: View {
                     }
                 }
 
-                Divider()
-
-                // File Handling Strategy
-                VStack(alignment: .leading, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("File Handling")
-                            .font(theme.fontBody.weight(.semibold))
-                        Text("How attached files and knowledge sources are processed")
-                            .font(theme.fontCaption)
-                            .foregroundColor(theme.secondaryText)
-                    }
-
-                    FileContextStrategyPicker(
-                        strategy: $editBuffer.draft.fileContextStrategy,
-                        profileType: .bot
-                    )
-                    .padding(.leading, 12)
-                }
+                // Bot file handling is fixed to .directInjection (bots have no tools,
+                // and contextualRAG is deprecated) — one option, so no picker.
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 16)

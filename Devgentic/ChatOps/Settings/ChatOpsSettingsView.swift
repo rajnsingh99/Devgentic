@@ -84,7 +84,7 @@ struct ChatOpsSettingsView: View {
             .padding(.bottom, 24)
         }
         .scrollContentBackground(.hidden)
-        .background(theme.primaryBackground)
+        .background(Color.clear)
         .onAppear {
             tokenInput = config.botToken ?? ""
             botUsername = config.botUsername

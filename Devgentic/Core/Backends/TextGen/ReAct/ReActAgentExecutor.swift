@@ -107,8 +107,10 @@ actor ReActAgentExecutor: Executor {
                     )
                     // [Loop Safety] Per-run memory of human interactions: replays identical
                     // clarification answers and auto-denies identical declined requests, so
-                    // the user is never asked the same thing twice in one run.
-                    let interactionMemory = RunInteractionMemory()
+                    // the user is never asked the same thing twice in one run. A capability
+                    // wrapper (Planning/Reflexion) may pass a SHARED instance so answers —
+                    // including the pre-plan clarification — carry across subtasks/trials.
+                    let interactionMemory = input.interactionMemory ?? RunInteractionMemory()
                     var retryStrategy = LLMRetryStrategy(
                         maxConsecutiveParseFailures: input.resiliencePolicy.cognitive.maxParseFailures,
                         backoffStrategy: input.resiliencePolicy.transport.backoffStrategy,
@@ -264,7 +266,9 @@ actor ReActAgentExecutor: Executor {
                             skillManifests: input.skillManifests,
                             taskDescription: input.workflowContext?.taskDescription,
                             promptLayerConfig: input.workflowContext != nil ? .workflow : .agent,
-                            workflowContext: input.workflowContext
+                            workflowContext: input.workflowContext,
+                            attachmentContext: input.attachmentContext,
+                            knowledgeBaseContext: input.knowledgeBaseContext
                         )
 
                         // G12: Seed native conversation turns on iter 1. System prompt and
@@ -288,9 +292,21 @@ actor ReActAgentExecutor: Executor {
                             // working-memory guard.
                             let seededContext = context.compiledScratchpad
                             let hasSeededContext = !seededContext.isEmpty && seededContext != "No actions taken yet."
-                            let kickoffText = hasSeededContext
-                                ? PromptWrapping.xml.section("prior_context", content: seededContext) + "\n\n" + input.userInput
-                                : input.userInput
+                            // Attachments ride the kickoff turn here because compileMessages
+                            // excludes them on the native path (includeAttachmentContext: false).
+                            // Both parts are nil/empty on unseeded, attachment-free runs, so the
+                            // kickoff stays byte-identical (KV-cache prefix unchanged).
+                            let kickoffText: String = {
+                                var parts: [String] = []
+                                if hasSeededContext {
+                                    parts.append(PromptWrapping.xml.section("prior_context", content: seededContext))
+                                }
+                                if let attachments = input.attachmentContext, !attachments.isEmpty {
+                                    parts.append(attachments)
+                                }
+                                parts.append(input.userInput)
+                                return parts.joined(separator: "\n\n")
+                            }()
 
                             // Pre-resolve attached image bytes (async) so the sync adapter
                             // can serialize them into the kickoff user turn natively. Empty
@@ -1092,6 +1108,7 @@ actor ReActAgentExecutor: Executor {
                                     personaInstructions: input.instructions,
                                     originalQuery: input.userInput,
                                     forceSynthesis: true,
+                                    suppressLLM: input.suppressLLMSynthesis,
                                     onUsage: { accumulatedTokenUsage.accumulate($0) }
                                 )
                                 if !input.suppressEpisodeManagement {
@@ -1221,6 +1238,7 @@ actor ReActAgentExecutor: Executor {
                         originalQuery: input.userInput,
                         isNativeFlow: input.generatorStrategy is NativeStructuredGenerator,
                         forceSynthesis: input.responseSynthesisEnabled || !effectiveFailures.isEmpty,
+                        suppressLLM: input.suppressLLMSynthesis,
                         onUsage: { accumulatedTokenUsage.accumulate($0) }
                     )
 
@@ -1312,6 +1330,19 @@ actor ReActAgentExecutor: Executor {
                         await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                     }
                     continuation.yield(.thought("Cancelled by user."))
+                    // Report the honest terminal outcome to the session summary. Without
+                    // this, a user Stop prints "FAIL ❌" in the executor-span rollup
+                    // (no reported outcome + didFinishSuccessfully false) when the
+                    // truthful label is CANCELLED 🚫.
+                    onTraceUpdate(AgentTraceLog(
+                        traceID: input.traceContext.traceID,
+                        spanID: input.traceContext.spanID,
+                        parentSpanID: input.traceContext.parentSpanID,
+                        stepNumber: 0,
+                        state: .thinking(.finalizing),
+                        content: "Cancelled by user.",
+                        metadata: ["outcome": ExecutionOutcome.cancelled.rawValue]
+                    ))
                     // Emit a content placeholder so the message bubble isn't left empty.
                     // Without this, cancelled messages show an empty bubble with action
                     // buttons as if the agent completed normally.

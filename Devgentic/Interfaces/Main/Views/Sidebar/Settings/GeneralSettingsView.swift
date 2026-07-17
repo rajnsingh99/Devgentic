@@ -20,7 +20,6 @@ struct GeneralSettingsView: View {
     @AppStorage(AppSettings.speechAutoStopOnSilenceKey) private var autoStopOnSilence: Bool = true
     @AppStorage(AppSettings.developerModeKey) private var developerMode: Bool = false
     @AppStorage(AppSettings.diagnosticsEnabledKey) private var diagnosticsEnabled: Bool = true
-    @AppStorage(AppSettings.agentViewVariantKey) private var agentViewVariant: AgentViewVariant = .dynamicIsland
 
     // Download/delete confirmation state
     enum SettingsWhisperAlert { case download, delete }
@@ -162,23 +161,6 @@ struct GeneralSettingsView: View {
                             .tint(theme.accentColor)
                     }
 
-                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
-
-                    SettingsRow(
-                        title: "Agent Execution View",
-                        description: "Select how the agent's thought process and tool usage are displayed during execution.",
-                        theme: theme
-                    ) {
-                        Picker("", selection: $agentViewVariant) {
-                            ForEach(AgentViewVariant.allCases) { variant in
-                                Text(variant.rawValue).tag(variant)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .labelsHidden()
-                        .tint(theme.primaryText)
-                        .fixedSize()
-                    }
                 }
 
                 // 3. Speech Recognition Section
@@ -317,7 +299,7 @@ struct GeneralSettingsView: View {
             .padding(.bottom, 24)
         }
         .scrollContentBackground(.hidden)
-        .background(theme.primaryBackground)
+        .background(Color.clear)
     }
 
     // MARK: - Settings Alert Helpers

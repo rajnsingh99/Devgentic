@@ -84,9 +84,12 @@ actor PlanningExecutorWrapper: Executor {
 
                     continuation.yield(.thought("Planning: Decomposing task into subtasks..."))
 
+                    // Anchor to the EXISTING root span. Emitting on `newSpan()` referenced
+                    // a span row that was never begun — the event failed the FK check at
+                    // flush and was dropped from the trace (confirmed in both manual runs).
                     onTraceUpdate(AgentTraceLog(
                         traceID: executionTrace.traceID,
-                        spanID: executionTrace.newSpan().spanID,
+                        spanID: executionTrace.spanID,
                         parentSpanID: executionTrace.parentSpanID,
                         stepNumber: 0,
                         state: .thinking(.planning),
@@ -115,33 +118,88 @@ actor PlanningExecutorWrapper: Executor {
                         userProfile = nil
                     }
 
-                    let planContext = SemanticContext(
-                        instructions: input.instructions,
-                        environmentFacts: envFacts,
-                        longTermMemory: input.longTermMemory,
-                        recentHistory: input.recentHistory,
-                        nativeHistoryTurns: input.nativeHistoryTurns,
-                        originalQuery: input.userInput,
-                        currentIteration: 0,
-                        compiledScratchpad: "",
-                        latestClarification: nil,
-                        negativeConstraints: Set(sessionState.negativeConstraints),
-                        hallucinatedTools: [],
-                        availableTools: input.tools,
-                        userProfile: userProfile,
-                        skillManifests: input.skillManifests,
-                        taskDescription: nil,
-                        promptLayerConfig: .agent,
-                        workflowContext: nil
-                    )
+                    // Both plan calls (initial + post-clarification) share this shape;
+                    // only the answered clarification differs.
+                    func makePlanContext(_ clarification: ClarificationContext?) -> SemanticContext {
+                        SemanticContext(
+                            instructions: input.instructions,
+                            environmentFacts: envFacts,
+                            longTermMemory: input.longTermMemory,
+                            recentHistory: input.recentHistory,
+                            nativeHistoryTurns: input.nativeHistoryTurns,
+                            originalQuery: input.userInput,
+                            currentIteration: 0,
+                            compiledScratchpad: "",
+                            latestClarification: clarification,
+                            negativeConstraints: Set(sessionState.negativeConstraints),
+                            hallucinatedTools: [],
+                            availableTools: input.tools,
+                            userProfile: userProfile,
+                            skillManifests: input.skillManifests,
+                            taskDescription: nil,
+                            promptLayerConfig: .agent,
+                            workflowContext: nil
+                        )
+                    }
+
+                    // [Loop Safety] ONE interaction memory for the whole planned run: the
+                    // pre-plan clarification recorded here replays for identical `ask_user`
+                    // re-asks inside any subtask (threaded via subtaskInput below).
+                    let interactionMemory = input.interactionMemory ?? RunInteractionMemory()
 
                     let planGenerator = PlanGeneratorStrategy(planningConfig: config)
                     var subtasks: [SubTask]
 
                     do {
-                        let planResult = try await planGenerator.generatePlan(model: spyModel, context: planContext)
-                        subtasks = planResult.plan
+                        // Round 1 — the model may answer with a plan or (when enabled and the
+                        // task is too vague) a single CLARIFY question. Suppressed in workflow
+                        // mode: nodes run headless on task+input, and a mid-DAG question would
+                        // stall the graph on context the upstream node should have provided.
+                        let allowClarify = config.clarifyBeforePlanning && input.workflowContext == nil
+                        let planResult = try await planGenerator.generatePlan(
+                            model: spyModel, context: makePlanContext(nil), allowClarification: allowClarify
+                        )
                         continuation.yield(.tokenUsage(planResult.usage))
+
+                        switch planResult.outcome {
+                        case .plan(let plan):
+                            subtasks = plan
+
+                        case .clarificationNeeded(let question):
+                            logger.info("Planner requested clarification before planning.")
+                            let operationID = UUID()
+                            continuation.yield(.requestClarification(question: question, operationID: operationID))
+                            let answer = await ExecutionSuspensionService.shared
+                                .suspendForClarification(for: operationID, conversationID: input.conversationID)
+                            // A Stop while suspended resumes nil via cancel(for:) — don't record
+                            // that as a real "skip"; propagate to the cancel handler instead.
+                            try Task.checkCancellation()
+
+                            // Record the Q&A so an identical ask_user inside a subtask replays
+                            // the answer instead of re-raising the banner (loop-safety contract).
+                            await interactionMemory.recordAnswer(question: question, response: answer)
+
+                            let answerText = answer ?? "System: The user skipped or did not respond."
+                            continuation.yield(.thought(answer != nil
+                                ? "Clarified before planning — \(question) → \(answerText)"
+                                : "Clarification skipped — planning with reasonable assumptions."))
+
+                            // Round 2 — the answer shapes the plan; no second question allowed.
+                            await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
+                            let clarified = ClarificationContext(query: question, response: answerText)
+                            let secondResult = try await planGenerator.generatePlan(
+                                model: spyModel, context: makePlanContext(clarified), allowClarification: false
+                            )
+                            continuation.yield(.tokenUsage(secondResult.usage))
+                            if case .plan(let plan) = secondResult.outcome {
+                                subtasks = plan
+                            } else {
+                                // Unreachable (allowClarification: false never yields a question) —
+                                // defensive parity with the parse-failure fallback below.
+                                subtasks = [SubTask(id: "step_1", description: input.userInput)]
+                            }
+                        }
+
                         // Cap to configured max
                         if subtasks.count > config.maxSubtasks {
                             subtasks = Array(subtasks.prefix(config.maxSubtasks))
@@ -156,11 +214,9 @@ actor PlanningExecutorWrapper: Executor {
                         subtasks = [SubTask(id: "step_1", description: input.userInput)]
                     }
 
-                    let planSummary = subtasks.enumerated()
-                        .map { "  \($0.offset + 1). \($0.element.description)" }
-                        .joined(separator: "\n")
-                    continuation.yield(.planGenerated(subtaskCount: subtasks.count))
-                    continuation.yield(.thought("Plan generated with \(subtasks.count) steps:\n\(planSummary)"))
+                    // Structured plan → UI plan card. The step list travels as data; the old
+                    // numbered-list `.thought` duplicated what the card now renders.
+                    continuation.yield(.planGenerated(subtasks: subtasks))
                     logger.info("Plan generated: \(subtasks.count) subtasks.")
 
                     // =====================================================================
@@ -180,13 +236,26 @@ actor PlanningExecutorWrapper: Executor {
                             continuation.yield(.content("Plan was cancelled. Let me know if you'd like a different approach."))
                             sessionState.closeActiveEpisode(outcome: .cancelled, message: "Plan rejected by user")
                             await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                            // Honest terminal for the session summary — a rejected plan is
+                            // CANCELLED 🚫, not FAIL ❌ (observed in the reject-path manual run).
+                            onTraceUpdate(AgentTraceLog(
+                                traceID: input.traceContext.traceID,
+                                spanID: input.traceContext.spanID,
+                                parentSpanID: input.traceContext.parentSpanID,
+                                stepNumber: 0,
+                                state: .thinking(.finalizing),
+                                content: "Plan rejected by user.",
+                                metadata: ["outcome": ExecutionOutcome.cancelled.rawValue]
+                            ))
                             continuation.yield(.executionFinished(outcome: .cancelled, reason: "Plan rejected by user"))
                             continuation.finish()
                             return
                         }
 
                         subtasks = Self.sanitizeDependencies(approvedPlan)
-                        continuation.yield(.thought("Plan approved (\(subtasks.count) subtasks). Starting execution..."))
+                        // Review edits can add/remove/reword steps — ship the FINAL plan so the
+                        // UI card replaces its step list before execution starts.
+                        continuation.yield(.planApproved(subtasks: subtasks))
                         logger.info("Plan approved with \(subtasks.count) subtasks. Proceeding to execution.")
                     }
 
@@ -197,13 +266,19 @@ actor PlanningExecutorWrapper: Executor {
                     let levels = Self.computeExecutionLevels(subtasks: subtasks)
                     var subtaskResults: [String: String] = [:]
                     var allToolResults: [ToolOutput] = []  // [G4] Aggregate across subtasks
+                    // Inner runs that finished dishonestly-cleanly: `.failed` without
+                    // throwing (fatal path yields + finishes), and `.completedWithWarnings`
+                    // (circuit-breaker abort / tool failures with a best-effort answer).
+                    // Both must reach the plan-level outcome — the old `Error:`-prefix
+                    // check alone let a force-terminated subtask read as full success.
+                    var hardFailedIDs: [String] = []
+                    var degradedSubtasks: [(id: String, reason: String?)] = []
 
                     for (levelIndex, levelIDs) in levels.enumerated() {
                         try Task.checkCancellation()
 
                         let levelSubtasks = levelIDs.compactMap { id in subtasks.first(where: { $0.id == id }) }
-
-                        continuation.yield(.thought("Executing level \(levelIndex + 1)/\(levels.count) (\(levelSubtasks.count) subtask\(levelSubtasks.count == 1 ? "" : "s"))..."))
+                        logger.info("Executing level \(levelIndex + 1)/\(levels.count) (\(levelSubtasks.count) subtask(s)).")
 
                         if config.parallelSubtasks && levelSubtasks.count > 1 {
                             // Parallel execution — catch per-subtask errors so one failure
@@ -213,7 +288,7 @@ actor PlanningExecutorWrapper: Executor {
                             // results (correct — they're independent by definition).
                             let priorResults = subtaskResults
 
-                            await withTaskGroup(of: (String, String?, [ToolOutput]).self) { group in
+                            await withTaskGroup(of: (String, String?, [ToolOutput], ExecutionOutcome?, String?).self) { group in
                                 for subtask in levelSubtasks {
                                     group.addTask {
                                         do {
@@ -223,12 +298,13 @@ actor PlanningExecutorWrapper: Executor {
                                                 priorResults: priorResults,
                                                 input: input,
                                                 model: model,
+                                                interactionMemory: interactionMemory,
                                                 continuation: continuation,
                                                 onTraceUpdate: onTraceUpdate
                                             )
-                                            return (subtask.id, result.output, result.toolResults)
+                                            return (subtask.id, result.output, result.toolResults, result.outcome, result.reason)
                                         } catch is CancellationError {
-                                            return (subtask.id, nil, [])
+                                            return (subtask.id, nil, [], nil, nil)
                                         } catch {
                                             logger.error("Subtask '\(subtask.id)' failed: \(error.localizedDescription)")
                                             // Structured warning — this is a system signal (subtask threw)
@@ -240,13 +316,25 @@ actor PlanningExecutorWrapper: Executor {
                                                 message: "Subtask '\(subtask.id)' failed: \(error.localizedDescription)",
                                                 relatedPath: subtask.id
                                             ))
-                                            return (subtask.id, "Error: \(error.localizedDescription)", [])
+                                            // A thrown subtask never reaches executeSubtask's completion
+                                            // yield — close its plan-card row here so it doesn't spin forever.
+                                            let failedIndex = (subtasks.firstIndex(where: { $0.id == subtask.id }) ?? 0) + 1
+                                            continuation.yield(.subtaskCompleted(
+                                                id: subtask.id, index: failedIndex, total: subtasks.count,
+                                                summary: "Failed: \(error.localizedDescription)", outcome: .failed
+                                            ))
+                                            return (subtask.id, "Error: \(error.localizedDescription)", [], nil, nil)
                                         }
                                     }
                                 }
-                                for await (id, result, tools) in group {
+                                for await (id, result, tools, outcome, reason) in group {
                                     if let result { subtaskResults[id] = result }
                                     allToolResults.append(contentsOf: tools)
+                                    switch outcome {
+                                    case .failed: hardFailedIDs.append(id)
+                                    case .completedWithWarnings: degradedSubtasks.append((id: id, reason: reason))
+                                    default: break
+                                    }
                                 }
                             }
                             try Task.checkCancellation()
@@ -261,11 +349,17 @@ actor PlanningExecutorWrapper: Executor {
                                         priorResults: subtaskResults,
                                         input: input,
                                         model: model,
+                                        interactionMemory: interactionMemory,
                                         continuation: continuation,
                                         onTraceUpdate: onTraceUpdate
                                     )
                                     subtaskResults[subtask.id] = result.output
                                     allToolResults.append(contentsOf: result.toolResults)
+                                    switch result.outcome {
+                                    case .failed: hardFailedIDs.append(subtask.id)
+                                    case .completedWithWarnings: degradedSubtasks.append((id: subtask.id, reason: result.reason))
+                                    default: break
+                                    }
                                 } catch is CancellationError {
                                     throw CancellationError()
                                 } catch {
@@ -274,6 +368,12 @@ actor PlanningExecutorWrapper: Executor {
                                         category: .retry,
                                         message: "Subtask '\(subtask.id)' failed: \(error.localizedDescription)",
                                         relatedPath: subtask.id
+                                    ))
+                                    // Close the plan-card row for the thrown subtask (see parallel branch).
+                                    let failedIndex = (subtasks.firstIndex(where: { $0.id == subtask.id }) ?? 0) + 1
+                                    continuation.yield(.subtaskCompleted(
+                                        id: subtask.id, index: failedIndex, total: subtasks.count,
+                                        summary: "Failed: \(error.localizedDescription)", outcome: .failed
                                     ))
                                     subtaskResults[subtask.id] = "Error: \(error.localizedDescription)"
                                 }
@@ -289,11 +389,14 @@ actor PlanningExecutorWrapper: Executor {
 
                     let combinedResults = subtasks.compactMap { subtaskResults[$0.id] }.joined(separator: "\n")
 
-                    // Partial-failure detection: subtask catch sites prefix failures with
-                    // "Error: ". Computed BEFORE building the summary so an all-failed run
+                    // Partial-failure detection: thrown subtasks are recorded with an
+                    // "Error: " prefix by the catch sites; non-throwing `.failed` terminals
+                    // are in hardFailedIDs (disjoint by construction — a throw never returns
+                    // an outcome). Computed BEFORE building the summary so an all-failed run
                     // doesn't present raw internal error descriptions as the conclusion.
                     let totalSubtasks = subtasks.count
-                    let failedSubtasks = subtaskResults.values.filter { $0.hasPrefix("Error:") }.count
+                    let thrownFailures = subtaskResults.values.filter { $0.hasPrefix("Error:") }.count
+                    let failedSubtasks = thrownFailures + hardFailedIDs.count
                     let allFailed = totalSubtasks > 0 && failedSubtasks == totalSubtasks
 
                     var synthesisSummary = ExecutionSummary(originalGoal: input.userInput)
@@ -331,13 +434,42 @@ actor PlanningExecutorWrapper: Executor {
                         onUsage: { continuation.yield(.tokenUsage($0)) }
                     )
 
-                    let terminalOutcome: ExecutionOutcome = allFailed ? .failed : .completed
-                    let terminalReason: String? = failedSubtasks > 0
-                        ? "\(failedSubtasks) of \(totalSubtasks) subtasks failed"
-                        : nil
+                    // Honest plan-level terminal: any hard failure or degraded (forced-
+                    // termination) subtask demotes the run to `.completedWithWarnings` —
+                    // previously a circuit-breaker-aborted subtask read as a clean
+                    // `.completed` with a nil reason.
+                    let terminalOutcome: ExecutionOutcome
+                    if allFailed {
+                        terminalOutcome = .failed
+                    } else if failedSubtasks > 0 || !degradedSubtasks.isEmpty {
+                        terminalOutcome = .completedWithWarnings
+                    } else {
+                        terminalOutcome = .completed
+                    }
+                    var reasonParts: [String] = []
+                    if failedSubtasks > 0 {
+                        reasonParts.append("\(failedSubtasks) of \(totalSubtasks) subtasks failed")
+                    }
+                    for degraded in degradedSubtasks {
+                        reasonParts.append("'\(degraded.id)' ended early\(degraded.reason.map { ": \($0)" } ?? "")")
+                    }
+                    let terminalReason: String? = reasonParts.isEmpty ? nil : reasonParts.joined(separator: "; ")
 
                     sessionState.closeActiveEpisode(outcome: terminalOutcome, message: response)
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+
+                    // Report the plan-level outcome on the root span so the session summary
+                    // (EvaluationLogger) reflects the PLAN's verdict, not whichever inner
+                    // run happened to report its finalizing event last.
+                    onTraceUpdate(AgentTraceLog(
+                        traceID: executionTrace.traceID,
+                        spanID: executionTrace.spanID,
+                        parentSpanID: executionTrace.parentSpanID,
+                        stepNumber: subtasks.count,
+                        state: .thinking(.finalizing),
+                        content: "Plan execution complete: \(subtasks.count) subtask(s).",
+                        metadata: ["outcome": terminalOutcome.rawValue]
+                    ))
 
                     continuation.yield(.content(response))
                     didEmitContent = true
@@ -350,6 +482,16 @@ actor PlanningExecutorWrapper: Executor {
                     sessionState.cancelActiveEpisode()
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                     continuation.yield(.thought("Cancelled by user."))
+                    // Honest terminal for the session summary: CANCELLED 🚫, not FAIL ❌.
+                    onTraceUpdate(AgentTraceLog(
+                        traceID: input.traceContext.traceID,
+                        spanID: input.traceContext.spanID,
+                        parentSpanID: input.traceContext.parentSpanID,
+                        stepNumber: 0,
+                        state: .thinking(.finalizing),
+                        content: "Cancelled by user.",
+                        metadata: ["outcome": ExecutionOutcome.cancelled.rawValue]
+                    ))
                     // #23: mirror ReActAgentExecutor's cancel placeholder so a cancelled
                     // Plan&Execute run doesn't leave an empty bubble (the inner subtask
                     // content is accumulated, not forwarded, so on a wrapper-level cancel
@@ -398,13 +540,14 @@ actor PlanningExecutorWrapper: Executor {
         priorResults: [String: String],
         input: AgentInput,
         model: any LLMProvider,
+        interactionMemory: RunInteractionMemory,
         continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation,
         onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
-    ) async throws -> (output: String, toolResults: [ToolOutput]) {
+    ) async throws -> (output: String, toolResults: [ToolOutput], outcome: ExecutionOutcome?, reason: String?) {
 
         let subtaskIndex = (allSubtasks.firstIndex(where: { $0.id == subtask.id }) ?? 0) + 1
-        continuation.yield(.subtaskStarted(index: subtaskIndex, total: allSubtasks.count, description: subtask.description))
-        continuation.yield(.thought("Subtask: \(subtask.description)"))
+        let subtaskStartedAt = Date()
+        continuation.yield(.subtaskStarted(id: subtask.id, index: subtaskIndex, total: allSubtasks.count, description: subtask.description))
 
         // Persist a subtask span so the inner executor's iteration spans attach to a real
         // parent row instead of orphaning under the trace root (Gap #10). The success flag
@@ -459,7 +602,13 @@ actor PlanningExecutorWrapper: Executor {
         subtaskInput.userInput = subtask.description
         subtaskInput.tools = filteredTools
         subtaskInput.workingMemory = seededMemory
+        // Shared across ALL subtasks (and holding the pre-plan clarification):
+        // a question answered once replays for identical re-asks anywhere in the run.
+        subtaskInput.interactionMemory = interactionMemory
         subtaskInput.suppressEpisodeManagement = true
+        // Subtask output is intermediate — Phase 3 composes the user-facing answer.
+        // Per-subtask IC synthesis was pure cost (one load/gen/unload per subtask).
+        subtaskInput.suppressLLMSynthesis = true
         subtaskInput.traceContext = subtaskSpan
 
         // Delegate to inner executor
@@ -467,12 +616,27 @@ actor PlanningExecutorWrapper: Executor {
 
         var output = ""
         var toolResults: [ToolOutput] = []
+        // Inner terminal signal. A circuit-breaker abort doesn't throw — the inner
+        // ReAct synthesizes a best-effort answer and finishes with
+        // `.completedWithWarnings` (or `.failed` on empty synthesis). Capturing it
+        // is the only way the plan level can distinguish a forced termination from
+        // a clean completion (the output string alone looks like success).
+        var terminalOutcome: ExecutionOutcome? = nil
+        var terminalReason: String? = nil
         for try await event in stream {
             switch event {
             case .content(let text):
                 output += text
-            case .thought(let thought, _, _):
-                continuation.yield(.thought("  [\(subtask.id)] \(thought)"))
+            case .thought(let thought, let id, _):
+                // Forwarded verbatim (original id kept) — attribution to this subtask is
+                // structural now: the stream-bridge routes events between subtaskStarted
+                // and subtaskCompleted into the plan card's step sub-timeline, so the old
+                // "[step_N]" text prefix would just leak plumbing into the UI.
+                continuation.yield(.thought(thought, id: id))
+            case .reasoning(let text, let id, _):
+                // The model's visible monologue — previously dropped by this switch's
+                // default case, which starved planned runs of their narrative in the UI.
+                continuation.yield(.reasoning(text, id: id))
             case .toolCall(let name, let params, _, let stepId):
                 // [G11] Forward tool invocation events so UI shows tool activity during subtasks.
                 continuation.yield(.toolCall(name: name, params: params, stepId: stepId))
@@ -492,12 +656,17 @@ actor PlanningExecutorWrapper: Executor {
             case .error(let msg):
                 continuation.yield(.error(msg))
             case .warning(let cat, let msg, let relatedPath, _):
-                // [G11] Forward warnings so UI surfaces memory-pressure / retry / parse-failure signals during subtasks.
-                continuation.yield(.warning(category: cat, message: "[\(subtask.id)] \(msg)", relatedPath: relatedPath))
+                // [G11] Forward warnings so UI surfaces memory-pressure / retry / parse-failure
+                // signals during subtasks. Unprefixed — attribution is structural (plan card).
+                continuation.yield(.warning(category: cat, message: msg, relatedPath: relatedPath))
             case .artifactProduced(let artifact):
                 continuation.yield(.artifactProduced(artifact))
             case .tokenUsage(let usage):
                 continuation.yield(.tokenUsage(usage))
+            case .executionFinished(let outcome, let reason):
+                // Not forwarded — the wrapper emits its own plan-level terminal.
+                terminalOutcome = outcome
+                terminalReason = reason
             default:
                 break
             }
@@ -506,10 +675,14 @@ actor PlanningExecutorWrapper: Executor {
         let summary = output.isEmpty
             ? "Completed (\(toolResults.count) tool call\(toolResults.count == 1 ? "" : "s"))"
             : String(output.prefix(150))
-        continuation.yield(.subtaskCompleted(index: subtaskIndex, total: allSubtasks.count, summary: summary))
+        let durationMs = Int(Date().timeIntervalSince(subtaskStartedAt) * 1000)
+        continuation.yield(.subtaskCompleted(
+            id: subtask.id, index: subtaskIndex, total: allSubtasks.count,
+            summary: summary, outcome: terminalOutcome, durationMs: durationMs
+        ))
 
         subtaskSucceeded = true
-        return (output, toolResults)
+        return (output, toolResults, terminalOutcome, terminalReason)
     }
 
     // MARK: - Dependency Sanitization

@@ -16,12 +16,16 @@ import Foundation
 /// Tests: `MockWorkflowStreamProvider` scripts deterministic responses.
 protocol WorkflowStreamProvider: Sendable {
     /// Chat-oriented streaming — used by standalone agent/bot interactions.
+    /// `attachmentContext` / `knowledgeBaseContext` carry current-turn file text and
+    /// profile knowledge payloads as separate prompt vehicles (2026-07 redesign).
     func streamAgentResponse(
         for profile: BackendProfileModel,
         userInput: String,
         chatHistory: [ChatMessage],
         conversationID: UUID,
         ragContext: String?,
+        attachmentContext: String?,
+        knowledgeBaseContext: String?,
         userPayload: Payload?,
         resumeState: TimelineReconstruction?,
         traceContext: TraceContext,
@@ -70,6 +74,8 @@ extension WorkflowStreamProvider {
             chatHistory: [],
             conversationID: conversationID,
             ragContext: nil,
+            attachmentContext: nil,
+            knowledgeBaseContext: nil,
             userPayload: nil,
             resumeState: nil,
             traceContext: traceContext,

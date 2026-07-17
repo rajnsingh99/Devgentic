@@ -24,53 +24,91 @@ struct WelcomeView: View {
     @AppStorage(AppSettings.diagnosticsDisclosureSeenKey) private var diagnosticsDisclosureSeen = false
 
     var body: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(spacing: 0) {
-                Spacer()
-                    .frame(height: 60)
+        GeometryReader { geo in
+            let isWide = geo.size.width > 850
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 0) {
+                    if isWide {
+                        HStack(alignment: .top, spacing: 32) {
+                            // Left Pane: Greeting, Quick Actions & Keyboard Hints
+                            VStack(alignment: .leading, spacing: 0) {
+                                greetingSection
+                                    .opacity(showContent ? 1 : 0)
+                                    .offset(y: showContent ? 0 : 12)
+                                
+                                Spacer()
+                                    .frame(height: 36)
+                                
+                                quickActionsGrid
+                                    .opacity(showActions ? 1 : 0)
+                                    .offset(y: showActions ? 0 : 10)
+                                
+                                Spacer()
+                                    .frame(height: 24)
+                                
+                                keyboardHints
+                                    .opacity(showShortcuts ? 1 : 0)
+                                    .offset(y: showShortcuts ? 0 : 8)
+                            }
+                            .frame(maxWidth: 480)
+                            
+                            // Right Pane: Active Widgets list
+                            VStack(alignment: .leading, spacing: 16) {
+                                Text("Your Feed")
+                                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                                    .foregroundColor(theme.secondaryText.opacity(0.8))
+                                    .padding(.leading, 4)
+                                
+                                widgetList
+                            }
+                            .frame(maxWidth: 500)
+                        }
+                        .padding(.horizontal, 40)
+                        .padding(.top, 50)
+                    } else {
+                        // Narrow Screen: Single column centered stack
+                        VStack(spacing: 0) {
+                            Spacer()
+                                .frame(height: 50)
 
-                // MARK: - Greeting (hero — stays centered across all widths)
-                greetingSection
-                    .opacity(showContent ? 1 : 0)
-                    .offset(y: showContent ? 0 : 12)
+                            greetingSection
+                                .opacity(showContent ? 1 : 0)
+                                .offset(y: showContent ? 0 : 12)
 
-                Spacer()
-                    .frame(height: 36)
+                            Spacer()
+                                .frame(height: 32)
 
-                // MARK: - Widget Grid (adaptive — reflows 1→N columns by width)
-                widgetGrid
-                    .opacity(showActions ? 1 : 0)
-                    .offset(y: showActions ? 0 : 10)
-                    .padding(.bottom, 28)
+                            widgetGrid
+                                .opacity(showActions ? 1 : 0)
+                                .offset(y: showActions ? 0 : 10)
+                                .padding(.bottom, 28)
 
-                // MARK: - Quick Actions
-                quickActionsGrid
-                    .frame(maxWidth: 640)
-                    .opacity(showActions ? 1 : 0)
-                    .offset(y: showActions ? 0 : 10)
+                            quickActionsGrid
+                                .frame(maxWidth: 480)
+                                .opacity(showActions ? 1 : 0)
+                                .offset(y: showActions ? 0 : 10)
 
-                Spacer()
-                    .frame(height: 24)
+                            Spacer()
+                                .frame(height: 24)
 
-                // MARK: - Keyboard Hints
-                keyboardHints
-                    .opacity(showShortcuts ? 1 : 0)
-                    .offset(y: showShortcuts ? 0 : 8)
+                            keyboardHints
+                                .opacity(showShortcuts ? 1 : 0)
+                                .offset(y: showShortcuts ? 0 : 8)
+                        }
+                    }
 
-                // MARK: - First-run diagnostics disclosure
-                if !diagnosticsDisclosureSeen {
-                    Spacer().frame(height: 28)
-                    diagnosticsDisclosure
-                        .opacity(showShortcuts ? 1 : 0)
+                    // Diagnostics banner (always bottom-centered)
+                    if !diagnosticsDisclosureSeen {
+                        Spacer().frame(height: 32)
+                        diagnosticsDisclosure
+                            .opacity(showShortcuts ? 1 : 0)
+                    }
+
+                    Spacer()
+                        .frame(height: 40)
                 }
-
-                Spacer()
-                    .frame(height: 40)
+                .frame(maxWidth: .infinity)
             }
-            // Wider cap than the old 520 so widgets can flow into 2 columns on
-            // large windows; collapses to one centered column when narrow.
-            .frame(maxWidth: contentMaxWidth)
-            .frame(maxWidth: .infinity)
         }
         .scrollContentBackground(.hidden)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.4), value: showContent)
@@ -104,7 +142,7 @@ struct WelcomeView: View {
     /// Max content width. Wide enough for two ~480pt widget cards + spacing.
     private let contentMaxWidth: CGFloat = 1040
 
-    // MARK: - Widget Grid
+    // MARK: - Widget Layouts
 
     /// Hosts the welcome "widgets" in a centered flow that reflows by available
     /// width: one centered column when narrow, multiple columns when wide.
@@ -112,6 +150,15 @@ struct WelcomeView: View {
     /// registering it, not by editing this view.
     @ViewBuilder private var widgetGrid: some View {
         CenteredFlowLayout(itemWidth: 480, hSpacing: 16, vSpacing: 16) {
+            ForEach(WelcomeWidgetRegistry.active, id: \.id) { widget in
+                widget.makeBody()
+            }
+        }
+    }
+
+    /// Vertical list layout used in wide split-pane mode.
+    @ViewBuilder private var widgetList: some View {
+        VStack(spacing: 16) {
             ForEach(WelcomeWidgetRegistry.active, id: \.id) { widget in
                 widget.makeBody()
             }
@@ -264,10 +311,10 @@ struct WelcomeView: View {
             .buttonStyle(.plain)
             .help("Dismiss")
         }
-        .padding(10)
+        .padding(12)
         .frame(maxWidth: 520)
-        .background(theme.surfaceOverlay.opacity(0.5))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        // MARK: Liquid Glass for diagnostics disclosure
+        .glassEffect(.regular, in: .rect(cornerRadius: 12))
     }
 
 }
@@ -337,10 +384,8 @@ private struct QuickActionCard: View {
                 Spacer()
             }
             .padding(14)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(theme.controlBackground)
-            )
+            // MARK: Liquid Glass card style
+            .glassEffect(.regular, in: .rect(cornerRadius: 12))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(
@@ -348,7 +393,7 @@ private struct QuickActionCard: View {
                         lineWidth: 1
                     )
             )
-            .shadow(color: theme.primaryText.opacity(isHovering ? 0.08 : 0.03), radius: isHovering ? 12 : 6, x: 0, y: 4)
+            .shadow(color: isHovering ? accentColors.first!.opacity(0.15) : theme.primaryText.opacity(0.03), radius: isHovering ? 12 : 6, x: 0, y: 4)
             .scaleEffect(isHovering ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)

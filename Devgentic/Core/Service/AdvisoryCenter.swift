@@ -1,0 +1,90 @@
+//
+//  AdvisoryCenter.swift
+//  Devgentic
+//
+//  Created on 12/07/26.
+//
+//  Non-blocking, actionable notices about AMBIENT conversation state — rendered
+//  as a compact banner between the HITL stack and the chat input (HITL top,
+//  advisory mid, input bottom). Deliberately separate from InteractionCenter:
+//  HITL is blocking request/response with a durable audit; advisories are
+//  dismissible, ephemeral, and update in place.
+//
+//  Lifecycle rules that keep the banner un-annoying:
+//  - One advisory surfaced per conversation (highest = latest posted).
+//  - Same dedupe key → update-in-place, never stacks.
+//  - Dismiss suppresses that dedupe key until the underlying inputs change
+//    (the key encodes them — e.g. profile + effective window).
+//  - Callers clear the category when the condition resolves, so the banner
+//    disappears on its own once a turn fits / the profile changes.
+//
+
+import Foundation
+
+/// A single non-blocking notice with an optional navigation action.
+struct Advisory: Identifiable, Equatable {
+    enum Category: String {
+        /// Assembled prompt exceeds the model's effective context window.
+        case contextOverflow
+    }
+
+    enum Action: Equatable {
+        /// Deep-link to the profile editor (router `.profileDetail`).
+        case openProfileSettings(profileID: UUID)
+    }
+
+    let id = UUID()
+    let conversationID: UUID
+    let category: Category
+    let message: String
+    let actionLabel: String?
+    let action: Action?
+    /// Encodes the condition's inputs (e.g. "conv|category|profile|window") —
+    /// identical key means "same situation": update in place, honor dismissal.
+    let dedupeKey: String
+}
+
+@MainActor
+@Observable
+final class AdvisoryCenter {
+
+    static let shared = AdvisoryCenter()
+
+    private(set) var advisories: [Advisory] = []
+
+    /// Dedupe keys the user dismissed — suppressed until the situation changes
+    /// (a changed profile/window produces a different key). Session-scoped:
+    /// unlike HITL there is nothing to audit or restore.
+    private var dismissedKeys: Set<String> = []
+
+    /// Internal (not private) so tests can build isolated instances; the app
+    /// itself always goes through `.shared`.
+    init() {}
+
+    /// The one advisory the banner shows for a conversation (latest posted wins).
+    func current(for conversationID: UUID) -> Advisory? {
+        advisories.last { $0.conversationID == conversationID }
+    }
+
+    /// Post or update-in-place; silently ignored while its dedupe key is dismissed.
+    func post(_ advisory: Advisory) {
+        guard !dismissedKeys.contains(advisory.dedupeKey) else { return }
+        if let index = advisories.firstIndex(where: { $0.dedupeKey == advisory.dedupeKey }) {
+            advisories[index] = advisory
+        } else {
+            advisories.append(advisory)
+        }
+    }
+
+    /// User dismissed the banner: remove it and suppress its exact situation.
+    func dismiss(_ advisory: Advisory) {
+        advisories.removeAll { $0.id == advisory.id }
+        dismissedKeys.insert(advisory.dedupeKey)
+    }
+
+    /// Condition resolved (e.g. this turn's prompt fits): drop the category's
+    /// advisories for the conversation so the banner self-heals.
+    func clear(category: Advisory.Category, conversationID: UUID) {
+        advisories.removeAll { $0.category == category && $0.conversationID == conversationID }
+    }
+}

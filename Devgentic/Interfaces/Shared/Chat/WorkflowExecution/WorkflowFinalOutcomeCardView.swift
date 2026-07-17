@@ -54,19 +54,13 @@ struct WorkflowFinalOutcomeCardView: View {
         if !trimmed.isEmpty { return trimmed }
         if let error = displayData.workflowError, !error.isEmpty { return error }
         switch aggregateStatus {
-        case .running: return "Synthesising final output…"
-        case .pending: return "Awaiting node outputs…"
-        default:       return "No final output produced."
+        case .running: return String(localized: "Synthesising final output…")
+        case .pending: return String(localized: "Awaiting node outputs…")
+        default:       return String(localized: "No final output produced.")
         }
     }
 
-    private var durationText: String {
-        let d = displayData.duration
-        if d <= 0 { return "" }
-        if d < 1 { return "<1s" }
-        if d < 60 { return "\(String(format: "%.1f", d))s" }
-        return "\(Int(d / 60))m \(Int(d.truncatingRemainder(dividingBy: 60)))s"
-    }
+    private var durationText: String { DurationFormat.seconds(displayData.duration) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -93,7 +87,7 @@ struct WorkflowFinalOutcomeCardView: View {
             // body in `WorkflowOutcomeCardView` so the strip reads uniformly.
             Text(bodyText)
                 .font(.system(size: 11))
-                .foregroundColor(displayData.workflowError != nil ? .red.opacity(0.85) : theme.secondaryText)
+                .foregroundColor(displayData.workflowError != nil ? theme.errorColor.opacity(0.85) : theme.secondaryText)
                 .lineLimit(5)
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -110,6 +104,9 @@ struct WorkflowFinalOutcomeCardView: View {
                     Text("\(displayData.completedNodes)/\(displayData.totalNodes)")
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .foregroundColor(statusColor.opacity(0.8))
+                        // Same defect as the run-position badge: "3/5" is spoken as
+                        // "three slash five".
+                        .accessibilityLabel("\(displayData.completedNodes) of \(displayData.totalNodes) nodes completed")
                 }
             }
             .padding(.horizontal, 14)
@@ -131,6 +128,10 @@ struct WorkflowFinalOutcomeCardView: View {
         )
         .contentShape(RoundedRectangle(cornerRadius: 10))
         .onTapGesture(perform: onTap)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("Final Outcome, \(footerLabel)")
+        .accessibilityAction(.default, onTap)
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovering = hovering
@@ -142,11 +143,11 @@ struct WorkflowFinalOutcomeCardView: View {
 
     private var footerLabel: String {
         let failedCount = displayData.nodeResults.filter { $0.status == .failed }.count
-        if displayData.isRunning { return "Running…" }
-        if displayData.workflowError != nil { return "Failed" }
-        if failedCount > 0 { return "\(failedCount) Failed" }
-        if displayData.nodeResults.isEmpty { return "Waiting" }
-        return "Completed"
+        if displayData.isRunning { return String(localized: "Running…") }
+        if displayData.workflowError != nil { return String(localized: "Failed") }
+        if failedCount > 0 { return String(localized: "\(failedCount) Failed") }
+        if displayData.nodeResults.isEmpty { return String(localized: "Waiting") }
+        return String(localized: "Completed")
     }
 
     // MARK: - Status badge

@@ -41,6 +41,30 @@ actor EmbeddingService {
     /// The fixed sequence length the Core ML model expects.
     private let sequenceLength = 128
 
+    /// Output width contract — must match ChildChunkEntity's `dimensions=384`
+    /// HNSW annotation. Enforced loudly in `generateEmbedding`: a swapped model
+    /// with a different width would otherwise corrupt the index schema silently
+    /// (the annotation is the only other place the contract lives).
+    static let expectedDimensions = 384
+
+    /// Special-token IDs, resolved from the LOADED tokenizer where possible —
+    /// the BERT-vocab literals (102 / 0) remain only as fallbacks. Previously
+    /// hardcoded: a tokenizer swap with different special tokens would have
+    /// broken truncation/padding silently.
+    private var sepTokenID = 102
+    private var padTokenID = 0
+
+    /// Embedding cache. The dominant repeat pattern is replace-on-reindex:
+    /// re-attaching a file re-embeds mostly byte-identical chunks — this makes
+    /// those hits free. FIFO eviction (the win is the burst, not long-lived
+    /// reuse); bounded at ~256 × 384 floats ≈ 400 KB.
+    private var cache: [String: [Float]] = [:]
+    private var cacheOrder: [String] = []
+    private let cacheLimit = 256
+
+    /// Test hook: current number of cached embeddings.
+    var cachedEmbeddingCount: Int { cache.count }
+
     /// Lazy-loaded tokenizer instance (actor isolation provides thread safety).
     private var _tokenizer: (any Tokenizer)?
 
@@ -70,6 +94,10 @@ actor EmbeddingService {
     /// - Parameter text: The input string to generate an embedding for.
     /// - Returns: An array of `Float` representing the normalized vector embedding, or `nil` if an error occurs.
     func generateEmbedding(for text: String) async -> [Float]? {
+        if let cached = cache[text] {
+            return cached
+        }
+
         guard let model = self.model else {
             logger.error("Embedding model is not available. Cannot generate embedding.")
             return nil
@@ -102,6 +130,14 @@ actor EmbeddingService {
                 return nil
             }
 
+            // 7. Enforce the width contract LOUDLY — a mismatched model would
+            // otherwise poison the HNSW index (schema says 384) without a trace.
+            guard normalizedArray.count == Self.expectedDimensions else {
+                logger.error("Embedding width \(normalizedArray.count) ≠ expected \(Self.expectedDimensions) — model/schema mismatch; dropping embedding.")
+                return nil
+            }
+
+            cacheStore(text: text, embedding: normalizedArray)
             logger.debug("Generated embedding for text (\(text.prefix(50))...).")
             return normalizedArray
         } catch {
@@ -124,8 +160,25 @@ actor EmbeddingService {
         // Actor isolation provides thread safety
         if let existing = _tokenizer { return existing }
         _tokenizer = tokenizer
-        logger.info("Successfully loaded WordPiece tokenizer for All-MiniLM-L6-v2.")
+
+        // Resolve special-token IDs from the tokenizer itself; keep the BERT
+        // literals only when the vocabulary doesn't answer.
+        if let sep = tokenizer.convertTokenToId("[SEP]") { sepTokenID = sep }
+        if let pad = tokenizer.convertTokenToId("[PAD]") { padTokenID = pad }
+
+        logger.info("Successfully loaded WordPiece tokenizer for All-MiniLM-L6-v2 (sep=\(self.sepTokenID), pad=\(self.padTokenID)).")
         return tokenizer
+    }
+
+    /// FIFO-bounded cache insert (see `cache` doc for the sizing rationale).
+    private func cacheStore(text: String, embedding: [Float]) {
+        if cache[text] == nil {
+            cacheOrder.append(text)
+            if cacheOrder.count > cacheLimit {
+                cache.removeValue(forKey: cacheOrder.removeFirst())
+            }
+        }
+        cache[text] = embedding
     }
 
     private func _loadTokenizer() async throws -> any Tokenizer {
@@ -171,7 +224,7 @@ actor EmbeddingService {
         let truncatedIDs: [Int]
         if tokenIDs.count > sequenceLength {
             var ids = Array(tokenIDs.prefix(sequenceLength - 1))
-            ids.append(102) // [SEP] token ID for BERT vocab
+            ids.append(sepTokenID) // resolved from the tokenizer (BERT 102 fallback)
             truncatedIDs = ids
         } else {
             truncatedIDs = tokenIDs
@@ -193,8 +246,8 @@ actor EmbeddingService {
                 inputIDs[i] = NSNumber(value: Int32(truncatedIDs[i]))
                 attentionMask[i] = 1 as NSNumber
             } else {
-                inputIDs[i] = 0 as NSNumber     // [PAD] token ID = 0
-                attentionMask[i] = 0 as NSNumber // no attention on padding
+                inputIDs[i] = NSNumber(value: Int32(padTokenID)) // resolved from the tokenizer (0 fallback)
+                attentionMask[i] = 0 as NSNumber                 // no attention on padding
             }
         }
 

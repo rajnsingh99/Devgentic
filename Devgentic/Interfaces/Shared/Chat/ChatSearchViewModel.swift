@@ -34,8 +34,6 @@ class ChatSearchViewModel {
     /// The debounced query that actually triggers search execution.
     @ObservationIgnored private(set) var debouncedQuery: String = ""
     @ObservationIgnored private var debounceCancellable: AnyCancellable?
-    /// Pre-computed lowercase content index for O(1) lookup per message.
-    @ObservationIgnored private var lowercaseIndex: [(id: UUID, text: String)] = []
 
     /// Debounce interval in seconds. 150ms balances responsiveness with performance.
     static let debounceInterval: TimeInterval = 0.15
@@ -67,21 +65,28 @@ class ChatSearchViewModel {
             }
     }
 
-    /// Rebuilds the pre-computed lowercase index from the current message array.
-    /// Call this when messages change (new message added, conversation switched).
-    func rebuildSearchIndex(from messages: [ChatMessage]) {
-        lowercaseIndex = messages.reversed().compactMap { message in
-            let content: String?
-            if message.sender == .agent, let agentContent = message.currentAgentContent {
-                content = agentContent.textContent
-            } else {
-                content = message.content.textContent
-            }
-            guard let text = content, !text.isEmpty else { return nil }
-            return (id: message.id, text: text.lowercased())
+    /// The searchable text for a message: the selected agent variant when present
+    /// (so results match what's on screen for regenerated responses), else `content`.
+    private static func searchableText(for message: ChatMessage) -> String? {
+        let content: String?
+        if message.sender == .agent, let agentContent = message.currentAgentContent {
+            content = agentContent.textContent
+        } else {
+            content = message.content.textContent
         }
+        guard let text = content, !text.isEmpty else { return nil }
+        return text
     }
 
+    /// Runs the search against the CURRENT message contents — extraction and
+    /// lowercasing happen at query time, so results are correct by construction.
+    ///
+    /// A pre-computed index (the previous design) went stale on every in-place
+    /// content mutation: a streamed response finalizes without any membership
+    /// change, so the just-completed answer was unsearchable until the next
+    /// message arrived; variant switches (Redo) had the same hole. The 150ms
+    /// debounce bounds how often this runs, and lowercasing even hundreds of KB
+    /// is cheap relative to one keystroke.
     func performSearch(in messages: [ChatMessage]) {
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
@@ -93,32 +98,18 @@ class ChatSearchViewModel {
         let lowercasedQuery = query.lowercased()
         var results: [SearchMatch] = []
 
-        // Use pre-computed lowercase index if available, otherwise fall back to direct scan
-        let searchSource: [(id: UUID, text: String)]
-        if !lowercaseIndex.isEmpty {
-            searchSource = lowercaseIndex
-        } else {
-            // Fallback: build on-the-fly (first search before index is built)
-            searchSource = messages.reversed().compactMap { message in
-                let content: String?
-                if message.sender == .agent, let agentContent = message.currentAgentContent {
-                    content = agentContent.textContent
-                } else {
-                    content = message.content.textContent
-                }
-                guard let text = content, !text.isEmpty else { return nil }
-                return (id: message.id, text: text.lowercased())
-            }
-        }
-
-        for entry in searchSource {
-            var searchRange = entry.text.startIndex..<entry.text.endIndex
+        // Messages are stored newest→oldest; scan reversed so matches come out
+        // in display (oldest→newest) order for natural next/previous navigation.
+        for message in messages.reversed() {
+            guard let text = Self.searchableText(for: message) else { continue }
+            let lowercasedText = text.lowercased()
+            var searchRange = lowercasedText.startIndex..<lowercasedText.endIndex
             var matchIndexInMessage = 0
 
-            while let range = entry.text.range(of: lowercasedQuery, range: searchRange) {
-                results.append(SearchMatch(messageID: entry.id, matchIndex: matchIndexInMessage))
+            while let range = lowercasedText.range(of: lowercasedQuery, range: searchRange) {
+                results.append(SearchMatch(messageID: message.id, matchIndex: matchIndexInMessage))
                 matchIndexInMessage += 1
-                searchRange = range.upperBound..<entry.text.endIndex
+                searchRange = range.upperBound..<lowercasedText.endIndex
             }
         }
 

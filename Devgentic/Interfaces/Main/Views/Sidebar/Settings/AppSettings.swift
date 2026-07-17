@@ -12,9 +12,6 @@ struct AppSettings {
     /// Key for the boolean value that determines if LLM responses should be streamed.
     static let useStreamingResponseKey = "useStreamingResponse"
 
-    // Agent View
-    static let agentViewVariantKey = "agentViewVariant"
-
     // Speech Recognition
     static let speechModelKey = "speechModel"
     static let speechLanguageKey = "speechLanguage"
@@ -96,11 +93,4 @@ struct AppSettings {
     static let chatOpsSlackChannelIDKey = "chatOpsSlackChannelID"
     static let chatOpsSlackEnabledKey = "chatOpsSlackEnabled"
     static let chatOpsSlackActiveConversationIDKey = "chatOpsSlackActiveConversationID"
-}
-
-enum AgentViewVariant: String, Codable, CaseIterable, Identifiable {
-    case dynamicIsland = "Dynamic Island"
-    case timeline = "Timeline"
-    
-    var id: String { self.rawValue }
 }

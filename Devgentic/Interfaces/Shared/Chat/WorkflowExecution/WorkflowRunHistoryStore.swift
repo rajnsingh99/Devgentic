@@ -87,21 +87,47 @@ final class WorkflowRunHistoryStore {
     /// `maxRecordsPerConversation`). On update, no eviction happens (we're
     /// mutating a row that's already counted).
     func upsert(_ record: WorkflowRunRecord, forConversation conversationID: UUID) {
+        write(record, forConversation: conversationID, blobs: nil)
+    }
+
+    /// Same as `upsert`, but the JSON encode runs OFF the main actor.
+    ///
+    /// Use this for FINALIZED records. A finished run's blob carries up to 400
+    /// `TimelineEvent`s per node, and this write lands at the exact moment the UI
+    /// transitions to "completed" — encoding that inline on `@MainActor` was a
+    /// visible hitch at the worst possible time. SwiftData's `mainContext` still
+    /// requires the actual write on main, so only the encode moves; the `.running`
+    /// stub at run start keeps using the cheap synchronous `upsert` (its
+    /// `nodeResults` is empty, so there's nothing to move).
+    func upsertFinalized(_ record: WorkflowRunRecord, forConversation conversationID: UUID) async {
+        let blobs = await Task.detached(priority: .userInitiated) {
+            WorkflowRunRecordSD.encodeBlobs(for: record)
+        }.value
+        write(record, forConversation: conversationID, blobs: blobs)
+    }
+
+    /// Shared main-actor write. `blobs == nil` encodes inline.
+    private func write(
+        _ record: WorkflowRunRecord,
+        forConversation conversationID: UUID,
+        blobs: WorkflowRunRecordSD.EncodedBlobs?
+    ) {
         guard let context = mainContext else {
             logger.error("upsert(_:forConversation:) called before container was configured — drop.")
             return
         }
 
         do {
+            let resolvedBlobs = blobs ?? WorkflowRunRecordSD.encodeBlobs(for: record)
             let recordID = record.id
             let existingPredicate = #Predicate<WorkflowRunRecordSD> { $0.id == recordID }
             var existingDescriptor = FetchDescriptor<WorkflowRunRecordSD>(predicate: existingPredicate)
             existingDescriptor.fetchLimit = 1
 
             if let existing = try context.fetch(existingDescriptor).first {
-                // Update path — rewrite the row's contents. The `record` computed
-                // setter on `WorkflowRunRecordSD` syncs every column + blob.
-                existing.record = record
+                // Update path — rewrite the row's contents from the (possibly
+                // off-main-encoded) blobs.
+                existing.apply(record, blobs: resolvedBlobs)
                 try context.save()
                 logger.info("Updated run \(record.id) for conversation \(conversationID) — status=\(record.status.rawValue).")
                 return
@@ -109,7 +135,7 @@ final class WorkflowRunHistoryStore {
 
             // Insert path
             let conversation = try fetchConversation(id: conversationID, in: context)
-            let newRow = WorkflowRunRecordSD(record: record, conversation: conversation)
+            let newRow = WorkflowRunRecordSD(record: record, conversation: conversation, blobs: resolvedBlobs)
             context.insert(newRow)
 
             // Enforce sliding window: fetch the conversation's records sorted oldest-first,

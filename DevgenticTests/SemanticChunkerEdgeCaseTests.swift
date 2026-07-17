@@ -60,7 +60,8 @@ final class SemanticChunkerEdgeCaseTests: XCTestCase {
         let chunker = SemanticChunker(maxChunkSize: 512, overlap: 50)
         let blocks = [ContentBlock(id: "b0", type: .table(
             headers: ["Expression", "Result"],
-            rows: [["a | b", "true"], ["x || y", "false"]]
+            rows: [["a | b", "true"], ["x || y", "false"]],
+            alignments: []
         ))]
         let chunks = chunker.chunk(blocks: blocks)
 
@@ -78,7 +79,8 @@ final class SemanticChunkerEdgeCaseTests: XCTestCase {
         let chunker = SemanticChunker(maxChunkSize: 512, overlap: 50)
         let blocks = [ContentBlock(id: "b0", type: .table(
             headers: [],
-            rows: [["data1", "data2"]]
+            rows: [["data1", "data2"]],
+            alignments: []
         ))]
         let chunks = chunker.chunk(blocks: blocks)
 
@@ -90,7 +92,8 @@ final class SemanticChunkerEdgeCaseTests: XCTestCase {
         let chunker = SemanticChunker(maxChunkSize: 512, overlap: 50)
         let blocks = [ContentBlock(id: "b0", type: .table(
             headers: ["Col1", "Col2"],
-            rows: []
+            rows: [],
+            alignments: []
         ))]
         let chunks = chunker.chunk(blocks: blocks)
 
@@ -102,7 +105,8 @@ final class SemanticChunkerEdgeCaseTests: XCTestCase {
         let chunker = SemanticChunker(maxChunkSize: 512, overlap: 50)
         let blocks = [ContentBlock(id: "b0", type: .table(
             headers: [],
-            rows: []
+            rows: [],
+            alignments: []
         ))]
         let chunks = chunker.chunk(blocks: blocks)
 
@@ -190,7 +194,7 @@ final class SemanticChunkerEdgeCaseTests: XCTestCase {
             ContentBlock(id: "b0", type: .paragraph("")),
             ContentBlock(id: "b1", type: .code(language: "swift", content: "", fileName: nil)),
             ContentBlock(id: "b2", type: .heading(level: 1, text: "  ")),
-            ContentBlock(id: "b3", type: .table(headers: [], rows: [])),
+            ContentBlock(id: "b3", type: .table(headers: [], rows: [], alignments: [])),
             ContentBlock(id: "b4", type: .horizontalRule),
             ContentBlock(id: "b5", type: .image(url: "img.png", altText: "alt"))
         ]

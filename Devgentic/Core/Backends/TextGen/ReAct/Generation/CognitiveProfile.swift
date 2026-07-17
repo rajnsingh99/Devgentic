@@ -247,6 +247,27 @@ struct SupportedModalities: OptionSet, Sendable, Codable, Hashable {
     static let visionCapable: SupportedModalities = [.textInput, .textOutput, .visionInput]
 }
 
+// MARK: - Tool Support Caveat
+
+/// Qualifies a model's tool capability for the UI so pickers can explain instead of
+/// silently hiding: blocked models render disabled-with-reason, quality-suspect ones
+/// selectable-with-warning. `nil` = clean, no qualification needed.
+/// Detection-side only — `ProviderConfig` derives its profile from stored fields and
+/// never persists this.
+enum ToolSupportCaveat: String, Codable, Hashable, Sendable {
+    /// The daemon's capabilities array lacks "tools": any tools request WILL be
+    /// rejected with HTTP 400. A hard protocol block, not a guess.
+    case serverRejectsTools
+    /// Reasoning-focused fine-tune (deepseek-r1, qwq, gpt-oss…). When the daemon
+    /// declares tools the model stays selectable — the server accepts the param;
+    /// the caveat flags tool-call *reliability*, a quality concern, not protocol.
+    /// Without a capabilities field the same pattern blocks (can't verify).
+    case reasoningFocused
+    /// No authoritative capabilities data and no heuristic signal — tool support
+    /// can't be verified (legacy daemon without the capabilities field).
+    case undetected
+}
+
 // MARK: - Cognitive Profile
 
 /// A complete runtime profile that pairs the model's structural capability tier
@@ -259,6 +280,11 @@ struct CognitiveProfile: Codable, Hashable {
 
     /// The exact output format/dialect this model uses for tool calls.
     let dialect: ModelDialect
+
+    /// Why `capability` needs qualification in pickers (blocked reason / reliability
+    /// warning). Optional so old persisted profiles decode unchanged and nil encodes
+    /// as absent.
+    var toolSupportCaveat: ToolSupportCaveat?
 
     /// Rich metadata describing the model's constraints (tier, context, etc).
     var metadata: ModelMetadata?
@@ -282,13 +308,14 @@ struct CognitiveProfile: Codable, Hashable {
     /// Empty array means no custom stop sequences — rely on framework EOS detection only.
     var stopSequences: [String]
 
-    init(capability: ModelCognitiveCapability, dialect: ModelDialect = .nativeJSON, metadata: ModelMetadata? = nil, modalities: SupportedModalities = .textOnly, chatTemplateSource: ChatTemplateSource = .embedded, stopSequences: [String] = []) {
+    init(capability: ModelCognitiveCapability, dialect: ModelDialect = .nativeJSON, metadata: ModelMetadata? = nil, modalities: SupportedModalities = .textOnly, chatTemplateSource: ChatTemplateSource = .embedded, stopSequences: [String] = [], toolSupportCaveat: ToolSupportCaveat? = nil) {
         self.capability = capability
         self.dialect = dialect
         self.metadata = metadata
         self.modalities = modalities
         self.chatTemplateSource = chatTemplateSource
         self.stopSequences = stopSequences
+        self.toolSupportCaveat = toolSupportCaveat
     }
 
     // MARK: - Convenience Presets

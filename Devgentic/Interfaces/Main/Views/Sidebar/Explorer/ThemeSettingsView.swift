@@ -251,7 +251,7 @@ struct ThemeSettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollContentBackground(.hidden)
-        .background(theme.primaryBackground)
+        .background(Color.clear)
     }
 }
 

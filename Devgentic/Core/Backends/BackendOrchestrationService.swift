@@ -73,52 +73,48 @@ class BackendOrchestrationService {
                     return true
                 }
                 
+                // Retrieval dedup must exclude the CURRENT user message too — its
+                // fire-and-forget indexing (MessagingCoordinator) can land before
+                // Section 3 runs, and the duplicate-removal below strips it from
+                // `conversationHistory`, so a history-derived dedup set can't see it.
+                // Without this the query literally retrieves itself (observed: the
+                // "executionDefaultsCard" question consumed a doc slot as its own echo).
+                // Captured from the ORIGINAL history, before any trimming.
+                let retrievalExcludedIDs = Set(history.map { $0.id })
+
                 // Prevent duplicate current query in history (User UX vs LLM Context)
                 if let lastMsg = conversationHistory.last,
                    lastMsg.sender == .user,
                    let lastContent = lastMsg.content.textContent,
                    lastContent.trimmingCharacters(in: .whitespacesAndNewlines) == userQuery.trimmingCharacters(in: .whitespacesAndNewlines) {
-                    
+
                     logger.debug("Removing duplicated current message from history to prevent double-prompting. (Trace: \(context.traceID))")
                     conversationHistory.removeLast()
                 }
                 
-                var queryForRequest = userQuery
+                // The typed query is the ONLY thing that rides `userInput` → the system
+                // <task> block. File and knowledge payloads travel as separate context
+                // fields below (2026-07 redesign: no more prompt-prepending).
+                let queryForRequest = userQuery
                 let fileContextStrategy = config.profile.resolvedFileContextStrategy
 
-                // 2. File Context Handling — strategy-based routing
+                // 2. File Context Handling — the strategy shapes HOW current-turn
+                // attachments are DELIVERED (extracted content vs read_file path note);
+                // delivery is always deterministic, never dependent on retrieval. The
+                // payload lands at the top of the USER message (executors render it
+                // ahead of the query) — never in the system <task>.
+                var attachmentContext: String? = nil
                 if !files.isEmpty {
                     logger.info("Processing \(files.count) attached files with strategy: \(fileContextStrategy.rawValue). (Trace: \(context.traceID))")
 
                     switch fileContextStrategy {
-                    case .contextualRAG:
-                        // [attachment-delivery fix] A freshly-attached file is EPHEMERAL context the
-                        // user is asking about — it MUST reach the model. contextualRAG previously
-                        // ONLY indexed the file and relied on similarity retrieval, which returns 0
-                        // chunks when the query ("explain this file") is semantically far from the
-                        // content (and query-rewrite is skipped on the first message) — so the model
-                        // got NOTHING and hallucinated "I can't access files". Now we ALSO inject the
-                        // budget-limited text (same vehicle as directInjection, so it fixes chat /
-                        // agent / workflow / QuickAccess at once), while STILL indexing it so later
-                        // turns and the oversize remainder stay retrievable. RAG retrieval below then
-                        // only SUPPLEMENTS (knowledge base + prior turns) instead of being the sole,
-                        // silently-failing content path.
+                    case .contextualRAG, .directInjection:
+                        // .contextualRAG is deprecated and never returned by resolve() —
+                        // the arm stays only for switch exhaustiveness until Phase 4
+                        // deletes the case, and maps to directInjection behavior.
                         let (fileContext, docFailures) = await self.assembleTextFileContent(for: files)
                         if !fileContext.isEmpty {
-                            queryForRequest = fileContext + "\n\n" + queryForRequest
-                        }
-                        await self.reportFileFailures(docFailures, span: context, continuation: continuation)
-                        await RAGIndexingService.shared.indexAttachedFiles(
-                            files: files,
-                            conversationID: conversationID,
-                            messageID: UUID()
-                        )
-
-                    case .directInjection:
-                        // Extract full text and inject into prompt context.
-                        let (fileContext, docFailures) = await self.assembleTextFileContent(for: files)
-                        if !fileContext.isEmpty {
-                            queryForRequest = fileContext + "\n\n" + queryForRequest
+                            attachmentContext = fileContext
                         }
                         // D3: report (traced + structured notice), keep answering.
                         await self.reportFileFailures(docFailures, span: context, continuation: continuation)
@@ -126,18 +122,35 @@ class BackendOrchestrationService {
                     case .stateless:
                         // No extraction — note file paths for agent tool access
                         let paths = files.map { $0.url.path }.joined(separator: "\n")
-                        let fileNote = "The user has attached the following files. Use the read_file tool to access them when needed:\n\(paths)"
-                        queryForRequest = fileNote + "\n\n" + queryForRequest
+                        attachmentContext = "The user has attached the following files. Use the read_file tool to access them when needed:\n\(paths)"
                     }
                 }
 
-                // 3. RAG Retrieval
-                // Fetch long-term memory context when using contextualRAG strategy.
+                // 3. RAG Retrieval — standard per-conversation memory (2026-07 redesign).
+                // Strategy-independent: retrieval only SUPPLEMENTS what the sections above
+                // delivered; it is never a delivery path. Skipped on the first message
+                // (nothing indexed for this conversation yet — no placeholder is emitted)
+                // and for flows that can't consume it (workflow/code suppress the
+                // semantic_context layer; imageGen never dispatches through AgentConnect).
+                // Resolve the EFFECTIVE context window once — the retrieval budget
+                // (Section 3) and the pre-flight fit check (Section 5) both key off it.
+                // Ollama: num_ctx is the allocation, not the trained max — the user's
+                // configured value wins, else the auto-default the request factory now
+                // sends, else Ollama's ~4K server default. Resolved through the same
+                // policy the factory uses, so budget and request can never disagree.
+                // MLX: trained metadata (the app owns the prompt). Cloud: catalog
+                // windows; overflow errors loudly there anyway.
+                let primaryConfig = config.profile.primaryLLMConfig
+                let trainedWindow = EffectiveContextWindow.trainedWindow(for: primaryConfig)
+                let contextWindowTokens = EffectiveContextWindow.resolve(for: primaryConfig)
+
                 var ragContextString: String? = nil
-                if fileContextStrategy == .contextualRAG {
+                let profileUsesConversationRAG = config.profile.profileType == .bot
+                    || config.profile.profileType == .agent
+                if profileUsesConversationRAG && !conversationHistory.isEmpty {
 
                     // --- UI Progress: RAG preparation ---
-                    continuation.yield(.thought("Searching knowledge base…"))
+                    continuation.yield(.thought("Searching conversation memory…"))
 
                     aggregatedTraceUpdate(AgentTraceLog(
                         traceID: context.traceID,
@@ -163,35 +176,96 @@ class BackendOrchestrationService {
                         queryForRAG = userQuery
                     }
 
-                    ragContextString = await self.retrieveRAGContext(for: queryForRAG, conversationID: conversationID, history: conversationHistory)
+                    ragContextString = await self.retrieveRAGContext(for: queryForRAG, lexicalQuery: userQuery, contextWindowTokens: contextWindowTokens, conversationID: conversationID, excludedMessageIDs: retrievalExcludedIDs)
                 }
 
-                // 4. Knowledge Sources — strategy-aware handling of pre-configured reference documents
+                // 3b. Conversation-memory indexing of current-turn attachments — AFTER
+                // retrieval, so a file can never re-surface in the same turn it was
+                // injected; later turns can recall it, including the >50K tail the
+                // injection budget cut off. Fire-and-forget: dispatch shouldn't wait on
+                // chunking/embedding. Stateless attachments are paths-only by design and
+                // are never indexed (the model never received their content).
+                if !files.isEmpty,
+                   profileUsesConversationRAG,
+                   fileContextStrategy == .directInjection {
+                    let filesToIndex = files
+                    Task.detached(priority: .background) {
+                        await RAGIndexingService.shared.indexAttachedFiles(
+                            files: filesToIndex,
+                            conversationID: conversationID,
+                            messageID: UUID()
+                        )
+                    }
+                }
+
+                // 4. Knowledge Sources — static profile reference material, delivered as
+                // the dedicated system `<knowledge_base>` layer (byte-stable per profile,
+                // so the system prefix stays cache-friendly). The strategy shapes the
+                // payload: extracted content vs a read_file path manifest. It never
+                // rides the user query.
+                var knowledgeBaseContext: String? = nil
                 if let knowledgeSources = self.resolveKnowledgeSources(from: config.profile),
                    !knowledgeSources.isEmpty {
                     let localSources = knowledgeSources.filter { $0.isLocalFile && $0.exists }
                     if !localSources.isEmpty {
                         switch fileContextStrategy {
-                        case .contextualRAG:
-                            // Freshness check + indexing handled by KnowledgeSourceMonitor
-                            await KnowledgeSourceMonitor.shared.ensureFreshness(
-                                sources: localSources,
-                                conversationID: conversationID
-                            )
-
-                        case .directInjection:
-                            // Extract text from knowledge sources and inject into prompt
-                            let knowledgeText = await self.assembleKnowledgeSourceContent(sources: localSources)
+                        case .contextualRAG, .directInjection:
+                            // Deprecated arm maps to directInjection (see Section 2 note).
+                            let (knowledgeText, kbFailures) = await self.assembleKnowledgeSourceContent(sources: localSources)
                             if !knowledgeText.isEmpty {
-                                queryForRequest = knowledgeText + "\n\n" + queryForRequest
+                                knowledgeBaseContext = knowledgeText
                             }
+                            await self.reportFileFailures(kbFailures, span: context, continuation: continuation)
 
                         case .stateless:
-                            // Note paths for agent tool access
+                            // Manifest only — the agent reads sources on demand.
                             let paths = localSources.map { $0.location }.joined(separator: "\n")
-                            let note = "Knowledge sources available via read_file:\n\(paths)"
-                            queryForRequest = note + "\n\n" + queryForRequest
+                            knowledgeBaseContext = "The following profile reference documents are available. Read them with the read_file tool when needed:\n\(paths)"
                         }
+                    }
+                }
+
+                // 5. Pre-flight context-fit check — every piece of the prompt is known
+                // here, BEFORE any tokens stream. Oversize prompts on local models don't
+                // fail loudly: Ollama HEAD-truncates silently (system prompt first), so
+                // the model quietly loses the knowledge/retrieval layers and answers from
+                // fragments. This is AMBIENT state (profile + content size), not a turn
+                // event — it surfaces as an actionable advisory banner above the chat
+                // input (AdvisoryBannerView), never as per-turn transcript clutter.
+                if profileUsesConversationRAG {
+                    let estimatedTokens = PromptFitCheck.estimatedTokens(
+                        attachmentChars: attachmentContext?.count ?? 0,
+                        knowledgeChars: knowledgeBaseContext?.count ?? 0,
+                        retrievalChars: ragContextString?.count ?? 0,
+                        queryChars: queryForRequest.count,
+                        historyChars: conversationHistory.reduce(0) { $0 + ($1.content.textContent?.count ?? 0) }
+                    )
+                    if PromptFitCheck.exceeds(estimatedTokens: estimatedTokens, windowTokens: contextWindowTokens) {
+                        // Condition-aware advice: raising num_ctx only helps when the
+                        // model is trained for more than the current allocation —
+                        // telling a gemma-at-trained-max user to raise it is a dead end.
+                        let canRaiseWindow = primaryConfig?.apiProvider == .ollama
+                            && (trainedWindow ?? 0) > contextWindowTokens
+                        let modelName = primaryConfig?.modelName ?? "this model"
+                        let message: String
+                        if canRaiseWindow {
+                            message = "This prompt is ~\(PromptFitCheck.roundedK(estimatedTokens)) tokens but the context window is set to \(PromptFitCheck.roundedK(contextWindowTokens)) — content will be cut off. \(modelName) supports up to \(PromptFitCheck.roundedK(trainedWindow ?? 0)): raise Context Window in the profile's Advanced settings."
+                        } else {
+                            message = "This prompt is ~\(PromptFitCheck.roundedK(estimatedTokens)) tokens but \(modelName)'s context window is \(PromptFitCheck.roundedK(contextWindowTokens)) — the model will only see part of it. Use fewer or smaller files, or switch to a larger-context model."
+                        }
+                        AdvisoryCenter.shared.post(Advisory(
+                            conversationID: conversationID,
+                            category: .contextOverflow,
+                            message: message,
+                            actionLabel: canRaiseWindow ? "Open Settings" : "Profile Settings",
+                            action: .openProfileSettings(profileID: config.profile.id),
+                            dedupeKey: "\(conversationID.uuidString)|contextOverflow|\(config.profile.id.uuidString)|\(contextWindowTokens)"
+                        ))
+                        logger.warning("Context-fit: ~\(estimatedTokens) tokens estimated vs \(contextWindowTokens)-token window — advisory posted. (Trace: \(context.traceID))")
+                    } else {
+                        // Condition resolved (files removed, model switched, window
+                        // raised…) — the banner self-heals.
+                        AdvisoryCenter.shared.clear(category: .contextOverflow, conversationID: conversationID)
                     }
                 }
 
@@ -243,6 +317,8 @@ class BackendOrchestrationService {
                             chatHistory: conversationHistory,
                             conversationID: conversationID,
                             ragContext: ragContextString,
+                            attachmentContext: attachmentContext,
+                            knowledgeBaseContext: knowledgeBaseContext,
                             userPayload: attachedImagePayload,
                             traceContext: context,
                             onTraceUpdate: aggregatedTraceUpdate
@@ -274,6 +350,8 @@ class BackendOrchestrationService {
                             chatHistory: conversationHistory,
                             conversationID: conversationID,
                             ragContext: ragContextString,
+                            attachmentContext: attachmentContext,
+                            knowledgeBaseContext: knowledgeBaseContext,
                             userPayload: attachedImagePayload,
                             resumeState: resumeState,
                             traceContext: context,
@@ -327,7 +405,7 @@ class BackendOrchestrationService {
                             case .requestPlanReview:
                                 logger.debug("[PLAN_REVIEW] Plan review requested")
                                 continuation.yield(event)
-                            case .planGenerated, .subtaskStarted, .subtaskCompleted,
+                            case .planGenerated, .planApproved, .subtaskStarted, .subtaskCompleted,
                                  .reflectionTrialStarted, .reflectionEvaluating, .reflectionRetrying, .reflectionAccepted,
                                  .delegationStarted, .delegationCompleted,
                                  .compactionStarted, .compactionCompleted,
@@ -352,6 +430,8 @@ class BackendOrchestrationService {
                             chatHistory: conversationHistory,
                             conversationID: conversationID,
                             ragContext: ragContextString,
+                            attachmentContext: attachmentContext,
+                            knowledgeBaseContext: knowledgeBaseContext,
                             userPayload: attachedImagePayload,
                             traceContext: context,
                             onTraceUpdate: aggregatedTraceUpdate
@@ -470,6 +550,8 @@ class BackendOrchestrationService {
                             chatHistory: conversationHistory,
                             conversationID: conversationID,
                             ragContext: ragContextString,
+                            attachmentContext: attachmentContext,
+                            knowledgeBaseContext: knowledgeBaseContext,
                             userPayload: attachedImagePayload,
                             resumeState: resumeState,
                             traceContext: context,
@@ -565,50 +647,78 @@ class BackendOrchestrationService {
         }
     }
     
-    private func retrieveRAGContext(for userQuery: String, conversationID: UUID, history: [ChatMessage] = []) async -> String? {
+    /// - Parameters:
+    ///   - userQuery: The (possibly rewritten) query used for the EMBEDDING search.
+    ///   - lexicalQuery: The user's RAW typed query, used for exact-match token
+    ///     boosting — the raw text is the ground truth for symbol names, and it
+    ///     can't be corrupted by a hallucinated rewrite.
+    ///   - excludedMessageIDs: Message IDs whose indexed parents must not be
+    ///     re-injected — everything already visible in history PLUS the current
+    ///     user message (whose fire-and-forget indexing can beat retrieval, making
+    ///     the query retrieve its own echo).
+    private func retrieveRAGContext(for userQuery: String, lexicalQuery: String, contextWindowTokens: Int, conversationID: UUID, excludedMessageIDs: Set<UUID>) async -> String? {
         logger.info("RAG: Attempting to retrieve context for conversation: \(conversationID.uuidString)")
-        
+
         guard let queryEmbedding = await embeddingService.generateEmbedding(for: userQuery) else {
             logger.warning("RAG: Could not generate embedding for query.")
             return nil
         }
-        
-        // Retrieve relevant parent documents based on child chunk embeddings
-        let relevantParents = vectorStoreService.findNearest(to: queryEmbedding, limit: 3, conversationID: conversationID)
 
-        guard !relevantParents.isEmpty else {
+        // Retrieve relevant documents — history/self exclusion happens INSIDE the
+        // ranker so excluded parents can't occupy limit slots (post-filtering here
+        // starved turns to 0 injected docs while injectable chunks sat at rank 4).
+        let hits = vectorStoreService.findNearest(to: queryEmbedding, queryText: lexicalQuery, limit: 3, conversationID: conversationID, excludedParentMessageIDs: excludedMessageIDs)
+
+        guard !hits.isEmpty else {
             logger.info("RAG: Vector store returned 0 documents.")
             return nil
         }
 
-        // Phase 5: O(1) ID-based Deduplication instead of heavy string matching.
-        // We simply check if the parent document's source message is already in the current chat history.
-        let historyIDs = Set(history.map { $0.id })
-        
-        let filteredParents = relevantParents.filter { parent in
-            !historyIDs.contains(parent.sourceMessageID)
+        // Belt-and-braces: the ranker already skips excluded parents during
+        // collection — anything caught here indicates an exclusion leak upstream,
+        // so the log doubles as a tripwire.
+        let filteredHits = hits.filter { hit in
+            !excludedMessageIDs.contains(hit.parent.sourceMessageID)
         }
 
-        let removedCount = relevantParents.count - filteredParents.count
+        let removedCount = hits.count - filteredHits.count
         if removedCount > 0 {
-            logger.info("RAG: Dedup filter removed \(removedCount)/\(relevantParents.count) documents already present in history.")
+            logger.warning("RAG: Dedup tripwire removed \(removedCount)/\(hits.count) documents the ranker should have excluded.")
         }
 
-        guard !filteredParents.isEmpty else {
-            logger.info("RAG: No relevant context found (all \(relevantParents.count) documents were duplicates of history).")
+        guard !filteredHits.isEmpty else {
+            logger.info("RAG: No relevant context found (all \(hits.count) documents were duplicates of history).")
             return nil
         }
 
-        logger.info("RAG: Found \(filteredParents.count) relevant documents after dedup.")
-        return filteredParents.map { $0.fullTextContent }.joined(separator: "\n\n")
+        // Window each document around its matched chunk — never the blind head —
+        // and size the injection to the model's window so retrieval can't evict
+        // the system prompt on small local models.
+        let budgets = RAGRetrievalBudget.budgets(forContextWindowTokens: contextWindowTokens)
+        // Name each injected document (file name, or message-id prefix for chat
+        // turns) + its match distance — without this, a wrong answer can't be
+        // triaged to "retrieved the wrong doc" vs "model missed it".
+        let hitsSummary = filteredHits.map { hit -> String in
+            let identifier = hit.parent.sourceIdentifier
+            let name = identifier.contains("/")
+                ? (identifier as NSString).lastPathComponent
+                : "msg:\(hit.parent.sourceMessageID.uuidString.prefix(8))"
+            return "\(name) d=\(String(format: "%.3f", hit.distance))"
+        }.joined(separator: ", ")
+        logger.info("RAG: Injecting \(filteredHits.count) document(s) [\(hitsSummary)] (budget: \(budgets.total) chars for \(contextWindowTokens)-token window).")
+        return RAGRetrievalBudget.assemble(
+            filteredHits.map { (text: $0.parent.fullTextContent, anchor: $0.bestChunkText) },
+            perParent: budgets.perParent,
+            total: budgets.total
+        )
     }
     
     // MARK: - Direct Injection Budget
 
     /// Maximum characters to inject per file (~12.5K tokens)
-    private let directInjectionBudgetPerFile: Int = 50_000
+    private var directInjectionBudgetPerFile: Int { DirectInjectionBudget.perFile }
     /// Maximum total characters to inject across all files (~50K tokens)
-    private let directInjectionTotalBudget: Int = 200_000
+    private var directInjectionTotalBudget: Int { DirectInjectionBudget.total }
 
     /// Builds an image `Payload` from the current message's attachments so
     /// vision-capable bot/agent profiles receive them natively (separate from the
@@ -731,29 +841,209 @@ class BackendOrchestrationService {
         }
     }
 
-    /// Extracts text from knowledge source files for direct injection.
-    private func assembleKnowledgeSourceContent(sources: [KnowledgeSource]) async -> String {
+    /// Extracts text from knowledge source files for the system `<knowledge_base>`
+    /// layer. Returns the assembled content plus a typed list of sources that
+    /// couldn't be read — previously silent skips, now reported like attachments.
+    private func assembleKnowledgeSourceContent(sources: [KnowledgeSource]) async -> (content: String, failures: [FileRetrievalError]) {
         var assembled = ""
+        var failures: [FileRetrievalError] = []
         for source in sources {
-            guard assembled.count < directInjectionTotalBudget else { break }
+            guard assembled.count < directInjectionTotalBudget else {
+                failures.append(.tooLarge(path: source.location))
+                continue
+            }
             let remainingBudget = min(
                 directInjectionBudgetPerFile,
                 directInjectionTotalBudget - assembled.count
             )
-            if let content = await fileProcessorService.readFileContent(
-                for: source.url,
-                maxSize: remainingBudget
-            ) {
+            do {
+                let content = try await fileProcessorService.readFileContentOrThrow(for: source.url, maxSize: remainingBudget)
                 assembled += "\n\n--- Knowledge: \(source.fileName) ---\n\(content)"
+            } catch let retrievalError as FileRetrievalError {
+                failures.append(retrievalError)
+            } catch {
+                failures.append(.readFailed(path: source.location, underlying: error.localizedDescription))
             }
         }
-        return assembled
+        return (assembled, failures)
+    }
+}
+
+// MARK: - RAG Retrieval Budget
+
+/// Budgets for retrieved conversation-memory context (Section 3). Retrieval
+/// SUPPLEMENTS the prompt — an un-capped parent (an entire indexed file) could
+/// otherwise blow the context for a single chunk match, unlike the injection
+/// path which has always been budgeted (50K/file, 200K total).
+enum RAGRetrievalBudget {
+    /// Per-parent CEILING on retrieved document text (~2K tokens) — cloud-scale.
+    static let perParent = 8_000
+    /// Total CEILING across all retrieved parents (~6K tokens) — cloud-scale.
+    static let total = 24_000
+    /// Floors so retrieval stays useful even against tiny local windows.
+    static let minPerParent = 600
+    static let minTotal = 1_200
+
+    /// Scales the injection budget to the target model's context window. The
+    /// fixed ceilings suit cloud models, but 24K chars injected into a local
+    /// model whose ENTIRE window is ~4-8K tokens evicts the system prompt — the
+    /// provider head-truncates, and the retrieved context (plus everything else
+    /// in the system message) silently vanishes. Observed on-device: deep-symbol
+    /// queries succeeded early in a conversation and failed once history +
+    /// retrieval volume exceeded gemma:7b's num_ctx.
+    /// Target ≈15% of the window at a conservative 3 chars/token (code-dense).
+    static func budgets(forContextWindowTokens tokens: Int) -> (perParent: Int, total: Int) {
+        let scaledTotal = Int(Double(tokens) * 3.0 * 0.15)
+        let clampedTotal = max(minTotal, min(total, scaledTotal))
+        let clampedPerParent = max(minPerParent, min(perParent, clampedTotal / 2))
+        return (clampedPerParent, clampedTotal)
+    }
+
+    /// Assembles retrieved documents into the injected context string, windowing
+    /// each oversize document AROUND its matched chunk (`anchor`) rather than
+    /// taking the head — a head-clamped whole-file parent loses any match past
+    /// the first 8K chars (manual testing: symbols early in a file answered,
+    /// later ones "not found"). Falls back to the head window when the anchor
+    /// can't be located in the text (e.g. markdown-normalized message chunks).
+    static func assemble(
+        _ docs: [(text: String, anchor: String?)],
+        perParent perParentBudget: Int = perParent,
+        total totalBudget: Int = total
+    ) -> String {
+        var assembled: [String] = []
+        var used = 0
+        for doc in docs {
+            guard used < totalBudget else { break }
+            let budget = min(perParentBudget, totalBudget - used)
+            let windowed = window(for: doc.text, anchor: doc.anchor, budget: budget)
+            assembled.append(windowed)
+            used += windowed.count
+        }
+        return assembled.joined(separator: "\n\n")
+    }
+
+    /// A `budget`-sized excerpt of `text` centered on `anchor` (the matched chunk).
+    /// Keeps the document's identity line (`[File: …]`) when the head is cut, and
+    /// marks trimmed edges so the model knows the text is partial.
+    static func window(for text: String, anchor: String?, budget: Int) -> String {
+        guard text.count > budget else { return text }
+
+        // Code chunks carry a "[lang Context]:\n" retrieval prefix that is not part
+        // of the stored document text — strip it or the anchor never matches and
+        // every code chunk silently falls back to the head window.
+        var needle = anchor ?? ""
+        if needle.hasPrefix("["),
+           let newline = needle.firstIndex(of: "\n"),
+           needle[..<newline].hasSuffix(" Context]:") {
+            needle = String(needle[needle.index(after: newline)...])
+        }
+
+        // Locate the anchor: full chunk text first, then its head (chunk boundaries
+        // can drift from the stored full text via sanitization/overlap).
+        var anchorRange: Range<String.Index>?
+        if !needle.isEmpty {
+            anchorRange = text.range(of: needle)
+            if anchorRange == nil, needle.count > 120 {
+                anchorRange = text.range(of: String(needle.prefix(120)))
+            }
+        }
+
+        guard let matched = anchorRange else {
+            return String(text.prefix(budget)) + "\n… [truncated]"
+        }
+
+        let matchStart = text.distance(from: text.startIndex, to: matched.lowerBound)
+        let matchLength = text.distance(from: matched.lowerBound, to: matched.upperBound)
+        let center = matchStart + matchLength / 2
+
+        var start = max(0, center - budget / 2)
+        let end = min(text.count, start + budget)
+        start = max(0, end - budget)
+
+        let winStart = text.index(text.startIndex, offsetBy: start)
+        let winEnd = text.index(text.startIndex, offsetBy: end)
+        var excerpt = String(text[winStart..<winEnd])
+
+        if start > 0 {
+            // Preserve the "[File: name]" identity line so the model knows the
+            // excerpt's source even when the head is trimmed away.
+            let firstLine = text.prefix(while: { $0 != "\n" })
+            let header = firstLine.hasPrefix("[File:") ? String(firstLine) + "\n" : ""
+            excerpt = header + "… [\(start) earlier chars omitted]\n" + excerpt
+        }
+        if end < text.count {
+            excerpt += "\n… [truncated]"
+        }
+        return excerpt
+    }
+}
+
+// MARK: - Direct Injection Budget
+
+/// Injection budgets for current-turn attachments and knowledge sources.
+/// File-scope (not private orchestrator state) so the composer's PRE-SEND
+/// estimate can mirror exactly what the orchestrator will inject.
+enum DirectInjectionBudget {
+    /// Maximum characters injected per file (~12.5K tokens).
+    static let perFile = 50_000
+    /// Maximum total characters injected across all files (~50K tokens).
+    static let total = 200_000
+}
+
+// MARK: - Prompt Fit Check
+
+/// Pre-flight estimate of whether the assembled prompt fits the model's
+/// effective context window. Char-based (~3 chars/token, conservative for
+/// code-dense content) with a fixed allowance for prompt-builder layers —
+/// ±15% accuracy is plenty for a warning that only gates a banner.
+enum PromptFitCheck {
+    /// Instructions, environment facts, episodic wrappers, tool schemas, etc.
+    static let layerOverheadChars = 2_000
+    /// Conservative chars→tokens ratio (code burns tokens fast).
+    static let charsPerToken = 3.0
+    /// Fraction of the window reserved for the model's own output.
+    static let responseHeadroom = 0.25
+
+    static func estimatedTokens(
+        attachmentChars: Int,
+        knowledgeChars: Int,
+        retrievalChars: Int,
+        queryChars: Int,
+        historyChars: Int
+    ) -> Int {
+        let totalChars = attachmentChars + knowledgeChars + retrievalChars
+            + queryChars + historyChars + layerOverheadChars
+        return Int(Double(totalChars) / charsPerToken)
+    }
+
+    static func exceeds(estimatedTokens: Int, windowTokens: Int) -> Bool {
+        Double(estimatedTokens) > Double(windowTokens) * (1.0 - responseHeadroom)
+    }
+
+    /// "8192" → "8K", "200000" → "200K"; sub-thousand values print as-is.
+    static func roundedK(_ tokens: Int) -> String {
+        tokens >= 1_000 ? "\(Int((Double(tokens) / 1_000).rounded()))K" : "\(tokens)"
+    }
+
+    /// COMPOSER-SIDE attachment estimate from stat'd file sizes (content not yet
+    /// read; bytes ≈ chars for text/code), clamped to the direct-injection budgets
+    /// the orchestrator will actually apply — a 5 MB file injects at most 50K
+    /// chars, so estimating its full size would wildly over-warn.
+    static func estimatedAttachmentChars(forFileSizes sizes: [Int]) -> Int {
+        var total = 0
+        for size in sizes {
+            guard total < DirectInjectionBudget.total else { break }
+            total += min(max(size, 0), DirectInjectionBudget.perFile)
+        }
+        return min(total, DirectInjectionBudget.total)
     }
 }
 
 // MARK: - Vision Capability Gate Helpers
 
-private extension BackendProfileModel {
+// Internal (not private): `primaryLLMConfig` is also the composer-side pre-send
+// fit hint's window-resolution input (PreSendFitHint).
+extension BackendProfileModel {
     /// The primary chat model's config (bot / agent profiles). Workflow / image-gen → nil.
     var primaryLLMConfig: ProviderConfig? {
         switch details {

@@ -335,7 +335,6 @@ final class ChatMessageSDTests: XCTestCase {
         )
         // Set transient state
         original.agentState = .thinking(.reasoning)
-        original.thinkingHeadline = "Processing..."
         original.isStreaming = true
 
         let sd = ChatMessageSD.from(original)
@@ -343,7 +342,6 @@ final class ChatMessageSDTests: XCTestCase {
 
         // Transient properties should be reset
         XCTAssertEqual(decoded.agentState, .idle)
-        XCTAssertNil(decoded.thinkingHeadline)
         XCTAssertFalse(decoded.isStreaming)
     }
 

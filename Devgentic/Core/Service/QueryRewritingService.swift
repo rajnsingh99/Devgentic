@@ -89,6 +89,19 @@ actor QueryRewritingService {
                 return currentQuery
             }
 
+            // [Rewrite guard] The rewriter's contract is to EXPAND a query (resolve
+            // references by ADDING history context), never to replace its topic.
+            // Small IC models sometimes hallucinate replacements — observed:
+            // "Write an essay on Fire" → "…impact of wildfires on biodiversity",
+            // "Write an essay on technology" → "Explain attached file in composer
+            // application" — and retrieval then searches the wrong topic entirely.
+            // Falling back to the original is always safe (pre-rewrite behavior).
+            if !Self.rewriteRetainsOriginalTopic(original: currentQuery, rewrite: cleaned) {
+                fallbackCount += 1
+                logger.warning("[RAG Rewrite #\(rewriteNum)] FALLBACK — rewrite dropped the original query's content words (\(String(format: "%.2f", rewriteDuration))s). Using original query. Total fallbacks: \(self.fallbackCount)/\(self.totalRewriteCount)")
+                return currentQuery
+            }
+
             let wasChanged = cleaned != currentQuery
             logger.notice("[RAG Rewrite #\(rewriteNum)] COMPLETE — \(String(format: "%.2f", rewriteDuration))s, Changed: \(wasChanged)")
             if wasChanged {
@@ -107,6 +120,29 @@ actor QueryRewritingService {
 
             return currentQuery
         }
+    }
+
+    /// True when every content word of the original query survives (as a whole
+    /// word, case-insensitive) into the rewrite. Expansion is legal — adding
+    /// history context around the original words — topic replacement is not.
+    /// Whole-word matching matters: substring containment would let "wildfires"
+    /// satisfy "fire" and wave the observed hallucination through.
+    /// `static` (nonisolated on the actor) so tests exercise it directly.
+    static func rewriteRetainsOriginalTopic(original: String, rewrite: String) -> Bool {
+        let stopwords: Set<String> = [
+            "what", "tell", "about", "this", "that", "explain", "write", "please",
+            "does", "mean", "show", "where", "when", "which", "with", "from", "have",
+            "will", "would", "could", "should", "give", "describe", "method", "function"
+        ]
+        func tokens(_ text: String) -> [String] {
+            text.lowercased()
+                .split(whereSeparator: { !($0.isLetter || $0.isNumber || $0 == "_") })
+                .map(String.init)
+        }
+        let contentTokens = tokens(original).filter { $0.count >= 4 && !stopwords.contains($0) }
+        guard !contentTokens.isEmpty else { return true }
+        let rewriteTokens = Set(tokens(rewrite))
+        return contentTokens.allSatisfy { rewriteTokens.contains($0) }
     }
 
     private func formatRecentHistory(_ history: [ChatMessage], maxMessages: Int = 4) -> String {

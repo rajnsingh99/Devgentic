@@ -195,9 +195,11 @@ struct BackendProfileSnapshot: Codable, Identifiable, Hashable, Sendable {
     /// User-selected file context strategy. When nil, resolves to the smart default for the profile type.
     var fileContextStrategy: FileContextStrategy?
 
-    /// Resolved file context strategy — uses explicit setting or falls back to smart default.
+    /// Resolved file context strategy — explicit setting when the profile type can
+    /// honor it, otherwise the smart default. A persisted override the type can't
+    /// honor (e.g. a legacy bot set to `.stateless`) heals to the default here.
     var resolvedFileContextStrategy: FileContextStrategy {
-        fileContextStrategy ?? FileContextStrategy.defaultStrategy(for: profileType)
+        FileContextStrategy.resolve(fileContextStrategy, for: profileType)
     }
 
     var profileType: ProfileType {

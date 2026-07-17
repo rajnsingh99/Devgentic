@@ -35,6 +35,12 @@ struct UserBubbleContentView: View {
                         .padding(.vertical, 4)
                         .padding(.horizontal, 4)
                     }
+                    // A horizontal ScrollView fills the proposed width and CENTERS
+                    // undersized content, which left a few attachment cards floating
+                    // mid-row while the text bubble + avatar hug the right edge.
+                    // Anchor alignment trailing so the cards join the right-aligned
+                    // message group; overflowing rows still scroll normally.
+                    .defaultScrollAnchor(.trailing, for: .alignment)
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel("\(attachedTextFiles.count) attached files")
                 }

@@ -113,6 +113,8 @@ struct ThemeDecorator: Theme {
     var chatGPTGradientTop: Color { base.chatGPTGradientTop }
     var chatGPTGradientBottom: Color { base.chatGPTGradientBottom }
     var shadowColor: Color { base.shadowColor }
+    var searchHighlight: Color { base.searchHighlight }
+    var searchHighlightActive: Color { base.searchHighlightActive }
 
     // Tier 3 — Typography
     var fontLargeTitle: Font { base.fontLargeTitle }
@@ -155,10 +157,17 @@ struct ThemeDecorator: Theme {
     // Backend Origin Color (forwarded so a base theme may override the hues)
     func backendColor(for backend: BackendType) -> Color { base.backendColor(for: backend) }
 
+    // Capability Accent Color (forwarded so a base theme may override the hues)
+    func capabilityColor(for category: CapabilityMilestoneKind.MilestoneColor) -> Color { base.capabilityColor(for: category) }
+
     // Syntax Highlighting
     var syntaxTheme: SyntaxTheme {
         base.syntaxTheme.patched(with: accentColorOverride.nsColor)
     }
+
+    /// Not patched with the accent override: a highlight.js theme is a whole CSS palette,
+    /// not a token we can recolour one entry of.
+    var codeHighlightThemeName: String { base.codeHighlightThemeName }
 }
 
 
@@ -254,6 +263,11 @@ protocol Theme {
     /// Single source of truth for the per-backend hues (sidebar rail, input picker dot, etc.).
     func backendColor(for backend: BackendType) -> Color
 
+    /// Accent color for an agent-capability surface (planning / reflection / delegation /
+    /// compaction). Single source of truth for the capability hues used by the timeline
+    /// milestone chips and the plan/reflection progress cards.
+    func capabilityColor(for category: CapabilityMilestoneKind.MilestoneColor) -> Color
+
     // ── Tier 2: Extended Color Tokens (defaults provided) ────────────
 
     /// Background for standard controls (input fields, popovers, chips).
@@ -309,6 +323,13 @@ protocol Theme {
     /// to a softer value since pure black reads too heavy on pale backgrounds.
     var shadowColor: Color { get }
 
+    /// Background tint for a search match in chat text (find-in-conversation).
+    /// Single source of truth so every chat surface highlights identically.
+    var searchHighlight: Color { get }
+
+    /// Stronger background tint for the *currently focused* search match.
+    var searchHighlightActive: Color { get }
+
     // ── Tier 3: Typography ───────────────────────────────────────────
 
     var fontLargeTitle: Font { get }
@@ -356,6 +377,15 @@ protocol Theme {
 
     /// Colors used by the code editor (CodeEditSourceEditor).
     var syntaxTheme: SyntaxTheme { get }
+
+    /// Name of the highlight.js CSS theme used for code blocks in chat bubbles.
+    ///
+    /// Separate from `syntaxTheme` because Highlightr can't be driven by it: `setTheme(to:)`
+    /// only loads a CSS file from Highlightr's OWN bundle, and `Theme(themeString:)` is
+    /// internal to that package — so our 15 colour tokens cannot be handed to it. Picking
+    /// the closest of its 271 bundled themes is the available lever, and it's the one that
+    /// matters: every theme used to get `atom-one-*`, so Dracula rendered Atom's palette.
+    var codeHighlightThemeName: String { get }
 }
 
 
@@ -390,6 +420,11 @@ extension Theme {
     var chatGPTGradientTop: Color { Color(red: 0.15, green: 0.15, blue: 0.16) }
     var chatGPTGradientBottom: Color { Color(red: 0.1, green: 0.1, blue: 0.11) }
     var shadowColor: Color { Color.black.opacity(0.18) }
+    // Find-in-conversation highlight hues (browser-find style). Kept in sync with
+    // `SearchHighlighter.defaultBase`/`.defaultActive`, which the theme-less static
+    // highlight entry points use.
+    var searchHighlight: Color { Color.yellow.opacity(0.4) }
+    var searchHighlightActive: Color { Color.orange.opacity(0.6) }
 
     // ── Tier 3 Typography Defaults ───────────────────────────────────
 
@@ -444,6 +479,27 @@ extension Theme {
         case .remote: return Color(red: 0.30, green: 0.66, blue: 0.96)  // sky blue — remote
         case .none:   return tertiaryText
         }
+    }
+
+    // ── Capability Accent Color ──────────────────────────────────────
+
+    /// Defaults preserve the pre-token hardcoded hues (planning blue, reflection
+    /// purple, delegation green, compaction orange). Themes may override.
+    func capabilityColor(for category: CapabilityMilestoneKind.MilestoneColor) -> Color {
+        switch category {
+        case .planning:   return .blue
+        case .reflection: return .purple
+        case .delegation: return .green
+        case .compaction: return .orange
+        }
+    }
+
+    // ── Code Highlight Theme Default ─────────────────────────────────
+
+    /// Falls back to Atom One, matched to the theme's light/dark scheme. Themes with a
+    /// closer match among Highlightr's bundled styles override this.
+    var codeHighlightThemeName: String {
+        colorScheme == .light ? "atom-one-light" : "atom-one-dark"
     }
 
     // ── Syntax Theme Default ─────────────────────────────────────────
@@ -509,6 +565,10 @@ extension AppThemes {
         let id = "dracula"
         let displayName = "Dracula"
         let colorScheme: ColorScheme? = .dark
+        /// Highlightr bundles the real Dracula palette. Choosing Dracula and getting
+        /// Atom's colours in every code block was the most visible case of the old
+        /// light/dark-only fallback.
+        let codeHighlightThemeName = "dracula"
 
         // Tier 1 — Core
         let primaryBackground: Color = Color(hex: "#282a36")
@@ -703,6 +763,9 @@ extension AppThemes {
         let id = "cosmic_dark"
         let displayName = "Cosmic Dark"
         let colorScheme: ColorScheme? = .dark
+        /// No Cosmic style ships with Highlightr; Nord is the closest bundled match for
+        /// its cool, desaturated palette.
+        let codeHighlightThemeName = "nord"
 
         // Tier 1 — Core (Spotify Palette)
         let primaryBackground: Color = Color(hex: "#121212")        // Pure Spotify Dark

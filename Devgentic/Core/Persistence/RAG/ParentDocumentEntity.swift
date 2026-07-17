@@ -28,18 +28,26 @@ final class ParentDocumentEntity {
     
     /// The actual full text content of the message or file.
     var fullTextContent: String = ""
-    
+
     /// The timestamp when this document was ingested.
     var timestamp: Date = Date()
-    
+
+    /// Stable identity of the indexed source within its conversation — a file path
+    /// for attachments, the message UUID string for chat turns. Enables
+    /// replace-on-reindex (delete prior copies before re-adding) so re-attached
+    /// files and re-finalized messages don't accumulate duplicate vectors.
+    /// Empty for rows written before this field existed.
+    var sourceIdentifier: String = ""
+
     /// The default initializer required by ObjectBox.
     init() {}
-    
+
     /// A convenience initializer for creating new ParentDocumentEntity instances.
-    init(sourceMessageID: UUID, conversationID: UUID, fullTextContent: String, timestamp: Date = Date()) {
+    init(sourceMessageID: UUID, conversationID: UUID, fullTextContent: String, timestamp: Date = Date(), sourceIdentifier: String = "") {
         self.sourceMessageID = sourceMessageID
         self.conversationID = conversationID
         self.fullTextContent = fullTextContent
         self.timestamp = timestamp
+        self.sourceIdentifier = sourceIdentifier
     }
 }

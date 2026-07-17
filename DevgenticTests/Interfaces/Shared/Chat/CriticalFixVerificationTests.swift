@@ -21,12 +21,17 @@ import Foundation
 
 // MARK: - Fix 1: CodeBlockView Safe Font Fallback
 
+/// `monoFont` became `monoFont(size:)` in 2026-07: the size now follows `chatFontSize`
+/// instead of being pinned at 12pt, so a single `static let` could no longer serve it.
+/// These still pin what they always did — safe fallback, monospaced, cached — plus the
+/// scaling that replaced the constant.
+@MainActor
 final class CodeBlockFontSafetyTests: XCTestCase {
 
-    /// Verifies the static monoFont is non-nil and usable.
+    /// Verifies monoFont is non-nil and usable.
     /// Previously this was a force unwrap that could crash if .monospaced design was unavailable.
     func testMonoFontIsAvailableAndValid() {
-        let font = AsyncHighlightedCodeView.monoFont
+        let font = AsyncHighlightedCodeView.monoFont(size: 12)
         XCTAssertGreaterThan(font.pointSize, 0, "Font should have a valid point size")
         // Verify it's a monospaced-ish font (SF Mono, Menlo, or system fallback)
         XCTAssertNotNil(font.fontName, "Font should have a valid name")
@@ -34,18 +39,29 @@ final class CodeBlockFontSafetyTests: XCTestCase {
 
     /// Verifies the font is actually monospaced (or Menlo fallback).
     func testMonoFontIsMonospaced() {
-        let font = AsyncHighlightedCodeView.monoFont
+        let font = AsyncHighlightedCodeView.monoFont(size: 12)
         let fontName = font.fontName.lowercased()
         // Should be SF Mono (from .monospaced design) or Menlo (fallback)
         let isMonospaced = fontName.contains("mono") || fontName.contains("menlo") || fontName.contains("courier")
         XCTAssertTrue(isMonospaced, "Font '\(font.fontName)' should be monospaced, got: \(fontName)")
     }
 
-    /// Verifies the font is a singleton (computed once, reused).
-    func testMonoFontIsCachedSingleton() {
-        let font1 = AsyncHighlightedCodeView.monoFont
-        let font2 = AsyncHighlightedCodeView.monoFont
-        XCTAssertTrue(font1 === font2, "monoFont should return the same cached instance")
+    /// Still cached — now per size rather than one global instance.
+    func testMonoFontIsCachedPerSize() {
+        let font1 = AsyncHighlightedCodeView.monoFont(size: 13)
+        let font2 = AsyncHighlightedCodeView.monoFont(size: 13)
+        XCTAssertTrue(font1 === font2, "The same size should return the same cached instance")
+    }
+
+    /// The point of the change: code size tracks the chat font instead of a hardcoded 12pt.
+    func testMonoFontHonoursTheRequestedSize() {
+        XCTAssertEqual(AsyncHighlightedCodeView.monoFont(size: 18).pointSize, 18)
+        XCTAssertEqual(AsyncHighlightedCodeView.monoFont(size: 10).pointSize, 10)
+        XCTAssertNotEqual(
+            AsyncHighlightedCodeView.monoFont(size: 18),
+            AsyncHighlightedCodeView.monoFont(size: 10),
+            "Different sizes must not collapse to one cached font"
+        )
     }
 }
 

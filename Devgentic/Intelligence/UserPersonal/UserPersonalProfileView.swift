@@ -299,8 +299,12 @@ struct ProfileBlockRenderer: View {
             headingView(level: level, text: text)
         case .paragraph(let text):
             paragraphView(text: text)
-        case .listItem(_, let text, let indentation):
-            listItemView(text: text, indentation: indentation)
+        case .listItem(_, let blocks, _):
+            // Profiles render flat; nesting depth isn't modelled here, so children are
+            // flattened into the item's text.
+            listItemView(text: blocks.map(\.plainText).joined(separator: " "), indentation: 0)
+        case .blockquote(let blocks):
+            listItemView(text: blocks.map(\.plainText).joined(separator: " "), indentation: 1)
         case .horizontalRule:
             Divider()
                 .background(theme.dividerColor)
@@ -313,7 +317,7 @@ struct ProfileBlockRenderer: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(theme.secondaryBackground)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
-        case .table(let headers, let rows):
+        case .table(let headers, let rows, _):
             tableView(headers: headers, rows: rows)
         case .image:
             EmptyView()

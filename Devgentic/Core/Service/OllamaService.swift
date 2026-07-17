@@ -18,6 +18,10 @@ struct LocalModel: Identifiable, Hashable {
     // This prevents SwiftUI from getting confused when the list is refreshed.
     var id: String { name }
     let name: String
+    /// Blob digest from `/api/tags`. Same digest ⇒ the cached `/api/show` detection
+    /// is still valid (see `LocalModelRefresher`). Nil when the entry predates digest
+    /// tracking or its detail fetch failed — treated as "changed" so it re-detects.
+    let digest: String?
     let details: OllamaModelDetails?
     let tags: [ModelTag]
 
@@ -33,8 +37,9 @@ struct LocalModel: Identifiable, Hashable {
     /// Convenience accessor for the output dialect.
     var modelDialect: ModelDialect { cognitiveProfile.dialect }
 
-    init(name: String, response: OllamaShowResponse) {
+    init(name: String, digest: String? = nil, response: OllamaShowResponse) {
         self.name = name
+        self.digest = digest
         self.details = response.details
         // Use the method form so reasoning-only detection can check against `name`
         // itself — some distilled fine-tunes (e.g. deepseek-r1:14b) report a
@@ -42,30 +47,36 @@ struct LocalModel: Identifiable, Hashable {
         // reasoning-only identity.
         self.cognitiveProfile = response.cognitiveProfile(modelName: name)
         self.supportsThinking = response.supportsThinking
-        self.tags = Self.generateTags(from: response)
+        self.tags = Self.generateTags(from: response, profile: self.cognitiveProfile)
     }
 
-    /// Generates a list of tags by parsing the model's details and modelfile.
-    private static func generateTags(from response: OllamaShowResponse) -> [ModelTag] {
+    /// Generates tags from the NAME-AWARE profile (reasoning-only detection needs the
+    /// model name — `response.cognitiveCapability` alone misses distilled fine-tunes
+    /// like deepseek-r1 whose family reports the tool-capable base architecture).
+    /// Vision/Thinking come from the same authoritative detection the pickers bind to.
+    private static func generateTags(from response: OllamaShowResponse, profile: CognitiveProfile) -> [ModelTag] {
         var generatedTags: [ModelTag] = []
-        let details = response.details
-        
+
         // Add quantization level tag
-        if let quant = details?.quantizationLevel, !quant.isEmpty {
+        if let quant = response.details?.quantizationLevel, !quant.isEmpty {
             generatedTags.append(ModelTag(text: quant, color: .cyan, icon: "dial.medium.fill"))
         }
 
-        // Check native tool capabilities explicitly based on the API response evaluation
-        if response.cognitiveCapability != .none {
-            generatedTags.append(ModelTag(text: "Tools", color: .orange, icon: "wrench.and.screwdriver.fill"))
+        if profile.capability != .none {
+            // Reasoning-focused models are usable but flagged: server accepts tools,
+            // the fine-tune's call reliability is the concern.
+            if profile.toolSupportCaveat == .reasoningFocused {
+                generatedTags.append(ModelTag(text: "Tools · limited", color: .yellow, icon: "wrench.and.screwdriver.fill"))
+            } else {
+                generatedTags.append(ModelTag(text: "Tools", color: .orange, icon: "wrench.and.screwdriver.fill"))
+            }
         }
-        
-        let modelfileContent = response.modelfile?.lowercased() ?? ""
-        if modelfileContent.contains("vision") || modelfileContent.contains("multimodal") || details?.supportsVision == true {
-             generatedTags.append(ModelTag(text: "Vision", color: .purple, icon: "eye.fill"))
+
+        if profile.modalities.contains(.visionInput) {
+            generatedTags.append(ModelTag(text: "Vision", color: .purple, icon: "eye.fill"))
         }
-        
-        if modelfileContent.contains("think") {
+
+        if response.supportsThinking {
             generatedTags.append(ModelTag(text: "Thinking", color: .green, icon: "brain.head.profile"))
         }
 
@@ -79,6 +90,92 @@ struct LocalModel: Identifiable, Hashable {
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
+    }
+}
+
+// MARK: - Digest-Aware Model Refresh
+
+/// Digest-aware local-model refresh shared by `OllamaService` (model manager) and
+/// `OllamaModelPickerView` (profile editor). One cheap `/api/tags` + `/api/version`
+/// probe decides which models actually need the expensive per-model `/api/show`
+/// detection fan-out: unchanged digests reuse the cached `LocalModel`. External
+/// `ollama pull`s become visible on the next refresh without re-detecting the whole
+/// library, and a daemon upgrade (which can change what `/api/show` reports for the
+/// same blob) invalidates the cache wholesale.
+enum LocalModelRefresher {
+
+    struct RefreshPlan: Equatable {
+        var reusableNames: [String] = []
+        var namesToFetch: [String] = []
+    }
+
+    /// Pure diff between cached models and a fresh `/api/tags` listing.
+    /// - Daemon version change ⇒ everything re-detects.
+    /// - Nil digest on either side ⇒ that model re-detects (legacy cache entries and
+    ///   failed detail fetches heal on the next pass).
+    /// - Cached models absent from `fresh` are dropped (deleted out-of-band).
+    static func planRefresh(
+        cached: [LocalModel],
+        fresh: [OllamaConnect.OllamaTagEntry],
+        daemonVersionChanged: Bool
+    ) -> RefreshPlan {
+        guard !daemonVersionChanged else {
+            return RefreshPlan(reusableNames: [], namesToFetch: fresh.map(\.name))
+        }
+        var cachedDigests: [String: String] = [:]
+        for model in cached {
+            if let digest = model.digest { cachedDigests[model.name] = digest }
+        }
+        var plan = RefreshPlan()
+        for entry in fresh {
+            if let freshDigest = entry.digest, cachedDigests[entry.name] == freshDigest {
+                plan.reusableNames.append(entry.name)
+            } else {
+                plan.namesToFetch.append(entry.name)
+            }
+        }
+        return plan
+    }
+
+    /// Fetches the current model list, reusing cached detection where digests match.
+    /// A failed `/api/show` degrades to a bare `LocalModel` (visible, untagged, nil
+    /// digest so the next refresh retries) — a model is never silently dropped.
+    static func refresh(
+        baseURL: String,
+        cached: [LocalModel],
+        cachedDaemonVersion: String?
+    ) async throws -> (models: [LocalModel], daemonVersion: String?) {
+        let entries = try await OllamaConnect.fetchLocalOllamaModelTags(baseURL: baseURL)
+        let daemonVersion = await OllamaConnect.fetchDaemonVersion(baseURL: baseURL)
+        let versionChanged = daemonVersion != nil && daemonVersion != cachedDaemonVersion
+
+        let plan = planRefresh(cached: cached, fresh: entries, daemonVersionChanged: versionChanged)
+
+        let cachedByName = Dictionary(uniqueKeysWithValues: cached.map { ($0.name, $0) })
+        var models: [LocalModel] = plan.reusableNames.compactMap { cachedByName[$0] }
+
+        let digestsByName = Dictionary(uniqueKeysWithValues: entries.map { ($0.name, $0.digest) })
+        await withTaskGroup(of: LocalModel.self) { group in
+            for name in plan.namesToFetch {
+                group.addTask {
+                    do {
+                        let response = try await OllamaConnect.fetchModelDetails(name: name, baseURL: baseURL)
+                        return LocalModel(name: name, digest: digestsByName[name] ?? nil, response: response)
+                    } catch {
+                        logger.error("Failed to fetch details for model \(name): \(error.localizedDescription)")
+                        let emptyResponse = OllamaShowResponse(license: nil, modelfile: nil, parameters: nil, template: nil, details: nil, capabilities: nil, modelInfo: nil)
+                        return LocalModel(name: name, digest: nil, response: emptyResponse)
+                    }
+                }
+            }
+            for await model in group {
+                models.append(model)
+            }
+        }
+
+        // A nil version (endpoint missing / transient failure) keeps the previous one
+        // so a single failed probe doesn't force a full re-detect next time.
+        return (models.sorted { $0.name < $1.name }, daemonVersion ?? cachedDaemonVersion)
     }
 }
 
@@ -118,6 +215,11 @@ class OllamaService {
     /// Tracks when the last failed server check occurred to prevent rapid-fire socket errors.
     private var lastFailedCheckTime: Date? = nil
     private let failedCheckCooldown: TimeInterval = 30
+
+    /// Daemon version seen at the last successful model load. A version change
+    /// invalidates digest-based detection reuse in `LocalModelRefresher` — an
+    /// upgraded daemon can report different capabilities for the same model blob.
+    private var lastDaemonVersion: String? = nil
 
     // MARK: - Configuration Properties
     /// These properties are now set by a central authority (like MainApplicationViewModel) based on the active profile.
@@ -185,36 +287,18 @@ class OllamaService {
         modelLoadingError = nil
         
         do {
-            let modelNames = try await OllamaConnect.fetchLocalOllamaModels(baseURL: ollamaBaseURL)
-            
-            var detailedModels: [LocalModel] = []
-            
-            // Fetch details for each model concurrently
-            await withTaskGroup(of: LocalModel?.self) { group in
-                for name in modelNames {
-                    group.addTask {
-                        do {
-                            let response = try await OllamaConnect.fetchModelDetails(name: name, baseURL: self.ollamaBaseURL)
-                            return LocalModel(name: name, response: response)
-                        } catch {
-                            logger.error("Failed to fetch details for model \(name): \(error.localizedDescription)")
-                            // Even if details fail, we can create a model with no tags
-                            let emptyResponse = OllamaShowResponse(license: nil, modelfile: nil, parameters: nil, template: nil, details: nil, capabilities: nil, modelInfo: nil)
-                            return LocalModel(name: name, response: emptyResponse)
-                        }
-                    }
-                }
-                
-                for await model in group {
-                    if let model = model {
-                        detailedModels.append(model)
-                    }
-                }
-            }
-            
-            // Sort the models alphabetically by name
-            self.localModels = detailedModels.sorted { $0.name < $1.name }
-            
+            // Digest-aware refresh: one cheap /api/tags + /api/version probe; the
+            // /api/show detection fan-out runs only for new/changed models, so calling
+            // this on every view appearance is safe (and is what keeps external
+            // `ollama pull`s visible without a manual refresh).
+            let result = try await LocalModelRefresher.refresh(
+                baseURL: ollamaBaseURL,
+                cached: localModels,
+                cachedDaemonVersion: lastDaemonVersion
+            )
+            self.localModels = result.models
+            self.lastDaemonVersion = result.daemonVersion
+
         } catch {
             let errorMessage = ErrorHandling.generateUserFriendlyMessage(for: error, backendType: .ollama)
             self.localModels = []

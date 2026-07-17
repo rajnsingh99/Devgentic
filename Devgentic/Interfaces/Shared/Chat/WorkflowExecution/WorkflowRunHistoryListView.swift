@@ -36,6 +36,11 @@ struct WorkflowRunHistoryListView: View {
             .padding(.horizontal, 16)
             .padding(.top, 16)
             .padding(.bottom, 10)
+            // The count capsule read as a bare "12" — a number with no noun. Merged into
+            // the title, and marked a header so the list can be jumped to via the rotor.
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Run History, \(runHistory.count) run\(runHistory.count == 1 ? "" : "s")")
+            .accessibilityAddTraits(.isHeader)
 
             // Run cards
             ScrollView(.vertical) {
@@ -56,6 +61,62 @@ struct WorkflowRunHistoryListView: View {
     }
 }
 
+// MARK: - Spoken form
+
+/// What VoiceOver says for a run card.
+///
+/// Extracted for the same reason as `TableSpeech`: a SwiftUI accessibility label can't be
+/// read back from a hosted view (the tree is built lazily when a real assistive client
+/// attaches), so testing this function is the only way to pin the contract.
+enum RunCardSpeech {
+
+    /// The whole card as ONE utterance.
+    ///
+    /// Every fact is already on screen, but scattered across four rows of icon+text pairs,
+    /// so VoiceOver read the card as a pile of disconnected fragments:
+    /// "checkmark.circle.fill, 12.4s, text.bubble, <input>, square.on.square, 3 nodes, Failed".
+    /// Ordered by what identifies a run: what happened, then what was asked, then the result.
+    static func label(for record: WorkflowRunRecord, totalNodes: Int, failedNodes: Int) -> String {
+        var parts: [String] = []
+        let startedAt = record.timestamp.formatted(date: .omitted, time: .shortened)
+
+        if record.status == .running {
+            // A spoken elapsed time is stale the instant it's said, and re-announcing it
+            // every second would make the list unusable. The start time doesn't move.
+            parts.append(String(localized: "Running since \(startedAt)"))
+        } else {
+            parts.append("\(record.status.label), \(DurationFormat.seconds(record.duration)), \(startedAt)")
+        }
+
+        if !record.userInput.isEmpty {
+            parts.append(String(localized: "Input: \(spokenPreview(record.userInput))"))
+        }
+        // Error wins over output: a failed run's error is what you need, and the card
+        // shows one or the other, never both.
+        if let error = record.error, !error.isEmpty {
+            parts.append(String(localized: "Error: \(spokenPreview(error))"))
+        } else if !record.finalOutput.isEmpty {
+            parts.append(String(localized: "Output: \(spokenPreview(record.finalOutput))"))
+        }
+
+        var nodes = "\(totalNodes) node\(totalNodes == 1 ? "" : "s")"
+        if failedNodes > 0 { nodes += ", \(failedNodes) failed" }
+        parts.append(nodes)
+
+        return parts.joined(separator: ". ")
+    }
+
+    /// Mirrors the card's visual truncation. The card shows 1–2 lines; reading a full
+    /// multi-kilobyte output aloud for one row of a list is its own accessibility failure.
+    static func spokenPreview(_ text: String, limit: Int = 120) -> String {
+        let flat = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard flat.count > limit else { return flat }
+        return String(flat.prefix(limit)) + "…"
+    }
+}
+
 // MARK: - Run Card
 
 private struct WorkflowRunCardView: View {
@@ -64,49 +125,26 @@ private struct WorkflowRunCardView: View {
     let onSelect: () -> Void
 
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovering = false
 
-    private var statusColor: Color {
-        switch record.status {
-        case .completed: return theme.successColor
-        case .failed:    return theme.errorColor
-        case .cancelled: return theme.warningColor
-        case .running:   return theme.accentColor
-        }
-    }
+    // Status vocabulary delegates to the canonical RunStatus extension
+    // (WorkflowRunDisplayData) so the list can't drift from the picker / cards.
+    private var statusColor: Color { record.status.color(theme) }
+    private var statusIcon: String { record.status.icon }
+    private var statusLabel: String { record.status.label }
 
-    private var statusIcon: String {
-        switch record.status {
-        case .completed: return "checkmark.circle.fill"
-        case .failed:    return "xmark.circle.fill"
-        case .cancelled: return "stop.circle.fill"
-        case .running:   return "circle.fill"
-        }
-    }
-
-    private var statusLabel: String {
-        switch record.status {
-        case .completed: return "Completed"
-        case .failed:    return "Failed"
-        case .cancelled: return "Cancelled"
-        case .running:   return "Running"
-        }
-    }
-
-    private var durationText: String { Self.formatDuration(record.duration) }
-
-    /// Shared formatter used both for the static (finalized) duration and the
-    /// live-ticking elapsed time on `.running` rows.
-    private static func formatDuration(_ d: TimeInterval) -> String {
-        if d < 1 { return "<1s" }
-        if d < 60 { return "\(String(format: "%.1f", d))s" }
-        return "\(Int(d / 60))m \(Int(d.truncatingRemainder(dividingBy: 60)))s"
-    }
+    private var durationText: String { DurationFormat.seconds(record.duration) }
 
     private var nodeStats: (total: Int, failed: Int) {
         let total = record.nodeResults.count
         let failed = record.nodeResults.filter { $0.status == .failed }.count
         return (total, failed)
+    }
+
+    private var cardAccessibilityLabel: String {
+        let stats = nodeStats
+        return RunCardSpeech.label(for: record, totalNodes: stats.total, failedNodes: stats.failed)
     }
 
     var body: some View {
@@ -121,7 +159,7 @@ private struct WorkflowRunCardView: View {
 
                     if record.status == .running {
                         TimelineView(.periodic(from: record.timestamp, by: 1.0)) { context in
-                            Text(Self.formatDuration(context.date.timeIntervalSince(record.timestamp)))
+                            Text(DurationFormat.seconds(context.date.timeIntervalSince(record.timestamp)))
                                 .font(theme.fontCaption.weight(.bold).monospacedDigit())
                                 .foregroundColor(theme.primaryText)
                         }
@@ -207,6 +245,7 @@ private struct WorkflowRunCardView: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(cardBackground)
             )
+            .glassEffect(.regular, in: .rect(cornerRadius: 12))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(cardBorder, lineWidth: isSelected ? 1.5 : 0.5)
@@ -214,18 +253,25 @@ private struct WorkflowRunCardView: View {
             .shadow(color: isSelected ? statusColor.opacity(0.08) : Color.black.opacity(0.04), radius: isSelected ? 6 : 1, y: 1)
         }
         .buttonStyle(.plain)
-        .scaleEffect(isHovering ? 1.012 : 1.0)
+        .scaleEffect(isHovering && !reduceMotion ? 1.012 : 1.0)
         .onHover { hovering in
-            withAnimation(.spring(response: 0.22, dampingFraction: 0.75)) {
+            withAnimation(reduceMotion ? nil : .spring(response: 0.22, dampingFraction: 0.75)) {
                 isHovering = hovering
             }
         }
+        // `.ignore` rather than `.combine`: combining would still read every icon and
+        // fragment, just glued together. This replaces them with one composed sentence —
+        // and it takes the decorative glyphs out of the tree for free.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(cardAccessibilityLabel)
+        // Which run you're viewing was conveyed only by border weight, fill and shadow.
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 
     private var cardBackground: Color {
         if isSelected { return theme.accentColor.opacity(0.08) }
         if isHovering { return theme.surfaceOverlay }
-        return theme.controlBackground
+        return Color.clear
     }
 
     private var cardBorder: Color {

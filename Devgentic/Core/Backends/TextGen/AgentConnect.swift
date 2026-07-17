@@ -34,6 +34,8 @@ class AgentConnect: @unchecked Sendable {
         chatHistory: [ChatMessage],
         conversationID: UUID,
         ragContext: String? = nil,
+        attachmentContext: String? = nil,
+        knowledgeBaseContext: String? = nil,
         userPayload: Payload? = nil,
         resumeState: TimelineReconstruction? = nil,
         traceContext: TraceContext,
@@ -73,9 +75,17 @@ class AgentConnect: @unchecked Sendable {
                     case .workflow:
                         // Workflow: each node resolves its own model, tools, and generator.
                         // Bypass the single-model pipeline entirely. Layout is the source of truth.
+                        // Workflows have no layered per-node prompt for chat context, and the
+                        // engine merges userInput into the FIRST node's task only — so knowledge
+                        // and attachment payloads must ride userInput here or they'd be dropped.
+                        var workflowInputParts: [String] = []
+                        if let kb = knowledgeBaseContext, !kb.isEmpty { workflowInputParts.append(kb) }
+                        if let attachments = attachmentContext, !attachments.isEmpty { workflowInputParts.append(attachments) }
+                        workflowInputParts.append(userInput)
+                        let composedWorkflowInput = workflowInputParts.joined(separator: "\n\n")
                         let workflowExecutor = WorkflowExecutor(workflowProfileID: profile.id)
                         let wfStream = workflowExecutor.executeWorkflow(
-                            userInput: userInput,
+                            userInput: composedWorkflowInput,
                             chatHistory: chatHistory,
                             conversationID: conversationID,
                             ragContext: ragContext,
@@ -123,18 +133,23 @@ class AgentConnect: @unchecked Sendable {
                     
                     // 3. Memory & Model Initialization
                     let modelTier = llmConfig.modelMetadata?.tier ?? .medium
-                    let contextWindow = max(2048, llmConfig.modelMetadata?.contextWindow
-                        ?? KnownModelContextWindows.lookup(llmConfig.modelName)
-                        ?? 128_000)
-                    let fallbackRag = ragContext ?? "No static context provided."
-                    
+                    // EFFECTIVE window (num_ctx-aware for Ollama, 8K local fallback) —
+                    // sizing compaction and native-turn budgets to a 128K assumption on
+                    // a ~4-8K local allocation meant turn arrays never compacted and
+                    // Ollama truncated silently mid-run.
+                    let contextWindow = EffectiveContextWindow.resolve(for: llmConfig)
+                    // Empty (not a sentinel) when nothing was retrieved — PromptBuilder
+                    // skips the <semantic_context> layer for empty grounding, so non-RAG
+                    // turns no longer carry a hollow "No static context provided." block.
+                    let staticGrounding = ragContext ?? ""
+
                     // Instantiate the correct Long-Term Memory Strategy
                     let longTermMemory: any LongTermMemoryStrategy
                     if modelTier == .tiny || modelTier == .small {
-                        longTermMemory = StaticGroundingMemory(ragContext: fallbackRag)
+                        longTermMemory = StaticGroundingMemory(ragContext: staticGrounding)
                     } else {
                         longTermMemory = ToolAugmentedMemory(
-                            ragContext: fallbackRag,
+                            ragContext: staticGrounding,
                             memoryTools: [
                                 wrapTool(ReadSessionHistoryTool(conversationID: conversationID), requiresConfirmation: false)
                             ]
@@ -415,6 +430,8 @@ class AgentConnect: @unchecked Sendable {
                     let input = AgentInput(
                         userInput: userInput,
                         userPayload: userPayload,
+                        attachmentContext: attachmentContext,
+                        knowledgeBaseContext: knowledgeBaseContext,
                         chatHistory: chatHistory,
                         conversationID: conversationID,
                         tools: activeTools,
@@ -651,9 +668,9 @@ class AgentConnect: @unchecked Sendable {
                         ? workflowContext.taskDescription
                         : workflowContext.upstreamInput
 
-                    let contextWindow = max(2048, llmConfig.modelMetadata?.contextWindow
-                        ?? KnownModelContextWindows.lookup(llmConfig.modelName)
-                        ?? 128_000)
+                    // EFFECTIVE window — see the main-path note; workflow nodes get the
+                    // same num_ctx-aware sizing so per-node budgets match reality.
+                    let contextWindow = EffectiveContextWindow.resolve(for: llmConfig)
                     let modelTier = llmConfig.modelMetadata?.tier ?? .medium
                     let memoryConfig = MemoryBudgetConfig.derive(contextWindow: contextWindow, tier: modelTier)
                     // #22: native turn-payload budget (~75% of context window as chars) —
@@ -945,7 +962,24 @@ class AgentConnect: @unchecked Sendable {
             if let advConfig = llmConfig.advancedConfiguration {
                 options = advConfig
             }
-            
+
+            // [num_ctx auto-default] When the user hasn't configured a context
+            // window, send one sized to the model instead of inheriting Ollama's
+            // ~4K server default — which silently HEAD-truncates oversized prompts
+            // (system prompt, with the knowledge/retrieval layers, goes first).
+            // min(trained max, cap) keeps KV-cache memory bounded; the value flows
+            // through the provider's existing numCtx → num_ctx mapping.
+            if OllamaContextWindowPolicy.configuredNumCtx(in: options) == nil,
+               let autoNumCtx = OllamaContextWindowPolicy.autoNumCtx(
+                   trainedContextWindow: llmConfig.modelMetadata?.contextWindow
+                       ?? KnownModelContextWindows.lookup(llmConfig.modelName)
+               ) {
+                var merged = options ?? [:]
+                merged["numCtx"] = .number(Double(autoNumCtx))
+                options = merged
+                logger.info("[num_ctx] Auto-defaulting num_ctx=\(autoNumCtx) for '\(llmConfig.modelName)' (no user-configured value).")
+            }
+
             let config = LLMProviderConfig(baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options, rateLimitKey: rlKey, thinkingEnabled: llmConfig.thinkingEnabled)
             return OllamaLLMProvider(config: config)
             

@@ -18,6 +18,13 @@ struct InputToolbarView: View {
     let promptText: String
     let interfaceMode: MainApplicationViewModel.InterfaceMode
 
+    /// [Composer P1] What this surface offers. Defaults to the main composer's set (screenshot
+    /// off — see ComposerCapabilities.mainComposer); flipping it on + providing
+    /// `onCaptureScreenshot` is all it takes to add capture here.
+    var capabilities: ComposerCapabilities = .mainComposer
+    /// Screenshot-capture action; the button renders only when the capability is on AND this is set.
+    var onCaptureScreenshot: (() -> Void)? = nil
+
     let onOpenFilePicker: () -> Void
     let onNavigateToToolLibrary: (UUID) -> Void
     /// Invoked when the user taps "Open folder..." in the folder popover.
@@ -39,7 +46,6 @@ struct InputToolbarView: View {
     @Environment(BackendProfileService.self) private var profileService
     @Environment(\.appTheme) private var theme
 
-    @State private var isPlusButtonHovering = false
     @State private var isToolsHovering = false
     @State private var isScheduleButtonHovering = false
     @State private var isFolderButtonHovering = false
@@ -53,7 +59,19 @@ struct InputToolbarView: View {
                 folderSelectorButton
                 codeToolManagerButton
             } else {
-                filePickerButton
+                if capabilities.attachments {
+                    filePickerButton
+                }
+                // [Composer P1] Capability-gated screenshot slot — off for the main composer
+                // today; a preset flip + callback enables it with zero view changes.
+                if capabilities.screenshot, let onCaptureScreenshot {
+                    ComposerIconButton(
+                        systemName: "camera.viewfinder",
+                        help: "Capture screenshot",
+                        disabled: !isInputEnabled,
+                        action: onCaptureScreenshot
+                    )
+                }
                 toolManagerButton
                 scheduleButton
             }
@@ -63,15 +81,13 @@ struct InputToolbarView: View {
     // MARK: - File Picker
 
     private var filePickerButton: some View {
-        Button(action: onOpenFilePicker) {
-            toolbarIcon(systemName: "paperclip", isHovering: isPlusButtonHovering)
-        }
-        .buttonStyle(.plain)
-        .onHover { hover in withAnimation(.easeInOut(duration: 0.15)) { isPlusButtonHovering = hover } }
-        .help("Attach files")
-        .accessibilityLabel("Attach files")
-        .disabled(!isInputEnabled)
-        .opacity(isInputEnabled ? 1.0 : 0.5)
+        // [Composer P1] Shared primitive — same attach button as the QuickAccess panel.
+        ComposerIconButton(
+            systemName: "paperclip",
+            help: "Attach files",
+            disabled: !isInputEnabled,
+            action: onOpenFilePicker
+        )
     }
 
     // MARK: - Tool Manager (Agent only, non-code modes)
@@ -151,10 +167,10 @@ struct InputToolbarView: View {
             }
             .buttonStyle(.plain)
             .onHover { hover in withAnimation(.easeInOut(duration: 0.15)) { isFolderButtonHovering = hover } }
-            .help(codeSessionManager.projectPath?.path ?? "Select project folder")
+            .help(codeSessionManager.projectPath?.path ?? String(localized: "Select project folder"))
             .accessibilityLabel(codeSessionManager.projectPath != nil
-                ? "Project folder: \(codeSessionManager.projectPath!.lastPathComponent)"
-                : "Select project folder")
+                ? String(localized: "Project folder: \(codeSessionManager.projectPath!.lastPathComponent)")
+                : String(localized: "Select project folder"))
             .disabled(!isInputEnabled)
             .opacity(isInputEnabled ? 1.0 : 0.5)
             .popover(isPresented: $showingFolderPopover, arrowEdge: .bottom) {

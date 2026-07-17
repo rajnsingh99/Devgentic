@@ -2,6 +2,30 @@ import Foundation
 
 class EvaluationLogger {
     static let shared = EvaluationLogger()
+
+    /// The span summary's Outcome field. Mirrors the executor's verdict, nothing else.
+    ///
+    /// It used to downgrade a zero-tool `.completed` to "PARTIAL ⚠️" as a
+    /// worth-a-second-look nudge — but zero tool calls is the NORMAL state for every
+    /// bot/chat run (their tool list is ~[ask_user]), so every clean reply printed
+    /// PARTIAL and the label stopped meaning anything. The zero-tool nuance isn't lost:
+    /// "Tool Calls: 0" is printed directly above it in the same summary.
+    ///
+    /// PARTIAL is reserved for `.completedWithWarnings`. If a run degrades some other way
+    /// (token-cap truncation, say), the EXECUTOR should report it as such — this logger
+    /// must not guess an outcome from tool counts it can't interpret.
+    static func outcomeLabel(reported: String?, didFinishSuccessfully: Bool) -> String {
+        guard let reported else {
+            // Legacy executors that never report an outcome.
+            return didFinishSuccessfully ? "SUCCESS ✅" : "FAIL ❌"
+        }
+        switch reported {
+        case ExecutionOutcome.completedWithWarnings.rawValue: return "PARTIAL ⚠️"
+        case ExecutionOutcome.failed.rawValue:                return "FAIL ❌"
+        case ExecutionOutcome.cancelled.rawValue:             return "CANCELLED 🚫"
+        default:                                              return "SUCCESS ✅"
+        }
+    }
     
     private var activeSessions: [UUID: AgentSessionMetrics] = [:]
     private let queue = DispatchQueue(label: "com.devgentic.evals")
@@ -93,8 +117,17 @@ class EvaluationLogger {
                     // exits emit no .reasoning row (undercount) and throttle-preflight
                     // notices emit an extra one (overcount). The incremental count
                     // remains as fallback for executors that don't report.
+                    //
+                    // ACCUMULATE across inner runs: Planning/Reflexion sessions complete
+                    // several ReAct loops, each reporting its own total — a plain
+                    // overwrite displayed only the LAST subtask's count (observed:
+                    // 8-iteration plan run printing "Iterations: 2"). Each report
+                    // replaces the event-derived drift for the run that just ended;
+                    // a final run that never reports (circuit-breaker abort path exits
+                    // without a finalizing event) keeps its incremental events on top.
                     if let reported = log.metadata?["iterations"], let count = Int(reported), count > 0 {
-                        metrics.totalIterations = count
+                        metrics.confirmedIterations += count
+                        metrics.totalIterations = metrics.confirmedIterations
                     } else if metrics.totalIterations == 0 {
                         // Ensure at least 1 iteration is counted when the loop ran
                         // but no .reasoning trace was emitted (e.g., null-termination
@@ -175,28 +208,7 @@ class EvaluationLogger {
                 print("Errors:      JSON Parse (\(metrics.parseErrors)) | Hallucinations (\(metrics.hallucinatedTools))")
             }
             
-            let outcomeLabel: String
-            if let reported = metrics.reportedOutcome {
-                switch reported {
-                case ExecutionOutcome.completedWithWarnings.rawValue:
-                    outcomeLabel = "PARTIAL ⚠️"  // Completed with tool failures / best-effort
-                case ExecutionOutcome.failed.rawValue:
-                    outcomeLabel = "FAIL ❌"
-                case ExecutionOutcome.cancelled.rawValue:
-                    outcomeLabel = "CANCELLED 🚫"
-                default:
-                    // .completed — keep the zero-tool nuance: a completion that never
-                    // executed a tool is worth a second look during testing.
-                    outcomeLabel = metrics.toolCalls == 0 ? "PARTIAL ⚠️" : "SUCCESS ✅"
-                }
-            } else if metrics.didFinishSuccessfully && metrics.toolCalls == 0 {
-                outcomeLabel = "PARTIAL ⚠️"  // Completed but no tools executed
-            } else if metrics.didFinishSuccessfully {
-                outcomeLabel = "SUCCESS ✅"
-            } else {
-                outcomeLabel = "FAIL ❌"
-            }
-            print("Outcome:     \(outcomeLabel)")
+            print("Outcome:     \(Self.outcomeLabel(reported: metrics.reportedOutcome, didFinishSuccessfully: metrics.didFinishSuccessfully))")
             print("========================================================\n")
             
             return metrics

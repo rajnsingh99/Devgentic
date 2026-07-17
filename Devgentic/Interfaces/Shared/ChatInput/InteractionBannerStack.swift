@@ -27,6 +27,7 @@ private let bannerLogger = DGLogger(category: "InteractionBanner")
 struct InteractionBannerStack: View {
     @Environment(MainApplicationViewModel.self) private var vm
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// [HITL/E2] One-shot attention flash, driven by InteractionCenter.attentionPulse.
     @State private var pulse = false
 
@@ -42,25 +43,40 @@ struct InteractionBannerStack: View {
                 banner(for: pending)
                     // Reset per-item @State (typed answer, edited plan) when the FIFO advances.
                     .id(pending.id)
-                    .scaleEffect(pulse ? 1.025 : 1.0)
+                    // Reduce Motion keeps the attention cue but drops the movement: the
+                    // shadow flash still draws the eye, the scale bounce and slide don't.
+                    .scaleEffect(pulse && !reduceMotion ? 1.025 : 1.0)
                     .shadow(color: theme.warningColor.opacity(pulse ? 0.55 : 0), radius: pulse ? 14 : 0)
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .bottom).combined(with: .opacity),
-                        removal: .move(edge: .bottom).combined(with: .opacity)
-                    ))
+                    .transition(reduceMotion
+                        ? .opacity
+                        : .asymmetric(
+                            insertion: .move(edge: .bottom).combined(with: .opacity),
+                            removal: .move(edge: .bottom).combined(with: .opacity)
+                        ))
             }
         }
         .frame(maxWidth: 1000)
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.horizontal)
         .padding(.bottom, 6)
-        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: current?.id)
+        .animation(reduceMotion ? .easeInOut(duration: 0.15) : .spring(response: 0.38, dampingFraction: 0.82),
+                   value: current?.id)
+        // The banner slides in and flashes — both of which are invisible to a VoiceOver user,
+        // who was left with a silently blocked agent. `.immediate` is warranted here and
+        // almost nowhere else: execution is halted until they answer, and a gate will
+        // auto-reject on a deadline they can't see.
+        .onChange(of: current?.id, initial: true) { _, _ in
+            guard let pending = current else { return }
+            AccessibilityAnnouncer.announce(Self.announcement(for: pending), urgency: .immediate)
+        }
         // [HITL/E2] Flash the banner when the user taps an "awaiting input" node.
         .onChange(of: vm.interactionCenter.attentionPulse) { _, _ in
             guard current != nil else { return }
-            withAnimation(.spring(response: 0.16, dampingFraction: 0.45)) { pulse = true }
+            let rise: Animation = reduceMotion ? .easeInOut(duration: 0.12) : .spring(response: 0.16, dampingFraction: 0.45)
+            let fall: Animation = reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.34, dampingFraction: 0.7)
+            withAnimation(rise) { pulse = true }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
-                withAnimation(.spring(response: 0.34, dampingFraction: 0.7)) { pulse = false }
+                withAnimation(fall) { pulse = false }
             }
         }
     }
@@ -76,6 +92,22 @@ struct InteractionBannerStack: View {
             PlanReviewInteractionBanner(pending: pending, planReview: planReview)
         case .gate(let gate):
             GateInteractionBanner(pending: pending, gate: gate)
+        }
+    }
+
+    /// Says what is being asked, not merely that something appeared — "the agent needs
+    /// input" would leave the user hunting for what and where.
+    static func announcement(for pending: PendingHITL) -> String {
+        switch pending.kind {
+        case .toolConfirmation(let confirmation):
+            return String(localized: "Permission needed: \(confirmation.toolName). The agent is paused until you respond.")
+        case .clarification:
+            return String(localized: "The agent needs clarification before continuing.")
+        case .planReview:
+            return String(localized: "Plan review needed. The agent is paused until you approve or edit the plan.")
+        case .gate(let gate):
+            let deadline = gate.deadline != nil ? String(localized: " This will auto-reject if you don't respond.") : ""
+            return String(localized: "Input needed: \(gate.prompt).\(deadline)")
         }
     }
 }
@@ -652,6 +684,9 @@ private struct GateInteractionBanner: View {
     @Environment(MainApplicationViewModel.self) private var vm
     @Environment(\.appTheme) private var theme
     @State private var isSubmitting = false
+    /// Which countdown thresholds have already been spoken — the timer ticks every second,
+    /// so without this the banner would repeat itself forever.
+    @State private var announcedThresholds: Set<Int> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -671,6 +706,13 @@ private struct GateInteractionBanner: View {
                         Label(text, systemImage: "timer")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(theme.warningColor)
+                            .accessibilityLabel(text)
+                            // Announcing every tick would talk over the whole app, so speak
+                            // only at thresholds. Silence here meant a VoiceOver user was
+                            // auto-rejected on a deadline they had no way to perceive.
+                            .onChange(of: Int(max(0, gate.deadline?.timeIntervalSince(context.date) ?? 0))) { _, remaining in
+                                announceCountdownIfNeeded(remaining)
+                            }
                     }
                 }
             }
@@ -692,9 +734,23 @@ private struct GateInteractionBanner: View {
     private func countdownText(now: Date) -> String? {
         guard let deadline = gate.deadline else { return nil }
         let remaining = max(0, deadline.timeIntervalSince(now))
-        if remaining <= 0 { return "Timing out…" }
+        if remaining <= 0 { return String(localized: "Timing out…") }
         let m = Int(remaining) / 60, s = Int(remaining) % 60
-        return m > 0 ? String(format: "Auto-rejects in %d:%02d", m, s) : "Auto-rejects in \(s)s"
+        return m > 0 ? String(format: String(localized: "Auto-rejects in %d:%02d"), m, s) : String(localized: "Auto-rejects in \(s)s")
+    }
+
+    /// Speaks the deadline at a few thresholds — enough warning to act, not a metronome.
+    /// Each fires once: the timer ticks every second and re-entering would make the banner
+    /// repeat itself indefinitely.
+    private func announceCountdownIfNeeded(_ remaining: Int) {
+        let thresholds = [30, 10]
+        guard let crossed = thresholds.first(where: { remaining == $0 }),
+              !announcedThresholds.contains(crossed) else { return }
+        announcedThresholds.insert(crossed)
+        AccessibilityAnnouncer.announce(
+            String(localized: "\(crossed) seconds left to respond, or this auto-rejects."),
+            urgency: .immediate
+        )
     }
 
     private func gateButton(_ option: String) -> some View {

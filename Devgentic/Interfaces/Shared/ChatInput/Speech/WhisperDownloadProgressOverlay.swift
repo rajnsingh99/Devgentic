@@ -12,6 +12,7 @@ struct WhisperDownloadProgressOverlay: View {
 
     private var service: WhisperModelDownloadService { .shared }
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 12) {
@@ -19,7 +20,9 @@ struct WhisperDownloadProgressOverlay: View {
             Image(systemName: "arrow.down.circle.fill")
                 .font(.title3)
                 .foregroundColor(theme.accentColor)
-                .symbolEffect(.pulse, options: .repeating)
+                // Pulsed for the entire download — the ProgressView already conveys activity.
+                .symbolEffect(.pulse, options: .repeating, isActive: !reduceMotion)
+                .accessibilityHidden(true)
 
             // Model name + progress
             VStack(alignment: .leading, spacing: 4) {
@@ -51,6 +54,9 @@ struct WhisperDownloadProgressOverlay: View {
             }
             .buttonStyle(.plain)
             .help("Cancel download")
+            // `.help()` is AX help, not the AX label — without this the only way to stop a
+            // download announced as "button".
+            .accessibilityLabel("Cancel download")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -59,8 +65,8 @@ struct WhisperDownloadProgressOverlay: View {
     private var displayName: String {
         if let modelId = service.downloadingModelId,
            let model = WhisperModelCatalog.availableModels.first(where: { $0.id == modelId }) {
-            return "Downloading \(model.displayName)…"
+            return String(localized: "Downloading \(model.displayName)…")
         }
-        return "Downloading model…"
+        return String(localized: "Downloading model…")
     }
 }
