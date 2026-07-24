@@ -23,32 +23,46 @@ struct BackendPickerButton: View {
 
     var body: some View {
         Button(action: { showingPopup = true }) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(profileThemeColor)
-                    .frame(width: 8, height: 8)
-                    .shadow(color: profileThemeColor.opacity(0.4), radius: 2, x: 0, y: 0)
+            HStack(spacing: 7) {
+                ZStack {
+                    Circle()
+                        .fill(profileThemeColor.opacity(0.25))
+                        .frame(width: 12, height: 12)
+                    Circle()
+                        .fill(profileThemeColor)
+                        .frame(width: 7, height: 7)
+                        .shadow(color: profileThemeColor.opacity(0.7), radius: 3, x: 0, y: 0)
+                }
 
                 Text(profileButtonText)
-                    .font(theme.fontSubheadline.weight(.medium))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(theme.primaryText)
                     .lineLimit(1)
 
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .bold)) // Fixed size: intentional (badge/chip text)
-                    .foregroundColor(theme.secondaryText.opacity(0.8))
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundColor(theme.secondaryText.opacity(0.85))
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
             .background(
                 Capsule()
-                    .fill(isHovering ? theme.surfaceOverlay : Color.clear)
+                    .fill(isHovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
             )
             .overlay(
                 Capsule()
-                    .stroke(theme.secondaryText.opacity(isHovering ? 0.3 : 0.15), lineWidth: 1)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: isHovering
+                                ? [profileThemeColor.opacity(0.5), theme.secondaryText.opacity(0.3)]
+                                : [theme.secondaryText.opacity(0.2), theme.secondaryText.opacity(0.1)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
             )
-            .scaleEffect(isHovering ? 1.02 : 1.0)
+            .scaleEffect(isHovering ? 1.025 : 1.0)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingPopup, arrowEdge: .bottom) {

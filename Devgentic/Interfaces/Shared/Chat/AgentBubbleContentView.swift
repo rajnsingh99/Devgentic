@@ -79,6 +79,10 @@ struct AgentBubbleContentView: View, Equatable {
                 // the island's compensating ForEach went with it.
                 if message.isStreaming || !message.timelineEvents.isEmpty {
                     AgentTimelineView(message: message)
+                        // [TL-4] Skip the O(events) grouping rebuild on every streamed
+                        // token — body re-runs only when the timeline revision (or the
+                        // streaming flag / post-stream final text) actually changes.
+                        .equatable()
                         .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
                 }
             } else if message.isStreaming {
@@ -175,6 +179,16 @@ struct AgentBubbleContentView: View, Equatable {
                         activeHighlightIndex: activeLocalIdx
                     )
                     .equatable()
+                }
+
+                // [ASM-2] A failed run that KEPT its partial prose (throw after streaming;
+                // the error card demoted to the timeline) has no error-card Retry — give
+                // the failure the same affordance. `terminalOutcome` is only stamped at
+                // finalize, so this never shows mid-stream.
+                if message.terminalOutcome == .failed {
+                    RetryMessageButton {
+                        mainAppViewModel.regenerateResponse(for: message)
+                    }
                 }
             }
 

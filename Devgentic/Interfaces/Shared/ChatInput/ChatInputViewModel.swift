@@ -37,7 +37,7 @@ protocol RecognitionServiceProtocol {
     func transcribe(audioArray: [Float]) async throws -> String?
 
     // Streaming transcription
-    func startStreaming(onStateChange: @escaping (StreamingTranscriptionState) -> Void) async throws
+    func startStreaming(owner: VoiceSurface, onStateChange: @escaping (StreamingTranscriptionState) -> Void) async throws
     func stopStreaming() async -> String?
 
     // Model management
@@ -166,6 +166,15 @@ final class ChatInputViewModel {
     // MARK: - Private State
     @ObservationIgnored private let logger = DGLogger(category: "ChatInputViewModel")
     @ObservationIgnored private var recordingTimer: Timer?
+    /// [Dead-mic] Pure detection core (ported from Jarvis): a session that ran ≥1s
+    /// with zero energy samples = the engine opened but delivered no audio
+    /// (`_StartIO error 35` class). Observed on-device 2026-07-19 as three silent
+    /// sessions with a normal-looking recording UI and no error.
+    @ObservationIgnored private var deadMicDetector = DeadMicDetector()
+    /// Set when a session enters `.recording`; consumed (nilled) by the FIRST
+    /// finalize path to run — manual stop and the stream-end continuation both
+    /// finalize, and the assessment must count each session exactly once.
+    @ObservationIgnored private var voiceSessionStartedAt: Date?
     @ObservationIgnored private let maxPowerLevelsToShow = 100
 
     // MARK: - Streaming Task Handle
@@ -289,6 +298,12 @@ final class ChatInputViewModel {
 
     // MARK: - Keyboard Shortcut Observer
 
+    /// [V3] The window hosting the composer, wired by `ChatInputAreaView` via a window
+    /// reader. Used to gate the app-wide ⌘⇧V shortcut: a recording started while some
+    /// OTHER window is key (QuickAccess panel, a file-viewer window) shows no overlay —
+    /// a hot mic with no affordance to stop it.
+    @ObservationIgnored weak var composerWindow: NSWindow?
+
     private func setupKeyboardShortcutObserver() {
         notificationObserver = NotificationCenter.default.addObserver(
             forName: GlobalConstants.toggleVoiceInputNotification,
@@ -296,9 +311,27 @@ final class ChatInputViewModel {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.toggleVoiceInput()
+                guard let self else { return }
+                // [V3] CommandMenu shortcuts fire app-wide. Only honor the toggle when
+                // the composer's window is key, so the recording overlay is actually
+                // on screen. Fall through when the window was never wired (nil) —
+                // a dead hotkey would be worse than the gate missing.
+                if let window = self.composerWindow, !window.isKeyWindow {
+                    self.logger.log("[VOICE] ⌘⇧V ignored — composer window is not key (key window: \(NSApp.keyWindow.map { String(describing: type(of: $0)) } ?? "none")).")
+                    return
+                }
+                self.toggleVoiceInput()
             }
         }
+    }
+
+    /// [V3] Called when the composer view leaves the hierarchy (main window closing).
+    /// A dictation session must not outlive its UI: stop it and keep the transcript
+    /// (it lands in `userInput`, which this app-scoped VM retains for reopen).
+    func handleComposerDismantled() {
+        guard voiceInputState == .recording || voiceInputState == .finalizingSilence else { return }
+        logger.log("[VOICE] Composer view dismantled mid-recording — stopping dictation so the mic can't stay hot without UI (V3).")
+        stopStreamingAndFinalize()
     }
 
     // MARK: - Suggestion Pipelines (Debounced)
@@ -685,6 +718,8 @@ final class ChatInputViewModel {
 
         recordingTimer?.invalidate()
         recordingTimer = nil
+        // [Dead-mic] A user cancel is an abort, not evidence — clear without assessing.
+        voiceSessionStartedAt = nil
         recordingDisplay.liveTranscriptionText = ""
         recordingDisplay.powerLevels = []
         recordingDisplay.recordingTime = 0.0
@@ -747,10 +782,21 @@ final class ChatInputViewModel {
     // MARK: - Streaming Transcription Lifecycle
 
     private func startStreaming() async {
+        // [V4/C9] Synchronous re-entry guard. Two rapid mic taps each spawn a Task; both
+        // bodies run serially on the MainActor, so flipping the state BEFORE the first
+        // await makes the second body bail here. Without this, the second start leaked
+        // the first recordingTimer (accumulating +1s/s forever) and raced a second
+        // Whisper session against the shared service.
+        guard voiceInputState == .available else {
+            logger.log("[VOICE] startStreaming re-entry blocked (state: \(String(describing: self.voiceInputState))).")
+            return
+        }
+        self.voiceInputState = .requestingPermissions
+
         logger.log("Starting streaming transcription...")
         guard recognitionService?.loadingState == .loaded else {
             logger.error("Cannot start streaming: model not ready (state: \(String(describing: self.recognitionService?.loadingState)))")
-            self.voiceInputState = .error("Model not ready.")
+            self.voiceInputState = .error(String(localized: "Model not ready."))
             return
         }
 
@@ -764,6 +810,8 @@ final class ChatInputViewModel {
         logger.log("Microphone permission confirmed, proceeding with streaming.")
 
         self.voiceInputState = .recording
+        self.deadMicDetector.beginSession()
+        self.voiceSessionStartedAt = Date()
         self.silenceUICounter = 0
         self.userInput = ""
         self.recordingDisplay.liveTranscriptionText = ""
@@ -779,7 +827,7 @@ final class ChatInputViewModel {
         streamingTask = Task { [weak self] in
             guard let self = self else { return }
             do {
-                try await self.recognitionService?.startStreaming { [weak self] streamState in
+                try await self.recognitionService?.startStreaming(owner: .mainComposer) { [weak self] streamState in
                     Task { @MainActor [weak self] in
                         guard let self = self else { return }
                         self.handleStreamingUpdate(streamState)
@@ -790,17 +838,38 @@ final class ChatInputViewModel {
                     self?.finalizeAfterStreamEnd()
                 }
             } catch {
-                self.logger.error("Streaming transcription error: \(error)")
+                self.logger.error("[VOICE] Streaming session failed: \(error)")
                 await MainActor.run { [weak self] in
-                    self?.voiceInputState = .error("Streaming failed: \(error.localizedDescription)")
-                    self?.recordingTimer?.invalidate()
-                    self?.recordingTimer = nil
+                    guard let self else { return }
+                    self.recordingTimer?.invalidate()
+                    self.recordingTimer = nil
+                    // [V1] Preserve whatever was transcribed before the failure — the
+                    // overlay is about to collapse, and the text vanished with it.
+                    let liveText = self.recordingDisplay.liveTranscriptionText
+                    if !liveText.isEmpty {
+                        self.userInput = liveText
+                    }
+                    self.recordingDisplay.liveTranscriptionText = ""
+                    self.recordingDisplay.powerLevels = []
+                    // RecognitionError carries user-appropriate descriptions ([V1]
+                    // unexpected-end, [V2] busy-with-owner); other errors keep the
+                    // generic streaming-failed framing.
+                    if let recognitionError = error as? RecognitionError {
+                        self.voiceInputState = .error(recognitionError.errorDescription ?? String(localized: "Voice input failed."))
+                    } else {
+                        self.voiceInputState = .error(String(localized: "Streaming failed: \(error.localizedDescription)"))
+                    }
                 }
             }
         }
     }
 
     private func handleStreamingUpdate(_ state: StreamingTranscriptionState) {
+        // [Dead-mic] Energy samples are proof the engine is actually delivering audio.
+        if !state.bufferEnergy.isEmpty {
+            deadMicDetector.recordAudioArrived()
+        }
+
         // Only update live text when it actually changes to avoid unnecessary re-renders
         let newText = state.fullText
         if newText != recordingDisplay.liveTranscriptionText {
@@ -837,6 +906,26 @@ final class ChatInputViewModel {
         }
     }
 
+    /// [Dead-mic] Consumes the session-start marker and assesses the session ONCE.
+    /// Returns `true` when the session was dead (ran ≥ threshold, zero audio).
+    /// User cancels clear the marker without assessing (an abort is not evidence).
+    private func concludeVoiceSessionAssessingDeadMic() -> Bool {
+        guard let startedAt = voiceSessionStartedAt else { return false }
+        voiceSessionStartedAt = nil
+        let duration = Date().timeIntervalSince(startedAt)
+        let dead = deadMicDetector.assessSessionEnd(duration: duration)
+        if dead {
+            logger.warning("[VOICE] Dead mic session — \(String(format: "%.1f", duration))s with ZERO audio samples (\(self.deadMicDetector.consecutiveDeadSessions) consecutive). Engine likely failed to start (_StartIO error 35 class); surfacing error instead of silent empty transcript.")
+        }
+        return dead
+    }
+
+    /// Actionable message for a dead session (adapted from Jarvis's). Surfaced via
+    /// the composer's existing error state.
+    private var deadMicErrorMessage: String {
+        String(localized: "The microphone opened but delivered no audio. Try again — if it keeps happening, another app may be holding the mic, or check your input device in System Settings → Sound.")
+    }
+
     private func stopStreamingAndFinalize() {
         logger.log("Stopping streaming, finalizing transcription...")
         self.voiceInputState = .processing
@@ -849,7 +938,11 @@ final class ChatInputViewModel {
             }
             self.recordingDisplay.liveTranscriptionText = ""
             self.recordingDisplay.powerLevels = []
-            self.voiceInputState = .available
+            // [Dead-mic] A ≥1s session with zero audio used to end here as a silently
+            // empty composer — recording UI looked normal, nothing arrived, no error.
+            self.voiceInputState = self.concludeVoiceSessionAssessingDeadMic()
+                ? .error(self.deadMicErrorMessage)
+                : .available
         }
     }
 
@@ -864,7 +957,11 @@ final class ChatInputViewModel {
         }
         self.recordingDisplay.liveTranscriptionText = ""
         self.recordingDisplay.powerLevels = []
-        self.voiceInputState = .available
+        // [Dead-mic] Same assessment as the manual-stop path; whichever finalize
+        // runs first consumes the marker, so a session is counted exactly once.
+        self.voiceInputState = concludeVoiceSessionAssessingDeadMic()
+            ? .error(deadMicErrorMessage)
+            : .available
     }
 
     // MARK: - API Key Validation

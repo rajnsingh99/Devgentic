@@ -239,11 +239,15 @@ final class ChatMessageObservableTests: XCTestCase {
 
     // MARK: - Schema Versioning
 
-    func testV2EncodeIncludesSchemaVersion() throws {
-        let msg = makeUserMessage(text: "v2 test")
+    func testEncodeIncludesSchemaVersion() throws {
+        // [P5] Was a documented known-failure for months: asserted 2 while the impl
+        // moved to 4. The constant tags the full-object JSON envelope ONLY (no
+        // production path round-trips it; the store persists version-less per-field
+        // blobs) — see the scope note at `currentSchemaVersion`.
+        let msg = makeUserMessage(text: "envelope test")
         let data = try JSONEncoder().encode(msg)
         let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        XCTAssertEqual(json["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(json["schemaVersion"] as? Int, 4)
     }
 
     func testV2EncodeDoesNotIncludeLegacyKeys() throws {
@@ -277,8 +281,12 @@ final class ChatMessageObservableTests: XCTestCase {
         }
     }
 
-    func testV1LegacyDecodeReconstructsTimeline() throws {
-        // Simulate v1 JSON: no schemaVersion, has legacy thoughts/artifacts, no timelineEvents
+    func testLegacyV1KeysAreIgnoredAfterMigrationRemoval() throws {
+        // [P5] The v1 thoughts/artifacts migration was DELETED 2026-07-19: it was
+        // unreachable in production (repo-verified — no durable v1 envelope exists
+        // anywhere; the store persists per-field blobs, and every ephemeral encode
+        // stamps the current version). This pins the new contract: legacy keys are
+        // ignored, the message still decodes cleanly.
         let v1JSON: [String: Any] = [
             "id": UUID().uuidString,
             "conversationId": UUID().uuidString,
@@ -287,7 +295,7 @@ final class ChatMessageObservableTests: XCTestCase {
             "content": ["type": "plainText", "text": "Hello"],
             "isStreaming": false,
             "thoughts": [
-                ["id": UUID().uuidString, "text": "I should greet the user"]
+                ["id": UUID().uuidString, "text": "Legacy — ignored"]
             ],
             "artifacts": [
                 ["id": UUID().uuidString, "toolName": "bash", "output": "done", "isSuccess": true]
@@ -297,23 +305,8 @@ final class ChatMessageObservableTests: XCTestCase {
         let data = try JSONSerialization.data(withJSONObject: v1JSON)
         let decoded = try JSONDecoder().decode(ChatMessage.self, from: data)
 
-        // Should have reconstructed 2 timeline events from legacy data
-        XCTAssertEqual(decoded.timelineEvents.count, 2)
-
-        if case .thought(_, let text) = decoded.timelineEvents[0] {
-            XCTAssertEqual(text, "I should greet the user")
-        } else {
-            XCTFail("Expected thought event from legacy migration")
-        }
-
-        if case .toolExecution(let data) = decoded.timelineEvents[1] {
-            XCTAssertEqual(data.name, "bash")
-            XCTAssertEqual(data.output, "done")
-            XCTAssertEqual(data.isSuccess, true)
-            XCTAssertEqual(data.isExecuting, false)
-        } else {
-            XCTFail("Expected tool execution event from legacy migration")
-        }
+        XCTAssertTrue(decoded.timelineEvents.isEmpty, "Legacy keys no longer reconstruct events")
+        XCTAssertEqual(decoded.content.textContent, "Hello", "The message itself still decodes")
     }
 
     func testV1WithTimelineEventsAlreadyPresent() throws {
@@ -361,14 +354,14 @@ final class ChatMessageObservableTests: XCTestCase {
         XCTAssertTrue(decoded.timelineEvents.isEmpty)
     }
 
-    func testV2ReencodePreservesVersion() throws {
+    func testReencodePreservesSchemaVersion() throws {
         let msg = makeUserMessage(text: "Round trip")
         let data1 = try JSONEncoder().encode(msg)
         let decoded = try JSONDecoder().decode(ChatMessage.self, from: data1)
         let data2 = try JSONEncoder().encode(decoded)
         let json = try JSONSerialization.jsonObject(with: data2) as! [String: Any]
 
-        XCTAssertEqual(json["schemaVersion"] as? Int, 2, "Re-encoded message should still be v2")
+        XCTAssertEqual(json["schemaVersion"] as? Int, 4, "Re-encode stamps the current envelope version")
     }
 
     // MARK: - Equatable

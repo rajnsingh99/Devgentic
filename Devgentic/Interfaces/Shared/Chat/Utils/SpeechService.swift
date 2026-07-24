@@ -51,11 +51,34 @@ struct VoiceInfo: Identifiable, Hashable {
 final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
     static let shared = SpeechService()
 
-    @ObservationIgnored private lazy var synthesizer: AVSpeechSynthesizer = {
+    /// [V5] Created per playback session and RELEASED at stop/finish — not held for the
+    /// app's lifetime. A live AVSpeechSynthesizer keeps a CoreAudio output context open,
+    /// which is exactly the pattern the Jarvis notes document as wedging the microphone
+    /// (`JarvisVoiceOutput` releases per-utterance for the same reason). Releasing when
+    /// idle costs one lazy re-creation on the next Read Aloud.
+    @ObservationIgnored private var synthesizer: AVSpeechSynthesizer?
+
+    /// Returns the live synthesizer, creating one if this is a fresh session.
+    private func ensureSynthesizer() -> AVSpeechSynthesizer {
+        if let synthesizer { return synthesizer }
         let synth = AVSpeechSynthesizer()
         synth.delegate = self
+        synthesizer = synth
+        logger.info("[TTS] Synthesizer created (playback session starting).")
         return synth
-    }()
+    }
+
+    /// [V5] Drops the synthesizer (and its CoreAudio output context). Only when idle —
+    /// callers release at session end (stop / natural finish), never mid-session.
+    private func releaseSynthesizer(reason: String) {
+        guard synthesizer != nil else { return }
+        synthesizer?.delegate = nil
+        synthesizer = nil
+        logger.info("[TTS] Synthesizer released (\(reason)) — CoreAudio output context freed.")
+    }
+
+    /// Test seam: whether a synthesizer (and its audio context) is currently held.
+    var isSynthesizerLoaded: Bool { synthesizer != nil }
 
     // MARK: - State
 
@@ -147,7 +170,7 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
 
     /// Stops all speech and resets state.
     func stop() {
-        if synthesizer.isSpeaking {
+        if let synthesizer, synthesizer.isSpeaking {
             synthesizer.stopSpeaking(at: .immediate)
         }
 
@@ -170,12 +193,14 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
             logger.info("Stopped reading aloud message \(id.uuidString)")
             NotificationCenter.default.post(name: .speechDidFinish, object: id)
         }
+
+        releaseSynthesizer(reason: "stop")
     }
 
     /// Pauses speech at the next word boundary.
     func pauseSpeaking() {
         guard isActive, !isPaused else { return }
-        synthesizer.pauseSpeaking(at: .word)
+        synthesizer?.pauseSpeaking(at: .word)
         isPaused = true
         logger.info("Paused speech")
     }
@@ -185,8 +210,8 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
         guard isActive, isPaused else { return }
         isPaused = false
 
-        if synthesizer.isPaused {
-            synthesizer.continueSpeaking()
+        if synthesizer?.isPaused == true {
+            synthesizer?.continueSpeaking()
         } else {
             speakCurrentSegment()
         }
@@ -206,7 +231,7 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
     func skipForward() {
         guard isActive else { return }
 
-        if synthesizer.isSpeaking {
+        if let synthesizer, synthesizer.isSpeaking {
             synthesizer.stopSpeaking(at: .immediate)
         }
         pendingCodeBlock = nil
@@ -225,7 +250,7 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
     func skipBackward() {
         guard isActive else { return }
 
-        if synthesizer.isSpeaking {
+        if let synthesizer, synthesizer.isSpeaking {
             synthesizer.stopSpeaking(at: .immediate)
         }
         pendingCodeBlock = nil
@@ -274,7 +299,7 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
 
     /// Whether the synthesizer is currently speaking audio.
     var isSpeaking: Bool {
-        synthesizer.isSpeaking
+        synthesizer?.isSpeaking ?? false
     }
 
     // MARK: - Segment Playback
@@ -295,14 +320,14 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
                 speakCurrentSegment()
             } else {
                 let utterance = makeUtterance(text)
-                synthesizer.speak(utterance)
+                ensureSynthesizer().speak(utterance)
             }
 
         case .codeBlock(let language, let code):
             let announcement = "Here is the code in the panel view."
             pendingCodeBlock = (language: language, code: code)
             let utterance = makeUtterance(announcement)
-            synthesizer.speak(utterance)
+            ensureSynthesizer().speak(utterance)
         }
     }
 
@@ -334,6 +359,8 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
         if let id = messageID {
             NotificationCenter.default.post(name: .speechDidFinish, object: id)
         }
+
+        releaseSynthesizer(reason: "playback finished")
     }
 
     // MARK: - AVSpeechSynthesizerDelegate

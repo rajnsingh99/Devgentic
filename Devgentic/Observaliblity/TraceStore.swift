@@ -650,6 +650,12 @@ final class TraceStore: Sendable {
                     tc.modelName AS model_name,
                     COUNT(*) AS total,
                     SUM(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                    -- Degraded success is its own status as of 2026-07-19. Counted with
+                    -- `completed` in successRate (it IS a success) but surfaced separately
+                    -- so a model that keeps limping over the line is visible. Without this
+                    -- bucket the new status would fall through every CASE and silently
+                    -- deflate the success rate.
+                    SUM(CASE WHEN t.status = 'completedWithWarnings' THEN 1 ELSE 0 END) AS completed_with_warnings,
                     SUM(CASE WHEN t.status IN ('error', 'failed') THEN 1 ELSE 0 END) AS failed,
                     SUM(CASE WHEN t.status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled,
                     SUM(CASE WHEN t.status = 'interrupted' THEN 1 ELSE 0 END) AS interrupted,
@@ -667,6 +673,7 @@ final class TraceStore: Sendable {
                       let modelName: String = row["model_name"] else { return nil }
                 let total: Int = row["total"] ?? 0
                 let completed: Int = row["completed"] ?? 0
+                let completedWithWarnings: Int = row["completed_with_warnings"] ?? 0
                 let failed: Int = row["failed"] ?? 0
                 let cancelled: Int = row["cancelled"] ?? 0
                 let interrupted: Int = row["interrupted"] ?? 0
@@ -676,6 +683,7 @@ final class TraceStore: Sendable {
                     modelName: modelName,
                     totalRuns: total,
                     completedCount: completed,
+                    completedWithWarningsCount: completedWithWarnings,
                     failedCount: failed,
                     cancelledCount: cancelled,
                     // App-quit/crash mid-run — not the model's fault; excluded from the
@@ -801,7 +809,9 @@ final class TraceStore: Sendable {
                 SELECT
                     name,
                     COUNT(*) AS total,
-                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                    -- Spans share TraceStatus, so degraded-success nodes must land in
+                    -- the completed bucket here too or they vanish from node stats.
+                    SUM(CASE WHEN status IN ('completed', 'completedWithWarnings') THEN 1 ELSE 0 END) AS completed,
                     SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS failed,
                     AVG(CASE WHEN endedAt IS NOT NULL THEN (endedAt - startedAt) * 1000 END) AS avg_duration
                 FROM spans

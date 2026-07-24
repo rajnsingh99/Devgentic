@@ -72,6 +72,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             Self.logger.error("Previous session did not exit cleanly (crash or force-quit). MetricKit diagnostics, if any, arrive shortly; .ips reports are folded into diagnostic bundles.")
         }
 
+        // Seed the per-family Response Synthesis toggles from the legacy single
+        // toggle exactly once. Must run before any agent run can resolve its
+        // synthesis opt-in. Idempotent and cheap (a guarded UserDefaults read).
+        SynthesisOptIn.migrateLegacyToggleIfNeeded()
+
         // Set this delegate so UNUserNotificationCenter can deliver notifications
         // both when the app is in the foreground AND in the background.
         UNUserNotificationCenter.current().delegate = self
@@ -193,6 +198,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     /// Everything that needs `await` before quitting. Runs while the run loop is alive
     /// (from `applicationShouldTerminate`), so MainActor-bound services are reachable.
     private static func performAsyncTeardown() async {
+        // Stop any live Whisper capture (composer dictation or Jarvis listening) so the
+        // HAL client closes cleanly. An AVAudioEngine still running at process death can
+        // wedge coreaudiod into refusing this app's audio IO (`_StartIO error 35`) until
+        // the daemon restarts — observed 2026-07-18 as "mic silently dead in-app while
+        // other apps record fine". No-op when nothing is recording.
+        _ = await WhisperRecognitionService.shared.stopStreaming()
+
         // Disconnect MCP sessions so child processes (npx/uvx/etc.) don't get
         // re-parented to launchd as orphans (SIGTERM, escalating to SIGKILL).
         await MCPClientService.shared.disconnectAll()

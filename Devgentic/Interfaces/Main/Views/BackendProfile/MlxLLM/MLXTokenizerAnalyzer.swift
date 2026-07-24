@@ -66,6 +66,51 @@ enum MLXTokenizerAnalyzer {
         return visionModelTypes.contains(modelType) ? .visionCapable : .textOnly
     }
 
+    // MARK: - Context Window Detection
+
+    /// Reads the model's trained context length from `config.json` so the context gauge
+    /// and every window-derived budget (compaction, RAG, native-turn) use the real size
+    /// instead of the conservative 8K fallback `EffectiveContextWindow` applies when the
+    /// metadata carries none.
+    private static func detectContextWindow(for modelPath: URL) -> Int? {
+        let configURL = modelPath.appendingPathComponent("config.json")
+        guard let data = try? Data(contentsOf: configURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return contextWindow(fromConfig: json)
+    }
+
+    /// Pure extraction (unit-testable without a model on disk). Reads the standard
+    /// HF/MLX context-length keys in priority order, unwrapping a nested `text_config`
+    /// (multimodal configs put the language model's window there). `sliding_window` is
+    /// deliberately excluded — it's an attention span, not the max position count.
+    static func contextWindow(fromConfig json: [String: Any]) -> Int? {
+        let keys = ["max_position_embeddings", "n_positions", "max_seq_len", "max_sequence_length", "seq_length", "n_ctx"]
+        let nested = json["text_config"] as? [String: Any]
+        for key in keys {
+            if let value = positiveInt(json[key]) ?? nested.flatMap({ positiveInt($0[key]) }) {
+                return value
+            }
+        }
+        return nil
+    }
+
+    /// JSON numbers arrive as Int / Double / NSNumber / String — normalize to a positive
+    /// Int, rejecting zero, negatives, and non-numeric values.
+    private static func positiveInt(_ any: Any?) -> Int? {
+        let value: Int?
+        switch any {
+        case let i as Int: value = i
+        case let d as Double: value = Int(d)
+        case let n as NSNumber: value = n.intValue
+        case let s as String: value = Int(s)
+        default: value = nil
+        }
+        guard let resolved = value, resolved > 0 else { return nil }
+        return resolved
+    }
+
     // MARK: - Legacy Capability-Only API (backward compat)
 
     /// Evaluates multiple model configuration files to accurately determine structural capability.
@@ -310,7 +355,13 @@ enum MLXTokenizerAnalyzer {
             modelTier = .tiny
         }
 
-        let metadata = ModelMetadata(tier: modelTier, quantization: quantization, family: originalModelName)
+        let detectedContextWindow = detectContextWindow(for: modelPath)
+        if let cw = detectedContextWindow {
+            logger.info("MLX context window [\(modelName)]: \(cw) tokens (config.json) — gauge + memory/RAG/native-turn budgets now use the real window instead of the 8K fallback.")
+        } else {
+            logger.notice("MLX context window [\(modelName)]: not found in config.json — EffectiveContextWindow keeps the conservative 8K fallback. Add a key to MLXTokenizerAnalyzer.contextWindow(fromConfig:) if this model exposes one under a different name.")
+        }
+        let metadata = ModelMetadata(tier: modelTier, contextWindow: detectedContextWindow, quantization: quantization, family: originalModelName)
 
         return (capability, dialect, metadata, chatTemplateSource)
     }

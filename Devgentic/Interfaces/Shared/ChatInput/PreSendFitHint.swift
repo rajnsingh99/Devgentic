@@ -27,7 +27,11 @@ enum PreSendFitHint {
         "pdf", "doc", "docx", "rtf", "rtfd", "pptx", "xlsx", "pages", "key", "numbers"
     ]
 
-    /// Images ride the native vision payload, never the text-injection path.
+    /// Images ride the native vision payload, never the text-injection path — so they
+    /// are excluded from the CHAR estimate. They are not free, though: they are priced
+    /// separately in tokens via `PromptFitCheck.estimatedImageTokens`. Until that term
+    /// existed, attaching a 6 MB screenshot to an 8K-window model produced no warning
+    /// at all, which made this gauge quietly dishonest about its most common overflow.
     static let imageExtensions: Set<String> = [
         "png", "jpg", "jpeg", "gif", "heic", "heif", "webp", "tiff", "bmp"
     ]
@@ -43,19 +47,42 @@ enum PreSendFitHint {
         // New-chat edge: no conversation to key the advisory on yet — the
         // send-time check catches the first turn of a fresh chat.
         guard let conversationID else { return }
+        // Code is included deliberately: it's where large file attachments are MOST
+        // common, and it was the one text profile getting no pre-send warning at all.
+        // Workflow / imageGen stay out — they have no single primary context window.
         guard let profile,
-              profile.profileType == .bot || profile.profileType == .agent else { return }
+              profile.profileType == .bot || profile.profileType == .agent || profile.profileType == .code
+        else { return }
 
-        let llmConfig = profile.primaryLLMConfig
+        // `resolvedLLMConfig` (not `primaryLLMConfig`) — the latter returns nil for
+        // `.code`, so the estimate would have been computed against nothing. Left the
+        // shared `primaryLLMConfig` alone on purpose: it also backs `supportsVisionInput`
+        // and the orchestration path, so widening it would change Code-mode vision
+        // behaviour as a side effect of adding a hint.
+        let llmConfig = profile.resolvedLLMConfig
         let window = EffectiveContextWindow.resolve(for: llmConfig)
         let trained = EffectiveContextWindow.trainedWindow(for: llmConfig)
+
+        // Gated on vision so the composer never warns about images a non-vision model
+        // will have stripped before they reach the wire. Matches the send-time gate, so
+        // the two numbers agree and the shared-dedupeKey banner doesn't jump on send.
+        // Vision is read off `resolvedLLMConfig`, NOT `profile.supportsVisionInput`:
+        // the latter is built on `primaryLLMConfig`, which is nil for `.code`, so
+        // using it would have made this term dead for exactly the profile type where
+        // large attachments are most common — the same trap the window lookup above
+        // already sidesteps.
+        let supportsVision = llmConfig?.supportedModalities.contains(.visionInput) ?? false
+        let imageTokens = supportsVision
+            ? PromptFitCheck.estimatedImageTokens(forImageURLs: imageURLs(of: attachedFiles), provider: llmConfig?.apiProvider)
+            : 0
 
         let estimated = PromptFitCheck.estimatedTokens(
             attachmentChars: PromptFitCheck.estimatedAttachmentChars(forFileSizes: estimatableSizes(of: attachedFiles)),
             knowledgeChars: 0,
             retrievalChars: 0,
             queryChars: typedText.count,
-            historyChars: 0
+            historyChars: 0,
+            imageTokens: imageTokens
         )
 
         guard PromptFitCheck.exceeds(estimatedTokens: estimated, windowTokens: window) else {
@@ -69,12 +96,12 @@ enum PreSendFitHint {
         // Condition-aware advice — same logic as the orchestrator's Section 5:
         // "raise num_ctx" only helps below the trained max.
         let canRaiseWindow = llmConfig?.apiProvider == .ollama && (trained ?? 0) > window
-        let modelName = llmConfig?.modelName ?? "this model"
+        let modelName = llmConfig?.modelName ?? String(localized: "this model")
         let message: String
         if canRaiseWindow {
-            message = "Attached content is ~\(PromptFitCheck.roundedK(estimated)) tokens but the context window is set to \(PromptFitCheck.roundedK(window)) — content will be cut off. \(modelName) supports up to \(PromptFitCheck.roundedK(trained ?? 0)): raise Context Window in the profile's Advanced settings."
+            message = String(localized: "Attached content is ~\(PromptFitCheck.roundedK(estimated)) tokens but the context window is set to \(PromptFitCheck.roundedK(window)) — content will be cut off. \(modelName) supports up to \(PromptFitCheck.roundedK(trained ?? 0)): raise Context Window in the profile's Advanced settings.")
         } else {
-            message = "Attached content is ~\(PromptFitCheck.roundedK(estimated)) tokens but \(modelName)'s context window is \(PromptFitCheck.roundedK(window)) — the model will only see part of it. Use fewer or smaller files, or switch to a larger-context model."
+            message = String(localized: "Attached content is ~\(PromptFitCheck.roundedK(estimated)) tokens but \(modelName)'s context window is \(PromptFitCheck.roundedK(window)) — the model will only see part of it. Use fewer or smaller files, or switch to a larger-context model.")
         }
 
         AdvisoryCenter.shared.post(Advisory(
@@ -96,6 +123,16 @@ enum PreSendFitHint {
             let ext = file.url.pathExtension.lowercased()
             guard !imageExtensions.contains(ext), !binaryContainerExtensions.contains(ext) else { return nil }
             return (try? file.url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+        }
+    }
+
+    /// The counterpart to `estimatableSizes`: the attachments it deliberately drops
+    /// because they are priced in tokens, not characters. Every image is returned —
+    /// unlike the size lookup above, nothing is silently skipped on a read failure,
+    /// because `ImageTokenHeuristic` falls back to a flat per-image estimate.
+    static func imageURLs(of files: [FileSystemItem]) -> [URL] {
+        files.compactMap { file in
+            imageExtensions.contains(file.url.pathExtension.lowercased()) ? file.url : nil
         }
     }
 }

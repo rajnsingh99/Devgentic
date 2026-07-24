@@ -885,7 +885,7 @@ actor WorkflowExecutor: Executor {
                         case .planGenerated, .planApproved, .subtaskStarted, .subtaskCompleted,
                              .reflectionTrialStarted, .reflectionEvaluating, .reflectionRetrying, .reflectionAccepted,
                              .delegationStarted, .delegationCompleted,
-                             .compactionStarted, .compactionCompleted,
+                             .compactionCompleted, .compactionFailed,
                              .tokenUsage:
                             continuation.yield(event)
 

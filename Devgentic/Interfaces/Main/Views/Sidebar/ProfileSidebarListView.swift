@@ -97,7 +97,7 @@ struct ProfileSidebarListView: View {
                         title: "No Profiles",
                         subtitle: "Create an AI profile to get started.",
                         buttonTitle: "New Profile",
-                        systemImage: "brain.head.profile",
+                        systemImage: "cpu",
                         onAction: { isAddingProfile = true }
                     )
                 } else {

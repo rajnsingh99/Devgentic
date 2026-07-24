@@ -140,7 +140,9 @@ struct OpenAIImageGenService: ImageGenProvider, Sendable {
         bodyData.append(multipartField(name: "prompt", value: fullPrompt, boundary: boundary))
 
         // Image file
-        bodyData.append(multipartFileField(name: "image", fileName: "input.png", mimeType: "image/png", data: inputImage, boundary: boundary))
+        // Source is normalized to JPEG upstream (BackendOrchestrationService imageGen
+        // path) so this fixed label is truthful — a raw HEIC/TIFF here would 400.
+        bodyData.append(multipartFileField(name: "image", fileName: "input.jpg", mimeType: "image/jpeg", data: inputImage, boundary: boundary))
 
         // Size
         let dimensions = options.aspectRatio.dimensions()

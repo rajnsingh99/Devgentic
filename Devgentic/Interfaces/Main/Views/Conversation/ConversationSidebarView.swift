@@ -112,8 +112,10 @@ struct ConversationSidebarRow: View {
 
     var body: some View {
         ConversationRowView(
-            // Assuming toConversationStruct() maps the entity to a UI model
-            conversation: conversation.toStruct(),
+            // [P1] Row-weight projection: `toStruct()` decoded EVERY message's four
+            // JSON blobs per row per render (MainActor, re-run on every mid-stream
+            // flush). `toRowStruct()` decodes at most one content blob for the title.
+            conversation: conversation.toRowStruct(),
             isSelected: viewModel.selectedConversationID == conversation.id,
             isRenaming: renamingConversationID == conversation.id,
             editableName: $editableConversationName,
@@ -135,7 +137,10 @@ struct ConversationSidebarRow: View {
             },
             isSelectionMode: isSelectionMode,
             isBatchSelected: selectedIDs.contains(conversation.id),
-            needsInput: viewModel.interactionCenter.hasPending(for: conversation.id)   // [F2]
+            needsInput: viewModel.interactionCenter.hasPending(for: conversation.id),   // [F2]
+            // [P8] Live truth from the stream manager (observable — the row updates the
+            // moment a stream starts/ends). First time the pulse has ever been reachable.
+            isStreamingLive: viewModel.activeStreamManager.hasActiveStream(inConversation: conversation.id)
         )
         .contextMenu {
             contextMenuContent
@@ -434,7 +439,8 @@ struct ConversationSidebarView: View {
                             }
                         )
                     } else {
-                        VStack(spacing: 2) {
+                        // [P1] Lazy: rows build only as they scroll into view.
+                        LazyVStack(spacing: 2) {
                             ForEach(data.pinned) { conversation in
                                 row(for: conversation)
                             }
@@ -444,7 +450,8 @@ struct ConversationSidebarView: View {
                 case .all:
                     // Date-Grouped Sections (non-pinned only)
                     ForEach(Array(data.dateSections.enumerated()), id: \.element.title) { index, section in
-                        VStack(alignment: .leading, spacing: 2) {
+                        // [P1] Lazy: a large date section no longer builds every row up front.
+                        LazyVStack(alignment: .leading, spacing: 2) {
                             if index > 0 {
                                 Divider()
                                     .background(theme.dividerColor)

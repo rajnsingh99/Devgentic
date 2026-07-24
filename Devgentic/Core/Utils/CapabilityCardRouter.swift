@@ -208,8 +208,16 @@ final class CapabilityCardRouter {
     /// Appends the event into the active step's / attempt's nested sub-timeline.
     /// Returns `false` when no capability segment is active — the caller appends
     /// to the message's top-level timeline as before.
+    ///
+    /// [TL-2/P3] Nested arrays share the SAME eviction rule as the top-level
+    /// timeline — they used to bypass `maxTimelineEvents` entirely, so a runaway
+    /// capability step grew its card without bound (memory, persistence blob, and
+    /// render all scaled with it, and the card itself is deliberately un-evictable).
     func route(_ event: TimelineEvent) -> Bool {
-        withActiveEvents { $0.append(event) }
+        withActiveEvents { events in
+            events.append(event)
+            ChatMessage.evictOverflow(&events, context: "capability-card nested")
+        }
     }
 
     /// Completes an executing `.toolExecution` row nested in the active segment.

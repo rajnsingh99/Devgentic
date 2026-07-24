@@ -232,7 +232,25 @@ final class ActiveStreamManager {
 
         if let messageToUpdate = existingMessage {
             agentMessage = messageToUpdate
-            logger.notice("🚀 [STREAM_REGENERATE] Updating message \(agentMessage.id.uuidString) in conversation \(conversationID.uuidString).")
+            if resumeState != nil {
+                // [ASM-3] A resumed run RE-GENERATES the assistant turn from the
+                // reconstructed history — it does not continue the interrupted text
+                // mid-sentence. Streaming into the old variant appended the new answer
+                // onto the stale partial ("…partial sentenceHere is the full answer…").
+                // Clear the streamed text; the timeline (tool rows, cards) survives —
+                // resumeRun already sanitized it.
+                let staleChars = agentMessage.currentAgentContent?.textContent?.count
+                    ?? agentMessage.content.textContent?.count ?? 0
+                if let agentResponse = agentMessage.agentResponse,
+                   agentResponse.variants.indices.contains(agentResponse.selectedVariantIndex) {
+                    agentMessage.agentResponse?.variants[agentResponse.selectedVariantIndex].content = .markdownText("")
+                }
+                agentMessage.content = .markdownText("")
+                agentMessage.invalidateMarkdownCache()
+                logger.notice("🚀 [STREAM_RESUME] Resuming message \(agentMessage.id.uuidString) — cleared \(staleChars) chars of interrupted partial prose before re-generation (ASM-3).")
+            } else {
+                logger.notice("🚀 [STREAM_REGENERATE] Updating message \(agentMessage.id.uuidString) in conversation \(conversationID.uuidString).")
+            }
         } else {
             agentMessage = ChatMessage(
                 conversationId: conversationID,
@@ -617,6 +635,14 @@ final class ActiveStreamManager {
 
                     case .requestPlanReview(let subtasks, let operationID, let sourceNodeID):
                         agentMessage.agentState = .interaction(.planReview)
+                        // [ASM-5] Park + immediate boundary flush — every other HITL case
+                        // (tool confirmation, clarification, gate) does exactly this. Without
+                        // the marker a plan-review park reloaded as `.streaming` after a quit
+                        // (resume couldn't re-raise the review), and the run never reached the
+                        // parked state the local-model release keys off — the loaded MLX model
+                        // stayed pinned in memory for as long as the banner sat unanswered.
+                        agentMessage.lifecycleState = .parkedHITL(operationID: operationID)
+                        await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
                         if capabilityCardsEnabled {
                             capabilityRouter.handlePlanReviewRequested()
                         } else {
@@ -713,18 +739,27 @@ final class ActiveStreamManager {
                         ))
 
                     // MARK: History Compaction Events
-                    case .compactionStarted(let turns, let checkpoint):
-                        agentMessage.appendTimelineEvent(.capabilityMilestone(
-                            id: UUID(), kind: .compactionStarted,
-                            detail: "Compacting \(turns) turns into checkpoint #\(checkpoint)"
-                        ))
-
-                    case .compactionCompleted(let turns, let preview):
+                    case .compactionCompleted(let turns, let preview, let checkpoint):
+                        // Chip ONLY. Persistence + live-array splice moved to
+                        // HistoryCompactionService's checkpoint sink (registered by
+                        // MessagingCoordinator): compaction runs in the background now, so
+                        // it can complete after this stream has finished — at which point
+                        // this event is never delivered. Data must not depend on it.
                         let shortPreview = String(preview.prefix(100))
                         agentMessage.appendTimelineEvent(.capabilityMilestone(
                             id: UUID(), kind: .compactionCompleted,
                             detail: "History compacted \u{2014} \(turns) turns summarized: \(shortPreview)"
                         ))
+                        logger.info("[COMPACTION] Completed chip shown \u{2014} checkpoint \(checkpoint.id.uuidString.prefix(8)), conversationID: \(conversationID.uuidString.prefix(8))")
+
+                    case .compactionFailed(let reason):
+                        // Best-effort chip from the background run. The run continues
+                        // with uncompacted history, so this is a warning, not an error.
+                        agentMessage.appendTimelineEvent(.capabilityMilestone(
+                            id: UUID(), kind: .compactionFailed,
+                            detail: "History compaction didn't finish (\(reason)) \u{2014} continuing with full history"
+                        ))
+                        logger.warning("[COMPACTION] Reported to user as failed \u{2014} \(reason), conversationID: \(conversationID.uuidString.prefix(8))")
 
                     // MARK: Multimodal Events
                     case .mediaProgress:
@@ -895,7 +930,12 @@ final class ActiveStreamManager {
         profileID: UUID?,
         traceContext: TraceContext
     ) {
-        guard let interactionCenter else { return }
+        guard let interactionCenter else {
+            // A park with no center means the run waits on an interaction NOBODY can
+            // ever answer — that must never be silent.
+            logger.error("[HITL] enqueue DROPPED — no InteractionCenter wired (op: \(operationID.uuidString.prefix(8)), conversation: \(conversationID.uuidString.prefix(8))). The run will hang parked.")
+            return
+        }
 
         let isWorkflow = workflowState != nil && sourceNodeID != nil
         let interface: HITLOrigin.Interface = isWorkflow
@@ -915,6 +955,11 @@ final class ActiveStreamManager {
             }
         }()
         let title = nodeName.map { "\($0) · \(kindLabel)" } ?? kindLabel
+
+        // Logged HERE (not at function entry) so it can reuse `kindLabel` — the first
+        // version stringified the enum and truncated it to 40 chars, emitting the
+        // half-word "toolConfirmation(devgentic.PendingToolCo".
+        logger.log("[HITL] Parked op \(operationID.uuidString.prefix(8)) — \(kindLabel), conversation: \(conversationID.uuidString.prefix(8)), interface: \(interface.rawValue), profile: \(profileType.rawValue), node: \(nodeName ?? "none"). Awaiting user.")
 
         let origin = HITLOrigin(
             interface: interface,
@@ -982,23 +1027,32 @@ final class ActiveStreamManager {
     }
 
     private func updateMessageContent(_ agentMessage: ChatMessage, with newTextChunk: String, isRegeneration: Bool) {
+        // Merge decision lives in `ChatMessage.resolveStreamedChunkMerge` (pure,
+        // testable). ASM-1: when current content is an `.error` card and prose
+        // streams afterwards (workflow node failure + surviving terminal nodes;
+        // planning subtask failure), the merge starts the answer fresh and hands
+        // back a demoted timeline event so the failure stays discoverable instead
+        // of being laundered into the answer's opening words.
         if isRegeneration {
             guard let agentResponse = agentMessage.agentResponse,
                   agentResponse.variants.indices.contains(agentResponse.selectedVariantIndex) else {
                 return
             }
             var targetVariant = agentResponse.variants[agentResponse.selectedVariantIndex]
-            if var currentText = targetVariant.content.textContent {
-                currentText += newTextChunk
-                targetVariant.content = .markdownText(currentText)
+            if let merged = ChatMessage.resolveStreamedChunkMerge(current: targetVariant.content, chunk: newTextChunk) {
+                targetVariant.content = merged.content
                 agentMessage.agentResponse?.variants[agentResponse.selectedVariantIndex] = targetVariant
+                if let demoted = merged.demotedError {
+                    agentMessage.appendTimelineEvent(demoted)
+                }
             }
         } else {
-            if var currentText = agentMessage.content.textContent {
-                currentText += newTextChunk
-                let newContent = MessageContent.markdownText(currentText)
-                agentMessage.content = newContent
-                agentMessage.agentResponse?.variants[0].content = newContent
+            if let merged = ChatMessage.resolveStreamedChunkMerge(current: agentMessage.content, chunk: newTextChunk) {
+                agentMessage.content = merged.content
+                agentMessage.agentResponse?.variants[0].content = merged.content
+                if let demoted = merged.demotedError {
+                    agentMessage.appendTimelineEvent(demoted)
+                }
             }
         }
         // Invalidate cached markdown blocks so the next body evaluation reparses
@@ -1007,6 +1061,16 @@ final class ActiveStreamManager {
         agentMessage.invalidateMarkdownCache()
     }
     
+    /// [P8] Whether any stream is live for `conversationID` RIGHT NOW. Drives the
+    /// sidebar's `StreamingPulseIndicator` — which had never rendered once: it read a
+    /// persisted `isStreaming` that has no column, so every decode said `false`.
+    /// "Streaming" is a live-process property (after a crash, nothing is streaming),
+    /// so the live dictionary is the honest source; reading it from a view body
+    /// auto-updates rows on stream start/end (`activeStreams` is observable).
+    func hasActiveStream(inConversation conversationID: UUID) -> Bool {
+        activeStreams.values.contains { $0.conversationId == conversationID }
+    }
+
     public func cancelStream(for messageId: UUID) {
         guard let taskToCancel = activeTasks[messageId] else {
             logger.warning("Attempted to cancel a stream for message ID \(messageId.uuidString), but no active task was found.")
@@ -1065,14 +1129,31 @@ final class ActiveStreamManager {
 
         // Terminal-outcome safety net: if no executor emitted `.executionFinished`
         // (legacy code path, early `continuation.finish()` in a catch block, or a
-        // third-party executor), infer the outcome from whether an error reached us.
-        // Without this, the UI would silently show a polished-looking bubble for what
-        // was actually a failed run — exactly the trust-breaking mismatch we're fixing.
+        // third-party executor), infer the outcome from how the run actually ended.
+        // [ASM-4] Keying only on "did a throw reach us" stamped `.completed` (green
+        // chip + `completed` trace status) over an ERROR CARD whenever a producer
+        // yielded `.error` and then finished without throwing. The resolver also
+        // inspects the content (pure + tested: `ChatMessage.resolveFallbackOutcome`).
         if message.terminalOutcome == nil {
-            message.terminalOutcome = (error != nil) ? .failed : .completed
-            if message.terminalReason == nil, let err = error {
-                message.terminalReason = err.localizedDescription
+            let fallback = ChatMessage.resolveFallbackOutcome(
+                threwError: error,
+                content: message.currentAgentContent ?? message.content
+            )
+            message.terminalOutcome = fallback.outcome
+            if message.terminalReason == nil {
+                message.terminalReason = fallback.reason
             }
+            if error == nil, fallback.outcome == .failed {
+                logger.warning("[STREAM_FINALIZE] messageID: \(message.id.uuidString.prefix(8)) — no .executionFinished received; inferred .failed from error-card content (previously recorded .completed) (ASM-4).")
+            }
+        }
+
+        // [TL-1] Close any tool row still spinning at end-of-run — cancel and failure
+        // mid-tool used to persist rows with `isExecuting == true`, so the spinner
+        // survived reload forever.
+        let danglingClosed = message.closeDanglingToolRows(outcome: message.terminalOutcome)
+        if danglingClosed > 0 {
+            logger.warning("[STREAM_FINALIZE] messageID: \(message.id.uuidString.prefix(8)) — closed \(danglingClosed) dangling tool row(s) at finalize (outcome: \(message.terminalOutcome?.rawValue ?? "nil")); a persisted row must never claim to still be executing (TL-1).")
         }
 
         if let traceID = message.traceID {
@@ -1098,18 +1179,32 @@ final class ActiveStreamManager {
             // be loaded for a vision turn) with their category icon + remediation,
             // symmetric with the streaming `.error(StructuredError)` path, instead of
             // the generic "Response Error" card this chokepoint would otherwise force.
-            let errorContent: MessageContent
+            let errorCard: MessageContent
             if let fre = error as? FileRetrievalError {
                 let se = fre.structuredError
-                errorContent = .error(title: se.title, details: se.message, category: se.category, suggestion: se.suggestion)
+                errorCard = .error(title: se.title, details: se.message, category: se.category, suggestion: se.suggestion)
             } else {
-                errorContent = .error(title: "Response Error", details: error.localizedDescription)
+                errorCard = .error(title: "Response Error", details: error.localizedDescription)
             }
-            message.content = errorContent
+
+            // [ASM-2] Don't discard prose the user watched stream: if real partial text
+            // exists it stays as content and the error demotes to a timeline warning
+            // (failure remains loud via the `.failed` chip + retry). No prose → the
+            // error card replaces as before. Pure + tested: `resolveThrownFinalContent`.
+            let resolved = ChatMessage.resolveThrownFinalContent(
+                streamed: message.currentAgentContent ?? message.content,
+                errorCard: errorCard
+            )
+            message.content = resolved.content
+            if let demoted = resolved.demotedError {
+                message.appendTimelineEvent(demoted)
+                let kept = resolved.content.textContent?.count ?? 0
+                logger.log("[STREAM_FINALIZE] messageID: \(message.id.uuidString.prefix(8)) — preserved \(kept) chars of partial streamed prose; terminal error demoted to timeline (ASM-2).")
+            }
 
             if let agentResponse = message.agentResponse,
                agentResponse.variants.indices.contains(agentResponse.selectedVariantIndex) {
-                message.agentResponse?.variants[agentResponse.selectedVariantIndex].content = errorContent
+                message.agentResponse?.variants[agentResponse.selectedVariantIndex].content = resolved.content
             }
         } else {
             // Resolve the display content: streamed text if any; else a generated

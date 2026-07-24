@@ -34,9 +34,9 @@ struct ProfileSelectorPopover: View {
     @State private var selectedType: ProfileType = .bot
     @FocusState private var isSearchFocused: Bool
 
-    /// Fixed content width — deterministic NSPopover sizing (the structural fix).
-    private let popoverWidth: CGFloat = 320
-    private let listMaxHeight: CGFloat = 320
+    /// Fixed content width & height — matching CodeModelSelectorPopover 1:1 (340 x 440).
+    private let popoverWidth: CGFloat = 340
+    private let listMaxHeight: CGFloat = 330
 
     /// Picker-facing types in display order (`.code` is never offered, matching the old popup).
     private var availableTypes: [ProfileType] {
@@ -63,12 +63,15 @@ struct ProfileSelectorPopover: View {
         VStack(spacing: 10) {
             searchField
             typeBubbleRow
-            Divider().background(theme.dividerColor.opacity(0.3))
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.25))
+                .frame(height: 1)
+                .padding(.horizontal, 10)
             profileList
         }
-        .padding(.top, 12)
-        .padding(.bottom, 8)
-        .frame(width: popoverWidth)
+        .padding(.top, 14)
+        .padding(.bottom, 10)
+        .frame(width: popoverWidth, height: 440)
         .onAppear {
             profiles = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
             // Land on the current selection's type so the highlighted row is visible immediately.
@@ -86,10 +89,11 @@ struct ProfileSelectorPopover: View {
     // MARK: - Search
 
     private var searchField: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(theme.tertiaryText)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(isSearchFocused ? theme.accentColor : theme.tertiaryText)
+
             TextField("", text: $searchText)
                 .textFieldStyle(.plain)
                 .font(theme.fontSubheadline)
@@ -98,63 +102,57 @@ struct ProfileSelectorPopover: View {
                 .accessibilityLabel("Search profiles")
                 .overlay(alignment: .leading) {
                     if searchText.isEmpty {
-                        Text("Search profiles")
+                        Text("Search profiles...")
                             .font(theme.fontSubheadline)
                             .foregroundColor(theme.placeholderText)
                             .allowsHitTesting(false)
                             .accessibilityHidden(true)
                     }
                 }
+
             if !searchText.isEmpty {
                 Button(action: { searchText = "" }) {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 11))
+                        .font(.system(size: 12))
                         .foregroundColor(theme.tertiaryText)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Clear search")
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 7).fill(theme.surfaceOverlay.opacity(0.6)))
         .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(theme.surfaceOverlayStrong)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(
+                    isSearchFocused ? theme.accentColor.opacity(0.55) : theme.secondaryText.opacity(0.18),
+                    lineWidth: 1
+                )
+        )
+        .shadow(color: isSearchFocused ? theme.accentColor.opacity(0.2) : Color.black.opacity(0.1), radius: 4)
+        .padding(.horizontal, 12)
     }
 
     // MARK: - Type bubbles
 
     private var typeBubbleRow: some View {
-        HStack(spacing: 6) {
-            ForEach(availableTypes, id: \.self) { type in
-                typeBubble(type)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(availableTypes, id: \.self) { type in
+                    TypeBubbleView(
+                        type: type,
+                        count: profiles(of: type).count,
+                        isActive: selectedType == type,
+                        action: { selectedType = type }
+                    )
+                }
             }
-            Spacer(minLength: 0)
+            .padding(.horizontal, 12)
         }
-        .padding(.horizontal, 10)
-    }
-
-    private func typeBubble(_ type: ProfileType) -> some View {
-        let isActive = selectedType == type
-        let count = profiles(of: type).count
-        return Button(action: { selectedType = type }) {
-            HStack(spacing: 5) {
-                Circle()
-                    .fill(type.displayColor)
-                    .frame(width: 6, height: 6)
-                Text(Self.bubbleTitle(for: type))
-                    .font(.system(.caption, weight: .semibold))
-                    .foregroundColor(isActive ? theme.primaryText : theme.secondaryText)
-                Text("\(count)")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(isActive ? theme.primaryText.opacity(0.7) : theme.tertiaryText)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(Capsule().fill(isActive ? theme.accentColor.opacity(0.18) : theme.surfaceOverlay.opacity(0.5)))
-            .overlay(Capsule().stroke(isActive ? theme.accentColor.opacity(0.5) : Color.clear, lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(Self.bubbleTitle(for: type)), \(count) profiles\(isActive ? ", selected" : "")")
     }
 
     private static func bubbleTitle(for type: ProfileType) -> String {
@@ -172,12 +170,12 @@ struct ProfileSelectorPopover: View {
     @ViewBuilder
     private var profileList: some View {
         if visibleProfiles.isEmpty {
-            VStack(spacing: 6) {
+            VStack(spacing: 8) {
                 Image(systemName: searchText.isEmpty ? "square.stack.3d.up.slash" : "magnifyingglass")
-                    .font(.title3)
+                    .font(.system(size: 26))
                     .foregroundColor(theme.tertiaryText)
-                Text(searchText.isEmpty ? "No profiles of this type yet" : "No matches")
-                    .font(theme.fontSubheadline)
+                Text(searchText.isEmpty ? "No profiles of this type yet" : "No matches found")
+                    .font(theme.fontSubheadline.weight(.medium))
                     .foregroundColor(theme.secondaryText)
                 if searchText.isEmpty {
                     Text("Create one in the Backend Profiles panel.")
@@ -185,11 +183,11 @@ struct ProfileSelectorPopover: View {
                         .foregroundColor(theme.tertiaryText)
                 }
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 28)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.vertical, 36)
         } else {
-            ScrollView {
-                VStack(spacing: 1) {
+            ScrollView(showsIndicators: true) {
+                VStack(spacing: 6) {
                     ForEach(visibleProfiles) { profile in
                         ProfileRow(
                             profile: profile,
@@ -201,7 +199,8 @@ struct ProfileSelectorPopover: View {
                         )
                     }
                 }
-                .padding(.vertical, 2)
+                .padding(.vertical, 4)
+                .padding(.horizontal, 12)
             }
             .frame(maxHeight: listMaxHeight)
         }
@@ -220,6 +219,72 @@ struct ProfileSelectorPopover: View {
     }
 }
 
+// MARK: - Type Bubble Component
+
+private struct TypeBubbleView: View {
+    let type: ProfileType
+    let count: Int
+    let isActive: Bool
+    let action: () -> Void
+
+    @Environment(\.appTheme) private var theme
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(type.displayColor)
+                    .frame(width: 7, height: 7)
+                    .shadow(color: type.displayColor.opacity(0.8), radius: 3)
+
+                Text(bubbleTitle)
+                    .font(.system(size: 12, weight: isActive ? .bold : .medium))
+                    .foregroundColor(isActive ? theme.primaryText : theme.secondaryText)
+
+                Text("\(count)")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(isActive ? theme.primaryText.opacity(0.85) : theme.tertiaryText)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1.5)
+                    .background(
+                        Capsule()
+                            .fill(isActive ? type.displayColor.opacity(0.25) : theme.surfaceOverlayStrong)
+                    )
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                Capsule()
+                    .fill(isActive ? type.displayColor.opacity(0.18) : (isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay))
+            )
+            .overlay(
+                Capsule()
+                    .strokeBorder(
+                        isActive ? type.displayColor.opacity(0.65) : (isHovered ? theme.secondaryText.opacity(0.3) : Color.clear),
+                        lineWidth: 1
+                    )
+            )
+            .shadow(color: isActive ? type.displayColor.opacity(0.25) : .clear, radius: 4)
+            .scaleEffect(isHovered ? 1.04 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .onHover { h in
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { isHovered = h }
+        }
+    }
+
+    private var bubbleTitle: String {
+        switch type {
+        case .bot: return String(localized: "Bots")
+        case .agent: return String(localized: "Agents")
+        case .workflow: return String(localized: "Workflows")
+        case .imageGen: return String(localized: "Image Gen")
+        case .code: return String(localized: "Code")
+        }
+    }
+}
+
 // MARK: - Row
 
 private struct ProfileRow: View {
@@ -232,21 +297,28 @@ private struct ProfileRow: View {
 
     var body: some View {
         Button(action: onSelect) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(profile.profileType.displayColor)
-                    .frame(width: 7, height: 7)
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(profile.profileType.displayColor.opacity(isHovering || isSelected ? 0.25 : 0.12))
+                        .frame(width: 24, height: 24)
+                        .shadow(color: isHovering ? profile.profileType.displayColor.opacity(0.4) : .clear, radius: 4)
 
-                VStack(alignment: .leading, spacing: 2) {
+                    Circle()
+                        .fill(profile.profileType.displayColor)
+                        .frame(width: 7, height: 7)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
                     Text(profile.displayName)
-                        .font(theme.fontSubheadline.weight(.medium))
+                        .font(theme.fontSubheadline.weight(.semibold))
                         .foregroundColor(theme.primaryText)
                         .lineLimit(1)
                         .truncationMode(.tail)
 
                     if let detail = ProfileSelectorPopover.detailText(for: profile), !detail.isEmpty {
                         Text(detail)
-                            .font(.caption)
+                            .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(theme.secondaryText)
                             .lineLimit(1)
                             .truncationMode(.middle)
@@ -257,25 +329,36 @@ private struct ProfileRow: View {
 
                 if isSelected {
                     Image(systemName: "checkmark.circle.fill")
-                        .font(.system(.caption))
+                        .font(.system(size: 14, weight: .bold))
                         .foregroundColor(theme.accentColor)
+                        .shadow(color: theme.accentColor.opacity(0.5), radius: 4)
                 }
             }
-            .padding(.vertical, 6)
-            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
             .background(
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(isSelected
-                          ? theme.accentColor.opacity(0.15)
-                          : (isHovering ? theme.surfaceOverlay : Color.clear))
+                          ? theme.accentColor.opacity(0.16)
+                          : (isHovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay.opacity(0.4)))
             )
-            .contentShape(Rectangle())
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(
+                        isSelected
+                            ? theme.accentColor.opacity(0.55)
+                            : (isHovering ? theme.secondaryText.opacity(0.3) : Color.clear),
+                        lineWidth: 1
+                    )
+            )
+            .shadow(color: isSelected ? theme.accentColor.opacity(0.2) : (isHovering ? Color.black.opacity(0.15) : .clear), radius: 5, y: 2)
+            .scaleEffect(isHovering ? 1.015 : 1.0)
+            .contentShape(RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
         .onHover { hover in
-            withAnimation(.easeInOut(duration: 0.1)) { isHovering = hover }
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { isHovering = hover }
         }
-        .padding(.horizontal, 8)
         .accessibilityLabel("\(profile.displayName)\(isSelected ? ", selected" : "")")
     }
 }

@@ -206,13 +206,13 @@ struct InputToolbarView: View {
         .padding(.vertical, 5)
         .background(
             Capsule()
-                .fill(isFolderButtonHovering ? theme.surfaceOverlay : Color.clear)
+                .fill(isFolderButtonHovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
         )
         .overlay(
             Capsule()
-                .stroke(theme.secondaryText.opacity(isFolderButtonHovering ? 0.3 : 0.15), lineWidth: 1)
+                .strokeBorder(theme.secondaryText.opacity(isFolderButtonHovering ? 0.35 : 0.15), lineWidth: 1)
         )
-        .scaleEffect(isFolderButtonHovering ? 1.02 : 1.0)
+        .scaleEffect(isFolderButtonHovering ? 1.03 : 1.0)
     }
 
     // MARK: - Shared Icon Builder
@@ -222,11 +222,17 @@ struct InputToolbarView: View {
             .resizable()
             .scaledToFit()
             .frame(width: 14, height: 14)
-            .foregroundColor(isHovering ? theme.primaryText : theme.secondaryText.opacity(0.8))
+            .foregroundColor(isHovering ? theme.primaryText : theme.secondaryText.opacity(0.85))
             .padding(7)
             .background(
                 Circle()
-                    .fill(isHovering ? theme.surfaceOverlay : Color.clear)
+                    .fill(isHovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
             )
+            .overlay(
+                Circle()
+                    .stroke(isHovering ? theme.secondaryText.opacity(0.3) : Color.clear, lineWidth: 1)
+            )
+            .shadow(color: isHovering ? Color.black.opacity(0.2) : .clear, radius: 4, x: 0, y: 1)
+            .scaleEffect(isHovering ? 1.06 : 1.0)
     }
 }

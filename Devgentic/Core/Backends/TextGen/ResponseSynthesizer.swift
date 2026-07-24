@@ -38,8 +38,11 @@ struct ResponseSynthesizer {
     ///   - summary: The clean record of what happened during execution.
     ///   - personaInstructions: Injected instructions to ensure the synthesis doesn't degrade base persona behavior.
     ///   - originalQuery: The user's original query to ensure contextual grounding.
-    ///   - isNativeFlow: A flag indicating if the agent used Native tool calling (bypasses IC synthesis when `forceSynthesis` is false).
-    ///   - forceSynthesis: When true, IC synthesis is always attempted even for native flows (user opted in for cloud models).
+    ///   - isNativeFlow: A flag indicating if the agent used Native tool calling (bypasses IC synthesis when `synthesisOptedIn` is false).
+    ///   - synthesisOptedIn: Whether the user opted this run's provider family into IC
+    ///     synthesis (see `SynthesisOptIn`). When false, the IC branch is UNREACHABLE —
+    ///     the model's own output is returned verbatim. Nothing forces synthesis:
+    ///     not tool failures, not a circuit-breaker abort.
     /// - Returns: A non-empty user-facing string. Never throws.
     ///
     /// LLM synthesis is powered exclusively by IntelligenceCoreService.
@@ -48,13 +51,13 @@ struct ResponseSynthesizer {
         personaInstructions: String? = nil,
         originalQuery: String,
         isNativeFlow: Bool = false,
-        forceSynthesis: Bool = false,
+        synthesisOptedIn: Bool = false,
         // Wrapper-run inner loops (Planning subtasks, Reflexion trials): never pay
         // for IC synthesis — their output is intermediate; the wrapper composes the
         // user-facing answer. The free paths above the LLM branch still apply; only
         // the IC call degrades to the deterministic builder. Deliberately wins over
-        // `forceSynthesis` (a circuit-breaker abort inside a subtask must not load
-        // IC either — the abort reason reaches the wrapper via its terminal event).
+        // `synthesisOptedIn` (a subtask must not load IC even when the user opted
+        // the family in — the wrapper's own synthesis is the one that counts).
         suppressLLM: Bool = false,
         // Called with an (estimated) token-usage figure ONLY when the LLM synthesis path
         // runs — the native fast-path and deterministic fallbacks are free (D1). Optional
@@ -67,7 +70,7 @@ struct ResponseSynthesizer {
         // =====================================================================
         // Native models output conversational answers naturally when they finish.
         // We trust them 100% UNLESS the user has opted into IC synthesis.
-        if isNativeFlow && !forceSynthesis {
+        if isNativeFlow && !synthesisOptedIn {
             if let rawAnswer = summary.finalAgentThought?.trimmingCharacters(in: .whitespacesAndNewlines), !rawAnswer.isEmpty {
                 logger.info("🏎️ [Synthesizer] Native API flow detected. Returning agent's natural response directly.")
                 let finalAnswer = OutputSanitizer.stripThinkBlocksAndTokens(rawAnswer)
@@ -132,6 +135,31 @@ struct ResponseSynthesizer {
             return buildDeterministicFallback(summary: summary)
         }
 
+        // --- NOT OPTED IN: RAW PASSTHROUGH ---
+        // IC synthesis is strictly opt-in per provider family (`SynthesisOptIn`).
+        // Without it the model's own answer IS the deliverable — returned verbatim
+        // apart from sanitization. This is the gate that legacy (non-native) JSON
+        // runs previously fell straight through: PATH A only ever covered native
+        // flows, so a legacy multi-tool run reached IC even with the toggle off.
+        //
+        // Nothing below this line may run un-opted: the IC pass is a small-model
+        // rewrite that demonstrably compresses a larger model's finished answer.
+        if !synthesisOptedIn {
+            if let thought = summary.finalAgentThought?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !thought.isEmpty {
+                // "the run's own output" rather than "the model's answer": for ReAct
+                // this IS model-authored prose, but the Planning wrapper passes a
+                // composed digest of its subtask results. Both are returned as-is.
+                logger.info("🏎️ [Synthesizer] Not opted in — returning the run's own output verbatim (tools: \(summary.toolResults.count), status: \(String(describing: summary.completionStatus)), chars: \(thought.count)).")
+                let cleaned = OutputSanitizer.stripThinkBlocksAndTokens(thought)
+                return cleaned.isEmpty ? thought : cleaned
+            }
+            // No usable model output (circuit-breaker abort mid-loop, stalled legacy
+            // parse). The deterministic template is the never-empty floor.
+            logger.info("⚠️ [Synthesizer] Not opted in and no final answer — using deterministic fallback (tools: \(summary.toolResults.count), status: \(String(describing: summary.completionStatus))).")
+            return buildDeterministicFallback(summary: summary)
+        }
+
         // --- LLM SYNTHESIS PATH (Multi-Tool / Complex Output) ---
         // `completionStatus` is derived purely from per-tool success flags, which
         // means a forced-termination run (circuit-breaker abort, iteration
@@ -161,7 +189,7 @@ struct ResponseSynthesizer {
 
         do {
             defer {
-                Task { await IntelligenceCoreService.shared.unload(caller: .responseSynthesis) }
+                Task { await IntelligenceCoreService.shared.releaseHold(caller: .responseSynthesis) }
             }
 
             let response = try await IntelligenceCoreService.shared.generate(

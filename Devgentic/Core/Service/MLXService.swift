@@ -251,7 +251,10 @@ actor MLXService {
         repetitionPenalty: Float? = nil,
         repetitionContextSize: Int = 20,
         chatTemplateSource: ChatTemplateSource = .embedded,
-        stopSequences: [String] = []
+        stopSequences: [String] = [],
+        // Invoked once with EXACT provider token counts (mlx-swift-lm's terminal
+        // completion event) so MLX can report real usage instead of a chars/4 estimate.
+        onUsage: (@Sendable (TokenUsage) -> Void)? = nil
     ) -> AsyncThrowingStream<String, Error> {
 
         // 1. Cancel any pending idle timer because we are active now.
@@ -278,6 +281,14 @@ actor MLXService {
                     let wrappedMessages = UnsafeSendable(messages)
                     let wrappedTools = UnsafeSendable(tools)
 
+                    // Convert MLX C++ fatal errors (e.g. a VLM shape/broadcast mismatch)
+                    // into a Swift throw instead of `fatalError` crashing the whole app.
+                    // `withError` installs a TASK-LOCAL handler; the internal generation
+                    // `Task` that `MLXLMCommon.generate` spawns is created inside this scope
+                    // and inherits it, so an error raised in the forward pass is recorded and
+                    // rethrown here rather than aborting the process. MUST wrap BOTH the
+                    // perform (where the Task is created) and the consume (where it runs).
+                    try await withError {
                     let stream = try await container.perform { context -> AsyncStream<Generation> in
                         // A. Apply Chat Template & Tokenize
                         //
@@ -349,109 +360,10 @@ actor MLXService {
                         )
                     }
                     
-                    // --- Safety Layer 1: Stop Sequence Detection ---
-                    // Accumulate a trailing window of generated text and check for
-                    // any custom stop sequence suffix after each chunk.
-                    // This catches multi-token stop sequences that span chunk boundaries.
-                    let maxStopLen = stopSequences.map(\.count).max() ?? 0
-                    var trailingWindow = ""
-                    var stopDetected = false
-
-                    // --- Safety Layer 2: Streaming Circuit Breaker ---
-                    // Monitors for pathological repetition loops where the model
-                    // generates the same block of text over and over. Trips after
-                    // 3 consecutive repetitions of the same block.
-                    var circuitBreaker = StreamingCircuitBreaker()
-
-                    for await generation in stream {
-                        switch generation {
-                        case .chunk(let text):
-
-                            // Circuit breaker: feed every chunk regardless of stop sequence mode
-                            let breakerStatus = circuitBreaker.feed(text)
-                            if case .tripped(let reason) = breakerStatus {
-                                // Breaker tripped — yield the clean (non-repetitive) portion only
-                                logger.warning("⚡ Generation terminated by circuit breaker: \(reason)")
-
-                                // If we were accumulating a stop-sequence window, discard it —
-                                // the trimmedOutput() already has the authoritative clean text.
-                                // We don't yield here because the circuit breaker's accumulated
-                                // text was never yielded in full yet (it was buffered in trailingWindow
-                                // or yielded piecemeal). Instead, we'll handle cleanup after the loop.
-                                stopDetected = true
-                                break
-                            }
-
-                            // Stop sequence check
-                            if !stopSequences.isEmpty {
-                                trailingWindow += text
-
-                                // Check if any stop sequence appears in the trailing window
-                                if let matchedStop = stopSequences.first(where: { trailingWindow.contains($0) }) {
-                                    // Yield only the text BEFORE the stop sequence
-                                    if let range = trailingWindow.range(of: matchedStop) {
-                                        let beforeStop = String(trailingWindow[trailingWindow.startIndex..<range.lowerBound])
-                                        if !beforeStop.isEmpty {
-                                            continuation.yield(beforeStop)
-                                        }
-                                    }
-                                    logger.info("Stop sequence detected: \(matchedStop) — terminating generation")
-                                    stopDetected = true
-                                    break
-                                }
-
-                                // Yield text that can't possibly be part of a stop sequence
-                                // Keep only the last `maxStopLen` characters as the trailing window
-                                if trailingWindow.count > maxStopLen {
-                                    let safeCount = trailingWindow.count - maxStopLen
-                                    let safeIndex = trailingWindow.index(trailingWindow.startIndex, offsetBy: safeCount)
-                                    let safeText = String(trailingWindow[trailingWindow.startIndex..<safeIndex])
-                                    continuation.yield(safeText)
-                                    trailingWindow = String(trailingWindow[safeIndex...])
-                                }
-                            } else {
-                                // No stop sequences — pass through directly
-                                continuation.yield(text)
-                            }
-
-                        case .toolCall(let toolCall):
-                            // Flush any remaining trailing window before tool call
-                            if !trailingWindow.isEmpty && !stopSequences.isEmpty {
-                                continuation.yield(trailingWindow)
-                                trailingWindow = ""
-                            }
-
-                            let argsDict: [String: Any] = toolCall.function.arguments.mapValues { $0.anyValue }
-                            let syntheticStep: [String: Any] = [
-                                "content": "Executing tool \(toolCall.function.name)...",
-                                "tool_name": toolCall.function.name,
-                                "arguments": argsDict
-                            ]
-
-                            if let syntheticData = try? JSONSerialization.data(withJSONObject: syntheticStep),
-                               let syntheticString = String(data: syntheticData, encoding: .utf8) {
-                                continuation.yield(syntheticString)
-                            }
-                        case .info:
-                            break
-                        }
-
-                        if stopDetected { break }
+                    await self.consumeGenerationStream(stream, into: continuation, stopSequences: stopSequences, onUsage: onUsage)
                     }
-
-                    // Post-loop cleanup
-                    if circuitBreaker.hasTripped {
-                        // Circuit breaker tripped — the downstream parser will receive
-                        // whatever was already yielded (piecemeal). The repetitive tail
-                        // was cut off by breaking out of the loop. No further yield needed.
-                        logger.info("Circuit breaker terminated generation after \(circuitBreaker.accumulatedText.count) chars")
-                    } else if !stopDetected && !trailingWindow.isEmpty {
-                        // Normal completion with pending trailing window — flush it
-                        continuation.yield(trailingWindow)
-                    }
-
                     continuation.finish()
-                    
+
                 } catch {
                     logger.error("MLX Generation Error: \(error.localizedDescription)")
                     continuation.finish(throwing: error)
@@ -463,6 +375,113 @@ actor MLXService {
         }
     }
     
+    // MARK: - Shared Generation Consumer
+
+    /// Consumes an MLX generation stream into `continuation`, applying the two safety
+    /// layers a ReAct loop depends on. Shared by `streamChat` and `streamVisionChat`
+    /// so an agent gets IDENTICAL protection whether or not its turn carries an image
+    /// — previously the vision path had neither, and a small quantized VLM would run a
+    /// repetition loop straight to `maxTokens` with no circuit breaker to stop it.
+    ///
+    ///   Layer 1 — custom stop sequences (multi-token, chunk-boundary safe).
+    ///   Layer 2 — `StreamingCircuitBreaker` (kills pathological repetition).
+    ///
+    /// Also forwards native `.toolCall` events as synthetic JSON. On the vision path
+    /// these are rare (tools are prompted as text there), but forwarding them removes
+    /// a silent drop rather than swallowing a real tool call.
+    ///
+    /// Does NOT finish the continuation — the caller owns success/error termination.
+    private func consumeGenerationStream(
+        _ stream: AsyncStream<Generation>,
+        into continuation: AsyncThrowingStream<String, Error>.Continuation,
+        stopSequences: [String],
+        onUsage: (@Sendable (TokenUsage) -> Void)? = nil
+    ) async {
+        // --- Safety Layer 1: Stop Sequence Detection ---
+        let maxStopLen = stopSequences.map(\.count).max() ?? 0
+        var trailingWindow = ""
+        var stopDetected = false
+
+        // --- Safety Layer 2: Streaming Circuit Breaker ---
+        var circuitBreaker = StreamingCircuitBreaker()
+
+        for await generation in stream {
+            switch generation {
+            case .chunk(let text):
+
+                // Circuit breaker: feed every chunk regardless of stop sequence mode
+                let breakerStatus = circuitBreaker.feed(text)
+                if case .tripped(let reason) = breakerStatus {
+                    logger.warning("⚡ Generation terminated by circuit breaker: \(reason)")
+                    stopDetected = true
+                    break
+                }
+
+                // Stop sequence check
+                if !stopSequences.isEmpty {
+                    trailingWindow += text
+
+                    if let matchedStop = stopSequences.first(where: { trailingWindow.contains($0) }) {
+                        if let range = trailingWindow.range(of: matchedStop) {
+                            let beforeStop = String(trailingWindow[trailingWindow.startIndex..<range.lowerBound])
+                            if !beforeStop.isEmpty {
+                                continuation.yield(beforeStop)
+                            }
+                        }
+                        logger.info("Stop sequence detected: \(matchedStop) — terminating generation")
+                        stopDetected = true
+                        break
+                    }
+
+                    // Yield text that can't possibly be part of a stop sequence
+                    if trailingWindow.count > maxStopLen {
+                        let safeCount = trailingWindow.count - maxStopLen
+                        let safeIndex = trailingWindow.index(trailingWindow.startIndex, offsetBy: safeCount)
+                        let safeText = String(trailingWindow[trailingWindow.startIndex..<safeIndex])
+                        continuation.yield(safeText)
+                        trailingWindow = String(trailingWindow[safeIndex...])
+                    }
+                } else {
+                    continuation.yield(text)
+                }
+
+            case .toolCall(let toolCall):
+                if !trailingWindow.isEmpty && !stopSequences.isEmpty {
+                    continuation.yield(trailingWindow)
+                    trailingWindow = ""
+                }
+
+                let argsDict: [String: Any] = toolCall.function.arguments.mapValues { $0.anyValue }
+                let syntheticStep: [String: Any] = [
+                    "content": "Executing tool \(toolCall.function.name)...",
+                    "tool_name": toolCall.function.name,
+                    "arguments": argsDict
+                ]
+
+                if let syntheticData = try? JSONSerialization.data(withJSONObject: syntheticStep),
+                   let syntheticString = String(data: syntheticData, encoding: .utf8) {
+                    continuation.yield(syntheticString)
+                }
+            case .info(let info):
+                // Terminal completion event: EXACT prompt/generation token counts from
+                // mlx-swift-lm. Surfaced so MLX reports real usage instead of the chars/4
+                // estimate. Fires only on natural completion — an early stop-sequence or
+                // circuit-breaker exit breaks the loop before this event, and callers then
+                // fall back to the estimate (documented at the `onUsage` call sites).
+                onUsage?(TokenUsage(inputTokens: info.promptTokenCount, outputTokens: info.generationTokenCount, isEstimated: false))
+            }
+
+            if stopDetected { break }
+        }
+
+        // Post-loop cleanup
+        if circuitBreaker.hasTripped {
+            logger.info("Circuit breaker terminated generation after \(circuitBreaker.accumulatedText.count) chars")
+        } else if !stopDetected && !trailingWindow.isEmpty {
+            continuation.yield(trailingWindow)
+        }
+    }
+
     // MARK: - Vision Inference
 
     /// Streams a VISION chat response. Uses the SAME loaded `modelContainer` as
@@ -472,15 +491,26 @@ actor MLXService {
     /// tokens automatically, so we never hand-place placeholders.
     ///
     /// `imageData` are raw image bytes; `CIImage` is constructed inside `perform` (off
-    /// the actor's Sendable path) and attached to the LAST user turn. Generation is a
-    /// simple chunk stream — no tool-call / stop-sequence machinery (vision answers are
-    /// plain prose).
+    /// the actor's Sendable path) and attached to the LAST user turn.
+    ///
+    /// Generation runs through the SAME safety consumer as `streamChat` — stop
+    /// sequences + circuit breaker + repetition penalty — because an image-bearing
+    /// turn on the AGENT path still runs a full ReAct loop over a small quantized VLM,
+    /// exactly the population those layers protect. (The one text-path layer that does
+    /// NOT apply here is the `applyChatTemplate` two-tier fallback: the VLM's own
+    /// `UserInputProcessor` owns templating on this path, so there is no
+    /// `ChatTemplateSource` to fall back through.)
     func streamVisionChat(
         messages: [[String: String]],
         imageData: [Data],
         maxTokens: Int = 2048,
         temperature: Float = 0.6,
-        topP: Float = 1.0
+        topP: Float = 1.0,
+        repetitionPenalty: Float? = nil,
+        repetitionContextSize: Int = 20,
+        stopSequences: [String] = [],
+        // Exact provider token counts (terminal completion event) — see `streamChat`.
+        onUsage: (@Sendable (TokenUsage) -> Void)? = nil
     ) -> AsyncThrowingStream<String, Error> {
         cancelIdleTimer()
 
@@ -500,23 +530,50 @@ actor MLXService {
                     return
                 }
 
+                logger.info("[VISION] streamVisionChat generating: \(imageData.count) image(s), \(messages.count) message(s), maxTokens=\(maxTokens), stops=\(stopSequences.count), repPenalty=\(repetitionPenalty.map { String($0) } ?? "none")")
+
                 do {
                     let wrappedMessages = UnsafeSendable(messages)
                     let wrappedData = UnsafeSendable(imageData)
 
+                    // Convert MLX C++ fatal errors (e.g. a VLM shape/broadcast mismatch)
+                    // into a Swift throw instead of `fatalError` crashing the whole app.
+                    // `withError` installs a TASK-LOCAL handler; the internal generation
+                    // `Task` that `MLXLMCommon.generate` spawns is created inside this scope
+                    // and inherits it, so an error raised in the forward pass is recorded and
+                    // rethrown here rather than aborting the process. MUST wrap BOTH the
+                    // perform (where the Task is created) and the consume (where it runs).
+                    try await withError {
                     let stream = try await container.perform { context -> AsyncStream<Generation> in
                         // Decode raw bytes → CIImage → UserInput.Image inside the closure.
-                        let images: [UserInput.Image] = wrappedData.value.compactMap { data in
-                            CIImage(data: data).map { .ciImage($0) }
+                        // Mirror the reference mlx-swift-lm apps: hand the VLM a CGImage-backed
+                        // image (materialized pixel buffer + finite [0,0,w,h] extent) rather than a
+                        // bare CIImage(data:), so the shared MLXVLM.asMLXArray derives its array
+                        // shape from a concrete extent. Each image is logged with extent/bytes/
+                        // colorspace; an undecodable slot is logged as DROPPED so a later
+                        // placeholder/feature-count divergence is traceable to a lost image.
+                        let images: [UserInput.Image] = wrappedData.value.enumerated().compactMap { (idx, data) in
+                            Self.decodeVisionImage(data, index: idx, logger: self.logger)
+                        }
+                        if images.count != wrappedData.value.count {
+                            self.logger.error("[VISION] decoded \(images.count)/\(wrappedData.value.count) image(s); \(wrappedData.value.count - images.count) DROPPED — prompt placeholders will outnumber vision features downstream")
                         }
 
                         // Rebuild the chat, attaching the images to the final user turn.
+                        // Fall back to the last message when NO user turn exists — the
+                        // previous `i == lastUserIdx` with an `Int?` compared every index
+                        // to nil, which is always false, so a malformed (system-only /
+                        // assistant-terminated) array dropped every image silently.
                         let msgs = wrappedMessages.value
-                        let lastUserIdx = msgs.lastIndex(where: { $0["role"] == "user" })
+                        let userIdx = msgs.lastIndex(where: { $0["role"] == "user" })
+                        if userIdx == nil, !images.isEmpty {
+                            self.logger.warning("[VISION] no user turn in a \(msgs.count)-message array — attaching \(images.count) image(s) to the last turn so they aren't silently dropped")
+                        }
+                        let targetIdx = userIdx ?? (msgs.isEmpty ? -1 : msgs.count - 1)
                         var chat: [Chat.Message] = []
                         for (i, m) in msgs.enumerated() {
                             let content = m["content"] ?? ""
-                            let imgs = (i == lastUserIdx) ? images : []
+                            let imgs = (i == targetIdx) ? images : []
                             switch m["role"] {
                             case "system":    chat.append(.system(content, images: imgs))
                             case "assistant": chat.append(.assistant(content, images: imgs))
@@ -525,16 +582,56 @@ actor MLXService {
                         }
 
                         let userInput = UserInput(chat: chat)
-                        let lmInput = try await context.processor.prepare(input: userInput)
 
+                        // [VISION] Instrumentation around the crash-prone hop. The MLX vision
+                        // runtime does NOT reproduce this crash from an isolated harness (verified:
+                        // every image size/format/multi-image case either succeeds or throws
+                        // catchably), so the app must self-report enough to pin the trigger on a
+                        // real crash. A hard crash BETWEEN the PRE and POST lines localizes the
+                        // fault to `processor.prepare`; a crash after "starting forward" with no
+                        // token output localizes it to the first `generate` eval. `visionFeatures`
+                        // (the pixel-tensor leading dim) vs `promptTokens` lets us spot a
+                        // placeholder↔feature count divergence — the documented VLM failure family.
+                        let activeBefore = MLX.Memory.activeMemory
+                        let cacheBefore = MLX.Memory.cacheMemory
+                        self.logger.info("[VISION] prepare PRE — images=\(images.count), MLX active=\(ByteCountFormatter.string(fromByteCount: Int64(activeBefore), countStyle: .memory)), cache=\(ByteCountFormatter.string(fromByteCount: Int64(cacheBefore), countStyle: .memory))")
+                        let lmInput = try await context.processor.prepare(input: userInput)
+                        let pixShape = lmInput.image?.pixels.shape ?? []
+                        let promptLen = lmInput.text.tokens.shape.last ?? 0
+                        let activeAfter = MLX.Memory.activeMemory
+                        self.logger.info("[VISION] prepare POST — promptTokens=\(promptLen), visionFeatures(pixels)=\(pixShape), MLX active=\(ByteCountFormatter.string(fromByteCount: Int64(activeAfter), countStyle: .memory)) (Δ=\(ByteCountFormatter.string(fromByteCount: Int64(activeAfter) - Int64(activeBefore), countStyle: .memory)))")
+
+                        // ⚠️ ROOT-CAUSE FIX (reproduced on-device 2026-07-22): drop the library
+                        // repetition penalty on the VISION path. mlx-swift-lm 3.31.3's
+                        // `RepetitionContext.TokenRing.loadPrompt` reads `prompt.dim(0)`, but every
+                        // VLM `UserInputProcessor` builds `LMInput.text.tokens` as 2-D `[1, seqLen]`
+                        // (`MLXArray(promptTokens).expandedDimensions(axis: 0)`). So `dim(0)` is the
+                        // BATCH dim (1), not `seqLen`; the guard `n <= capacity` mis-fires and the
+                        // ring buffer is built as `[seqLen + repCtx - 1]` instead of `[repCtx]`. The
+                        // first `didSample → append` then evaluates
+                        // `MLX.where(positions[repCtx], token, buffer[seqLen+repCtx-1])` →
+                        // `Fatal error: [broadcast_shapes] Shapes (repCtx) and (seqLen+repCtx-1)` —
+                        // the exact reported crash (repCtx=25 → the "(25)"; the other number is
+                        // promptTokens+24). Under MLX lazy eval the corrupted shape can instead
+                        // surface downstream as an uncatchable `Index out of range` 0-dim slice
+                        // (MLXArray+Indexing.swift:551) — hence "crashed two ways across runs". The
+                        // TEXT path passes 1-D tokens so `dim(0) == seqLen` and is unaffected.
+                        // We can't durably patch the vendored checkout (lost on SPM re-resolve), so
+                        // we disable the penalty here. Runaway repetition on this small-quantized-VLM
+                        // population is still bounded by the StreamingCircuitBreaker + stop sequences
+                        // in `consumeGenerationStream` (added for exactly this reason).
+                        if let rp = repetitionPenalty, rp != 0 {
+                            self.logger.warning("[VISION] dropping repetitionPenalty=\(rp) on the MLX vision path — mlx-swift-lm 3.31.3 RepetitionContext broadcast-crashes on 2-D VLM prompts; circuit breaker + stop sequences still bound repetition")
+                        }
                         let parameters = GenerateParameters(
                             maxTokens: maxTokens,
                             temperature: temperature,
                             topP: topP,
                             repetitionPenalty: nil,
-                            repetitionContextSize: 20
+                            repetitionContextSize: repetitionContextSize
                         )
 
+                        self.logger.info("[VISION] prepare complete — starting first forward/eval (repetitionPenalty disabled on vision path); a crash before any token output localizes to the vision forward pass, not prepare")
                         return try MLXLMCommon.generate(
                             input: lmInput,
                             parameters: parameters,
@@ -542,12 +639,8 @@ actor MLXService {
                         )
                     }
 
-                    for await generation in stream {
-                        if case .chunk(let text) = generation {
-                            continuation.yield(text)
-                        }
+                    await self.consumeGenerationStream(stream, into: continuation, stopSequences: stopSequences, onUsage: onUsage)
                     }
-
                     continuation.finish()
                 } catch {
                     logger.error("MLX Vision Generation Error: \(error.localizedDescription)")
@@ -557,6 +650,45 @@ actor MLXService {
                 self.startIdleTimer()
             }
         }
+    }
+
+    // MARK: - Vision Image Decoding
+
+    /// Shared CoreImage context reused across image decodes (allocating a
+    /// `CIContext` per image is expensive). `nonisolated` so the `@Sendable`
+    /// `container.perform` closure can reach it without hopping the actor.
+    private nonisolated static let visionDecodeContext = CIContext(options: nil)
+
+    /// Decodes raw image bytes into a `UserInput.Image` for the VLM processor.
+    ///
+    /// The reference mlx-swift-lm apps feed a VLM a file URL (decoded via
+    /// `CIImage(contentsOf:)`) or a CGImage-backed image — never a bare
+    /// `CIImage(data:)`. We mirror that: rendering the decoded image through a
+    /// CGImage guarantees the `CIImage` handed to the shared
+    /// `MLXVLM.MediaProcessing` pipeline carries a materialized pixel buffer and a
+    /// concrete, finite `[0,0,w,h]` extent — the value `asMLXArray` reads to derive
+    /// the array shape. Falls back to the raw `CIImage(data:)` when a CGImage can't
+    /// be produced, and returns `nil` (logging the consequence) when the bytes can't
+    /// be decoded at all — a dropped image the caller must account for.
+    private nonisolated static func decodeVisionImage(
+        _ data: Data, index: Int, logger: DGLogger
+    ) -> UserInput.Image? {
+        guard let raw = CIImage(data: data) else {
+            logger.error("[VISION] image[\(index)] UNDECODABLE (\(data.count) bytes) — DROPPED; the model will receive one fewer image than the prompt has placeholders")
+            return nil
+        }
+        let extent = raw.extent
+        let cs = (raw.colorSpace?.name as String?) ?? "unknown"
+        guard !extent.isInfinite, !extent.isNull, extent.width >= 1, extent.height >= 1 else {
+            logger.warning("[VISION] image[\(index)] non-concrete extent \(extent) — retaining bare CIImage; asMLXArray may mis-shape the image tensor")
+            return .ciImage(raw)
+        }
+        if let cg = visionDecodeContext.createCGImage(raw, from: extent) {
+            logger.info("[VISION] image[\(index)] \(Int(extent.width))x\(Int(extent.height)) cs=\(cs) bytes=\(data.count) → CGImage-backed")
+            return .ciImage(CIImage(cgImage: cg))
+        }
+        logger.warning("[VISION] image[\(index)] createCGImage failed (extent \(extent)) — falling back to bare CIImage(data:)")
+        return .ciImage(raw)
     }
 
     // MARK: - Sendable Bridge

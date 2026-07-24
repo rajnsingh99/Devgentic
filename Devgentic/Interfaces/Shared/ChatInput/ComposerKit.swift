@@ -69,18 +69,23 @@ struct ComposerIconButton: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(.body, weight: .medium))
-                .foregroundColor(isHovered && !disabled ? theme.primaryText : theme.secondaryText)
+                .foregroundColor(isHovered && !disabled ? theme.primaryText : theme.secondaryText.opacity(0.85))
                 .frame(width: 28, height: 28)
                 .background(
-                    // [UI audit A] Transparent at rest — auxiliary buttons reveal their circle
-                    // only on hover, so they never outweigh the primary (send) action.
-                    Circle().fill(isHovered && !disabled ? theme.surfaceOverlay : Color.clear)
+                    Circle()
+                        .fill(isHovered && !disabled ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
                 )
+                .overlay(
+                    Circle()
+                        .stroke(isHovered && !disabled ? theme.secondaryText.opacity(0.3) : Color.clear, lineWidth: 1)
+                )
+                .shadow(color: isHovered && !disabled ? Color.black.opacity(0.2) : .clear, radius: 4, x: 0, y: 1)
+                .scaleEffect(isHovered && !disabled ? 1.06 : 1.0)
         }
         .buttonStyle(.plain)
         .disabled(disabled)
         .opacity(disabled ? 0.5 : 1.0)
-        .onHover { hover in withAnimation(.easeInOut(duration: 0.15)) { isHovered = hover } }
+        .onHover { hover in withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { isHovered = hover } }
         .help(help)
         .accessibilityLabel(Text(help))
     }
@@ -113,8 +118,6 @@ struct ComposerMicButton: View {
                         .frame(width: 28, height: 28)
                         .scaleEffect(pulseScale)
                         .onAppear {
-                            // Matches DynamicActionButton, this button's near-identical twin,
-                            // which already guarded. A forever-pulse is a vestibular trigger.
                             guard !reduceMotion else { return }
                             withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
                                 pulseScale = 1.25
@@ -127,12 +130,13 @@ struct ComposerMicButton: View {
                     .font(.system(.body, weight: .medium))
                     .foregroundColor(isRecording ? .red : (isReady ? (isHovered ? theme.primaryText : theme.secondaryText) : theme.secondaryText.opacity(0.3)))
                     .frame(width: 28, height: 28)
-                    .background(isHovered ? theme.surfaceOverlay : Color.clear) // [UI audit A] same hover token as ComposerIconButton
+                    .background(isHovered ? theme.surfaceOverlayStrong : Color.clear)
                     .clipShape(Circle())
+                    .scaleEffect(isHovered ? 1.06 : 1.0)
             }
         }
         .buttonStyle(.plain)
-        .onHover { hover in isHovered = hover }
+        .onHover { hover in withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { isHovered = hover } }
         .help(isRecording ? "Stop dictation" : "Dictate")
         .accessibilityLabel(isRecording ? "Stop dictation"
                             : (isReady ? "Start voice dictation"
@@ -156,26 +160,50 @@ struct ComposerSendStopButton: View {
             ZStack {
                 if isSending {
                     Circle()
-                        .fill(Color.primary.opacity(0.08))
+                        .fill(Color.red.opacity(0.12))
                         .frame(width: 28, height: 28)
+                        .overlay(
+                            Circle()
+                                .stroke(Color.red.opacity(0.3), lineWidth: 1)
+                        )
                     Image(systemName: "stop.fill")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundColor(.red)
                 } else {
-                    // [UI audit A] Disabled = fully transparent with a faded glyph, so the
-                    // enabled accent circle is the ONLY filled control in the row (hierarchy).
                     Circle()
-                        .fill(!isDisabled ? (isHovered ? theme.accentColor.opacity(0.9) : theme.accentColor) : Color.clear)
+                        .fill(
+                            !isDisabled
+                                ? LinearGradient(
+                                    colors: [
+                                        theme.accentColor,
+                                        isHovered ? theme.accentColor.opacity(0.85) : theme.accentColor.opacity(0.95)
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                  )
+                                : LinearGradient(
+                                    colors: [theme.surfaceOverlay],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                  )
+                        )
                         .frame(width: 28, height: 28)
+                        .shadow(
+                            color: !isDisabled ? theme.accentColor.opacity(isHovered ? 0.5 : 0.3) : .clear,
+                            radius: isHovered ? 5 : 3,
+                            x: 0,
+                            y: 1
+                        )
                     Image(systemName: "arrow.up")
                         .font(.system(size: 12, weight: .bold))
-                        .foregroundColor(!isDisabled ? .white : theme.secondaryText.opacity(0.3))
+                        .foregroundColor(!isDisabled ? .white : theme.secondaryText.opacity(0.35))
                 }
             }
+            .scaleEffect(!isDisabled && isHovered ? 1.07 : 1.0)
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
-        .onHover { hover in isHovered = hover }
+        .onHover { hover in withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { isHovered = hover } }
         .help(isSending ? "Stop" : "Send")
         .accessibilityLabel(isSending ? "Stop generating" : "Send")
     }

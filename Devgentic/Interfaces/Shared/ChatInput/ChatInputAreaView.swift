@@ -37,6 +37,10 @@ struct ChatInputAreaView: View {
     @Environment(ExplorerViewModel.self) private var explorerViewModel
     @Environment(MainApplicationViewModel.self) private var mainViewModel // retained only for delegate wiring & APIKeyInputPopup sheet
     @Environment(CodeSessionManager.self) private var codeSessionManager
+    // [Context gauge] Source of the conversation's messages (history size = the gauge's
+    // numerator) and the newest turn's real token usage. App-scoped, injected at the app
+    // root and already consumed by this view's parent — safe to read here.
+    @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
     @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -46,6 +50,10 @@ struct ChatInputAreaView: View {
     @State private var editorTextView: CustomTextEditor.CustomNSTextView? = nil
     @State private var selectedProfile: BackendProfileModel?
     @State private var showingSchedulePopover = false
+    /// [Context gauge] Occupancy of the selected model's window for THIS conversation
+    /// (nil = non-chat profile, so the ring self-hides). Recomputed on turn / model /
+    /// attachment changes — never per keystroke — so it stays cheap on long transcripts.
+    @State private var contextUsage: ContextWindowUsage?
 
     // MARK: - Layout Constants
     private let textEditorMinHeight: CGFloat = 32
@@ -94,15 +102,26 @@ struct ChatInputAreaView: View {
     /// Send-button availability — mirrors the old morphing button's `.send` disabled rule
     /// (backend selected, non-empty input, not mid-request, voice not busy). Never disabled
     /// while streaming: the button is the Stop control then.
+    /// Voice is mid-capture or mid-transcription. Sending now races the in-flight
+    /// transcript into a composer we're about to clear, so it lands as stray text at the
+    /// head of the NEXT message.
+    ///
+    /// Deliberately shared by the send BUTTON and the ENTER key: these were two
+    /// independently-computed gates and they had drifted — Enter checked only
+    /// `isInputEnabled` and sent straight through while the button was correctly
+    /// disabled. One property so they can't diverge again.
+    private var isVoiceBusy: Bool {
+        inputViewModel.voiceInputState == .recording
+            || inputViewModel.voiceInputState == .processing
+            || inputViewModel.voiceInputState == .finalizingSilence
+    }
+
     private var sendButtonDisabled: Bool {
         if inputViewModel.isStreaming { return false }
         let profileOK = mainViewModel.interfaceMode == .code
             ? codeSessionManager.isConfigured
             : backendConfiguration.selectedProfileID != nil
-        let voiceBusy = inputViewModel.voiceInputState == .recording
-            || inputViewModel.voiceInputState == .processing
-            || inputViewModel.voiceInputState == .finalizingSilence
-        return !profileOK || !hasInputText || isSending || voiceBusy
+        return !profileOK || !hasInputText || isSending || isVoiceBusy
     }
 
     var body: some View {
@@ -161,6 +180,16 @@ struct ChatInputAreaView: View {
         }
         .frame(maxWidth: ViewLayout.maxContentWidth)
         .frame(maxWidth: .infinity, alignment: .center)
+        // [V3] Wire the hosting window to the VM so the app-wide ⌘⇧V shortcut can be
+        // gated on THIS window being key (a recording started from another window has
+        // no visible overlay), and stop any live dictation when the composer leaves
+        // the hierarchy — a mic session must not outlive its UI.
+        .background(ComposerWindowReader { window in
+            inputViewModel.composerWindow = window
+        })
+        .onDisappear {
+            inputViewModel.handleComposerDismantled()
+        }
         // MARK: - File Drop Zone (P1)
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             handleFileDrop(providers)
@@ -169,6 +198,7 @@ struct ChatInputAreaView: View {
         // MARK: - Wiring
         .onAppear {
             updateSelectedProfile(profileID: backendConfiguration.selectedProfileID)
+            recomputeContextGauge()
 
             // Wire delegate so ChatInputViewModel can mediate MainApplicationViewModel
             inputViewModel.mainDelegate = mainViewModel
@@ -184,12 +214,45 @@ struct ChatInputAreaView: View {
         .onChange(of: backendConfiguration.selectedProfileID) { _, newID in
             updateSelectedProfile(profileID: newID)
             evaluatePreSendFit()
+            // Model changed → the gauge's DENOMINATOR (window) changed. Same conversation
+            // can jump from 24% to 100%+ on a switch to a smaller-window model.
+            recomputeContextGauge()
         }
         // [Pre-send fit hint] Surface the context-overflow advisory the moment
         // attachments imply the prompt won't fit — before the turn is spent.
         // Count-keyed: FileSystemItem isn't Equatable, and adds/removes are the
         // events that change the estimate.
-        .onChange(of: inputViewModel.attachedFiles.count) { _, _ in evaluatePreSendFit() }
+        .onChange(of: inputViewModel.attachedFiles.count) { _, _ in
+            evaluatePreSendFit()
+            recomputeContextGauge()
+        }
+
+        // [C2] Per-conversation drafts. The composer's view model is app-scoped and
+        // `attachedFiles` lives on the single MainApplicationViewModel, so nothing used to
+        // reset either on a conversation switch: the half-typed message and attachments
+        // from the conversation you just left stayed in the box, where they could be sent
+        // into the new one. Save under the OUTGOING id, restore the INCOMING one's.
+        //
+        // Observed here because this view is a SIBLING of the content switch — always
+        // mounted, even on the welcome screen — so it catches every change to the
+        // selection, including the ones the ChatOps bridges make, without having to patch
+        // each write site.
+        .onChange(of: mainViewModel.selectedConversationID) { oldID, newID in
+            guard oldID != newID else { return }
+            ComposerDraftStore.shared.save(
+                .init(text: inputViewModel.userInput, attachments: mainViewModel.attachedFiles),
+                for: oldID
+            )
+            let incoming = ComposerDraftStore.shared.draft(for: newID)
+            inputViewModel.userInput = incoming.text
+            // Write the SOURCE of truth: `ChatInputViewModel.attachedFiles` is a
+            // `private(set)` mirror that its observation stream keeps in sync from here.
+            mainViewModel.attachedFiles = incoming.attachments
+            // New conversation → different history size, so recompute occupancy. The
+            // message-count change fires too, but only AFTER the load completes; this
+            // clears the outgoing chat's number immediately on switch.
+            recomputeContextGauge()
+        }
 
         // Refresh files if Explorer/Context changes (Lazy refresh)
         .onChange(of: explorerViewModel.rootItems.count) { _, _ in
@@ -197,6 +260,17 @@ struct ChatInputAreaView: View {
                 inputViewModel.refreshFileSuggestions(using: explorerViewModel)
             }
         }
+
+        // [Context gauge] Occupancy moves when a turn is added (history grows), when
+        // streaming ends (final assistant text + real usage settle), and when the mode
+        // switches (Code vs chat resolve different models). Deliberately NOT keyed on
+        // keystrokes — the unsent draft is excluded from the ring.
+        // [Context gauge] All the cheap recompute signals — a turn added (history grows),
+        // streaming settling, mode switch, and a code-folder swap (project-context size) —
+        // collapsed into ONE onChange keyed on a combined signature computed outside the
+        // body. Four separate onChanges tipped this already-large body over the SwiftUI
+        // type-checker's complexity budget; one keeps it under.
+        .onChange(of: contextGaugeTriggerKey) { _, _ in recomputeContextGauge() }
         
         .sheet(isPresented: $inputViewModel.showAPIKeyInputPopup, onDismiss: {
             inputViewModel.resetAPIKeyPopupState()
@@ -226,28 +300,95 @@ struct ChatInputAreaView: View {
     /// [Pre-send fit hint] Posts/clears the shared context-overflow advisory from
     /// composer state (stat-based estimate); the send-time check refines it.
     private func evaluatePreSendFit() {
+        // In Code mode `selectedProfile` is NOT the code profile — `selectedProfileID`
+        // is only pointed at it during send (see onCommit), so before that it's nil or
+        // the last chat profile. Resolve the real one, else Code silently got no hint.
+        let profile: BackendProfileModel?
+        if mainViewModel.interfaceMode == .code, let codeID = codeSessionManager.codeProfileID {
+            profile = try? BackendProfileStore.shared.fetchProfile(byId: codeID)
+        } else {
+            profile = selectedProfile
+        }
+
         PreSendFitHint.evaluate(
             attachedFiles: inputViewModel.attachedFiles,
             typedText: inputViewModel.userInput,
-            profile: selectedProfile,
+            profile: profile,
             conversationID: mainViewModel.selectedConversationID
+        )
+    }
+
+    /// [Context gauge] Rebuilds the window-occupancy snapshot for the toolbar ring.
+    /// Resolves the active profile the same way `evaluatePreSendFit` does (in Code mode
+    /// the real profile isn't `selectedProfile` until send). Synchronous and cheap —
+    /// called on turn / model / attachment / mode changes, never per keystroke.
+    /// [Context gauge] Size of Code mode's injected project context (`.devgentic/context.md`),
+    /// 0 outside Code mode. Code adds it to the system prompt on every message — a real, fixed
+    /// cost the generic history/attachment estimate can't see. A plain Int so `onChange(of:)`
+    /// keeps the large body's type-checker under budget; shared by the recompute so they can't drift.
+    private var codeProjectContextChars: Int {
+        guard mainViewModel.interfaceMode == .code else { return 0 }
+        return codeSessionManager.projectMemoryContent?.count ?? 0
+    }
+
+    /// [Context gauge] One combined key over every cheap recompute signal (turn count,
+    /// streaming, mode, code project-context size), so a SINGLE `onChange` in the body
+    /// covers them all — keeping the large body under the type-checker's budget. Reading
+    /// each value here establishes the SwiftUI observation dependency just as separate
+    /// `onChange`s would.
+    private var contextGaugeTriggerKey: String {
+        "\(chatHistoryViewModel.currentChatMessages.count)|\(inputViewModel.isStreaming)|\(mainViewModel.interfaceMode)|\(codeProjectContextChars)"
+    }
+
+    private func recomputeContextGauge() {
+        let profile: BackendProfileModel?
+        if mainViewModel.interfaceMode == .code, let codeID = codeSessionManager.codeProfileID {
+            profile = try? BackendProfileStore.shared.fetchProfile(byId: codeID)
+        } else {
+            profile = selectedProfile
+        }
+        contextUsage = ContextWindowUsage.resolve(
+            profile: profile,
+            messages: chatHistoryViewModel.currentChatMessages,
+            attachedFiles: inputViewModel.attachedFiles,
+            conversationID: mainViewModel.selectedConversationID,
+            extraKnowledgeChars: codeProjectContextChars
         )
     }
 
     // MARK: - Main Input Area
     private var mainInputArea: some View {
-        VStack(spacing: 6) {
+        let isFocused = isInputFocused.wrappedValue
+        return VStack(spacing: 4) {
             editorAndPlaceholderArea
             toolbarArea
         }
-        // Liquid Glass material (matches the banners/pickers around it, no longer the one opaque
-        // bottom surface) with a quiet hairline for edge definition. The accent focus ring was
-        // removed by design choice — with vivid accent colors it read as a loud colored border.
-        .glassEffect(.regular, in: .rect(cornerRadius: 16))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(theme.surfaceOverlay, lineWidth: 1)
+        .padding(.top, 4)
+        .glassEffect(.regular, in: .rect(cornerRadius: 18))
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(theme.secondaryBackground.opacity(0.45))
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: isFocused
+                            ? [theme.accentColor.opacity(0.35), theme.accentColor.opacity(0.12)]
+                            : [Color.white.opacity(0.12), Color.white.opacity(0.03)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1.0
+                )
+        )
+        .shadow(
+            color: isFocused ? theme.accentColor.opacity(0.10) : Color.black.opacity(0.16),
+            radius: isFocused ? 10 : 6,
+            x: 0,
+            y: 3
+        )
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isFocused)
         .transition(.opacity)
     }
 
@@ -260,7 +401,9 @@ struct ChatInputAreaView: View {
             CustomTextEditor(
                 text: $inputViewModel.userInput,
                 onCommit: { attributedString in
-                    guard isInputEnabled else { return }
+                    // Same gate the send button uses — Enter must not bypass the
+                    // voice-busy check (see `isVoiceBusy`).
+                    guard isInputEnabled, !isVoiceBusy else { return }
                     // Code mode: intercept if model or folder not configured,
                     // then point selectedProfileID at the code profile so getRequestConfig resolves.
                     if mainViewModel.interfaceMode == .code {
@@ -442,6 +585,22 @@ struct ChatInputAreaView: View {
             )
 
             Spacer()
+
+            // [Context gauge] Small window-occupancy ring — how full the selected model's
+            // context window is for this conversation. Tap for the breakdown. Self-hides
+            // for non-chat profiles (workflow / imageGen have no single window).
+            if let contextUsage {
+                ContextWindowGauge(usage: contextUsage) { profileID in
+                    router.navigate(to: .profileDetail(profileID: profileID))
+                }
+            }
+
+            // [Jarvis] Experimental voice-HUD entry point, and the feature's ONLY hook
+            // into existing code — Jarvis otherwise lives entirely in its own floating
+            // NSPanel. Delete Devgentic/Jarvis/ plus these four lines to remove it.
+            if mainViewModel.interfaceMode == .chat {
+                JarvisComposerButton()
+            }
 
             // Voice — DynamicActionButton retained for its main-only machinery (voice states,
             // Whisper model picker via long-press/right-click, download-progress ring, alerts),
@@ -644,4 +803,27 @@ struct ChatInputAreaView: View {
         }
     }
 
+}
+
+// MARK: - Window Reader ([V3])
+
+/// Resolves the NSWindow hosting the composer and hands it to the caller — same
+/// accessor shape as `WindowConfigurator`, but reporting instead of configuring.
+/// Used to gate the app-wide toggle-voice shortcut on the composer's window being key.
+private struct ComposerWindowReader: NSViewRepresentable {
+    let onResolve: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { [weak view] in
+            onResolve(view?.window)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { [weak nsView] in
+            onResolve(nsView?.window)
+        }
+    }
 }

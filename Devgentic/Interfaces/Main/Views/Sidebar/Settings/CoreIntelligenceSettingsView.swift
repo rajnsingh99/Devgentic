@@ -24,7 +24,12 @@ struct CoreIntelligenceSettingsView: View {
     @AppStorage(AppSettings.ciFeatureSuggestionKey) private var suggestionEnabled: Bool = false
     @AppStorage(AppSettings.ciFeatureMorningBriefKey) private var morningBriefEnabled: Bool = false
     @AppStorage(AppSettings.ciFeatureUserPersonalKey) private var userPersonalEnabled: Bool = false
-    @AppStorage(AppSettings.ciFeatureResponseSynthesisKey) private var responseSynthesisEnabled: Bool = true
+    // Response Synthesis is opt-in per provider family. Default false everywhere —
+    // the IC pass is a small-model rewrite of an answer a larger model already
+    // finished, so it must never be on by accident. See `SynthesisOptIn`.
+    @AppStorage(AppSettings.ciFeatureResponseSynthesisMLXKey) private var synthesisMLXEnabled: Bool = false
+    @AppStorage(AppSettings.ciFeatureResponseSynthesisOllamaKey) private var synthesisOllamaEnabled: Bool = false
+    @AppStorage(AppSettings.ciFeatureResponseSynthesisRemoteKey) private var synthesisRemoteEnabled: Bool = false
     @AppStorage(AppSettings.ciFeatureHistoryCompactionKey) private var historyCompactionEnabled: Bool = true
 
     // Custom prompt
@@ -126,11 +131,10 @@ struct CoreIntelligenceSettingsView: View {
 
                         Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
-                        FeatureToggleRow(
-                            title: "Response Synthesis",
-                            description: "Uses Intelligence Core to compose polished final responses from agent execution results. Particularly effective for local models.",
-                            icon: "sparkles",
-                            isOn: $responseSynthesisEnabled,
+                        SynthesisFamilySection(
+                            mlxEnabled: $synthesisMLXEnabled,
+                            ollamaEnabled: $synthesisOllamaEnabled,
+                            remoteEnabled: $synthesisRemoteEnabled,
                             theme: theme
                         )
 
@@ -343,7 +347,7 @@ struct CoreIntelligenceSettingsView: View {
         }
         .onChange(of: selectedModel) { _, _ in
             // Unload previous model when selection changes so next inference loads the new one
-            Task { await IntelligenceCoreService.shared.unload() }
+            Task { await IntelligenceCoreService.shared.unloadNow(caller: .unknown) }
             updateFitAssessment()
         }
     }
@@ -453,7 +457,7 @@ struct CoreIntelligenceSettingsView: View {
                 appendLog("Post-load RAM available: \(midProfile.formattedAvailableRAM)")
 
                 appendLog("Unloading model...")
-                await IntelligenceCoreService.shared.unload(caller: .unknown)
+                await IntelligenceCoreService.shared.unloadNow(caller: .unknown)
 
                 let postProfile = SystemHardwareProfiler.shared.profile
                 appendLog("Post-unload RAM available: \(postProfile.formattedAvailableRAM)")
@@ -547,6 +551,65 @@ struct CoreIntelligenceSettingsView: View {
 // MARK: - Feature Toggle Row
 
 /// A specialized settings row for Intelligence Core feature toggles.
+/// Response Synthesis, opt-in per provider family.
+///
+/// Three checkboxes rather than one switch because the trade-off inverts with
+/// model size: an IC-sized cleanup pass genuinely helps a small on-device model,
+/// and behind a large cloud model it compresses a better answer than it writes.
+/// Any subset may be enabled; all default off.
+private struct SynthesisFamilySection: View {
+    @Binding var mlxEnabled: Bool
+    @Binding var ollamaEnabled: Bool
+    @Binding var remoteEnabled: Bool
+    let theme: any Theme
+
+    private var isActive: Bool { mlxEnabled || ollamaEnabled || remoteEnabled }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 20) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 14))
+                    .foregroundColor(isActive ? theme.accentColor : theme.secondaryText)
+                    .frame(width: 24, alignment: .center)
+                    .padding(.top, 2)
+                    .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Response Synthesis")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(theme.primaryText)
+
+                    Text("Has Intelligence Core rewrite the agent's final answer from its execution results. Off by default: it polishes output from smaller local models, but in front of a large model it usually shortens an answer that was already better. Pick which model families it applies to.")
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 24)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
+            .padding(.bottom, 10)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("MLX — on-device models", isOn: $mlxEnabled)
+                Toggle("Ollama — local server models", isOn: $ollamaEnabled)
+                Toggle("Remote — cloud API models", isOn: $remoteEnabled)
+            }
+            .toggleStyle(.checkbox)
+            .font(.system(size: 12))
+            .foregroundColor(theme.primaryText)
+            .tint(theme.accentColor)
+            // Indented under the heading so the checkboxes read as its options.
+            .padding(.leading, 60)
+            .padding(.trailing, 16)
+            .padding(.bottom, 14)
+        }
+    }
+}
+
 private struct FeatureToggleRow: View {
     let title: LocalizedStringKey
     let description: LocalizedStringKey

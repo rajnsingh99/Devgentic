@@ -26,24 +26,24 @@ enum AppAccentColor: String, CaseIterable {
     var color: Color? {
         switch self {
         case .default: return nil
-        case .blue: return .blue
-        case .green: return .green
-        case .purple: return .purple
-        case .orange: return .orange
-        case .pink: return .pink
-        case .modernSpotify: return Color(hex: "#1DB954")
+        case .blue: return Color(hex: "#0A84FF")          // Electric Azure
+        case .green: return Color(hex: "#10B981")         // Emerald Mint
+        case .purple: return Color(hex: "#8B5CF6")        // Royal Violet
+        case .orange: return Color(hex: "#F59E0B")        // Warm Amber
+        case .pink: return Color(hex: "#EC4899")          // Rose Quartz
+        case .modernSpotify: return Color(hex: "#06B6D4") // Cosmic Cyan
         }
     }
 
     var nsColor: NSColor? {
         switch self {
         case .default: return nil
-        case .blue: return .systemBlue
-        case .green: return .systemGreen
-        case .purple: return .systemPurple
-        case .orange: return .systemOrange
-        case .pink: return .systemPink
-        case .modernSpotify: return NSColor(hex: "#1DB954")
+        case .blue: return NSColor(hex: "#0A84FF")
+        case .green: return NSColor(hex: "#10B981")
+        case .purple: return NSColor(hex: "#8B5CF6")
+        case .orange: return NSColor(hex: "#F59E0B")
+        case .pink: return NSColor(hex: "#EC4899")
+        case .modernSpotify: return NSColor(hex: "#06B6D4")
         }
     }
 
@@ -51,11 +51,11 @@ enum AppAccentColor: String, CaseIterable {
         switch self {
         case .default: return "Default"
         case .blue: return "Ocean Blue"
-        case .green: return "Forest Green"
-        case .purple: return "Deep Purple"
-        case .orange: return "Sunset Orange"
-        case .pink: return "Vibrant Pink"
-        case .modernSpotify: return "Cosmic Green"
+        case .green: return "Emerald Mint"
+        case .purple: return "Royal Violet"
+        case .orange: return "Warm Amber"
+        case .pink: return "Rose Quartz"
+        case .modernSpotify: return "Cosmic Cyan"
         }
     }
 }
@@ -153,9 +153,6 @@ struct ThemeDecorator: Theme {
     var spacing12: CGFloat { base.spacing12 }
     var spacing16: CGFloat { base.spacing16 }
     var spacing24: CGFloat { base.spacing24 }
-
-    // Backend Origin Color (forwarded so a base theme may override the hues)
-    func backendColor(for backend: BackendType) -> Color { base.backendColor(for: backend) }
 
     // Capability Accent Color (forwarded so a base theme may override the hues)
     func capabilityColor(for category: CapabilityMilestoneKind.MilestoneColor) -> Color { base.capabilityColor(for: category) }
@@ -258,10 +255,6 @@ protocol Theme {
     /// can't infer the app's light/dark state from the parent environment.
     /// `nil` defers to the system appearance.
     var colorScheme: ColorScheme? { get }
-
-    /// Accent color for a conversation/message's backend origin (local agent / Ollama / remote).
-    /// Single source of truth for the per-backend hues (sidebar rail, input picker dot, etc.).
-    func backendColor(for backend: BackendType) -> Color
 
     /// Accent color for an agent-capability surface (planning / reflection / delegation /
     /// compaction). Single source of truth for the capability hues used by the timeline
@@ -469,19 +462,9 @@ extension Theme {
     var spacing16: CGFloat { 16 }
     var spacing24: CGFloat { 24 }
 
-    // ── Backend Origin Color ─────────────────────────────────────────
-
-    /// Curated cross-theme hues; the neutral case follows the theme's text color.
-    func backendColor(for backend: BackendType) -> Color {
-        switch backend {
-        case .agent:  return Color(red: 0.60, green: 0.49, blue: 0.93)  // violet — local native agent
-        case .ollama: return Color(red: 0.96, green: 0.60, blue: 0.24)  // orange — local Ollama
-        case .remote: return Color(red: 0.30, green: 0.66, blue: 0.96)  // sky blue — remote
-        case .none:   return tertiaryText
-        }
-    }
-
     // ── Capability Accent Color ──────────────────────────────────────
+    // (The backend-origin color token was REMOVED 2026-07-19 by user decision:
+    // no profile/backend colors in the sidebar — its only consumer.)
 
     /// Defaults preserve the pre-token hardcoded hues (planning blue, reflection
     /// purple, delegation green, compaction orange). Themes may override.

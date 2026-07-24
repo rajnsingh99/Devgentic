@@ -18,25 +18,32 @@ struct ThemeSettingsView: View {
             VStack(alignment: .leading, spacing: 40) {
                 
                 // MARK: - App Theme Section
-                VStack(alignment: .leading, spacing: 20) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "paintbrush.fill")
-                            .font(.system(.body, weight: .semibold))
-                            .foregroundColor(theme.accentColor)
-                            .accessibilityHidden(true)
-                        Text("App Appearance")
-                            .font(.system(.title3, weight: .semibold))
-                            .foregroundColor(theme.primaryText)
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "paintbrush.fill")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(theme.accentColor)
+
+                            Text("APP APPEARANCE")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .tracking(1.8)
+                                .foregroundColor(theme.secondaryText)
+                        }
+
+                        Text("Select a color scheme for the application workspace.")
+                            .font(theme.fontSubheadline)
+                            .foregroundColor(theme.secondaryText)
                     }
 
-                    LazyVGrid(columns: columns, spacing: 24) {
+                    LazyVGrid(columns: columns, spacing: 20) {
                         ForEach(themeManager.availableThemes, id: \.id) { appTheme in
                             ThemePreviewCard(
                                 previewTheme: appTheme,
                                 isSelected: themeManager.currentTheme.id == appTheme.id,
                                 currentTheme: theme
                             ) {
-                                withAnimation(.easeInOut(duration: 0.2)) {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
                                     themeManager.applyTheme(appTheme)
                                 }
                             }
@@ -44,28 +51,31 @@ struct ThemeSettingsView: View {
                     }
                 }
 
-                Divider().background(theme.dividerColor)
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.25))
+                    .frame(height: 1)
 
                 // MARK: - Accent Color Section
-                VStack(alignment: .leading, spacing: 20) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
                             Image(systemName: "circle.dotted")
-                                .font(.system(.body, weight: .semibold))
+                                .font(.system(size: 13, weight: .semibold))
                                 .foregroundColor(theme.accentColor)
-                                .accessibilityHidden(true)
-                            Text("Accent Color")
-                                .font(.system(.title3, weight: .semibold))
-                                .foregroundColor(theme.primaryText)
+
+                            Text("ACCENT COLOR")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .tracking(1.8)
+                                .foregroundColor(theme.secondaryText)
                         }
                         
-                        Text("Choose a personal touch that applies to interactive elements across the entire app.")
+                        Text("Personalize interactive controls and active indicators across the app.")
                             .font(theme.fontSubheadline)
                             .foregroundColor(theme.secondaryText)
                     }
 
                     ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 16) {
+                        HStack(spacing: 20) {
                             ForEach(AppAccentColor.allCases, id: \.self) { accent in
                                 AccentColorCircle(
                                     accent: accent,
@@ -83,22 +93,25 @@ struct ThemeSettingsView: View {
                     }
                 }
 
-                Divider().background(theme.dividerColor)
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.25))
+                    .frame(height: 1)
 
                 // MARK: - Chat Font Section
-                VStack(alignment: .leading, spacing: 20) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
                             Image(systemName: "textformat.size")
-                                .font(.system(.body, weight: .semibold))
+                                .font(.system(size: 13, weight: .semibold))
                                 .foregroundColor(theme.accentColor)
-                                .accessibilityHidden(true)
-                            Text("Chat Font")
-                                .font(.system(.title3, weight: .semibold))
-                                .foregroundColor(theme.primaryText)
+
+                            Text("CHAT FONT")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .tracking(1.8)
+                                .foregroundColor(theme.secondaryText)
                         }
 
-                        Text("Adjust the font size and line spacing for chat messages.")
+                        Text("Adjust font size and line spacing for chat messages.")
                             .font(theme.fontSubheadline)
                             .foregroundColor(theme.secondaryText)
                     }
@@ -108,22 +121,21 @@ struct ThemeSettingsView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text("Font Size")
-                                    .font(theme.fontSubheadline.weight(.medium))
+                                    .font(theme.fontSubheadline.weight(.semibold))
                                     .foregroundColor(theme.primaryText)
                                 Spacer()
                                 Text("\(Int(themeManager.chatFontSize)) pt")
-                                    .font(.system(size: 12, weight: .medium, design: .monospaced)) // Fixed size: monospaced (pt value label)
-                                    .foregroundColor(theme.secondaryText)
+                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                    .foregroundColor(theme.accentColor)
                                     .padding(.horizontal, 8)
-                                    .padding(.vertical, 2)
+                                    .padding(.vertical, 3)
                                     .background(
-                                        RoundedRectangle(cornerRadius: 4)
-                                            .fill(theme.surfaceOverlay)
+                                        Capsule().fill(theme.accentColor.opacity(0.14))
                                     )
                             }
-                            HStack(spacing: 8) {
+                            HStack(spacing: 10) {
                                 Text("A")
-                                    .font(.system(.caption))
+                                    .font(.system(size: 11, weight: .bold))
                                     .foregroundColor(theme.tertiaryText)
                                 Slider(
                                     value: Binding(
@@ -135,7 +147,7 @@ struct ThemeSettingsView: View {
                                 )
                                 .tint(theme.accentColor)
                                 Text("A")
-                                    .font(.system(.title3, weight: .medium))
+                                    .font(.system(size: 16, weight: .bold))
                                     .foregroundColor(theme.tertiaryText)
                             }
                         }
@@ -144,17 +156,16 @@ struct ThemeSettingsView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text("Line Spacing")
-                                    .font(theme.fontSubheadline.weight(.medium))
+                                    .font(theme.fontSubheadline.weight(.semibold))
                                     .foregroundColor(theme.primaryText)
                                 Spacer()
                                 Text(String(format: "%.0f pt", themeManager.chatLineSpacing))
-                                    .font(.system(size: 12, weight: .medium, design: .monospaced)) // Fixed size: monospaced (pt value label)
-                                    .foregroundColor(theme.secondaryText)
+                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                    .foregroundColor(theme.accentColor)
                                     .padding(.horizontal, 8)
-                                    .padding(.vertical, 2)
+                                    .padding(.vertical, 3)
                                     .background(
-                                        RoundedRectangle(cornerRadius: 4)
-                                            .fill(theme.surfaceOverlay)
+                                        Capsule().fill(theme.accentColor.opacity(0.14))
                                     )
                             }
                             Slider(
@@ -169,25 +180,25 @@ struct ThemeSettingsView: View {
                         }
 
                         // Live Preview
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Preview")
-                                .font(.system(.caption, weight: .medium))
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("PREVIEW")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .tracking(1.4)
                                 .foregroundColor(theme.tertiaryText)
-                                .textCase(.uppercase)
 
                             Text("The quick brown fox jumps over the lazy dog. This is how your chat messages will look with the current font settings.")
-                                .font(.system(size: themeManager.chatFontSize, weight: .regular)) // Fixed size: user-configured chat font size
+                                .font(.system(size: themeManager.chatFontSize, weight: .regular))
                                 .foregroundColor(theme.primaryText)
                                 .lineSpacing(themeManager.chatLineSpacing)
-                                .padding(12)
+                                .padding(14)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .fill(theme.secondaryBackground)
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(theme.surfaceOverlay.opacity(0.5))
                                 )
                                 .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(theme.surfaceOverlay, lineWidth: 1)
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .strokeBorder(theme.secondaryText.opacity(0.18), lineWidth: 1)
                                 )
                         }
 
@@ -211,27 +222,30 @@ struct ThemeSettingsView: View {
                     }
                 }
 
-                Divider().background(theme.dividerColor)
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.25))
+                    .frame(height: 1)
 
                 // MARK: - Code Viewer Section
-                VStack(alignment: .leading, spacing: 20) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
                             Image(systemName: "chevron.left.forwardslash.chevron.right")
-                                .font(.system(.body, weight: .semibold))
+                                .font(.system(size: 13, weight: .semibold))
                                 .foregroundColor(theme.accentColor)
-                                .accessibilityHidden(true)
-                            Text("Code Viewer")
-                                .font(.system(.title3, weight: .semibold))
-                                .foregroundColor(theme.primaryText)
+
+                            Text("CODE VIEWER THEME")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .tracking(1.8)
+                                .foregroundColor(theme.secondaryText)
                         }
                         
-                        Text("When set to Default, the code viewer follows the app theme. Select a specific theme to override it.")
+                        Text("Select a specialized syntax highlighting theme for the code editor.")
                             .font(theme.fontSubheadline)
                             .foregroundColor(theme.secondaryText)
                     }
 
-                    LazyVGrid(columns: columns, spacing: 24) {
+                    LazyVGrid(columns: columns, spacing: 20) {
                         ForEach(CodeViewerThemeOverride.allCases, id: \.self) { override in
                             CodeViewerPreviewCard(
                                 override: override,
@@ -239,7 +253,7 @@ struct ThemeSettingsView: View {
                                 isSelected: themeManager.codeViewerThemeOverride == override,
                                 appTheme: theme
                             ) {
-                                withAnimation(.easeInOut(duration: 0.2)) {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
                                     themeManager.applyCodeViewerTheme(override)
                                 }
                             }
@@ -247,7 +261,7 @@ struct ThemeSettingsView: View {
                     }
                 }
             }
-            .padding(32)
+            .padding(28)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollContentBackground(.hidden)
@@ -267,17 +281,17 @@ struct ThemePreviewCard: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 12) {
+            VStack(spacing: 10) {
                 // Mock UI Container
                 ZStack(alignment: .topLeading) {
                     previewTheme.primaryBackground
 
                     VStack(alignment: .leading, spacing: 6) {
-                        // macOS Window header mock
-                        HStack(spacing: 4) {
-                            Circle().fill(Color.gray.opacity(0.4)).frame(width: 6, height: 6)
-                            Circle().fill(Color.gray.opacity(0.4)).frame(width: 6, height: 6)
-                            Circle().fill(Color.gray.opacity(0.4)).frame(width: 6, height: 6)
+                        // macOS Window control dots
+                        HStack(spacing: 5) {
+                            Circle().fill(Color(hex: "#FF5F56")).frame(width: 6, height: 6)
+                            Circle().fill(Color(hex: "#FFBD2E")).frame(width: 6, height: 6)
+                            Circle().fill(Color(hex: "#27C93F")).frame(width: 6, height: 6)
                         }
                         .padding(.bottom, 4)
 
@@ -285,20 +299,20 @@ struct ThemePreviewCard: View {
                         HStack(spacing: 6) {
                             RoundedRectangle(cornerRadius: 4)
                                 .fill(previewTheme.secondaryBackground)
-                                .frame(width: 30)
+                                .frame(width: 28)
 
                             VStack(alignment: .leading, spacing: 5) {
                                 RoundedRectangle(cornerRadius: 3)
                                     .fill(previewTheme.accentColor)
-                                    .frame(width: 40, height: 5)
+                                    .frame(width: 44, height: 5)
 
                                 RoundedRectangle(cornerRadius: 3)
-                                    .fill(previewTheme.primaryText.opacity(0.2))
-                                    .frame(width: 50, height: 5)
+                                    .fill(previewTheme.primaryText.opacity(0.25))
+                                    .frame(width: 54, height: 5)
 
                                 RoundedRectangle(cornerRadius: 3)
-                                    .fill(previewTheme.primaryText.opacity(0.1))
-                                    .frame(width: 60, height: 5)
+                                    .fill(previewTheme.primaryText.opacity(0.12))
+                                    .frame(width: 64, height: 5)
                             }
                         }
                     }
@@ -308,28 +322,38 @@ struct ThemePreviewCard: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(isSelected ? currentTheme.accentColor : (isHovered ? currentTheme.accentColor.opacity(0.4) : currentTheme.surfaceOverlayStrong), lineWidth: isSelected ? 3 : 1)
+                        .strokeBorder(
+                            isSelected
+                                ? currentTheme.accentColor.opacity(0.85)
+                                : (isHovered ? currentTheme.secondaryText.opacity(0.35) : currentTheme.secondaryText.opacity(0.15)),
+                            lineWidth: isSelected ? 1.5 : 1.0
+                        )
                 )
-                .shadow(color: isHovered ? currentTheme.accentColor.opacity(0.15) : Color.black.opacity(0.1), radius: isHovered ? 8 : 4, y: isHovered ? 4 : 2)
+                .shadow(
+                    color: isSelected
+                        ? currentTheme.accentColor.opacity(0.25)
+                        : (isHovered ? Color.black.opacity(0.15) : .clear),
+                    radius: isSelected ? 8 : 4, y: 2
+                )
                 .scaleEffect(isHovered ? 1.02 : 1.0)
                 .onHover { hovering in
-                    withAnimation(.interactiveSpring(response: 0.25, dampingFraction: 0.7)) {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                         isHovered = hovering
                     }
                 }
 
-                // Title
-                HStack {
+                // Title & Selection Badge
+                HStack(spacing: 6) {
                     Text(previewTheme.displayName)
-                        .font(currentTheme.fontSubheadline.weight(isSelected ? .semibold : .medium))
+                        .font(currentTheme.fontSubheadline.weight(isSelected ? .bold : .medium))
                         .foregroundColor(isSelected ? currentTheme.primaryText : currentTheme.secondaryText)
                     
                     if isSelected {
                         Spacer()
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundColor(currentTheme.accentColor)
-                            .font(.system(.body))
-                            .accessibilityHidden(true)
+                            .font(.system(size: 13, weight: .bold))
+                            .shadow(color: currentTheme.accentColor.opacity(0.6), radius: 3)
                     }
                 }
                 .padding(.horizontal, 4)
@@ -366,25 +390,23 @@ struct CodeViewerPreviewCard: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 12) {
-                // Mock Code Container
+            VStack(spacing: 10) {
                 ZStack(alignment: .topLeading) {
                     Color(nsColor: syntaxTheme.background)
 
                     VStack(alignment: .leading, spacing: 6) {
-                        // Code block mock lines
                         HStack(spacing: 6) {
-                            Text("1").foregroundColor(Color(nsColor: syntaxTheme.comments)).font(.system(size: 8, design: .monospaced)) // Fixed size: monospaced code preview
+                            Text("1").foregroundColor(Color(nsColor: syntaxTheme.comments)).font(.system(size: 8, design: .monospaced))
                             RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: syntaxTheme.keywords)).frame(width: 25, height: 5)
                             RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: syntaxTheme.types)).frame(width: 35, height: 5)
                         }
                         HStack(spacing: 6) {
-                            Text("2").foregroundColor(Color(nsColor: syntaxTheme.comments)).font(.system(size: 8, design: .monospaced)) // Fixed size: monospaced code preview
+                            Text("2").foregroundColor(Color(nsColor: syntaxTheme.comments)).font(.system(size: 8, design: .monospaced))
                             RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: syntaxTheme.commands)).frame(width: 30, height: 5)
                             RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: syntaxTheme.strings)).frame(width: 50, height: 5)
                         }
                         HStack(spacing: 6) {
-                            Text("3").foregroundColor(Color(nsColor: syntaxTheme.comments)).font(.system(size: 8, design: .monospaced)) // Fixed size: monospaced code preview
+                            Text("3").foregroundColor(Color(nsColor: syntaxTheme.comments)).font(.system(size: 8, design: .monospaced))
                             RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: syntaxTheme.attributes)).frame(width: 20, height: 5)
                             RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: syntaxTheme.variables)).frame(width: 40, height: 5)
                         }
@@ -396,20 +418,29 @@ struct CodeViewerPreviewCard: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(isSelected ? appTheme.accentColor : (isHovered ? appTheme.accentColor.opacity(0.4) : appTheme.surfaceOverlayStrong), lineWidth: isSelected ? 3 : 1)
+                        .strokeBorder(
+                            isSelected
+                                ? appTheme.accentColor.opacity(0.85)
+                                : (isHovered ? appTheme.secondaryText.opacity(0.35) : appTheme.secondaryText.opacity(0.15)),
+                            lineWidth: isSelected ? 1.5 : 1.0
+                        )
                 )
-                .shadow(color: isHovered ? appTheme.accentColor.opacity(0.15) : Color.black.opacity(0.1), radius: isHovered ? 8 : 4, y: isHovered ? 4 : 2)
+                .shadow(
+                    color: isSelected
+                        ? appTheme.accentColor.opacity(0.25)
+                        : (isHovered ? Color.black.opacity(0.15) : .clear),
+                    radius: isSelected ? 8 : 4, y: 2
+                )
                 .scaleEffect(isHovered ? 1.02 : 1.0)
                 .onHover { hovering in
-                    withAnimation(.interactiveSpring(response: 0.25, dampingFraction: 0.7)) {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                         isHovered = hovering
                     }
                 }
 
-                // Title
-                HStack {
+                HStack(spacing: 6) {
                     Text(override.displayName)
-                        .font(appTheme.fontSubheadline.weight(isSelected ? .semibold : .medium))
+                        .font(appTheme.fontSubheadline.weight(isSelected ? .bold : .medium))
                         .foregroundColor(isSelected ? appTheme.primaryText : appTheme.secondaryText)
                         .lineLimit(1)
                     
@@ -417,8 +448,8 @@ struct CodeViewerPreviewCard: View {
                         Spacer()
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundColor(appTheme.accentColor)
-                            .font(.system(.body))
-                            .accessibilityHidden(true)
+                            .font(.system(size: 13, weight: .bold))
+                            .shadow(color: appTheme.accentColor.opacity(0.6), radius: 3)
                     }
                 }
                 .padding(.horizontal, 4)
@@ -440,7 +471,7 @@ struct AccentColorCircle: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 10) {
+            VStack(spacing: 8) {
                 ZStack {
                     if accent == .default {
                         Circle()
@@ -448,34 +479,39 @@ struct AccentColorCircle: View {
                             .frame(width: 32, height: 32)
                         
                         Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(.body, weight: .bold))
+                            .font(.system(size: 13, weight: .bold))
                             .foregroundColor(.white)
                     } else {
                         Circle()
                             .fill(accent.color ?? appTheme.accentColor)
                             .frame(width: 32, height: 32)
+                            .shadow(color: (accent.color ?? appTheme.accentColor).opacity(isHovered ? 0.6 : 0.2), radius: isHovered ? 6 : 3)
                     }
 
                     if isSelected {
                         Circle()
                             .strokeBorder(appTheme.primaryText, lineWidth: 2)
                             .frame(width: 40, height: 40)
+                            .shadow(color: appTheme.accentColor.opacity(0.5), radius: 4)
                     } else {
                         Circle()
-                            .strokeBorder(isHovered ? appTheme.accentColor.opacity(0.5) : appTheme.surfaceOverlayStrong, lineWidth: isHovered ? 2 : 1)
+                            .strokeBorder(
+                                isHovered ? appTheme.accentColor.opacity(0.6) : appTheme.surfaceOverlayStrong,
+                                lineWidth: isHovered ? 1.5 : 1.0
+                            )
                             .frame(width: 40, height: 40)
                     }
                 }
                 .contentShape(Circle())
-                .scaleEffect(isHovered ? 1.12 : 1.0)
+                .scaleEffect(isHovered ? 1.08 : 1.0)
                 .onHover { hovering in
-                    withAnimation(.interactiveSpring(response: 0.2, dampingFraction: 0.6)) {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                         isHovered = hovering
                     }
                 }
                 
                 Text(accent.displayName)
-                    .font(.system(.caption, weight: isSelected ? .semibold : .regular))
+                    .font(.system(size: 11, weight: isSelected ? .bold : .medium))
                     .foregroundColor(isSelected ? appTheme.primaryText : appTheme.secondaryText)
             }
         }

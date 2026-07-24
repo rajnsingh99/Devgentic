@@ -387,7 +387,9 @@ actor PlanningExecutorWrapper: Executor {
 
                     continuation.yield(.thought("Composing final response..."))
 
-                    let combinedResults = subtasks.compactMap { subtaskResults[$0.id] }.joined(separator: "\n")
+                    // Composed (labeled + blank-line separated) rather than raw-joined:
+                    // with synthesis opt-in, this text may reach the user verbatim.
+                    let combinedResults = Self.composeSubtaskResults(subtasks: subtasks, results: subtaskResults)
 
                     // Partial-failure detection: thrown subtasks are recorded with an
                     // "Error: " prefix by the catch sites; non-throwing `.failed` terminals
@@ -426,7 +428,7 @@ actor PlanningExecutorWrapper: Executor {
                         personaInstructions: input.instructions,
                         originalQuery: input.userInput,
                         isNativeFlow: input.generatorStrategy is NativeStructuredGenerator,
-                        forceSynthesis: input.responseSynthesisEnabled,
+                        synthesisOptedIn: input.responseSynthesisEnabled,
                         // Count the Phase-3 synthesis LLM cost — emitted as a usage event
                         // like plan-generation and subtask usages above. Without this the
                         // plan's final synthesis call was the one LLM cost dropped from the
@@ -683,6 +685,38 @@ actor PlanningExecutorWrapper: Executor {
 
         subtaskSucceeded = true
         return (output, toolResults, terminalOutcome, terminalReason)
+    }
+
+    // MARK: - Subtask Result Composition
+
+    /// Composes the plan's user-facing answer from its subtask results.
+    ///
+    /// Phase 3's IC call USED to be this composition step — it received a raw
+    /// concatenation and wrote the answer. With synthesis now strictly opt-in
+    /// (`SynthesisOptIn`), an un-opted run returns this text verbatim, so it has to
+    /// stand on its own. Two things the old `joined(separator: "\n")` got wrong once
+    /// it became user-visible:
+    ///   • a SINGLE newline let markdown lazily continue the previous subtask's
+    ///     bullet list, running adjacent subtasks together into one paragraph;
+    ///   • nothing marked where one subtask's answer ended and the next began.
+    ///
+    /// Subtasks are labeled with their description and separated by a blank line.
+    /// A single-subtask plan is returned bare — there is nothing to disambiguate,
+    /// and a heading over the only answer is noise. Empty/whitespace-only results
+    /// are dropped rather than contributing blank sections.
+    static func composeSubtaskResults(subtasks: [SubTask], results: [String: String]) -> String {
+        let ordered: [(subtask: SubTask, result: String)] = subtasks.compactMap { subtask in
+            guard let raw = results[subtask.id] else { return nil }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            return (subtask, trimmed)
+        }
+
+        guard ordered.count > 1 else { return ordered.first?.result ?? "" }
+
+        return ordered
+            .map { "### \($0.subtask.description)\n\n\($0.result)" }
+            .joined(separator: "\n\n")
     }
 
     // MARK: - Dependency Sanitization

@@ -62,38 +62,29 @@ private struct SettingsCategoryRow: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            // Left rail = STATE: accent when selected or hovered; absent otherwise
-            if isSelected || isHovering {
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(
-                        LinearGradient(
-                            colors: isSelected ? [theme.accentColor, theme.accentColor.opacity(0.45)] : [theme.accentColor.opacity(0.4), theme.accentColor.opacity(0.15)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .frame(width: 3)
-                    .padding(.vertical, isSelected ? 2 : 5)
-                    .padding(.trailing, 4)
-                    .shadow(color: isSelected ? theme.accentColor.opacity(0.4) : .clear, radius: 4)
+            if isSelected {
+                Capsule()
+                    .fill(theme.accentColor)
+                    .frame(width: 3, height: 18)
+                    .padding(.trailing, 6)
                     .transition(.opacity.combined(with: .scale))
             } else {
-                Spacer().frame(width: 7)
+                Spacer().frame(width: 9)
             }
 
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
                 Image(systemName: category.iconName)
-                    .font(.system(.body))
-                    .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
-                    .frame(width: 24)
+                    .font(.system(size: 13, weight: isSelected ? .bold : .semibold))
+                    .foregroundColor(isSelected ? theme.accentColor : (isHovering ? theme.primaryText : theme.secondaryText))
+                    .frame(width: 22)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(category.rawValue)
-                        .font(theme.fontFootnote.weight(.medium))
-                        .foregroundColor(theme.primaryText)
+                        .font(theme.fontFootnote.weight(isSelected ? .bold : .medium))
+                        .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
 
                     Text(category.subtitle)
-                        .font(.system(.caption))
+                        .font(.system(size: 10, weight: .regular))
                         .foregroundColor(theme.tertiaryText)
                         .lineLimit(1)
                 }
@@ -101,32 +92,26 @@ private struct SettingsCategoryRow: View {
                 Spacer()
             }
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            ZStack {
-                if isSelected {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(theme.accentColor.opacity(0.08))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(theme.accentColor.opacity(0.15), lineWidth: 0.5)
-                        )
-                        .shadow(color: theme.accentColor.opacity(0.05), radius: 4, x: 0, y: 0)
-                } else if isHovering {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(theme.surfaceOverlay)
-                }
-            }
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(isSelected
+                      ? theme.surfaceOverlayStrong
+                      : (isHovering ? theme.surfaceOverlay : Color.clear))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(isHovering && !isSelected ? theme.secondaryText.opacity(0.18) : Color.clear, lineWidth: 1)
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                 isHovering = hovering
             }
         }
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSelected)
+        .animation(.spring(response: 0.28, dampingFraction: 0.75), value: isSelected)
     }
 }

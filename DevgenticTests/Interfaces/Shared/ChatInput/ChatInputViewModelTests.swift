@@ -31,9 +31,11 @@ final class MockRecognitionService: RecognitionServiceProtocol {
 
     var startStreamingCallCount = 0
     var startStreamingError: Error?
+    var lastStartOwner: VoiceSurface?
     var onStateChangeCallback: ((StreamingTranscriptionState) -> Void)?
-    func startStreaming(onStateChange: @escaping (StreamingTranscriptionState) -> Void) async throws {
+    func startStreaming(owner: VoiceSurface, onStateChange: @escaping (StreamingTranscriptionState) -> Void) async throws {
         startStreamingCallCount += 1
+        lastStartOwner = owner
         onStateChangeCallback = onStateChange
         if let error = startStreamingError { throw error }
     }

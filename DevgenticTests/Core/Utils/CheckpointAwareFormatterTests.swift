@@ -194,7 +194,7 @@ final class CheckpointAwareFormatterTests: XCTestCase {
             makeAgentMessage("A1", timestamp: Date(timeIntervalSince1970: 101))
         ]
 
-        let turns = NativeHistoryConverter.buildNativeTurns(from: history, limit: 10, charBudget: 50_000)
+        let turns = NativeHistoryConverter.buildNativeTurns(from: history, limit: 10, charBudget: 50_000).asWireDicts()
         XCTAssertEqual(turns.count, 2) // 1 user + 1 assistant
         XCTAssertEqual(turns[0]["role"], "user")
         XCTAssertEqual(turns[1]["role"], "assistant")
@@ -204,7 +204,7 @@ final class CheckpointAwareFormatterTests: XCTestCase {
     func testNativeTurns_WithCheckpoint_PrependsContextPair() {
         let (history, _) = makeHistoryWithCheckpoint()
 
-        let turns = NativeHistoryConverter.buildNativeTurns(from: history, limit: 10, charBudget: 50_000)
+        let turns = NativeHistoryConverter.buildNativeTurns(from: history, limit: 10, charBudget: 50_000).asWireDicts()
 
         // First two turns should be the checkpoint context pair
         XCTAssertTrue(turns.count >= 2, "Should have at least the context pair")
@@ -219,7 +219,7 @@ final class CheckpointAwareFormatterTests: XCTestCase {
     func testPointerTurns_WithCheckpoint_PrependsContextPair() {
         let (history, _) = makeHistoryWithCheckpoint()
 
-        let turns = NativeHistoryConverter.buildPointerTurns(from: history)
+        let turns = NativeHistoryConverter.buildPointerTurns(from: history).asWireDicts()
 
         XCTAssertTrue(turns.count >= 2)
         XCTAssertTrue(turns[0]["content"]?.contains("Prior conversation summary") ?? false,
@@ -229,7 +229,7 @@ final class CheckpointAwareFormatterTests: XCTestCase {
     func testHybridTurns_WithCheckpoint_PrependsContextPair() {
         let (history, _) = makeHistoryWithCheckpoint()
 
-        let turns = NativeHistoryConverter.buildHybridTurns(from: history, inlineCount: 3, charBudget: 50_000)
+        let turns = NativeHistoryConverter.buildHybridTurns(from: history, inlineCount: 3, charBudget: 50_000).asWireDicts()
 
         XCTAssertTrue(turns.count >= 2)
         XCTAssertTrue(turns[0]["content"]?.contains("Prior conversation summary") ?? false,

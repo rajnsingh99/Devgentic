@@ -79,7 +79,7 @@ actor QueryRewritingService {
             let cleaned = rewritten.trimmingCharacters(in: .whitespacesAndNewlines)
 
             // Clean up cache to prevent memory footprint issues
-            await IntelligenceCoreService.shared.unload(caller: .ragRewriting)
+            await IntelligenceCoreService.shared.releaseHold(caller: .ragRewriting)
 
             let rewriteDuration = CFAbsoluteTimeGetCurrent() - rewriteStart
 
@@ -116,7 +116,7 @@ actor QueryRewritingService {
             logger.error("[RAG Rewrite #\(rewriteNum)] FAILED — \(error.localizedDescription) (\(String(format: "%.2f", rewriteDuration))s). Fallbacks: \(self.fallbackCount)/\(self.totalRewriteCount)")
 
             // Ensure we attempt to unload even if an error occurred during generation or tokenization
-            await IntelligenceCoreService.shared.unload(caller: .ragRewriting)
+            await IntelligenceCoreService.shared.releaseHold(caller: .ragRewriting)
 
             return currentQuery
         }

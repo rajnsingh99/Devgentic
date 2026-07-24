@@ -70,18 +70,11 @@ struct XMLNativeStructuredGenerator: CognitiveGenerator {
         let reqId = UUID().uuidString.prefix(8)
         logLLMOps.info("⚡️ [XMLNative:\(reqId)] Start Generation - Iteration: \(iteration)")
 
-        var executionMessages = compileMessages(from: context)
-
-        executionMessages.append(["role": "user", "content": promptTrigger(for: iteration)])
-
         logLLMOps.debug("📤 [XMLNative:\(reqId)] Sending request...")
         let startTime = Date()
 
-        let responseText = try await model.generate(
-            messages: executionMessages,
-            tools: nil,
-            responseSchema: nil
-        )
+        // Multimodal when the turn carries images; byte-identical text path otherwise.
+        let responseText = try await generatePromptedResponse(model: model, context: context, iteration: iteration, responseSchema: nil, label: "XMLNative:\(reqId)")
 
         let duration = Date().timeIntervalSince(startTime)
         logLLMOps.info("✅ [XMLNative:\(reqId)] Response received in \(String(format: "%.4f", duration))s")

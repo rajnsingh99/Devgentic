@@ -235,7 +235,7 @@ final class MorningBriefService {
             )
 
             logger.notice("[Morning Brief] IC unloading after insight generation...")
-            await IntelligenceCoreService.shared.unload(caller: .morningBrief)
+            await IntelligenceCoreService.shared.releaseHold(caller: .morningBrief)
 
             let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
             logger.info("[Morning Brief] Raw AI response: \(trimmed.count) chars")
@@ -246,7 +246,7 @@ final class MorningBriefService {
 
         } catch {
             logger.error("[Morning Brief] AI insight generation FAILED: \(error.localizedDescription)")
-            await IntelligenceCoreService.shared.unload(caller: .morningBrief)
+            await IntelligenceCoreService.shared.releaseHold(caller: .morningBrief)
             return []
         }
     }

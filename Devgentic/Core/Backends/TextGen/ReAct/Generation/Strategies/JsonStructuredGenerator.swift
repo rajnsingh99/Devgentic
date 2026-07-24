@@ -70,14 +70,11 @@ struct JsonStructuredGenerator: CognitiveGenerator {
         let reqId = UUID().uuidString.prefix(8)
         logLLMOps.info("⚡️ [JsonMode:\(reqId)] Start Generation - Iteration: \(iteration)")
 
-        var executionMessages = compileMessages(from: context)
-
-        executionMessages.append(["role": "user", "content": promptTrigger(for: iteration)])
-
         logLLMOps.debug("📤 [JsonMode:\(reqId)] Sending request...")
         let startTime = Date()
 
-        let responseText = try await model.generate(messages: executionMessages, tools: nil, responseSchema: "json")
+        // Multimodal when the turn carries images; byte-identical text path otherwise.
+        let responseText = try await generatePromptedResponse(model: model, context: context, iteration: iteration, responseSchema: "json", label: "JsonMode:\(reqId)")
 
         let duration = Date().timeIntervalSince(startTime)
         logLLMOps.info("✅ [JsonMode:\(reqId)] Response received in \(String(format: "%.4f", duration))s")

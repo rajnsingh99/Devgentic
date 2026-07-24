@@ -501,6 +501,13 @@ struct AgentInput: Sendable {
     // to enforce the "Zero-History Context" architecture.
     var chatHistory: [ChatMessage]
 
+    /// BOT path only: whether prior-turn images in `chatHistory` should be re-attached
+    /// to the request (vision-capable bots). Set by AgentConnect as
+    /// `isBotFlow && profile.supportsVisionInput`. Agents ignore this — they carry
+    /// history images via `nativeHistoryTurns`/the native splice. False for non-vision
+    /// bots (images omitted), which is why switching to a non-vision model is safe.
+    var botHistoryImagesEnabled: Bool = false
+
     var conversationID: UUID
     var tools: [AgentTool]
     var longTermMemory: any LongTermMemoryStrategy
@@ -539,7 +546,13 @@ struct AgentInput: Sendable {
 
     /// Pre-built native history turns for providers that support turn-by-turn conversation.
     /// Nil when using XML episodic memory (non-native providers).
-    var nativeHistoryTurns: [[String: String]]?
+    ///
+    /// ⚠️ MUST stay OPTIONAL. `ChatExecutor` derives `isNativeFlow` from
+    /// `nativeHistoryTurns != nil`, and an empty-but-non-nil value is reachable
+    /// (a history of user-only rows yields zero pairs). Letting Swift's natural
+    /// non-optional `[HistoryTurn]` shape win here would silently flip the flag
+    /// for every non-native run.
+    var nativeHistoryTurns: [HistoryTurn]?
 
     /// [G3/G5] When true, the inner executor skips episode append/close because
     /// the wrapping capability (Planning or Reflexion) owns the episode lifecycle.
@@ -606,6 +619,7 @@ struct AgentInput: Sendable {
         attachmentContext: String? = nil,
         knowledgeBaseContext: String? = nil,
         chatHistory: [ChatMessage],
+        botHistoryImagesEnabled: Bool = false,
         conversationID: UUID,
         tools: [AgentTool],
         longTermMemory: any LongTermMemoryStrategy,
@@ -622,7 +636,7 @@ struct AgentInput: Sendable {
         errorRecovery: ErrorRecovery = ErrorRecovery(),
         resiliencePolicy: ResolvedResiliencePolicy? = nil,
         responseSynthesisEnabled: Bool = false,
-        nativeHistoryTurns: [[String: String]]? = nil,
+        nativeHistoryTurns: [HistoryTurn]? = nil,
         suppressEpisodeManagement: Bool = false,
         suppressLLMSynthesis: Bool = false,
         workflowContext: WorkflowExecutionContext? = nil,
@@ -636,6 +650,7 @@ struct AgentInput: Sendable {
         self.attachmentContext = attachmentContext
         self.knowledgeBaseContext = knowledgeBaseContext
         self.chatHistory = chatHistory
+        self.botHistoryImagesEnabled = botHistoryImagesEnabled
         self.conversationID = conversationID
         self.tools = tools
         self.longTermMemory = longTermMemory
@@ -695,7 +710,7 @@ struct SemanticContext: Sendable {
     // 2. Memory & Long-Term State
     let longTermMemory: any LongTermMemoryStrategy
     let recentHistory: String?
-    let nativeHistoryTurns: [[String: String]]?
+    let nativeHistoryTurns: [HistoryTurn]?
 
     // 3. Current Execution State
     let originalQuery: String
@@ -737,6 +752,13 @@ struct SemanticContext: Sendable {
     /// Profile knowledge-source payload rendered as the system `<knowledge_base>`
     /// layer: budgeted content (directInjection) or a path manifest (stateless).
     var knowledgeBaseContext: String? = nil
+
+    /// Current-turn image attachments (already vision-gated upstream — nil for a
+    /// non-vision local model). The NATIVE path reads `input.userPayload` directly;
+    /// this field is the only channel by which the LEGACY/dialect generators can see
+    /// current-turn images, since a generator's sole input is this context. Defaulted,
+    /// so text-only construction sites are untouched.
+    var userImagePayload: Payload? = nil
 }
 
 // MARK: - Agent Failure Reasons

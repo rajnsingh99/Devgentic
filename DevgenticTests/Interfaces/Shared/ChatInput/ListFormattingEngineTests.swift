@@ -117,8 +117,9 @@ final class ListFormattingEngineTests: XCTestCase {
             textStorage: storage,
             selectedRange: NSRange(location: 13, length: 0) // cursor at end
         )
-        if case .continueList(let text) = result {
+        if case .continueList(let text, let renumbering) = result {
             XCTAssertEqual(text, "\n2. ", "Should insert next numbered item")
+            XCTAssertTrue(renumbering.isEmpty, "Appending at the end of a list renumbers nothing")
         } else {
             XCTFail("Expected .continueList, got \(result)")
         }
@@ -130,7 +131,7 @@ final class ListFormattingEngineTests: XCTestCase {
             textStorage: storage,
             selectedRange: NSRange(location: 15, length: 0)
         )
-        if case .continueList(let text) = result {
+        if case .continueList(let text, _) = result {
             XCTAssertEqual(text, "\n100. ")
         } else {
             XCTFail("Expected .continueList for item 99")
@@ -144,11 +145,73 @@ final class ListFormattingEngineTests: XCTestCase {
             textStorage: storage,
             selectedRange: NSRange(location: cursorLocation, length: 0)
         )
-        if case .terminateList(let range) = result {
+        if case .terminateList(let range, _) = result {
             XCTAssertTrue(range.length > 0, "Should return the paragraph range to remove")
         } else {
             XCTFail("Expected .terminateList for empty list item, got \(result)")
         }
+    }
+
+    // MARK: - Renumbering (C5)
+    //
+    // Enter used to derive the next number from the CURRENT paragraph alone, so inserting
+    // mid-list produced a duplicate ("1. a / 2. NEW / 2. b") and left everything after it
+    // stale. `handleEnterKey` now also returns the rewrites for the items that follow.
+
+    /// Applies an EnterAction the way the Coordinator does — renumber edits first
+    /// (last-first, original coordinates, all after the edit point), then insert/remove.
+    private func applyEnter(_ text: String, at cursor: Int) -> String {
+        let storage = NSTextStorage(string: text)
+        switch ListFormattingEngine.handleEnterKey(textStorage: storage, selectedRange: NSRange(location: cursor, length: 0)) {
+        case .passthrough:
+            return text
+        case .continueList(let insertion, let renumbering):
+            for e in renumbering { storage.replaceCharacters(in: e.range, with: e.replacement) }
+            storage.replaceCharacters(in: NSRange(location: cursor, length: 0), with: insertion)
+        case .terminateList(let paragraphRange, let renumbering):
+            for e in renumbering { storage.replaceCharacters(in: e.range, with: e.replacement) }
+            storage.replaceCharacters(in: paragraphRange, with: "")
+        }
+        return storage.string
+    }
+
+    func testInsertingMidListResequencesFollowingItems() {
+        XCTAssertEqual(applyEnter("1. a\n2. b\n3. c", at: 4), "1. a\n2. \n3. b\n4. c")
+    }
+
+    func testInsertingIntoTheMiddleOfALongerRun() {
+        XCTAssertEqual(applyEnter("1. a\n2. b\n3. c\n4. d", at: 9), "1. a\n2. b\n3. \n4. c\n5. d")
+    }
+
+    /// A rewrite that WIDENS the marker (9 → 10) shifts everything after it. Edits are
+    /// applied last-first precisely so the earlier ranges stay valid through that.
+    func testRenumberingHandlesWidthChange() {
+        XCTAssertEqual(applyEnter("8. h\n9. i", at: 4), "8. h\n9. \n10. i")
+    }
+
+    /// A blank line ends the list — a separate list below must keep its own numbering.
+    func testRenumberingStopsAtBlankLineAndLeavesTheNextListAlone() {
+        XCTAssertEqual(applyEnter("1. a\n2. b\n\n1. other", at: 4), "1. a\n2. \n3. b\n\n1. other")
+    }
+
+    func testRenumberingStopsAtProse() {
+        XCTAssertEqual(applyEnter("1. a\n2. b\nplain text", at: 4), "1. a\n2. \n3. b\nplain text")
+    }
+
+    /// Terminating an empty item in the MIDDLE closes the gap it would otherwise leave.
+    func testTerminatingMidListClosesTheNumberingGap() {
+        XCTAssertEqual(applyEnter("1. a\n2. \n3. b", at: 8), "1. a\n2. b")
+    }
+
+    /// Already-sequential items need no rewriting at all — the common append case stays free.
+    func testNoEditsWhenListIsAlreadySequential() {
+        let storage = NSTextStorage(string: "1. a\n2. b")
+        let edits = ListFormattingEngine.renumberingAfter(
+            paragraphRange: (storage.string as NSString).paragraphRange(for: NSRange(location: 0, length: 0)),
+            in: storage.string as NSString,
+            continuingFrom: 2
+        )
+        XCTAssertTrue(edits.isEmpty)
     }
 
     func testPassthroughWhenCursorInsideMarker() {

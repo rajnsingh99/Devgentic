@@ -118,4 +118,51 @@ final class ComposerUndoCrashTests: XCTestCase {
             XCTAssertEqual(tv.string, "", "⌘Z after a cleared composer is a safe no-op")
         }
     }
+
+    // MARK: - C4: list edits must register undo
+
+    private func returnKeyEvent() -> NSEvent {
+        NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: 0, context: nil,
+            characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36
+        )!
+    }
+
+    /// List continuation used to mutate `textStorage` directly from inside
+    /// `shouldChangeTextIn` and return `false`, so it registered NO undo: the edit was
+    /// unreversible AND it desynced the typing-undo stack (the same stale-range hazard
+    /// behind the post-send ⌘Z crash above). It now routes through `insertText`.
+    func testListContinuationIsUndoable() throws {
+        let (tv, window) = makeHostedComposer()
+        XCTAssertNotNil(window.contentView)
+        tv.string = "1. a"                                   // setup only — not an undoable edit
+        tv.setSelectedRange(NSRange(location: 4, length: 0))
+
+        tv.keyDown(with: returnKeyEvent())
+        XCTAssertEqual(tv.string, "1. a\n2. ", "Enter still continues the numbered list")
+
+        try XCTSkipUnless(tv.undoManager?.canUndo == true,
+                          "The list edit registered no undo at all — that IS the C4 regression")
+        tv.undoManager?.undo()
+        XCTAssertEqual(tv.string, "1. a", "⌘Z reverses the list continuation")
+    }
+
+    /// The grouping guarantee: a mid-list Enter also rewrites the FOLLOWING markers (the
+    /// C5 renumbering), and the whole thing must collapse into ONE undo step rather than
+    /// making the user press ⌘Z once per renumbered item.
+    func testMidListInsertAndItsRenumberingUndoAsOneStep() throws {
+        let (tv, window) = makeHostedComposer()
+        XCTAssertNotNil(window.contentView)
+        tv.string = "1. a\n2. b"
+        tv.setSelectedRange(NSRange(location: 4, length: 0))   // end of "1. a"
+
+        tv.keyDown(with: returnKeyEvent())
+        XCTAssertEqual(tv.string, "1. a\n2. \n3. b", "Insert renumbers the item that follows")
+
+        try XCTSkipUnless(tv.undoManager?.canUndo == true, "no live undo manager in this environment")
+        tv.undoManager?.undo()
+        XCTAssertEqual(tv.string, "1. a\n2. b",
+                       "ONE undo reverses both the inserted item and its renumbering")
+    }
 }

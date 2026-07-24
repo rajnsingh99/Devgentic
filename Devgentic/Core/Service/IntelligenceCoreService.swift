@@ -88,6 +88,11 @@ actor IntelligenceCoreService {
     /// Loads the user-selected model into memory.
     /// - Parameter caller: The feature requesting the load — used for diagnostics.
     func load(caller: ICCallerFeature = .unknown) async throws {
+        // Any new demand cancels a pending idle free — this is what lets a turn's
+        // sequential IC features (RAG rewrite → compaction → synthesis) share one load.
+        cancelIdleRelease()
+        releasePolicy.didLoad()
+
         if modelContainer != nil {
             logger.info("[IC Load] Model already in memory — reusing for \(caller.rawValue). Previous caller: \(self.currentCaller?.rawValue ?? "none")")
             currentCaller = caller
@@ -136,9 +141,99 @@ actor IntelligenceCoreService {
         logger.info("[IC Load] Post-load memory — System: \(postMemory.available), GPU: \(postMemory.gpuCache)")
     }
 
+    // MARK: - Release Policy
+    //
+    // The IC model is shared by several features that run SEQUENTIALLY within a single
+    // chat turn (RAG query rewriting → history compaction → response synthesis). Freeing
+    // the model the instant each one finishes made every turn pay 2-3 multi-second MLX
+    // loads, so `releaseHold` only marks the model *releasable*: the actual free happens
+    // after an idle grace period, and any new load cancels it. A turn's features therefore
+    // share ONE load, while an idle app still gives the memory back.
+    //
+    // `activeLeases` additionally guarantees a feature can never free the model out from
+    // under another's in-flight generation. That was previously possible: `unload` nil'd
+    // the container and called `MLX.GPU.clearCache()` unconditionally. The generation
+    // itself survived (it captures the container before its first suspension) but the
+    // cache was cleared mid-inference and the next caller reloaded a resident model.
+
+    /// Seconds the model stays resident after the last feature releases it.
+    private static let idleReleaseSeconds: Double = 60
+
+    /// Residency decision table — see `ICReleasePolicy` (pure, unit-tested).
+    private var releasePolicy = ICReleasePolicy()
+
+    /// Pending idle free. Cancelled by any new load.
+    private var idleReleaseTask: Task<Void, Never>?
+
+    private func beginLease() {
+        releasePolicy.beginLease()
+        cancelIdleRelease()
+    }
+
+    private func endLease(caller: ICCallerFeature) {
+        apply(releasePolicy.endLease(), caller: caller, reason: "last generation finished")
+    }
+
+    private func cancelIdleRelease() {
+        idleReleaseTask?.cancel()
+        idleReleaseTask = nil
+    }
+
+    /// Performs whatever the policy decided.
+    private func apply(_ action: ICReleasePolicy.Action, caller: ICCallerFeature, reason: String) {
+        switch action {
+        case .none:
+            if releasePolicy.activeLeases > 0 {
+                logger.info("[IC Release] Release requested by \(caller.rawValue), but \(self.releasePolicy.activeLeases) generation(s) still in flight — deferred until they finish.")
+            }
+        case .scheduleIdleRelease:
+            scheduleIdleRelease(caller: caller)
+        case .freeNow:
+            cancelIdleRelease()
+            performUnload(caller: caller, reason: reason)
+        }
+    }
+
+    private func scheduleIdleRelease(caller: ICCallerFeature) {
+        cancelIdleRelease()
+        guard modelContainer != nil else { return }
+        let seconds = Self.idleReleaseSeconds
+        logger.info("[IC Release] Idle release scheduled in \(Int(seconds))s — requested by: \(caller.rawValue). Any request before then reuses the loaded model.")
+        idleReleaseTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await self?.performIdleRelease(caller: caller)
+        }
+    }
+
+    private func performIdleRelease(caller: ICCallerFeature) {
+        // Re-checked under actor isolation: demand may have arrived while we slept.
+        guard !Task.isCancelled, releasePolicy.shouldHonorElapsedIdleRelease else {
+            logger.info("[IC Release] Idle release skipped — model is back in use (leases: \(self.releasePolicy.activeLeases)).")
+            return
+        }
+        performUnload(caller: caller, reason: "idle for \(Int(Self.idleReleaseSeconds))s")
+    }
+
+    /// Signals that `caller` is finished with the model. Does NOT free immediately — see
+    /// the release-policy note above. Safe to call while other features are mid-flight.
+    func releaseHold(caller: ICCallerFeature = .unknown) {
+        apply(releasePolicy.requestRelease(), caller: caller, reason: "released by \(caller.rawValue)")
+    }
+
+    /// Frees the model as soon as it is safe to do so, skipping the idle grace period.
+    /// For deliberate teardown — Core Intelligence switched off, or the IC model changed,
+    /// where lingering residency would let the next inference reuse the OLD model.
+    func unloadNow(caller: ICCallerFeature = .unknown) {
+        apply(releasePolicy.requestImmediateRelease(), caller: caller, reason: "immediate teardown")
+    }
+
     /// Unloads the model from memory and clears GPU cache.
     /// - Parameter caller: The feature requesting the unload.
-    func unload(caller: ICCallerFeature = .unknown) {
+    private func performUnload(caller: ICCallerFeature = .unknown, reason: String) {
+        cancelIdleRelease()
+        releasePolicy.didFree()
+
         guard modelContainer != nil else {
             logger.debug("[IC Unload] No-op — model not loaded. Caller: \(caller.rawValue)")
             return
@@ -158,7 +253,7 @@ actor IntelligenceCoreService {
 
         let postMemory = memorySnapshot()
 
-        logger.notice("[IC Unload] Model released — Session: \(sessionDuration), Loaded by: \(self.currentCaller?.rawValue ?? "unknown"), Unloaded by: \(caller.rawValue)")
+        logger.notice("[IC Unload] Model released — Session: \(sessionDuration), Reason: \(reason), Loaded by: \(self.currentCaller?.rawValue ?? "unknown"), Unloaded by: \(caller.rawValue)")
         logger.info("[IC Unload] Memory freed — Before GPU: \(preMemory.gpuCache) → After GPU: \(postMemory.gpuCache)")
 
         currentCaller = nil
@@ -179,6 +274,11 @@ actor IntelligenceCoreService {
         guard let container = modelContainer else {
             throw NSError(domain: "IntelligenceCoreService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Model container not available."])
         }
+
+        // Hold a lease for the whole generation so no other feature can free the model (or
+        // clear the GPU cache) mid-inference. `defer` covers the throwing paths too.
+        beginLease()
+        defer { endLease(caller: caller) }
 
         let genStart = CFAbsoluteTimeGetCurrent()
         let promptTokenCount = messages.reduce(0) { $0 + ($1["content"]?.count ?? 0) / 4 } // Rough estimate

@@ -233,6 +233,16 @@ extension Span: FetchableRecord, PersistableRecord {
 enum TraceStatus: String, Codable, Sendable, DatabaseValueConvertible {
     case running
     case completed
+    /// Degraded success: the run produced a usable answer but something went wrong on
+    /// the way (a failed tool call, a circuit-breaker abort, iteration exhaustion).
+    /// Distinct from `.completed` so the trace store stops recording "1 of 5 tool calls
+    /// failed" as a clean run — the message chip already said `completedWithWarnings`
+    /// while the trace said `completed`, and the row carried an `error` summary next to
+    /// a success status. Counted WITH `.completed` in every success-rate rollup (it IS
+    /// a success), just visible separately.
+    /// NB: rows written before 2026-07-19 stored this as `completed`; historical stats
+    /// are unchanged, and this case only appears on runs from this build forward.
+    case completedWithWarnings
     /// A graceful terminal failure — the run reached a failure outcome without an
     /// exception propagating to the stream boundary (circuit-breaker abort, parse/
     /// iteration exhaustion, workflow all-terminals-failed, ImageGen failure).
@@ -257,10 +267,12 @@ extension TraceStatus {
         if thrownError { return .error }
         switch terminalOutcome {
         case .completed: return .completed
-        // Degraded success: the stream finished cleanly with a best-effort answer. The
-        // early-stop itself is already on the span as a classified agent-error event
-        // (circuit-breaker / exhaustion), so the trace-level status stays `completed`.
-        case .completedWithWarnings: return .completed
+        // Degraded success gets its OWN status. The previous mapping to `.completed`
+        // assumed the early-stop was "already on the span as a classified agent-error
+        // event (circuit-breaker / exhaustion)" — but this outcome also carries plain
+        // tool failures ("1 of 5 tool call(s) failed"), which have no such span event,
+        // so those runs were indistinguishable from clean ones in the trace store.
+        case .completedWithWarnings: return .completedWithWarnings
         case .failed:    return .failed
         case .cancelled: return .cancelled
         case .none:      return .completed

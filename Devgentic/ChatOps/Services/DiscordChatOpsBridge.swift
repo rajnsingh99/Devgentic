@@ -319,7 +319,7 @@ final class DiscordChatOpsBridge {
         var currentButtons: [DiscordComponent] = []
 
         for conversationSD in conversations {
-            let title = conversationSD.toStruct().displayTitle
+            let title = conversationSD.toRowStruct().displayTitle
             let convID = conversationSD.id
             let isActive = convID == config.discordActiveConversationID ? "⭐ " : ""
             let label = String("\(isActive)\(title)".prefix(80))
@@ -427,7 +427,7 @@ final class DiscordChatOpsBridge {
         vm.selectedConversationID = uuid
         logger.info("[Discord] Mac UI navigated to conversation \(uuid.uuidString).")
 
-        let title = conversationSD.toStruct().displayTitle
+        let title = conversationSD.toRowStruct().displayTitle
         _ = try? await apiClient?.sendMessage(
             channelID: channelID,
             content: "✅ Switched to: **\(title)**\n\nJust type your message to continue."
@@ -489,7 +489,7 @@ final class DiscordChatOpsBridge {
 
         var lines = ["📋 **Your Conversations:**\n"]
         for (index, conversationSD) in conversations.enumerated() {
-            let title = conversationSD.toStruct().displayTitle
+            let title = conversationSD.toRowStruct().displayTitle
             let isActive = conversationSD.id == config.discordActiveConversationID ? " ⭐" : ""
             lines.append("\(index + 1). \(title)\(isActive)")
         }
@@ -503,7 +503,7 @@ final class DiscordChatOpsBridge {
         let activeConvTitle: String
         if let activeID = config.discordActiveConversationID,
            let conversationSD = vm.persistenceService.getConversation(withId: activeID) {
-            activeConvTitle = conversationSD.toStruct().displayTitle
+            activeConvTitle = conversationSD.toRowStruct().displayTitle
         } else {
             activeConvTitle = "None"
         }

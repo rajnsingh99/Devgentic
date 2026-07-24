@@ -38,7 +38,8 @@ struct AdvisoryBannerView: View {
                     ))
             }
         }
-        .frame(maxWidth: 1000)
+        // Match the composer's content lane exactly — this banner sits directly above it.
+        .frame(maxWidth: ViewLayout.maxContentWidth)
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.horizontal)
         .padding(.bottom, 6)

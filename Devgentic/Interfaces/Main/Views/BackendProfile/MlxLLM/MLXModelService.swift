@@ -56,6 +56,15 @@ class MLXModelService {
         return profile
     }
 
+    /// The model's trained context window (read from its `config.json` via the cached
+    /// cognitive profile), looked up by display name. Nil when the model isn't installed
+    /// or its config exposes no context length. Used to heal MLX profiles that were saved
+    /// before the window was read into metadata (they'd otherwise show the 8K fallback).
+    func trainedContextWindow(forModelName name: String) -> Int? {
+        guard let item = installedModels.first(where: { $0.displayName == name }) else { return nil }
+        return cachedCognitiveProfile(for: item).metadata?.contextWindow
+    }
+
     /// Pre-computes and caches profiles for all installed models in one pass.
     /// Call after refreshInstalledModels() completes to warm the cache.
     private func rebuildProfileCache() {

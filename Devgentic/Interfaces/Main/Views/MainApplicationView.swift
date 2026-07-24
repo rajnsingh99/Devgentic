@@ -392,21 +392,37 @@ struct MainApplicationView: View {
 
 // MARK: - Interface Mode Picker (Liquid Glass)
 
-/// Floating Chat/Workflow mode switcher using macOS 26+ Liquid Glass.
+/// Floating Chat/Workflow/Code mode switcher using macOS Liquid Glass.
 /// Uses `matchedGeometryEffect` for a sliding active-indicator that
 /// glides between tabs on selection change.
 private struct InterfaceModePicker: View {
     @Environment(MainApplicationViewModel.self) private var viewModel
+    @Environment(\.appTheme) private var theme
     @Namespace private var modeAnimation
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 4) {
             ForEach(MainApplicationViewModel.InterfaceMode.allCases, id: \.self) { mode in
                 ModeTabButton(mode: mode, namespace: modeAnimation)
             }
         }
-        .padding(3)
-        .glassEffect(.regular, in: .capsule)
+        .padding(4)
+        .background(
+            Capsule()
+                .fill(theme.secondaryBackground.opacity(0.65))
+        )
+        .overlay(
+            Capsule()
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.16), Color.white.opacity(0.04)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
+        )
+        .shadow(color: Color.black.opacity(0.22), radius: 10, x: 0, y: 4)
         .animation(.spring(response: 0.35, dampingFraction: 0.75), value: viewModel.interfaceMode)
     }
 }
@@ -418,31 +434,56 @@ private struct ModeTabButton: View {
     let mode: MainApplicationViewModel.InterfaceMode
     var namespace: Namespace.ID
     @Environment(MainApplicationViewModel.self) private var viewModel
+    @Environment(\.appTheme) private var theme
     @State private var isHovering = false
 
     private var isActive: Bool { viewModel.interfaceMode == mode }
 
+    private var modeColor: Color {
+        switch mode {
+        case .chat:     return Color(hex: "#0A84FF") // Ocean Blue
+        case .workflow: return Color(hex: "#8B5CF6") // Royal Violet
+        case .code:     return Color(hex: "#06B6D4") // Cosmic Cyan
+        }
+    }
+
     var body: some View {
         Button {
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.72)) {
                 viewModel.switchInterfaceMode(to: mode)
             }
         } label: {
-            HStack(spacing: 5) {
+            HStack(spacing: 6) {
                 Image(systemName: mode.icon)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 11, weight: isActive ? .bold : .medium))
+                    .foregroundColor(isActive ? modeColor : (isHovering ? theme.primaryText : theme.secondaryText))
+
                 Text(mode.rawValue)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 12, weight: isActive ? .semibold : .medium))
+                    .foregroundColor(isActive ? theme.primaryText : (isHovering ? theme.primaryText : theme.secondaryText))
             }
-            .foregroundColor(isActive ? .primary : .secondary)
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 14)
             .padding(.vertical, 6)
-            .opacity(isActive ? 1.0 : (isHovering ? 0.8 : 0.6))
             .background {
                 if isActive {
                     Capsule()
-                        .fill(.primary.opacity(0.1))
+                        .fill(theme.surfaceOverlayStrong)
+                        .overlay(
+                            Capsule()
+                                .strokeBorder(
+                                    LinearGradient(
+                                        colors: [modeColor.opacity(0.65), modeColor.opacity(0.25)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    lineWidth: 1
+                                )
+                        )
+                        .shadow(color: modeColor.opacity(0.22), radius: 6, x: 0, y: 1)
                         .matchedGeometryEffect(id: "activeModeIndicator", in: namespace)
+                } else if isHovering {
+                    Capsule()
+                        .fill(theme.surfaceOverlay.opacity(0.6))
                 }
             }
             // Unsaved-changes dot on the Workflow tab so the dirty state is visible even

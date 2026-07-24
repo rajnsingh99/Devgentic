@@ -62,6 +62,39 @@ final class MessagingCoordinator {
         self.persistenceService = persistenceService
         self.fileProcessorService = fileProcessorService
         self.backendConfiguration = backendConfiguration
+        registerCompactionCheckpointSink()
+    }
+
+    // MARK: - Compaction Checkpoint Sink
+
+    /// The stream-independent delivery path for background compaction checkpoints.
+    ///
+    /// This coordinator is the one app-lifetime object holding BOTH halves of delivery:
+    /// the persistence store and the live history array. Registered here (not per stream)
+    /// because compaction runs off the request path now and can finish after the
+    /// originating stream — and its events — are gone.
+    private func registerCompactionCheckpointSink() {
+        Task { [logger] in
+            await HistoryCompactionService.shared.setCheckpointSink { [weak self, logger] checkpoint, conversationID in
+                await MainActor.run {
+                    guard let self else {
+                        // App-teardown race only; the store write below never ran, so say so.
+                        logger.error("[COMPACTION] Checkpoint sink fired after coordinator teardown — checkpoint \(checkpoint.id.uuidString.prefix(8)) NOT persisted; the next launch will re-plan the same batch.")
+                        return
+                    }
+                    // Durably store first. `addMessage` is an upsert-by-id, so a repeat
+                    // updates one row rather than duplicating.
+                    Task { [persistenceService = self.persistenceService] in
+                        await persistenceService.addMessage(checkpoint, toConversation: conversationID)
+                        logger.info("[COMPACTION] Checkpoint persisted \u{2014} messageID: \(checkpoint.id.uuidString.prefix(8)), conversationID: \(conversationID.uuidString.prefix(8))")
+                    }
+                    // Then splice into the live transcript so the NEXT turn's history
+                    // resolution sees it in memory too. `insertCheckpoint` guards against
+                    // a different conversation being open and against duplicate ids.
+                    self.chatHistoryViewModel.insertCheckpoint(checkpoint)
+                }
+            }
+        }
     }
 
     // MARK: - Message Sending
@@ -148,12 +181,21 @@ final class MessagingCoordinator {
             self.chatHistoryViewModel.currentChatMessages.insert(userMessage, at: 0)
             self.logger.debug("Appended user message into UI.")
 
-            Task { [persistenceService] in
-                await persistenceService.addMessage(userMessage, toConversation: conversationIDToUse)
-                self.logger.debug("User message persisted successfully.")
-                // Conversation-memory indexing happens inside addMessage
-                // (ChatPersistenceStore.addMessages — the funnel all surfaces share).
-            }
+            // [IMG-PERSIST] Persist the user message — which may carry a large
+            // `@Attribute(.externalStorage)` image blob — and AWAIT it here, before resolving
+            // history / starting the stream, rather than the old fire-and-forget Task. That
+            // detached Task let this INSERT's save land LATE (only when the actor next freed at
+            // the `resolveBackendHistory` await), temporally adjacent to the agent stream's first
+            // flush save on the SAME autosave-enabled `mainContext` — so CoreData's async
+            // external-file maintenance for the two nearby commits raced, producing the benign
+            // but noisy "Failed to clone external data reference … .interim doesn't exist" log.
+            // Awaiting separates the image write from the stream's first flush (the model's
+            // first-token latency now sits between them) and makes the durable write ordered
+            // before the run begins. History still merges the in-memory copy inserted just above,
+            // so the backend sees no difference. Conversation-memory indexing happens inside
+            // addMessage (ChatPersistenceStore.addMessages — the funnel all surfaces share).
+            await self.persistenceService.addMessage(userMessage, toConversation: conversationIDToUse)
+            self.logger.debug("User message persisted successfully (awaited before stream start).")
 
             // Prepare workflow execution state if this is a workflow profile.
             //
@@ -194,13 +236,15 @@ final class MessagingCoordinator {
                 return state
             }()
 
-            self.logger.info("[sendMessage] Handing off to ActiveStreamManager — conversationID: \(conversationIDToUse.uuidString.prefix(8)), messageID: \(userMessage.id.uuidString.prefix(8)), historyCount: \(self.chatHistoryViewModel.currentChatMessages.count), files: \(filesForBackend.count)")
+            let backendHistory = await self.resolveBackendHistory(conversationID: conversationIDToUse)
+
+            self.logger.info("[sendMessage] Handing off to ActiveStreamManager — conversationID: \(conversationIDToUse.uuidString.prefix(8)), messageID: \(userMessage.id.uuidString.prefix(8)), historyCount: \(backendHistory.count), files: \(filesForBackend.count)")
 
             let agentMessage = self.activeStreamManager.startMessageStream(
                 withConfig: config,
                 conversationID: conversationIDToUse,
                 userQuery: plainUserQueryFromEditor,
-                history: self.chatHistoryViewModel.currentChatMessages.reversed(),
+                history: backendHistory,
                 files: filesForBackend,
                 updating: nil,
                 workflowExecutionState: workflowState,
@@ -280,7 +324,8 @@ final class MessagingCoordinator {
     // MARK: - Response Regeneration
 
     func regenerateResponse(for agentMessage: ChatMessage) {
-        guard let agentResponse = agentMessage.agentResponse, agentResponse.generationAttempts < 5 else {
+        guard let agentResponse = agentMessage.agentResponse,
+              agentResponse.generationAttempts < ChatMessage.maxGenerationAttempts else {
             logger.warning("Max generation attempts reached for message \(agentMessage.id.uuidString).")
             return
         }
@@ -308,14 +353,14 @@ final class MessagingCoordinator {
             return
         }
 
-        let newVariant = ResponseMessageVariant(
-            content: .markdownText(""),
-            backendEntityId: config.profile.id
-        )
-        agentMessage.agentResponse?.variants.append(newVariant)
-        agentMessage.agentResponse?.selectedVariantIndex = (agentMessage.agentResponse?.variants.count ?? 1) - 1
-        agentMessage.agentResponse?.generationAttempts += 1
-        agentMessage.isStreaming = true
+        // [P0 crash fix] Single-write mutation via ChatMessage.beginRegenerationVariant —
+        // the inline optional-chained writes here trapped Swift exclusivity (the
+        // selectedVariantIndex line re-READ agentResponse on its RHS while the LHS
+        // held the modify access) and killed the app on Retry, on-device 2026-07-19.
+        guard agentMessage.beginRegenerationVariant(backendEntityId: config.profile.id) else {
+            logger.warning("[regenerateResponse] Message \(agentMessage.id.uuidString.prefix(8)) not regenerable (attempt cap or no response) — no mutation performed.")
+            return
+        }
 
         let newStreamingMessage = activeStreamManager.startMessageStream(
             withConfig: config,
@@ -609,14 +654,15 @@ final class MessagingCoordinator {
                 await persistenceService.addMessage(userMessage, toConversation: conversationID)
             }
 
-            // Fetch history for context (same as sendMessage)
-            let history = self.chatHistoryViewModel.currentChatMessages.filter { $0.conversationId == conversationID }.reversed()
+            // Same resolution as sendMessage — a remote (ChatOps) turn must not get a
+            // smaller view of the conversation than the desktop UI would give it.
+            let history = await self.resolveBackendHistory(conversationID: conversationID)
 
             let agentMessage = self.activeStreamManager.startMessageStream(
                 withConfig: config,
                 conversationID: conversationID,
                 userQuery: prompt,
-                history: Array(history),
+                history: history,
                 files: [],
                 updating: nil,
                 onComplete: { [weak self] in
@@ -638,6 +684,65 @@ final class MessagingCoordinator {
         }
     }
 
+    // MARK: - Backend History Resolution
+
+    /// Upper bound on messages pulled from the store for model context. Downstream already
+    /// trims to the model's real budget (`charBudget`, the `recentHistory` /
+    /// `nativeHistoryTurns` limits), so this only bounds fetch+decode cost on a very long
+    /// conversation — it is not the context policy.
+    private static let backendHistoryMessageLimit = 300
+
+    /// Merges stored and in-memory history into one oldest-first list, deduplicated by id.
+    ///
+    /// In-memory wins on conflict, and in-memory-only messages are ALWAYS kept — that is the
+    /// load-bearing property. The user's message is persisted in a detached task that races
+    /// this read, and streaming messages are never in the store while in flight, so a
+    /// store-authoritative merge would intermittently drop the user's own question from the
+    /// request that answers it.
+    ///
+    /// Pure + internal so that guarantee is unit-testable without building a coordinator.
+    static func mergeHistory(stored: [ChatMessage], inMemory: [ChatMessage]) -> [ChatMessage] {
+        var byID: [UUID: ChatMessage] = [:]
+        for message in stored { byID[message.id] = message }
+        for message in inMemory { byID[message.id] = message }
+        return byID.values.sorted { $0.timestamp < $1.timestamp }
+    }
+
+    /// Resolves the conversation history handed to the backend, oldest-first.
+    ///
+    /// Deliberately NOT `currentChatMessages`. That array is the UI's *pagination window*
+    /// (20 messages on open, +10 per scroll upward), so using it made the model's memory
+    /// depend on how far the user happened to scroll, and gave a freshly reopened long
+    /// conversation only 20 messages regardless of the model's context window. What the
+    /// model sees is a context concern; what the list renders is a rendering concern.
+    ///
+    /// Two deliberate details:
+    ///  • The store is consulted ONLY when it can hold more than is already loaded
+    ///    (`canLoadMorePages`), so ordinary short conversations pay no extra fetch.
+    ///  • In-memory messages are merged OVER the stored ones, never replaced by them: the
+    ///    just-sent user message is persisted in a DETACHED task that may not have landed
+    ///    yet, and in-flight streaming messages exist only in memory. Dropping either would
+    ///    silently omit the user's own question from its own request.
+    private func resolveBackendHistory(conversationID: UUID) async -> [ChatMessage] {
+        let inMemory = chatHistoryViewModel.currentChatMessages.filter { $0.conversationId == conversationID }
+
+        guard chatHistoryViewModel.canLoadMorePages else {
+            // The whole conversation is already loaded — the window IS the conversation.
+            return inMemory.reversed()
+        }
+
+        let stored = await persistenceService.fetchMessages(
+            for: conversationID,
+            offset: 0,
+            limit: Self.backendHistoryMessageLimit
+        )
+
+        let merged = Self.mergeHistory(stored: stored, inMemory: inMemory)
+        let capHit = stored.count >= Self.backendHistoryMessageLimit
+        logger.info("[HISTORY] Resolved backend history — stored: \(stored.count), in-memory: \(inMemory.count), merged: \(merged.count)\(capHit ? ", CAP HIT (\(Self.backendHistoryMessageLimit)) → older turns are omitted from direct context and rely on RAG retrieval" : ""), conversationID: \(conversationID.uuidString.prefix(8))")
+        return merged
+    }
+
     // MARK: - Message Factory
 
     /// Builds a `ChatMessage` for the user, classifying attached files into
@@ -646,47 +751,16 @@ final class MessagingCoordinator {
     /// path (`sendScheduledMessage`) also needs this factory; that scheduler
     /// code still lives on the VM for now and calls through to here.
     func createUserMessage(conversationID: UUID, query: String, files: [FileSystemItem]) async -> ChatMessage {
-        var attachedTextFiles: [AttachedTextFile] = []
-        var attachedImageFiles: [AttachedImageFile] = []
-
-        for fileItem in files {
-            let mimeType = fileProcessorService.getFileMimeType(for: fileItem.url)
-            let fileExtension = fileItem.url.pathExtension
-            let attributes = try? FileManager.default.attributesOfItem(atPath: fileItem.url.path)
-            let fileSize = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
-
-            if fileProcessorService.isTextFile(mimeType: mimeType, url: fileItem.url) {
-                if let content = await fileProcessorService.readFileContent(for: fileItem.url) {
-                    let textFile = AttachedTextFile(name: fileItem.name, url: fileItem.url, fileExtension: fileExtension, content: content, size: fileSize)
-                    attachedTextFiles.append(textFile)
-                }
-            } else if fileProcessorService.isImageFile(mimeType: mimeType, url: fileItem.url) {
-                // [M7] Reject an oversized image BEFORE reading it into memory. Fan-in safety net
-                // for every sender (main / ChatOps / QuickAccess / Scheduler), redo, and any file
-                // that grew since it was picked; interactive attaches are also warned at the picker.
-                // `fileSize` was already stat'd above, so a huge file is never read.
-                guard fileSize <= ImageConstraints.maxAttachmentImageBytes else {
-                    logger.warning("Skipping oversized image attachment '\(fileItem.name)' — \(fileSize) bytes exceeds the \(ImageConstraints.maxAttachmentImageBytes)-byte cap.")
-                    continue
-                }
-                do {
-                    _ = fileItem.url.startAccessingSecurityScopedResource()
-                    let data = try Data(contentsOf: fileItem.url)
-                    fileItem.url.stopAccessingSecurityScopedResource()
-                    let imageFile = AttachedImageFile(name: fileItem.name, url: fileItem.url, fileExtension: fileExtension, binaryData: data, size: fileSize)
-                    attachedImageFiles.append(imageFile)
-                } catch {
-                    logger.error("Could not read image data for file: \(fileItem.name)")
-                }
-            }
-        }
+        // Classification + reads live in MessageAttachmentBuilder (testable
+        // without the coordinator's VM graph — see ATT-1 contract note there).
+        let attachments = await MessageAttachmentBuilder(fileProcessorService: fileProcessorService).build(from: files)
 
         return ChatMessage(
             conversationId: conversationID,
             sender: .user,
             content: .plainText(query),
-            attachedTextFiles: attachedTextFiles.isEmpty ? nil : attachedTextFiles,
-            attachedImageFiles: attachedImageFiles.isEmpty ? nil : attachedImageFiles
+            attachedTextFiles: attachments.textFiles.isEmpty ? nil : attachments.textFiles,
+            attachedImageFiles: attachments.imageFiles.isEmpty ? nil : attachments.imageFiles
         )
     }
 }

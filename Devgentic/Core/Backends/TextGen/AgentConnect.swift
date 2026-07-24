@@ -279,7 +279,22 @@ class AgentConnect: @unchecked Sendable {
                         }
                     }()
 
-                    var nativeHistoryTurns: [[String: String]]? = nil
+                    var nativeHistoryTurns: [HistoryTurn]? = nil
+
+                    // Vision gate for PRIOR-TURN images. Carrying history images is
+                    // pointless — and actively wasteful of the char budget — when the
+                    // target model can't see them, so the decision is made once here,
+                    // next to `isNativeProvider`, and the converter stays a pure function.
+                    //
+                    // Mirrors the current-turn gate in BackendOrchestrationService, with
+                    // one deliberate difference: that gate is local-only (cloud is left
+                    // to error on its own), whereas this one applies to every provider.
+                    // Spending budget on images a model will ignore costs the user real
+                    // context either way.
+                    let historyImagesEnabled = isNativeProvider && profile.supportsVisionInput
+                    if isNativeProvider && !profile.supportsVisionInput {
+                        logger.info("[HISTORY] conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID) Vision gate: prior-turn images omitted for '\(llmConfig.modelName)' (no visionInput modality) — the model will not see images from earlier turns in this conversation")
+                    }
 
                     // History building is independent of tool availability.
                     // Even tool-less agents benefit from conversation context.
@@ -287,34 +302,51 @@ class AgentConnect: @unchecked Sendable {
                     if !effectiveHistory.isEmpty {
                         let charBudget = max(4000, Int(Double(contextWindow) * 0.6) * 4) // 60% of context, ~4 chars/token, floor 4K
 
-                        // --- IC-Powered History Compaction (Synchronous) ---
-                        // Runs before history building so the current request benefits from compacted context.
+                        // --- IC-Powered History Compaction (Background) ---
+                        // Moved OFF the request path (2026-07-20). The 30s "timeout" around
+                        // the IC call was verified to be a cancellation request, not a
+                        // wall-clock bound (cold load and prompt prefill are uninterruptible),
+                        // so a synchronous compaction could stall this turn unboundedly. The
+                        // only real bound is not entering: this request proceeds with
+                        // uncompacted history (the history builders trim to charBudget), the
+                        // summarization runs in the background, and the checkpoint — persisted
+                        // via the service's sink, never via this stream, which may end first —
+                        // pays off from the next turn on. The trigger fires at ~36% of the
+                        // context window, so skipping one turn's relief costs little.
+                        //
+                        // Gated on the Core Intelligence MASTER toggle as well as the feature
+                        // toggle. Without the master check, turning Core Intelligence OFF still
+                        // loaded the IC model on every long-history turn: the feature key
+                        // defaults to true, and its toggle isn't even rendered while the master
+                        // switch is off — so the user had no way to see or stop it.
                         let compactionEnabled = UserDefaults.standard.object(forKey: AppSettings.ciFeatureHistoryCompactionKey) as? Bool ?? true
-                        if compactionEnabled,
-                           await IntelligenceCoreService.shared.hasModelSelected {
-                            do {
-                                if let result = try await HistoryCompactionService.shared.compactIfNeeded(
-                                    chatHistory: effectiveHistory,
-                                    conversationID: conversationID,
-                                    charBudget: charBudget
-                                ) {
-                                    continuation.yield(.compactionStarted(
-                                        turnsToCompact: result.turnsCompacted,
-                                        checkpointNumber: result.checkpointNumber
-                                    ))
-
-                                    // Insert checkpoint into effective history for this request.
-                                    effectiveHistory.append(result.checkpointMessage)
-                                    effectiveHistory.sort(by: { $0.timestamp < $1.timestamp })
-
-                                    continuation.yield(.compactionCompleted(
-                                        turnsCompacted: result.turnsCompacted,
-                                        summaryPreview: result.summaryPreview
-                                    ))
+                        let icMasterEnabled = UserDefaults.standard.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
+                        let icModelSelected = await IntelligenceCoreService.shared.hasModelSelected
+                        if compactionEnabled, icMasterEnabled, icModelSelected {
+                            if let plan = await HistoryCompactionService.shared.evaluate(
+                                chatHistory: effectiveHistory,
+                                charBudget: charBudget
+                            ) {
+                                // No `.compactionStarted` chip in background mode: if the
+                                // stream ended before completion, a persisted "Compacting…"
+                                // row with no terminal row would read as a hang forever.
+                                // The completed/failed chip stands alone; the checkpoint
+                                // card in the transcript is the durable evidence.
+                                await HistoryCompactionService.shared.scheduleExecution(
+                                    plan: plan,
+                                    conversationID: conversationID
+                                ) { event in
+                                    // Best-effort chips only — a yield after the stream
+                                    // finishes is a harmless no-op.
+                                    continuation.yield(event)
                                 }
-                            } catch {
-                                logger.warning("History compaction failed: \(error.localizedDescription). Continuing without compaction.")
+                                logger.info("[COMPACTION] Scheduled in background — \(plan.turnPairsInBatch) turn pairs, checkpoint #\(plan.checkpointNumber). THIS turn proceeds with uncompacted history (\(effectiveHistory.count) messages, trimmed to budget by the builders); the checkpoint applies from the next turn. conversationID: \(conversationID.uuidString.prefix(8)), traceID: \(traceContext.traceID)")
                             }
+                        } else {
+                            // Silent-skip logging: the consequence (history stays uncompacted,
+                            // so a long conversation is trimmed rather than summarized) is
+                            // invisible from the outside otherwise.
+                            logger.info("[COMPACTION] Skipped — feature: \(compactionEnabled), ic-master: \(icMasterEnabled), ic-model-selected: \(icModelSelected) → history stays uncompacted (\(effectiveHistory.count) messages), conversationID: \(conversationID.uuidString.prefix(8))")
                         }
 
                         // SessionGraph tracks tool failures (Ghost Protocol) — only relevant when tools exist.
@@ -339,20 +371,26 @@ class AgentConnect: @unchecked Sendable {
                         switch historyStrategy {
                         case .recentHistory:
                             recentHistory = EpisodicHistoryFormatter.buildRecentHistoryString(
-                                from: effectiveHistory, limit: 10
+                                from: effectiveHistory, limit: 10,
+                                includeImageNames: profile.supportsVisionInput
                             )
                             if isNativeProvider {
                                 nativeHistoryTurns = NativeHistoryConverter.buildNativeTurns(
-                                    from: effectiveHistory, limit: 10, charBudget: charBudget
+                                    from: effectiveHistory, limit: 10, charBudget: charBudget,
+                                    includeImages: historyImagesEnabled,
+                                    correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)"
                                 )
                             }
                         case .fullHistory:
                             recentHistory = EpisodicHistoryFormatter.buildRecentHistoryString(
-                                from: effectiveHistory, limit: effectiveHistory.count
+                                from: effectiveHistory, limit: effectiveHistory.count,
+                                includeImageNames: profile.supportsVisionInput
                             )
                             if isNativeProvider {
                                 nativeHistoryTurns = NativeHistoryConverter.buildNativeTurns(
-                                    from: effectiveHistory, limit: nil, charBudget: charBudget
+                                    from: effectiveHistory, limit: nil, charBudget: charBudget,
+                                    includeImages: historyImagesEnabled,
+                                    correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)"
                                 )
                             }
 
@@ -362,17 +400,22 @@ class AgentConnect: @unchecked Sendable {
                             )
                             if isNativeProvider {
                                 nativeHistoryTurns = NativeHistoryConverter.buildPointerTurns(
-                                    from: effectiveHistory
+                                    from: effectiveHistory,
+                                    includeImages: historyImagesEnabled,
+                                    correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)"
                                 )
                             }
 
                         case .hybrid:
                             recentHistory = EpisodicHistoryFormatter.buildHybridHistoryString(
-                                from: effectiveHistory, inlineCount: 3
+                                from: effectiveHistory, inlineCount: 3,
+                                includeImageNames: profile.supportsVisionInput
                             )
                             if isNativeProvider {
                                 nativeHistoryTurns = NativeHistoryConverter.buildHybridTurns(
-                                    from: effectiveHistory, inlineCount: 3, charBudget: charBudget
+                                    from: effectiveHistory, inlineCount: 3, charBudget: charBudget,
+                                    includeImages: historyImagesEnabled,
+                                    correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)"
                                 )
                             }
                         }
@@ -382,7 +425,11 @@ class AgentConnect: @unchecked Sendable {
                         // when history is too short for pointers (e.g. hybrid with <= 3 turns).
                         let hasPointers: Bool = {
                             if let turns = nativeHistoryTurns {
-                                return turns.contains { $0["content"]?.contains("get_conversation_history(") == true }
+                                // Probes the same lowered text the model will see. Previously a
+                                // `["content"]?` dict subscript; `HistoryTurn.text` is non-optional,
+                                // so the "key absent" case collapses into "empty text" — which
+                                // never contained the marker anyway.
+                                return turns.contains { $0.text.contains("get_conversation_history(") }
                             }
                             return recentHistory?.contains("get_conversation_history(") == true
                         }()
@@ -420,12 +467,18 @@ class AgentConnect: @unchecked Sendable {
                         endpointHint: llmConfig.baseURL
                     )
 
-                    // Resolve IC-powered response synthesis.
-                    // Global toggle from Core Intelligence settings, gated on IC availability.
+                    // Resolve IC-powered response synthesis: strictly opt-in, per provider
+                    // family (see SynthesisOptIn). Nothing else may turn it on — tool
+                    // failures and circuit-breaker aborts no longer force it.
                     let icAvailable = await IntelligenceCoreService.shared.hasModelSelected
                     let icEnabled = UserDefaults.standard.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
-                    let synthToggle = UserDefaults.standard.bool(forKey: AppSettings.ciFeatureResponseSynthesisKey)
-                    let responseSynthesisEnabled = icAvailable && icEnabled && synthToggle
+                    let synthDecision = SynthesisOptIn.resolved(
+                        provider: llmConfig.apiProvider,
+                        icModelSelected: icAvailable,
+                        icEnabled: icEnabled
+                    )
+                    let responseSynthesisEnabled = synthDecision.optedIn
+                    logger.info("[SYNTH] provider-family: \(synthDecision.family.rawValue), opted-in: \(synthDecision.optedIn) (\(synthDecision.reason)) → \(synthDecision.optedIn ? "IC synthesis pass" : "raw passthrough"), traceID: \(traceContext.traceID), conversationID: \(conversationID.uuidString.prefix(8))")
 
                     let input = AgentInput(
                         userInput: userInput,
@@ -433,6 +486,12 @@ class AgentConnect: @unchecked Sendable {
                         attachmentContext: attachmentContext,
                         knowledgeBaseContext: knowledgeBaseContext,
                         chatHistory: chatHistory,
+                        // Vision BOTS re-attach prior-turn images (ChatExecutor reads
+                        // chatHistory). Gated on vision alone — NOT tool capability —
+                        // because a vision model can see images regardless of whether it
+                        // supports tools (qwen2.5vl etc. are vision-but-.none → Bot-only).
+                        // Non-vision → false → history images omitted (safe on model swap).
+                        botHistoryImagesEnabled: isBotFlow && profile.supportsVisionInput,
                         conversationID: conversationID,
                         tools: activeTools,
                         longTermMemory: longTermMemory,

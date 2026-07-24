@@ -26,13 +26,20 @@ class TextTriggerAnalyzer {
     ///   - cursorLocation: The current cursor index (NSRange location).
     /// - Returns: A `Result` containing the trigger type, range, and query if found; otherwise `nil`.
     static func analyze(text: String, cursorLocation: Int) -> Result? {
-        // 1. Guard bounds
-        guard cursorLocation > 0, cursorLocation <= text.count else { return nil }
-        
-        // 2. Use NSString for robust UTF-16 indexing (matches NSRange)
+        // 1. Use NSString for robust UTF-16 indexing (matches NSRange)
         let nsText = text as NSString
         let length = nsText.length
-        
+
+        // 2. Guard bounds in UTF-16 space.
+        //
+        // `cursorLocation` is an NSRange location (UTF-16 offset), so it must be compared
+        // against `nsText.length` — NOT `text.count`, which counts grapheme clusters. A
+        // single emoji before the cursor makes the UTF-16 offset exceed the Character
+        // count, the guard failed, and `@`/`#` suggestions silently stopped working for
+        // the rest of the message. (`length` was already being computed here and thrown
+        // away — the compiler warned it was unused.)
+        guard cursorLocation > 0, cursorLocation <= length else { return nil }
+
         // Optimization: Don't scan back more than N characters (queries shouldn't be huge)
         let maxScanDepth = 120
         let startIndex = max(0, cursorLocation - maxScanDepth)
@@ -42,7 +49,14 @@ class TextTriggerAnalyzer {
         // 3. Scan backwards
         while i >= startIndex {
             let charCode = nsText.character(at: i)
-            guard let scalar = UnicodeScalar(charCode) else { return nil }
+            // A surrogate half belongs to an astral character (emoji, rare CJK). It is
+            // neither a trigger nor a word breaker, so keep scanning past it —
+            // `UnicodeScalar(_:)` returns nil for surrogates, and bailing out here aborted
+            // the scan whenever an emoji sat inside the query ("@fi👍le").
+            guard let scalar = UnicodeScalar(charCode) else {
+                i -= 1
+                continue
+            }
             
             // A. Check for Triggers
             if scalar == "#" || scalar == "@" {

@@ -39,16 +39,23 @@ struct PulseAnimationModifier: ViewModifier {
 // MARK: - Streaming Pulse Indicator
 /// An animated pulsing dot indicating an active streaming conversation.
 struct StreamingPulseIndicator: View {
+    /// `nil` → the theme's streaming color. The sidebar row passes `warningColor`
+    /// for the needs-input state — ONE indicator, two colors (user decision
+    /// 2026-07-19: yellow = waiting on you, streaming color = generating).
+    var color: Color? = nil
+
     @State private var isPulsing = false
     @Environment(\.appTheme) private var theme
 
+    private var fillColor: Color { color ?? theme.streamingIndicator }
+
     var body: some View {
         Circle()
-            .fill(theme.streamingIndicator)
+            .fill(fillColor)
             .frame(width: 8, height: 8)
             .scaleEffect(isPulsing ? 1.3 : 0.8)
             .opacity(isPulsing ? 1.0 : 0.5)
-            .shadow(color: theme.streamingIndicator.opacity(isPulsing ? 0.4 : 0.0), radius: 4)
+            .shadow(color: fillColor.opacity(isPulsing ? 0.4 : 0.0), radius: 4)
             .animation(
                 .easeInOut(duration: 0.8)
                 .repeatForever(autoreverses: true),

@@ -29,9 +29,15 @@ struct AgentTimelineView: View {
     /// node's final output and should stay full scale.
     private let compactReasoning: Bool
 
+    /// [TL-4] Change marker for `events` — proxies the whole array in `Equatable` so
+    /// SwiftUI can skip body (and the grouping rebuild) when the timeline didn't change.
+    /// Bumped by `ChatMessage.timelineEvents.didSet` on EVERY mutation path.
+    private let revision: UInt64
+
     /// Initialize from a ChatMessage (existing usage in chat bubbles).
     init(message: ChatMessage) {
         self.events = message.timelineEvents
+        self.revision = message.timelineRevision
         self.isStreaming = message.isStreaming
         self.finalContentText = message.currentAgentContent?.textContent ?? message.content.textContent
         self.streamingContext = StreamingContext(
@@ -56,12 +62,14 @@ struct AgentTimelineView: View {
     ///   answer is deduplicated — same behaviour as the chat-bubble init.
     init(
         events: [TimelineEvent],
+        revision: UInt64 = 0,
         isStreaming: Bool = false,
         chatFidelity: Bool = false,
         streamingStartedAt: Date? = nil,
         finalContentText: String? = nil
     ) {
         self.events = events
+        self.revision = revision
         self.isStreaming = isStreaming
         self.finalContentText = finalContentText
         if chatFidelity, isStreaming, let start = streamingStartedAt {
@@ -73,10 +81,11 @@ struct AgentTimelineView: View {
     }
 
     var body: some View {
-        // Compute grouped nodes inline every body pass. O(n) for n events per message
-        // (typically < 30) — cheap enough that caching isn't worth the @State-in-body
-        // hazard that an earlier implementation hit. SwiftUI's Identifiable diff handles
-        // the ForEach efficiently across updates.
+        // Grouping is O(n) over up to `ChatMessage.maxTimelineEvents` (500) events —
+        // NOT the "< 30" this comment used to assume — and body re-ran on every parent
+        // pass, i.e. every streamed token. [TL-4] The chat bubble call site wraps this
+        // view in `.equatable()` so body (and this rebuild) is skipped unless the
+        // timeline `revision`, streaming flag, or (post-stream) final text changed.
         let nodes = Self.buildGroupedNodes(
             from: events,
             isStreaming: isStreaming,
@@ -1102,5 +1111,25 @@ enum ToolArgFormatter {
 
     private static func truncate(_ s: String, _ max: Int) -> String {
         s.count > max ? String(s.prefix(max - 1)) + "…" : s
+    }
+}
+
+// MARK: - [TL-4] Render-skip contract
+
+extension AgentTimelineView: Equatable {
+    /// `revision` proxies `events` (bumped on every timeline mutation via
+    /// `ChatMessage.timelineEvents.didSet`), so the array itself is not compared.
+    /// `finalContentText` is deliberately ignored WHILE STREAMING: it mirrors the
+    /// growing prose (changes every token) but both grouping dedup passes are
+    /// `!isStreaming`-gated — comparing it live would re-run body per token and
+    /// defeat the memoization on the exact path it exists for. The streaming
+    /// footer self-ticks via `TimelineView(.periodic)`, so skipping body never
+    /// freezes the elapsed counter.
+    static func == (lhs: AgentTimelineView, rhs: AgentTimelineView) -> Bool {
+        lhs.revision == rhs.revision
+            && lhs.isStreaming == rhs.isStreaming
+            && lhs.compactReasoning == rhs.compactReasoning
+            && lhs.streamingContext?.startedAt == rhs.streamingContext?.startedAt
+            && (lhs.isStreaming || lhs.finalContentText == rhs.finalContentText)
     }
 }

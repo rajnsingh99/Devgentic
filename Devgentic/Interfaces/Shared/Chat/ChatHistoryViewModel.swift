@@ -51,6 +51,45 @@ final class ChatHistoryViewModel {
     // This allows O(1) appending of history pages instead of O(n) insertion at index 0.
     var currentChatMessages: [ChatMessage] = []
 
+    /// Splices a history-compaction checkpoint into the live conversation.
+    ///
+    /// Not an append: `currentChatMessages` is DESCENDING (newest first) and a checkpoint is
+    /// timestamped just after the turns it summarized, so it belongs in the MIDDLE of the
+    /// array. Doing this matters beyond display — the next turn's history is taken from this
+    /// array, so without the splice compaction would keep re-summarizing the same turns
+    /// (a full IC load + inference every request) until the conversation was reloaded.
+    ///
+    /// Idempotent by id, mirroring the persistence-side upsert. Also guards against the
+    /// wrong conversation being open: compaction completes in the background now, so its
+    /// checkpoint can arrive after the user has switched chats — splicing it into whatever
+    /// happens to be loaded would inject a foreign message into another transcript. The
+    /// store already has it; reopening the right conversation loads it from there.
+    func insertCheckpoint(_ checkpoint: ChatMessage) {
+        guard let loadedConversation = currentChatMessages.first?.conversationId else {
+            // Nothing loaded (fresh "new chat" or mid-reload) — a splice here would leave an
+            // orphan card floating in an empty transcript. The persisted copy is the truth.
+            logger.info("[COMPACTION] Checkpoint \(checkpoint.id.uuidString.prefix(8)) arrived with no conversation loaded — splice skipped (persisted copy loads on open).")
+            return
+        }
+        guard loadedConversation == checkpoint.conversationId else {
+            logger.info("[COMPACTION] Checkpoint \(checkpoint.id.uuidString.prefix(8)) is for conversation \(checkpoint.conversationId.uuidString.prefix(8)) but \(loadedConversation.uuidString.prefix(8)) is open — splice skipped (persisted copy loads on reopen).")
+            return
+        }
+        guard !currentChatMessages.contains(where: { $0.id == checkpoint.id }) else {
+            logger.info("[COMPACTION] Checkpoint \(checkpoint.id.uuidString.prefix(8)) already present in live history — duplicate insert skipped.")
+            return
+        }
+        let index = Self.descendingInsertionIndex(for: checkpoint.timestamp, in: currentChatMessages)
+        currentChatMessages.insert(checkpoint, at: index)
+        logger.info("[COMPACTION] Checkpoint \(checkpoint.id.uuidString.prefix(8)) spliced into live history at index \(index) (now \(self.currentChatMessages.count) messages).")
+    }
+
+    /// Insertion index for `timestamp` in an array sorted DESCENDING by timestamp.
+    /// Pure + internal so the ordering contract is unit-testable without a view model.
+    static func descendingInsertionIndex(for timestamp: Date, in messages: [ChatMessage]) -> Int {
+        messages.firstIndex { $0.timestamp <= timestamp } ?? messages.count
+    }
+
     var isInitiallyLoadingConversation = false
 
     var isLoadingPage = false

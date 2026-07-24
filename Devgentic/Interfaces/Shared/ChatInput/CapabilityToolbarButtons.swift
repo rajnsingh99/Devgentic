@@ -96,27 +96,41 @@ private struct CapabilityChipButton<PopoverContent: View>: View {
 
     private var tint: Color { theme.capabilityColor(for: color) }
 
+    private var borderStrokeColor: Color {
+        if isOn {
+            return hovering ? tint.opacity(0.6) : tint.opacity(0.30)
+        } else {
+            return hovering ? theme.secondaryText.opacity(0.35) : Color.clear
+        }
+    }
+
+    private var activeShadowColor: Color {
+        guard hovering && isEnabled else { return .clear }
+        return isOn ? tint.opacity(0.4) : Color.black.opacity(0.2)
+    }
+
     var body: some View {
         Button { showing = true } label: {
             Image(systemName: icon)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(isOn ? tint : theme.secondaryText.opacity(0.8))
-                .frame(width: 15, height: 15)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(isOn ? tint : (hovering ? theme.primaryText : theme.secondaryText.opacity(0.85)))
+                .frame(width: 16, height: 16)
                 .padding(6)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(isOn ? tint.opacity(0.14) : (hovering ? theme.surfaceOverlay : Color.clear))
+                        .fill(isOn ? (hovering ? tint.opacity(0.24) : tint.opacity(0.14)) : (hovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(isOn ? tint.opacity(0.30) : Color.clear, lineWidth: 1)
+                        .strokeBorder(borderStrokeColor, lineWidth: 1)
                 )
-                .scaleEffect(hovering && isEnabled ? 1.04 : 1.0)
+                .shadow(color: activeShadowColor, radius: 4, x: 0, y: 1)
+                .scaleEffect(hovering && isEnabled ? 1.06 : 1.0)
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)
         .opacity(isEnabled ? 1.0 : 0.5)
-        .onHover { h in withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { hovering = h } }
+        .onHover { h in withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { hovering = h } }
         .popover(isPresented: $showing, arrowEdge: .bottom) { popover() }
         .help("\(label): \(isOn ? "On" : "Off") — tap to configure")
         .accessibilityLabel("\(label) capability, \(isOn ? "enabled" : "disabled"). Tap to configure.")

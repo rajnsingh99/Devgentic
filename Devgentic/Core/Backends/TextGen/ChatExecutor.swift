@@ -127,9 +127,20 @@ actor ChatExecutor: Executor {
                     // gracefully (image dropped, text kept). Token streaming is traded
                     // for image support on these turns. A failed image resolve throws
                     // here and is surfaced as an error (never a silent drop).
-                    let imageBlocks: [MessageBlock] = (input.userPayload ?? []).filter {
+                    let currentImageBlocks: [MessageBlock] = (input.userPayload ?? []).filter {
                         if case .image = $0 { return true } else { return false }
                     }
+                    // Vision bots also re-attach PRIOR-turn images so the picture stays
+                    // "in view" across follow-ups (agents do this via nativeHistoryTurns;
+                    // a .none-capability bot's history is episodic XML with no per-turn
+                    // structure, so these ride the current user turn instead). Gated on
+                    // vision + format; non-vision → flag is false → nothing added.
+                    // TRADEOFF (accepted): any image in the conversation makes every
+                    // subsequent turn non-streaming (the multimodal API is atomic).
+                    let (historyImageBlocks, historyImagesOmitted, historyImagesTranscoded) = input.botHistoryImagesEnabled
+                        ? Self.buildHistoryImageBlocks(from: input.chatHistory, correlation: "trace:\(traceSpan.traceID)")
+                        : ([], 0, 0)
+                    let imageBlocks: [MessageBlock] = historyImageBlocks + currentImageBlocks
 
                     // Captures the provider's real token usage from the stream's terminal
                     // usage event (#10b); stays nil for the atomic image path and for
@@ -137,6 +148,12 @@ actor ChatExecutor: Executor {
                     let usageBox = StreamUsageBox()
 
                     if !imageBlocks.isEmpty {
+                        // [VISION] The bot-path counterpart to the native "Seeded" and the
+                        // legacy "[MULTIMODAL]" lines — the confirmation that THIS bot
+                        // request carries images and via the atomic (non-streaming)
+                        // generate(payload:) route. Without it the bot flow's only success
+                        // evidence was absence-of-error.
+                        logger.info("[VISION] trace:\(traceSpan.traceID) bot request carrying \(currentImageBlocks.count) current-turn + \(historyImageBlocks.count) prior-turn image(s)\(historyImagesOmitted > 0 ? ", \(historyImagesOmitted) history omitted (unsupported format)" : "")\(historyImagesTranscoded > 0 ? ", \(historyImagesTranscoded) history transcoded → jpeg" : "") → \(String(describing: type(of: model))) via generate(payload:) (atomic, non-streaming)")
                         // Atomic call — safe to retry the whole request.
                         let providerMessages = Self.appendImages(to: messages, imageBlocks: imageBlocks)
                         var result = ""
@@ -283,6 +300,64 @@ actor ChatExecutor: Executor {
     /// Builds provider messages from the legacy text messages and appends image
     /// blocks to the final user turn (the user's text already lives in `messages`).
     /// Image bytes stay reference-backed here — the provider resolves+encodes them.
+    /// Recent window of prior-turn messages scanned for re-attachable images. 20
+    /// messages ≈ 10 turn pairs, matching `NativeHistoryConverter`'s default agent
+    /// history window — the image window tracks the text window rather than dumping
+    /// every image from a long conversation (a recency bound, not a per-image tier).
+    private static let historyImageWindow = 20
+
+    /// Collects prior-turn images from a vision bot's chat history for re-attachment.
+    /// Keeps the picture "in view" across follow-up turns.
+    ///
+    /// - Bounded to the most recent `historyImageWindow` messages.
+    /// - Format-validated via `VisionImageFormat` — HEIC/GIF/TIFF/BMP are OMITTED, never
+    ///   guessed, so a bad format can't 400 the conversation on every subsequent turn.
+    /// - Bytes-first (`.ephemeralData` over `.diskPath`) — survives relaunch; no stale URL.
+    ///
+    /// Images attach to USER turns only. `chatHistory` already excludes the current
+    /// message (deduped upstream), so there is no overlap with the current-turn payload.
+    /// Returns the blocks in chronological order and the count omitted for bad format.
+    /// `internal` (not `private`) so the pure collection logic is directly unit-testable.
+    nonisolated static func buildHistoryImageBlocks(
+        from history: [ChatMessage],
+        window: Int = historyImageWindow,
+        correlation: String = ""
+    ) -> (blocks: [MessageBlock], omitted: Int, transcoded: Int) {
+        var blocks: [MessageBlock] = []
+        var omitted = 0
+        var transcoded = 0
+        for message in history.suffix(window) where message.sender == .user {
+            guard let files = message.attachedImageFiles, !files.isEmpty else { continue }
+            for file in files {
+                // Bytes-first + byte-TRUTHFUL: resolve from the persisted blob by its real
+                // container — pass jpeg/png/webp through, transcode HEIC/etc → JPEG (so a
+                // prior-turn HEIC keeps working across follow-ups instead of vanishing the
+                // turn after the current-turn path showed it), omit only the undecodable.
+                // Byte-based, so a mislabeled .jpg-that-is-HEIC can't replay a 400 here.
+                if !file.binaryData.isEmpty {
+                    if let sendable = VisionImageFormat.resolveSendable(data: file.binaryData) {
+                        blocks.append(.image(ImagePayload(reference: .ephemeralData(sendable.data), mimeType: sendable.mimeType, alt: file.name)))
+                        if sendable.wasTranscoded { transcoded += 1 }
+                    } else {
+                        omitted += 1
+                        logger.warning("[VISION] \(correlation) omitted prior-turn image '\(file.name)' — persisted bytes are not a decodable image; the model won't re-see it (it stays in the transcript).")
+                    }
+                    continue
+                }
+                // Rare .diskPath-only state (no persisted bytes): can't sniff or transcode
+                // without a read here, so fall back to the extension for the passthrough
+                // decision and omit an unsupported format.
+                if let mime = VisionImageFormat.mimeType(forExtension: file.fileExtension) {
+                    blocks.append(.image(ImagePayload(reference: .diskPath(file.url), mimeType: mime, alt: file.name)))
+                } else {
+                    omitted += 1
+                    logger.warning("[VISION] \(correlation) omitted prior-turn image '\(file.name)' (.\(file.fileExtension)) — unsupported format and no persisted bytes to transcode; the model won't re-see it (it stays in the transcript).")
+                }
+            }
+        }
+        return (blocks, omitted, transcoded)
+    }
+
     nonisolated private static func appendImages(to messages: [[String: String]], imageBlocks: [MessageBlock]) -> [ProviderMessage] {
         var providerMessages = messages.map { ProviderMessage(legacy: $0) }
         if let lastUser = providerMessages.lastIndex(where: { $0.role == "user" }) {

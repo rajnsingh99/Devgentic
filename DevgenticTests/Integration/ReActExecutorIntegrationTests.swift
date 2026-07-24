@@ -348,4 +348,83 @@ final class ReActExecutorIntegrationTests: XCTestCase {
         let content = StreamCollector.contentText(from: events)
         XCTAssertFalse(content.isEmpty, "Should produce content even with 1 failure in parallel batch")
     }
+
+    // MARK: - Synthesis Routing (opt-in only)
+
+    /// **Finding #1 regression — the executor's synthesis routing.**
+    ///
+    /// A real on-device run produced a complete 7-row markdown table; ONE dead
+    /// `fs_read_metadata` call made the call site compute
+    /// `forceSynthesis: responseSynthesisEnabled || !effectiveFailures.isEmpty`
+    /// → true, which handed the finished answer to the IC model (system prompt:
+    /// "Maximum 3 sentences for simple tasks") and the user received 3 rows.
+    ///
+    /// `TestAgentInputFactory` leaves `responseSynthesisEnabled` false — the
+    /// un-opted default — so an unrecovered tool failure must NOT reroute the
+    /// answer through synthesis. Pinned at the executor, not the synthesizer:
+    /// the synthesizer's own gate is not what regressed here.
+    func testReAct_UnrecoveredToolFailure_NotOptedIn_DoesNotRerouteAnswerThroughSynthesis() async throws {
+        let table = """
+        | File | Size |
+        | --- | --- |
+        | a.swift | 1 KB |
+        | b.swift | 2 KB |
+        | c.swift | 3 KB |
+        """
+
+        let failingTool = TestToolFactory.makeFailing(name: "fs_read_metadata", error: "No such file")
+
+        let provider = MockLLMProvider(steps: [
+            ModernCognitiveStep(
+                reasoning: "Fetching metadata.",
+                toolCalls: [TestToolCallFactory.make(name: "fs_read_metadata")]
+            ),
+            ModernCognitiveStep(reasoning: table)
+        ])
+
+        let executor = ReActAgentExecutor(maxIterations: 5)
+        let input = TestAgentInputFactory.make(query: "List the files", tools: [failingTool])
+        XCTAssertFalse(input.responseSynthesisEnabled, "Precondition: this run is NOT opted into synthesis")
+
+        let stream = executor.execute(model: provider, input: input) { _ in }
+        let events = try await StreamCollector.collect(from: stream)
+
+        let content = StreamCollector.contentText(from: events)
+        XCTAssertEqual(content, table,
+                       "A failed tool must not trigger a rewrite of the model's finished answer")
+
+        // The failure must still be reported honestly — the amber path is what
+        // communicates it now, and removing the force must not have muted it.
+        let toolOutputs = StreamCollector.toolOutputs(from: events)
+        XCTAssertEqual(toolOutputs.filter { !$0.isSuccess }.count, 1, "The failed tool row must survive")
+    }
+
+    /// TRAP: `effectiveFailures` does double duty — it fed BOTH the old
+    /// `forceSynthesis` expression and the terminal-outcome derivation. Removing it
+    /// from synthesis routing must leave the outcome honest, or every partially
+    /// failed run would silently record green.
+    func testReAct_UnrecoveredToolFailure_StillReportsCompletedWithWarnings() async throws {
+        let failingTool = TestToolFactory.makeFailing(name: "fs_read_metadata", error: "No such file")
+
+        let provider = MockLLMProvider(steps: [
+            ModernCognitiveStep(
+                reasoning: "Fetching metadata.",
+                toolCalls: [TestToolCallFactory.make(name: "fs_read_metadata")]
+            ),
+            ModernCognitiveStep(reasoning: "Here is the answer anyway.")
+        ])
+
+        let executor = ReActAgentExecutor(maxIterations: 5)
+        let input = TestAgentInputFactory.make(query: "List the files", tools: [failingTool])
+
+        let stream = executor.execute(model: provider, input: input) { _ in }
+        let events = try await StreamCollector.collect(from: stream)
+
+        let outcomes: [ExecutionOutcome] = events.compactMap { event in
+            if case .executionFinished(let outcome, _) = event { return outcome }
+            return nil
+        }
+        XCTAssertEqual(outcomes.last, .completedWithWarnings,
+                       "An unrecovered evidence failure must still amber the run")
+    }
 }

@@ -191,7 +191,7 @@ final class ChatOpsBridge {
         }
 
         let buttons: [[InlineKeyboardButton]] = conversations.map { conversationSD in
-            let title = conversationSD.toStruct().displayTitle
+            let title = conversationSD.toRowStruct().displayTitle
             let convID = conversationSD.id
             let isActive = convID == config.activeConversationID ? "⭐ " : ""
             let label = "\(isActive)\(title)"
@@ -255,7 +255,7 @@ final class ChatOpsBridge {
         let activeConvTitle: String
         if let activeID = config.activeConversationID,
            let conversationSD = vm.persistenceService.getConversation(withId: activeID) {
-            activeConvTitle = conversationSD.toStruct().displayTitle
+            activeConvTitle = conversationSD.toRowStruct().displayTitle
         } else {
             activeConvTitle = "None"
         }
@@ -326,7 +326,7 @@ final class ChatOpsBridge {
         vm.selectedConversationID = uuid
         logger.info("[ChatOps] Mac UI navigated to conversation \(uuid.uuidString).")
 
-        let title = conversationSD.toStruct().displayTitle
+        let title = conversationSD.toRowStruct().displayTitle
         _ = try? await apiClient?.sendMessage(
             chatID: chatID,
             text: "✅ Switched to: *\(title)*\n\nJust type your message to continue."

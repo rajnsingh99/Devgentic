@@ -162,12 +162,11 @@ final class ResponseSynthesizerTests: XCTestCase {
 
     // MARK: - Wrapper-Run Suppression (no IC synthesis in Planning/Reflexion inner loops)
 
-    /// A multi-tool summary takes the IC LLM path by default. Wrapper-run inner
-    /// loops (Planning subtasks, Reflexion trials) pass `suppressLLM: true` and
-    /// must route to the deterministic builder instead — even under
-    /// `forceSynthesis: true` (the circuit-breaker abort path), which otherwise
-    /// always attempts an IC load.
-    func testSuppressLLM_MultiToolRun_UsesDeterministicBuilder_EvenWhenForced() async {
+    /// A multi-tool summary takes the IC LLM path when the user opted in. Wrapper-run
+    /// inner loops (Planning subtasks, Reflexion trials) pass `suppressLLM: true` and
+    /// must route to the deterministic builder instead — even when the family IS
+    /// opted in, which otherwise attempts an IC load.
+    func testSuppressLLM_MultiToolRun_UsesDeterministicBuilder_EvenWhenOptedIn() async {
         var summary = ExecutionSummary(originalGoal: "Do two things")
         summary.record(toolCallId: "1", toolName: "step_one", params: "{}",
                        output: "first result", isSuccess: true)
@@ -180,10 +179,140 @@ final class ResponseSynthesizerTests: XCTestCase {
             summary: summary,
             originalQuery: "Do two things",
             isNativeFlow: false,
-            forceSynthesis: true,
+            synthesisOptedIn: true,
             suppressLLM: true
         )
         XCTAssertEqual(response, expected, "Suppressed runs must use the deterministic builder, never IC")
+    }
+
+    // MARK: - Opt-In Gate (synthesis is never automatic)
+
+    /// **Finding #1 regression.** A native run produced a complete 7-row markdown
+    /// table; ONE dead `fs_read_metadata` call set `forceSynthesis = true`, which
+    /// punched through the native fast-path and handed the finished answer to the
+    /// IC model, whose prompt caps simple answers at three sentences — the user
+    /// received 3 rows. Un-opted runs must now return the model's own bytes.
+    func testUnrecoveredFailure_NotOptedIn_ReturnsModelAnswerByteForByte() async {
+        let table = """
+        | File | Size |
+        | --- | --- |
+        | a.swift | 1 KB |
+        | b.swift | 2 KB |
+        | c.swift | 3 KB |
+        """
+        var summary = ExecutionSummary(originalGoal: "List the files")
+        summary.record(toolCallId: "1", toolName: "fs_list", params: "{}",
+                       output: "a.swift, b.swift, c.swift", isSuccess: true)
+        summary.record(toolCallId: "2", toolName: "fs_read_metadata", params: "{}",
+                       output: "Error: no such file", isSuccess: false, failureCategory: .executionThrew)
+        summary.finalAgentThought = table
+        summary.markComplete()
+
+        let response = await ResponseSynthesizer.synthesize(
+            summary: summary,
+            originalQuery: "List the files",
+            isNativeFlow: true,
+            synthesisOptedIn: false
+        )
+        XCTAssertEqual(response, table, "A tool failure must not trigger a rewrite of a finished answer")
+    }
+
+    /// The hole PATH A never covered: legacy (non-native) multi-tool runs fell
+    /// straight through to the IC branch regardless of the user's toggle.
+    func testLegacyMultiTool_NotOptedIn_ReturnsAnswerVerbatim() async {
+        var summary = ExecutionSummary(originalGoal: "Do two things")
+        summary.record(toolCallId: "1", toolName: "step_one", params: "{}",
+                       output: "first result", isSuccess: true)
+        summary.record(toolCallId: "2", toolName: "step_two", params: "{}",
+                       output: "second result", isSuccess: true)
+        summary.finalAgentThought = "Both steps finished: the config now points at port 443."
+        summary.markComplete()
+
+        let response = await ResponseSynthesizer.synthesize(
+            summary: summary,
+            originalQuery: "Do two things",
+            isNativeFlow: false,
+            synthesisOptedIn: false
+        )
+        XCTAssertEqual(response, "Both steps finished: the config now points at port 443.")
+    }
+
+    /// The deterministic template floor survives the gate: a legacy multi-tool run
+    /// with NO model output still gets a non-empty answer, without touching IC.
+    func testLegacyMultiTool_NotOptedIn_NoAnswer_FallsBackDeterministically() async {
+        var summary = ExecutionSummary(originalGoal: "Do two things")
+        summary.record(toolCallId: "1", toolName: "step_one", params: "{}",
+                       output: "first result", isSuccess: true)
+        summary.record(toolCallId: "2", toolName: "step_two", params: "{}",
+                       output: "second result", isSuccess: true)
+        summary.markComplete()
+
+        let expected = ResponseSynthesizer.buildDeterministicFallback(summary: summary)
+        let response = await ResponseSynthesizer.synthesize(
+            summary: summary,
+            originalQuery: "Do two things",
+            isNativeFlow: false,
+            synthesisOptedIn: false
+        )
+        XCTAssertEqual(response, expected)
+        XCTAssertFalse(response.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       "The floor guarantees a non-empty response")
+    }
+
+    /// Circuit-breaker abort shape (failureReason set, no final thought). Previously
+    /// hardcoded `forceSynthesis: true`; now it must reach the template, not IC.
+    func testCircuitBreakerShape_NotOptedIn_UsesDeterministicTemplate() async {
+        var summary = ExecutionSummary(originalGoal: "Loop forever")
+        summary.record(toolCallId: "1", toolName: "spin", params: "{}",
+                       output: "Error: repeated", isSuccess: false)
+        summary.record(toolCallId: "2", toolName: "spin", params: "{}",
+                       output: "Error: repeated", isSuccess: false)
+        summary.markComplete(failureReason: "Circuit breaker triggered: repeated identical calls")
+
+        let response = await ResponseSynthesizer.synthesize(
+            summary: summary,
+            originalQuery: "Loop forever",
+            isNativeFlow: false,
+            synthesisOptedIn: false
+        )
+        XCTAssertEqual(response, ResponseSynthesizer.buildDeterministicFallback(summary: summary))
+        XCTAssertFalse(response.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        XCTAssertTrue(response.contains("spin"), "The attempted tool should be named")
+    }
+
+    /// Paired control proving the gate actually OPENS. With no IC model selected the
+    /// IC call throws immediately (a cheap guard, no model load) and the catch path
+    /// lands on the deterministic builder — a different result than the verbatim
+    /// answer the un-opted path returns for the same summary. If the gate never
+    /// opened, this would equal `finalAgentThought` instead.
+    ///
+    /// Skipped when a model IS selected: past the gate the only path is a real IC
+    /// call, and this suite must never load an MLX model.
+    func testOptedIn_MultiToolRun_ReachesLLMBranch_NotRawPassthrough() async throws {
+        let icModelSelected = await IntelligenceCoreService.shared.hasModelSelected
+        try XCTSkipIf(icModelSelected,
+                      "An IC model is selected — opening the gate here would load it. " +
+                      "The un-opted tests above still pin the behavior that matters.")
+
+        var summary = ExecutionSummary(originalGoal: "Do two things")
+        summary.record(toolCallId: "1", toolName: "step_one", params: "{}",
+                       output: "first result", isSuccess: true)
+        summary.record(toolCallId: "2", toolName: "step_two", params: "{}",
+                       output: "second result", isSuccess: true)
+        summary.finalAgentThought = "A distinctive verbatim answer sentinel."
+        summary.markComplete()
+
+        let response = await ResponseSynthesizer.synthesize(
+            summary: summary,
+            originalQuery: "Do two things",
+            isNativeFlow: false,
+            synthesisOptedIn: true
+        )
+        XCTAssertNotEqual(response, "A distinctive verbatim answer sentinel.",
+                          "Opted in → must NOT take the raw-passthrough gate")
+        XCTAssertTrue(response.contains("step_one"),
+                      "IC is unavailable in the test host, so the LLM branch's catch path " +
+                      "lands on the deterministic builder, which lists the tools")
     }
 
     /// Suppression must NOT disturb the free paths: a native-flow run with a final

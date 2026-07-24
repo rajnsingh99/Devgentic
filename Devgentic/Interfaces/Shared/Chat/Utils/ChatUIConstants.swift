@@ -32,6 +32,12 @@ enum ChatUIConstants {
     /// doesn't jump when the picture arrives.
     static let imagePlaceholderMinHeight: CGFloat = 150
 
+    /// Longest side of a user-attached image THUMBNAIL in the user bubble (points).
+    /// Deliberately smaller than `imageMaxWidth`: a message can carry several attached
+    /// photos, and each stays a downsampled chip (`ImageDownsampler`) — full resolution
+    /// lives behind `ImageLightbox`, decoded only on tap.
+    static let attachmentThumbnailPointSize: CGFloat = 120
+
     /// Tallest an inline code block grows before it scrolls internally.
     ///
     /// Without a cap a 50-line block rendered its full ~780pt, pushing the rest of the

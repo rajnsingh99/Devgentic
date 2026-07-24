@@ -149,26 +149,15 @@ struct PromptLibrarySidebarView: View {
 
             sortMenu(viewModel: viewModel)
 
-            Button {
+            SidebarHeaderActionButton(
+                title: "New",
+                systemImage: "plus",
+                shortcut: "⌘N"
+            ) {
                 createEditVM.loadCreateDraft()
                 showingCreateSheet = true
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "plus")
-                        .font(.system(.caption, weight: .semibold))
-                    Text("New")
-                        .font(.system(.caption, weight: .medium))
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(theme.accentColor.opacity(0.15))
-                .foregroundColor(theme.accentColor)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
-            .buttonStyle(.plain)
             .keyboardShortcut("n", modifiers: [.command])
-            .help("New Prompt (⌘N)")
-            .accessibilityLabel("New Prompt")
         }
         .padding(.horizontal, 12)
         .padding(.top, 12)
@@ -659,55 +648,7 @@ struct PromptLibrarySidebarView: View {
 
 // MARK: - Refined Category Chip
 
-struct CategoryChip: View {
-    let title: String
-    let isSelected: Bool
-    let action: () -> Void
 
-    @Environment(\.appTheme) private var theme
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(.caption, weight: isSelected ? .semibold : .medium))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 5)
-                .background {
-                    if isSelected {
-                        LinearGradient(
-                            colors: [theme.accentColor, theme.accentColor.opacity(0.85)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    } else {
-                        theme.surfaceOverlay
-                    }
-                }
-                .foregroundColor(isSelected ? .white : theme.secondaryText)
-                .clipShape(Capsule())
-                .shadow(color: isSelected ? theme.accentColor.opacity(0.2) : Color.clear, radius: 4, y: 1)
-                .overlay(
-                    Capsule()
-                        .stroke(
-                            isSelected ? Color.clear : (isHovered ? theme.accentColor.opacity(0.4) : theme.surfaceOverlayStrong),
-                            lineWidth: 0.5
-                        )
-                )
-                .scaleEffect(isHovered ? 1.05 : 1.0)
-                .scaleEffect(isSelected ? 0.98 : 1.0)
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering in
-            withAnimation(.interactiveSpring(response: 0.2, dampingFraction: 0.65)) {
-                isHovered = hovering
-            }
-        }
-        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isSelected)
-        .accessibilityLabel(title)
-        .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : .isButton)
-    }
-}
 
 // MARK: - Tag Chip
 

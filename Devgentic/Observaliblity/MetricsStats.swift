@@ -63,6 +63,12 @@ struct ModelReliabilityStats: Sendable, Identifiable {
     let modelName: String
     let totalRuns: Int
     let completedCount: Int
+    /// Runs that produced a usable answer but hit trouble on the way (a failed tool
+    /// call, circuit-breaker abort, iteration exhaustion). Before 2026-07-19 these were
+    /// persisted as plain `completed` and were invisible here. They still count as
+    /// successes (`successRate`), but the split shows a model that keeps limping over
+    /// the line rather than clearing it.
+    let completedWithWarningsCount: Int
     let failedCount: Int
     let cancelledCount: Int
     /// Runs that died with the app (quit/crash mid-run) — not the model's fault, so
@@ -72,10 +78,22 @@ struct ModelReliabilityStats: Sendable, Identifiable {
 
     /// Composite key — enables listing multiple (provider, model) pairs.
     var id: String { "\(provider)::\(modelName)" }
+
+    /// Degraded successes are counted here deliberately — they DID answer the user.
+    /// This keeps the rate numerically identical to before `completedWithWarnings`
+    /// became its own status, so historical dashboards don't step-change.
     var successRate: Double {
         let attributable = totalRuns - interruptedCount
         guard attributable > 0 else { return 0 }
-        return Double(completedCount) / Double(attributable)
+        return Double(completedCount + completedWithWarningsCount) / Double(attributable)
+    }
+
+    /// Share of successful runs that were degraded. Surfaces the "always completes,
+    /// always with a broken tool call" model that `successRate` alone hides.
+    var degradedShare: Double {
+        let successes = completedCount + completedWithWarningsCount
+        guard successes > 0 else { return 0 }
+        return Double(completedWithWarningsCount) / Double(successes)
     }
 }
 

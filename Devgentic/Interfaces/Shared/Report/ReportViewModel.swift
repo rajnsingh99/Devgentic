@@ -224,7 +224,10 @@ class ReportViewModel {
     /// silently falling back to `.completed` and rendering a failed run as green.
     private static func spanStatus(forTrace status: TraceStatus) -> SpanStatus {
         switch status {
-        case .completed:                  return .completed
+        // Degraded success renders green here on purpose: the root span DID complete,
+        // and `SpanStatus` has no warning case. The per-tool failure already shows as
+        // its own errored child span, and the trace's status badge carries the nuance.
+        case .completed, .completedWithWarnings: return .completed
         case .running:                    return .running
         case .error, .failed, .cancelled, .interrupted: return .error
         }

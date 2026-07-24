@@ -51,6 +51,11 @@ struct QuickAccessContentView: View {
     @State private var showingProfilePopup: Bool = false
     // [QA revival P2a] Files attached to the next message (panel-local; passed to send()).
     @State private var attachedFiles: [FileSystemItem] = []
+
+    /// [Context gauge] Occupancy of the panel model's window for this conversation
+    /// (nil = non-chat profile, so the ring self-hides). Recomputed on turn / model /
+    /// attachment changes, mirroring the main composer.
+    @State private var contextUsage: ContextWindowUsage?
     // [QA revival P2b → Composer P2] Voice dictation via the shared ComposerVoiceController
     // (per-instance; owns the Whisper session lifecycle incl. the C9 re-entry/cancel guards).
     @State private var voice = ComposerVoiceController()
@@ -186,8 +191,18 @@ struct QuickAccessContentView: View {
         .animation(.easeInOut(duration: 0.2), value: isPanelZoomedToFullScreen)
         // [Pre-send fit hint] Same composer-state advisory as the main window —
         // fires when attachments or the panel's profile change, before a send.
-        .onChange(of: attachedFiles.count) { _, _ in evaluatePreSendFit() }
-        .onChange(of: session.backendConfiguration.selectedProfileID) { _, _ in evaluatePreSendFit() }
+        .onChange(of: attachedFiles.count) { _, _ in
+            evaluatePreSendFit()
+            recomputeContextGauge()
+        }
+        .onChange(of: session.backendConfiguration.selectedProfileID) { _, _ in
+            evaluatePreSendFit()
+            recomputeContextGauge()
+        }
+        // [Context gauge] Recompute occupancy when a turn is added (history grows) or a
+        // send settles (final message + real usage land). Mirrors the main composer.
+        .onChange(of: session.chatHistoryViewModel.currentChatMessages.count) { _, _ in recomputeContextGauge() }
+        .onChange(of: session.isSending) { _, _ in recomputeContextGauge() }
         .onChange(of: isExpanded) { _, newValue in
             // [Unified card] Pass explicit intent; collapsed target = the card's measured height
             // (geometry re-fires after the transition and fine-corrects if paddings shifted it).
@@ -213,6 +228,7 @@ struct QuickAccessContentView: View {
              // [QA revival P1a/P1e] Load the persisted QuickAccess conversation (if resuming);
              // a timed-out session starts fresh.
              session.prepareSession(resume: shouldResumeSession)
+             recomputeContextGauge()
              // [Composer P2] What THIS surface does with dictation events: mirror the transcript
              // into the input field, surface a permission denial, refocus after a stop.
              voice.onTextChange = { inputText = $0 }
@@ -264,6 +280,19 @@ struct QuickAccessContentView: View {
             attachedFiles: attachedFiles,
             typedText: inputText,
             profile: session.selectedProfile,
+            conversationID: session.conversationID
+        )
+    }
+
+    /// [Context gauge] Rebuilds the window-occupancy snapshot for the toolbar ring from the
+    /// panel's state. The panel is chat-only (no Code mode), so the profile is simply
+    /// `session.selectedProfile`. Synchronous and cheap — called on turn / model / attachment
+    /// changes, never per keystroke.
+    private func recomputeContextGauge() {
+        contextUsage = ContextWindowUsage.resolve(
+            profile: session.selectedProfile,
+            messages: session.chatHistoryViewModel.currentChatMessages,
+            attachedFiles: attachedFiles,
             conversationID: session.conversationID
         )
     }
@@ -552,6 +581,12 @@ extension QuickAccessContentView {
                 profilePickerButton
                 composerAttachAndCaptureButtons
                 Spacer()
+                // [Context gauge] Same window-occupancy ring as the main composer.
+                if let contextUsage {
+                    ContextWindowGauge(usage: contextUsage) { profileID in
+                        onOpenProfileSettings?(profileID)
+                    }
+                }
                 composerMicAndSendButtons
             }
             .padding(.horizontal, 12)

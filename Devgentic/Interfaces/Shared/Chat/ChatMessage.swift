@@ -301,6 +301,7 @@ enum CapabilityMilestoneKind: String, Codable, Equatable, Sendable {
     // History Compaction
     case compactionStarted      // "Compacting 15 turns..."
     case compactionCompleted    // "History compacted — 15 turns summarized"
+    case compactionFailed       // "History compaction failed — continuing uncompacted"
 
     /// SF Symbol for rendering in the timeline.
     var icon: String {
@@ -317,6 +318,7 @@ enum CapabilityMilestoneKind: String, Codable, Equatable, Sendable {
         case .delegationCompleted: return "person.fill.checkmark"
         case .compactionStarted: return "archivebox"
         case .compactionCompleted: return "archivebox.fill"
+        case .compactionFailed: return "archivebox.badge.exclamationmark"
         }
     }
 
@@ -326,7 +328,7 @@ enum CapabilityMilestoneKind: String, Codable, Equatable, Sendable {
         case .planGenerated, .planReviewRequested, .subtaskStarted, .subtaskCompleted: return .planning
         case .reflectionTrialStarted, .reflectionEvaluating, .reflectionRetrying, .reflectionAccepted: return .reflection
         case .delegationStarted, .delegationCompleted: return .delegation
-        case .compactionStarted, .compactionCompleted: return .compaction
+        case .compactionStarted, .compactionCompleted, .compactionFailed: return .compaction
         }
     }
 
@@ -489,7 +491,151 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         if let imageArtifact {
             return .mediaArtifact(imageArtifact)
         }
-        return .markdownText("*Operation was stopped before a response could be generated.*")
+        return .markdownText(Self.stoppedRunPlaceholder)
+    }
+
+    /// Synthetic placeholder written when a run ends with no content (cancelled or
+    /// empty). Deliberately unlocalized — persisted, and other layers classify by it.
+    static let stoppedRunPlaceholder = "*Operation was stopped before a response could be generated.*"
+
+    /// Legacy variant emitted by the pre-refactor executor; persisted rows still carry it.
+    static let legacyStoppedRunPlaceholder = "*Operation stopped by user.*"
+
+    /// True when `text` IS a synthetic stopped-run placeholder (exact match after
+    /// trimming — a message that merely QUOTES the phrase inside real prose is real
+    /// content and must not be treated as synthetic). Used by the RAG gate so
+    /// placeholders stop polluting conversation memory (observed on-device
+    /// 2026-07-19: a cancelled run's placeholder was embedded and stored).
+    static func isSyntheticPlaceholder(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed == stoppedRunPlaceholder || trimmed == legacyStoppedRunPlaceholder
+    }
+
+    /// Merges an incoming streamed text chunk into the current content. Returns the
+    /// new content plus (optionally) a timeline event the caller must append, or
+    /// `nil` when the chunk can't merge and content should stay untouched (e.g.
+    /// `.mediaArtifact` — the parked media+text decision). Pure + static for
+    /// testability, same pattern as `resolveFinalizedContent`; the streaming path
+    /// (`ActiveStreamManager.updateMessageContent`) and `StreamedChunkMergeTests`
+    /// share it.
+    static func resolveStreamedChunkMerge(current: MessageContent, chunk: String) -> (content: MessageContent, demotedError: TimelineEvent?)? {
+        if case .error(let title, let details, _, let suggestion) = current {
+            // [ASM-1] A mid-run `.error` replaced content with the structured card,
+            // but the producer survived it and streamed prose afterwards (a workflow
+            // where one node fails and a terminal node succeeds; a planning run
+            // where a subtask fails and the loop continues). Appending onto the
+            // card's textContent laundered the failure into the answer's opening
+            // words — "Execution Failed: Connection refusedHere is the summary…" —
+            // destroying the category icon + suggestion, and that merged string is
+            // what got persisted and RAG-indexed. Start the answer fresh and demote
+            // the error to a timeline warning so the failure stays discoverable.
+            // ("Error" fallback matches `textContent`'s — deliberately unlocalized,
+            // the string persists and feeds RAG.)
+            let headline = "\(title ?? "Error"): \(details)"
+            let demoted = TimelineEvent.warning(
+                id: UUID(),
+                category: .midRunError,
+                text: suggestion.map { "\(headline) — \($0)" } ?? headline
+            )
+            return (content: .markdownText(chunk), demotedError: demoted)
+        }
+        guard let currentText = current.textContent else { return nil }
+        return (content: .markdownText(currentText + chunk), demotedError: nil)
+    }
+
+    /// [ASM-2] Content for a run that ended in a THROW after possibly streaming prose.
+    /// The old chokepoint replaced everything the user watched stream with the error
+    /// card — bubble, persistence, and the RAG index all lost the partial answer. When
+    /// real prose exists it stays as content and the error demotes to a timeline
+    /// warning; the failure remains loud via the `.failed` chip + the retry affordance.
+    /// A streamed error card is NOT prose (its `textContent` is the error string), and
+    /// media has no text to keep — both fall back to card-replaces, today's behavior.
+    static func resolveThrownFinalContent(streamed: MessageContent?, errorCard: MessageContent) -> (content: MessageContent, demotedError: TimelineEvent?) {
+        guard let streamed else { return (errorCard, nil) }
+        if case .error = streamed { return (errorCard, nil) }
+        guard let text = streamed.textContent,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              case .error(let title, let details, _, let suggestion) = errorCard else {
+            return (errorCard, nil)
+        }
+        let headline = "\(title ?? "Error"): \(details)"
+        let demoted = TimelineEvent.warning(
+            id: UUID(),
+            category: .midRunError,
+            text: suggestion.map { "\(headline) — \($0)" } ?? headline
+        )
+        return (streamed, demoted)
+    }
+
+    /// [ASM-4] Terminal outcome for a run whose producer never emitted
+    /// `.executionFinished`. The old fallback keyed only on "did a throw reach
+    /// finalize" — a producer that yielded a structured `.error` event and then ended
+    /// cleanly was stamped `.completed`: a green chip and a `completed` trace status
+    /// sitting on top of an error card.
+    static func resolveFallbackOutcome(threwError: Error?, content: MessageContent) -> (outcome: ExecutionOutcome, reason: String?) {
+        if let threwError {
+            return (.failed, threwError.localizedDescription)
+        }
+        if case .error(let title, let details, _, _) = content {
+            return (.failed, "\(title ?? "Error"): \(details)")
+        }
+        return (.completed, nil)
+    }
+
+    /// Regeneration attempts allowed per message (Retry button gate + the mutation
+    /// guard below share this — they had drifted into two literal `5`s).
+    static let maxGenerationAttempts = 5
+
+    /// [P0 crash fix 2026-07-19] Prepares this message for a regeneration attempt in
+    /// ONE write access: appends the fresh variant, selects it, bumps the attempt
+    /// count, flips `isStreaming`. Returns `false` (no mutation) at the attempt cap
+    /// or when the message has no response to regenerate.
+    ///
+    /// The coordinator previously did this inline as three optional-chained writes,
+    /// one of which READ `agentResponse` on the RHS while the LHS held the `modify`
+    /// access — under `@Observable` that is a FATAL Swift exclusivity trap
+    /// ("Simultaneous accesses…"), reproduced on-device from the Retry button.
+    /// Same crash class the test suite documented earlier: capture a value copy,
+    /// mutate it, write back once.
+    @discardableResult
+    func beginRegenerationVariant(backendEntityId: UUID?) -> Bool {
+        guard var response = agentResponse, response.generationAttempts < Self.maxGenerationAttempts else {
+            return false
+        }
+        response.variants.append(ResponseMessageVariant(content: .markdownText(""), backendEntityId: backendEntityId))
+        response.selectedVariantIndex = response.variants.count - 1
+        response.generationAttempts += 1
+        agentResponse = response
+        isStreaming = true
+        return true
+    }
+
+    /// [TL-1] Closes top-level tool rows still marked executing at end-of-run — a
+    /// cancel or failure mid-tool used to leave the row's spinner running forever,
+    /// and it PERSISTED that way. Nested card rows are closed separately
+    /// (`CapabilityCardRouter.handleExecutionFinished` live,
+    /// `sanitizeCapabilityCardsForResume` on restart). Returns how many were closed
+    /// so the caller can log the repair.
+    @discardableResult
+    func closeDanglingToolRows(outcome: ExecutionOutcome?) -> Int {
+        var closed = 0
+        for i in timelineEvents.indices {
+            guard case .toolExecution(var data) = timelineEvents[i], data.isExecuting else { continue }
+            data.isExecuting = false
+            data.isSuccess = false
+            if outcome == .cancelled {
+                data.failureCategory = .cancelled
+            }
+            if data.output == nil {
+                // Persisted tool output — deliberately unlocalized (category-c, must stay stable).
+                data.output = outcome == .cancelled
+                    ? "Cancelled before the tool finished."
+                    : "Interrupted before the tool finished."
+            }
+            timelineEvents[i] = .toolExecution(data)
+            closed += 1
+        }
+        return closed
     }
 
     /// [G1 resume] Prepares persisted capability cards for a resumed run: drops dangling
@@ -543,28 +689,49 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     /// Capped at `maxTimelineEvents` to prevent unbounded memory growth in long-running agents.
     static let maxTimelineEvents = 500
 
-    var timelineEvents: [TimelineEvent] = []
+    var timelineEvents: [TimelineEvent] = [] {
+        didSet { timelineRevision &+= 1 }
+    }
+
+    /// [P4/TL-4] Change marker for `timelineEvents`, bumped by `didSet` so EVERY
+    /// mutation path counts — append, eviction, in-place card updates, subscript
+    /// writes, decode-time assignment. Consumers: the persistence flush skips
+    /// re-encoding an unchanged timeline (up to 500 events, every ~2s during a
+    /// stream), and `AgentTimelineView`'s Equatable skips regrouping on unrelated
+    /// body passes. Seeded randomly per instance so two instances of the SAME
+    /// persisted message (reload, regenerate) can never alias revisions in the
+    /// store's skip cache — an aliased skip would silently drop timeline writes.
+    @ObservationIgnored private(set) var timelineRevision: UInt64 = .random(in: UInt64.min ... UInt64.max)
 
     /// Appends a timeline event, evicting the oldest non-tool events if the cap is exceeded.
     /// Tool execution events are preserved to maintain output correctness; narrative events
     /// (thoughts and reasoning) are trimmed first as they're least valuable historically.
     func appendTimelineEvent(_ event: TimelineEvent) {
         timelineEvents.append(event)
-        if timelineEvents.count > Self.maxTimelineEvents {
-            // Evict oldest narrative event (.thought or .reasoning) first to stay under budget.
-            if let firstNarrativeIndex = timelineEvents.firstIndex(where: {
-                switch $0 {
-                case .thought, .reasoning: return true
-                default: return false
-                }
-            }) {
-                timelineEvents.remove(at: firstNarrativeIndex)
-            } else if let firstEvictableIndex = timelineEvents.firstIndex(where: { !$0.isCapabilityCard }) {
-                // All narrative gone — drop the oldest tool/milestone, but never a capability
-                // card: it holds whole nested sub-timelines (a plan card sits near the start
-                // of every planned run, so plain removeFirst() would delete the run's shape).
-                timelineEvents.remove(at: firstEvictableIndex)
+        Self.evictOverflow(&timelineEvents, context: "top-level")
+    }
+
+    /// [TL-2/P3] The single eviction rule for ANY timeline container — the message's
+    /// top-level array AND the nested per-step / per-attempt arrays inside capability
+    /// cards (which used to bypass the cap entirely, so a runaway capability run grew
+    /// its card without bound in memory, persistence, and render). Oldest narrative
+    /// (.thought/.reasoning) goes first; then the oldest non-card event; a capability
+    /// card is never evicted — it holds whole nested sub-timelines (a plan card sits
+    /// near the start of every planned run, so plain removeFirst() would delete the
+    /// run's shape).
+    static func evictOverflow(_ events: inout [TimelineEvent], context: String) {
+        guard events.count > maxTimelineEvents else { return }
+        if let firstNarrativeIndex = events.firstIndex(where: {
+            switch $0 {
+            case .thought, .reasoning: return true
+            default: return false
             }
+        }) {
+            events.remove(at: firstNarrativeIndex)
+            DGLogger(category: "ChatMessage").debug("[TIMELINE] Evicted oldest narrative event (\(context), cap \(maxTimelineEvents)).")
+        } else if let firstEvictableIndex = events.firstIndex(where: { !$0.isCapabilityCard }) {
+            events.remove(at: firstEvictableIndex)
+            DGLogger(category: "ChatMessage").debug("[TIMELINE] Evicted oldest non-card event (\(context), cap \(maxTimelineEvents)).")
         }
     }
     
@@ -741,6 +908,15 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     // v4: `TimelineEvent.planExecution` / `.reflectionRun` capability cards added
     // (nested per-step / per-attempt sub-timelines). Additive — v3 data decodes
     // unchanged; legacy planning/reflection runs keep their flat milestone chips.
+    //
+    // ⚠️ [P5] SCOPE: this version tags the FULL-OBJECT JSON envelope only — which no
+    // production code path round-trips (repo-verified 2026-07-19; tests are the sole
+    // consumer). The SwiftData store persists PER-FIELD blobs (contentData,
+    // timelineEventsData, …) that carry NO version tag, so bumping this constant does
+    // NOT protect on-disk data. Migrations for persisted data belong at the
+    // ChatMessageSD layer (like the legacy `.image` decode shim in MessageContent).
+    // The v1 thoughts/artifacts migration that used to live here was deleted for the
+    // same reason: no durable v1 envelope exists anywhere for it to migrate.
     private static let currentSchemaVersion = 4
 
     private enum CodingKeys: String, CodingKey {
@@ -752,14 +928,8 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         case lifecycleState, apiProvider, modelName, modelDialect
     }
 
-    /// Legacy keys only used for v1 migration — never encoded.
-    private enum LegacyCodingKeys: String, CodingKey {
-        case thoughts, artifacts, agentState
-    }
-
     required init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let version = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
 
         self.id = try container.decode(UUID.self, forKey: .id)
         self.conversationId = try container.decode(UUID.self, forKey: .conversationId)
@@ -780,11 +950,7 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         self.modelName = try container.decodeIfPresent(String.self, forKey: .modelName)
         self.modelDialect = try container.decodeIfPresent(String.self, forKey: .modelDialect)
 
-        if version == 1 {
-            self.timelineEvents = try Self.migrateV1Timeline(from: decoder)
-        } else {
-            self.timelineEvents = try container.decodeIfPresent([TimelineEvent].self, forKey: .timelineEvents) ?? []
-        }
+        self.timelineEvents = try container.decodeIfPresent([TimelineEvent].self, forKey: .timelineEvents) ?? []
 
         // Transient properties always initialize to defaults
         self.agentState = .idle
@@ -817,28 +983,6 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         // agentState, thoughts, artifacts are NOT encoded (transient / computed)
     }
 
-    // MARK: - V1 Migration
-
-    /// Reconstructs `timelineEvents` from legacy v1 format that stored separate
-    /// `thoughts` and `artifacts` arrays alongside `timelineEvents`.
-    /// Only invoked when `schemaVersion` is absent or 1.
-    private static func migrateV1Timeline(from decoder: Decoder) throws -> [TimelineEvent] {
-        // Try the modern key first — v1 data may already have timelineEvents
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let existing = try container.decodeIfPresent([TimelineEvent].self, forKey: .timelineEvents) ?? []
-        guard existing.isEmpty else { return existing }
-
-        // Fall back to legacy keys
-        let legacyContainer = try decoder.container(keyedBy: LegacyCodingKeys.self)
-        let legacyThoughts = try legacyContainer.decodeIfPresent([AgentThought].self, forKey: .thoughts) ?? []
-        let legacyArtifacts = try legacyContainer.decodeIfPresent([ToolOutput].self, forKey: .artifacts) ?? []
-
-        var events: [TimelineEvent] = legacyThoughts.map { .thought(id: $0.id, text: $0.text) }
-        events.append(contentsOf: legacyArtifacts.map {
-            .toolExecution(ToolExecutionData(id: UUID(), name: $0.toolName, params: "", output: $0.output, isSuccess: $0.isSuccess, isExecuting: false))
-        })
-        return events
-    }
 }
 
 // (AttachedTextFile, AttachedImageFile, MessageContent structs remain unchanged)

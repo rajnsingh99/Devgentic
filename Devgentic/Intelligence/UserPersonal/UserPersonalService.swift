@@ -437,7 +437,7 @@ final class UserPersonalService {
             )
 
             logger.notice("[User Personal] IC unloading after profile merge...")
-            await IntelligenceCoreService.shared.unload(caller: .userPersonal)
+            await IntelligenceCoreService.shared.releaseHold(caller: .userPersonal)
 
             let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
             logger.info("[User Personal] Raw IC response: \(trimmed.count) chars")
@@ -463,7 +463,7 @@ final class UserPersonalService {
 
         } catch {
             logger.error("[User Personal] IC merge FAILED: \(error.localizedDescription)")
-            await IntelligenceCoreService.shared.unload(caller: .userPersonal)
+            await IntelligenceCoreService.shared.releaseHold(caller: .userPersonal)
             return nil
         }
     }

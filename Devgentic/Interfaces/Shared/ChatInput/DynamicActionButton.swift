@@ -126,8 +126,8 @@ struct DynamicActionButton: View {
             // pulsing red ring while recording (was a filled accent/error circle).
             if mode == .stopVoice {
                 Circle()
-                    .fill(Color.red.opacity(0.15)
-                        .shadow(.drop(color: Color.red.opacity(0.3), radius: 2)))
+                    .fill(Color.red.opacity(0.18)
+                        .shadow(.drop(color: Color.red.opacity(0.4), radius: 3)))
                     .scaleEffect(pulseScale)
                     .onAppear {
                         guard !reduceMotion else { return }
@@ -138,7 +138,11 @@ struct DynamicActionButton: View {
                     .onDisappear { pulseScale = 1.0 }
             } else {
                 Circle()
-                    .fill(isHovering ? Color.primary.opacity(0.06) : Color.clear)
+                    .fill(isHovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
+                    .overlay(
+                        Circle()
+                            .stroke(isHovering ? theme.secondaryText.opacity(0.3) : Color.clear, lineWidth: 1)
+                    )
             }
 
             // One persistent Image so mode changes morph glyph-to-glyph via symbol
@@ -153,6 +157,8 @@ struct DynamicActionButton: View {
                 modelProgressOverlay
             }
         }
+        .shadow(color: isHovering && mode != .stopVoice ? theme.accentColor.opacity(0.25) : .clear, radius: 4, x: 0, y: 1)
+        .scaleEffect(isHovering && !isDisabled ? 1.06 : 1.0)
     }
 
     /// Model-fetch overlay: determinate ring while the Whisper download reports

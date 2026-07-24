@@ -87,6 +87,37 @@ final class ChatPersistenceStoreTests: XCTestCase {
         )
     }
 
+    private func makeImage(id: UUID = UUID(), name: String = "pic.png", byte: UInt8 = 0xAB, count: Int = 2048) -> AttachedImageFile {
+        AttachedImageFile(
+            id: id,
+            name: name,
+            url: URL(fileURLWithPath: "/tmp/\(name)"),
+            fileExtension: "png",
+            binaryData: Data(repeating: byte, count: count),
+            size: Int64(count)
+        )
+    }
+
+    private func makeUserImageMessage(
+        conversationId: UUID,
+        text: String = "look at this",
+        images: [AttachedImageFile],
+        timestamp: Date = Date()
+    ) -> ChatMessage {
+        ChatMessage(
+            conversationId: conversationId,
+            timestamp: timestamp,
+            sender: .user,
+            content: .plainText(text),
+            attachedImageFiles: images
+        )
+    }
+
+    /// All image rows currently in the store (the `@Attribute(.externalStorage)` owners).
+    private func imageRows() throws -> [AttachedImageFileSD] {
+        try container.mainContext.fetch(FetchDescriptor<AttachedImageFileSD>())
+    }
+
     // MARK: - Add & Get Conversation
 
     func testAddConversationAndRetrieve() {
@@ -429,6 +460,211 @@ final class ChatPersistenceStoreTests: XCTestCase {
 
         let page = await store.fetchMessages(for: convId, offset: 0, limit: 100)
         XCTAssertEqual(page.count, 100)
+    }
+
+    // MARK: - Token Usage Persistence (P2, chat hardening round 3)
+
+    /// P2: any tool-using agent run flushes mid-stream, INSERTing the row BEFORE the
+    /// provider's `.tokenUsage` event arrives; finalize then takes the upsert's UPDATE
+    /// branch — which never wrote `tokenUsageData`. The badge and conversation total
+    /// were visible live but gone forever after reload.
+    func testTokenUsageSurvivesUpsertUpdate() async {
+        let convId = UUID()
+        store.addConversation(from: makeConversation(id: convId))
+
+        let msg = makeAgentMessage(conversationId: convId, text: "streaming…")
+        await store.addMessage(msg, toConversation: convId)            // mid-stream flush → INSERT (no usage yet)
+
+        msg.tokenUsage = TokenUsage(inputTokens: 11, outputTokens: 22, isEstimated: false)
+        await store.addMessage(msg, toConversation: convId)            // finalize → UPDATE
+
+        let reloaded = await store.fetchMessages(for: convId, offset: 0, limit: 10)
+        XCTAssertEqual(reloaded.first?.tokenUsage?.inputTokens, 11,
+                       "tokenUsage set after the first flush must survive the upsert UPDATE branch — losing it here erases the badge and the conversation total on every reload (P2).")
+        XCTAssertEqual(reloaded.first?.tokenUsage?.outputTokens, 22)
+    }
+
+    // MARK: - Timeline Revision Skip (P4) + Sidebar Row Projection (P1)
+
+    /// [P4] The flush skips re-encoding an UNCHANGED timeline — this pins that a
+    /// CHANGED timeline is never skipped (the failure mode that would lose data).
+    func testTimelineMutationBetweenUpsertsIsPersisted() async {
+        let convId = UUID()
+        store.addConversation(from: makeConversation(id: convId))
+
+        let msg = makeAgentMessage(conversationId: convId)
+        msg.appendTimelineEvent(.thought(id: UUID(), text: "first"))
+        await store.addMessage(msg, toConversation: convId)          // INSERT (1 event)
+
+        msg.appendTimelineEvent(.thought(id: UUID(), text: "second"))
+        await store.addMessage(msg, toConversation: convId)          // UPDATE — revision changed, must encode
+
+        let reloaded = await store.fetchMessages(for: convId, offset: 0, limit: 10)
+        XCTAssertEqual(reloaded.first?.timelineEvents.count, 2,
+                       "A timeline mutated between flushes must persist — the revision skip may only elide truly unchanged encodes (P4)")
+    }
+
+    /// [P4] Unchanged-timeline double-upsert still round-trips correctly (the skip
+    /// path must be indistinguishable from an encode, minus the cost).
+    func testUnchangedTimelineDoubleUpsertRoundTrips() async {
+        let convId = UUID()
+        store.addConversation(from: makeConversation(id: convId))
+
+        let msg = makeAgentMessage(conversationId: convId)
+        msg.appendTimelineEvent(.thought(id: UUID(), text: "only"))
+        await store.addMessage(msg, toConversation: convId)
+        await store.addMessage(msg, toConversation: convId)          // UPDATE — same revision, skip path
+
+        let reloaded = await store.fetchMessages(for: convId, offset: 0, limit: 10)
+        XCTAssertEqual(reloaded.first?.timelineEvents.count, 1)
+    }
+
+    /// [P1] The sidebar's row projection must derive the SAME title as the full
+    /// projection — via the probe-message trick it reuses `Conversation.displayTitle`'s
+    /// own selection + truncation, so parity here guards the whole contract.
+    func testRowStructTitleMatchesFullProjection() async {
+        let convId = UUID()
+        store.addConversation(from: makeConversation(id: convId))
+        // First message empty → title must come from the SECOND (first non-empty text).
+        await store.addMessage(makeUserMessage(conversationId: convId, text: "", timestamp: Date().addingTimeInterval(-10)), toConversation: convId)
+        await store.addMessage(makeUserMessage(conversationId: convId, text: "Refactor the parser to handle CRLF", timestamp: Date()), toConversation: convId)
+
+        guard let sd = store.getConversation(withId: convId) else { XCTFail("conversation missing"); return }
+
+        XCTAssertEqual(sd.toRowStruct().displayTitle, sd.toStruct().displayTitle,
+                       "Row titles must never drift from the full projection (P1)")
+        XCTAssertTrue(sd.toRowStruct().displayTitle.contains("Refactor the parser"))
+    }
+
+    /// [P1] User-defined titles short-circuit the probe entirely; empty conversations
+    /// fall back exactly like the full projection.
+    func testRowStructUserTitleAndEmptyParity() async {
+        let namedId = UUID()
+        store.addConversation(from: makeConversation(id: namedId, title: "My Named Chat"))
+        await store.addMessage(makeUserMessage(conversationId: namedId, text: "ignored for title"), toConversation: namedId)
+
+        let emptyId = UUID()
+        store.addConversation(from: makeConversation(id: emptyId))
+
+        guard let named = store.getConversation(withId: namedId),
+              let empty = store.getConversation(withId: emptyId) else { XCTFail(); return }
+
+        XCTAssertEqual(named.toRowStruct().displayTitle, "My Named Chat")
+        XCTAssertEqual(empty.toRowStruct().displayTitle, empty.toStruct().displayTitle)
+    }
+
+    /// Control: the INSERT path already persisted usage (short runs with no mid-stream
+    /// flush) — pins that the fix didn't disturb it, and proves this harness CAN
+    /// round-trip usage at all.
+    func testTokenUsagePersistsOnInsert() async {
+        let convId = UUID()
+        store.addConversation(from: makeConversation(id: convId))
+
+        let msg = makeAgentMessage(conversationId: convId)
+        msg.tokenUsage = TokenUsage(inputTokens: 5, outputTokens: 7, isEstimated: true)
+        await store.addMessage(msg, toConversation: convId)
+
+        let reloaded = await store.fetchMessages(for: convId, offset: 0, limit: 10)
+        XCTAssertEqual(reloaded.first?.tokenUsage?.inputTokens, 5)
+        XCTAssertEqual(reloaded.first?.tokenUsage?.isEstimated, true)
+    }
+
+    // MARK: - Image Attachment Reconcile (external-storage clone hazard)
+
+    /// The UPDATE branch used to DELETE every `AttachedImageFileSD` (the
+    /// `@Attribute(.externalStorage)` blob owner) and re-INSERT a new one with the SAME
+    /// unique id + SAME bytes on every upsert — the pattern that makes CoreData try to
+    /// clone an external `.interim` file the same save just removed ("Failed to clone
+    /// external data reference … .interim doesn't exist"). The fix reconciles in place.
+    /// This pins the durable invariant: upsert an image message TWICE → exactly one image
+    /// row, bytes round-trip, and the row is REUSED (not delete-then-recreated), proven by
+    /// a stable `persistentModelID`. (The on-disk clone error itself is verified on-device
+    /// via `[IMG-PERSIST]` logging; an in-memory store doesn't exercise external files.)
+    func testUpsertImageMessageTwice_singleDurableRow_bytesRoundTrip_noChurn() async throws {
+        let convId = UUID()
+        store.addConversation(from: makeConversation(id: convId))
+
+        let bytes = Data((0..<4096).map { UInt8($0 & 0xFF) })
+        let imageID = UUID()
+        let image = AttachedImageFile(id: imageID, name: "pic.png",
+                                      url: URL(fileURLWithPath: "/tmp/pic.png"),
+                                      fileExtension: "png", binaryData: bytes, size: Int64(bytes.count))
+        let msg = makeUserImageMessage(conversationId: convId, images: [image])
+
+        await store.addMessage(msg, toConversation: convId)                 // INSERT
+        let rowsAfterInsert = try imageRows()
+        XCTAssertEqual(rowsAfterInsert.count, 1, "INSERT must write exactly one image row")
+        let idAfterInsert = rowsAfterInsert.first!.persistentModelID
+
+        await store.addMessage(msg, toConversation: convId)                 // UPDATE — identical images
+
+        let rowsAfterUpdate = try imageRows()
+        XCTAssertEqual(rowsAfterUpdate.count, 1,
+            "Re-upserting an unchanged image message must not duplicate or orphan the external row")
+        XCTAssertEqual(rowsAfterUpdate.first?.id, imageID)
+        XCTAssertEqual(rowsAfterUpdate.first?.binaryData, bytes, "Image bytes must round-trip across the upsert")
+        XCTAssertEqual(rowsAfterUpdate.first!.persistentModelID, idAfterInsert,
+            "Unchanged image must be reconciled IN PLACE (same row reused), not delete-then-recreated — the pre-fix churn that raised the external-storage clone error")
+
+        // And it reloads as a real message with its image.
+        let reloaded = await store.fetchMessages(for: convId, offset: 0, limit: 10)
+        XCTAssertEqual(reloaded.first?.attachedImageFiles?.count, 1)
+        XCTAssertEqual(reloaded.first?.attachedImageFiles?.first?.binaryData, bytes)
+    }
+
+    /// The reconcile must still handle a genuinely-changed image set: grow (add) then
+    /// shrink (remove). Survivors keep their row; only true adds insert and only true
+    /// removes delete.
+    func testUpsert_addThenRemoveImage_reconcilesWithoutDuplication() async throws {
+        let convId = UUID()
+        store.addConversation(from: makeConversation(id: convId))
+
+        let a = makeImage(name: "a.png", byte: 0x11)
+        let b = makeImage(name: "b.png", byte: 0x22)
+
+        // 1) [a]
+        let msg = makeUserImageMessage(conversationId: convId, images: [a])
+        await store.addMessage(msg, toConversation: convId)
+        XCTAssertEqual(try imageRows().count, 1)
+        let aModelID = try imageRows().first { $0.id == a.id }!.persistentModelID
+
+        // 2) [a, b] — a survives (row reused), b inserted
+        msg.attachedImageFiles = [a, b]
+        await store.addMessage(msg, toConversation: convId)
+        let two = try imageRows()
+        XCTAssertEqual(two.count, 2)
+        XCTAssertEqual(Set(two.map(\.id)), [a.id, b.id])
+        XCTAssertEqual(two.first { $0.id == a.id }!.persistentModelID, aModelID,
+            "Surviving image 'a' must keep its row across an add")
+
+        // 3) [b] — a removed, b survives (row reused)
+        let bModelID = two.first { $0.id == b.id }!.persistentModelID
+        msg.attachedImageFiles = [b]
+        await store.addMessage(msg, toConversation: convId)
+        let one = try imageRows()
+        XCTAssertEqual(one.count, 1, "Removed image must be deleted, not left orphaned")
+        XCTAssertEqual(one.first?.id, b.id)
+        XCTAssertEqual(one.first!.persistentModelID, bModelID, "Surviving image 'b' must keep its row across a removal")
+
+        let reloaded = await store.fetchMessages(for: convId, offset: 0, limit: 10)
+        XCTAssertEqual(reloaded.first?.attachedImageFiles?.map(\.id), [b.id])
+    }
+
+    /// Control: the imageless agent message (finalize/flush re-upserts it many times) must
+    /// never create image rows and must not throw — the reconcile's empty-set no-op path.
+    func testUpsert_imagelessAgentMessage_neverCreatesImageRows() async throws {
+        let convId = UUID()
+        store.addConversation(from: makeConversation(id: convId))
+
+        let msg = makeAgentMessage(conversationId: convId, text: "streaming…")
+        await store.addMessage(msg, toConversation: convId)   // INSERT
+        await store.addMessage(msg, toConversation: convId)   // UPDATE
+        await store.addMessage(msg, toConversation: convId)   // UPDATE
+
+        XCTAssertEqual(try imageRows().count, 0, "An imageless message must never create AttachedImageFileSD rows")
+        let reloaded = await store.fetchMessages(for: convId, offset: 0, limit: 10)
+        XCTAssertEqual(reloaded.count, 1, "Repeated upserts must not duplicate the row")
+        XCTAssertNil(reloaded.first?.attachedImageFiles)
     }
 
 }

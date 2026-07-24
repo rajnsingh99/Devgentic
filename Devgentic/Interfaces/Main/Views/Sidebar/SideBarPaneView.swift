@@ -61,64 +61,84 @@ struct SideBarPaneView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack {
+            ZStack {
                 switch selectedTab {
                 case .explorer:
                     ExplorerSidebarView()
+                        .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 0.98)), removal: .opacity))
                 case .conversations:
                     ConversationSidebarView()
+                        .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 0.98)), removal: .opacity))
                 case .promptLibrary:
                     PromptLibrarySidebarView()
+                        .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 0.98)), removal: .opacity))
                 case .scheduler:
                     TaskSchedulerSidebarView()
+                        .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 0.98)), removal: .opacity))
                 case .backendProfiles:
                     ProfileSidebarListView()
+                        .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 0.98)), removal: .opacity))
                 case .downloads:
                     DownloadSidebarView()
+                        .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 0.98)), removal: .opacity))
                 case .settings:
                     SettingsSidebarListView()
+                        .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 0.98)), removal: .opacity))
                 case .none:
                     noTabSelectedView
+                        .transition(.opacity)
                 }
             }
+            .id(selectedTab)
+            .animation(.spring(response: 0.28, dampingFraction: 0.8), value: selectedTab)
             .environment(viewModel)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        // Use clear background to allow the parent container's material/vibrancy to show through
         .background(Color.clear)
         .frame(maxHeight: .infinity)
     }
 
     // MARK: - No-Tab Empty State
-    /// Shown after Home is tapped (which sets `selectedTab = nil`). Previously
-    /// this case fell through to a bare `Spacer()`, leaving the pane blank
-    /// while still taking up space — confusing if the user later expected the
-    /// activity bar toggle to bring content back.
+
     private var noTabSelectedView: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 16) {
             Spacer()
 
-            Image(systemName: "sidebar.left")
-                .font(.system(size: 34))
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [theme.accentColor.opacity(0.55), theme.accentColor.opacity(0.25)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [theme.accentColor.opacity(0.14), Color.cyan.opacity(0.06)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
                     )
-                )
+                    .frame(width: 72, height: 72)
+                    .shadow(color: theme.accentColor.opacity(0.2), radius: 10)
 
-            VStack(spacing: 4) {
-                Text("No section selected")
-                    .font(.system(.subheadline, weight: .semibold))
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [theme.accentColor, Color.cyan],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            }
+
+            VStack(spacing: 6) {
+                Text("NO SECTION SELECTED")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .tracking(1.6)
                     .foregroundColor(theme.primaryText)
 
-                Text("Pick a tab from the activity bar on the left.")
-                    .font(.caption)
+                Text("Select a tab from the activity bar to view details.")
+                    .font(theme.fontSubheadline)
                     .foregroundColor(theme.secondaryText)
                     .multilineTextAlignment(.center)
             }
-            .padding(.horizontal, 16)
+            .padding(.horizontal, 20)
 
             Spacer()
         }

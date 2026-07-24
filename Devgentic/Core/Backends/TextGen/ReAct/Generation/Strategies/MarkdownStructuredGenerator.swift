@@ -69,14 +69,13 @@ struct MarkdownStructuredGenerator: CognitiveGenerator {
         let reqId = UUID().uuidString.prefix(8)
         logLLMOps.info("⚡️ [ReActMD:\(reqId)] Start Generation - Iteration: \(iteration)")
 
-        var executionMessages = compileMessages(from: context)
-
-        executionMessages.append(["role": "user", "content": promptTrigger(for: iteration)])
-
         logLLMOps.debug("📤 [ReActMD:\(reqId)] Sending request...")
         let startTime = Date()
 
-        let responseText = try await model.generate(messages: executionMessages, tools: nil, responseSchema: nil)
+        // Multimodal when the turn carries images (current-turn or prior-turn history),
+        // byte-identical text path otherwise. Markdown renders tools as prompt text
+        // (tools: nil), so the vision path loses no tool-calling.
+        let responseText = try await generatePromptedResponse(model: model, context: context, iteration: iteration, responseSchema: nil, label: "ReActMD:\(reqId)")
 
         let duration = Date().timeIntervalSince(startTime)
         logLLMOps.info("✅ [ReActMD:\(reqId)] Response received in \(String(format: "%.4f", duration))s")

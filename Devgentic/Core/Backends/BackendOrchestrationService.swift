@@ -233,12 +233,39 @@ class BackendOrchestrationService {
                 // event — it surfaces as an actionable advisory banner above the chat
                 // input (AdvisoryBannerView), never as per-turn transcript clutter.
                 if profileUsesConversationRAG {
+                    // Images cost real context but contribute ZERO chars: `attachmentChars`
+                    // filters them out by extension and `historyChars` reads `textContent`,
+                    // which is nil for media. Counted only when the model can actually see
+                    // them — a non-vision model has its images dropped, so warning about
+                    // them would be warning about payload that never ships.
+                    let imageTokens: Int = {
+                        guard config.profile.supportsVisionInput else { return 0 }
+                        let current = PromptFitCheck.estimatedImageTokens(
+                            forImageURLs: files.map(\.url).filter { fileProcessorService.isImageFile(mimeType: fileProcessorService.getFileMimeType(for: $0), url: $0) },
+                            provider: primaryConfig?.apiProvider
+                        )
+                        // Prior-turn images are charged ONLY where they actually ship.
+                        // On a bot, or a non-native/non-vision provider, they are
+                        // dropped before the wire — billing for them would raise a
+                        // banner the user has no way to clear.
+                        guard config.profile.carriesHistoryImages else { return current }
+                        let prior = PromptFitCheck.estimatedHistoryImageTokens(
+                            in: conversationHistory,
+                            provider: primaryConfig?.apiProvider,
+                            // `.pointer` ships skeletons only — zero history images —
+                            // so counting them would raise an un-clearable banner.
+                            shipsHistoryImages: config.profile.resolvedHistoryStrategy != .pointer
+                        )
+                        return current + prior
+                    }()
+
                     let estimatedTokens = PromptFitCheck.estimatedTokens(
                         attachmentChars: attachmentContext?.count ?? 0,
                         knowledgeChars: knowledgeBaseContext?.count ?? 0,
                         retrievalChars: ragContextString?.count ?? 0,
                         queryChars: queryForRequest.count,
-                        historyChars: conversationHistory.reduce(0) { $0 + ($1.content.textContent?.count ?? 0) }
+                        historyChars: conversationHistory.reduce(0) { $0 + ($1.content.textContent?.count ?? 0) },
+                        imageTokens: imageTokens
                     )
                     if PromptFitCheck.exceeds(estimatedTokens: estimatedTokens, windowTokens: contextWindowTokens) {
                         // Condition-aware advice: raising num_ctx only helps when the
@@ -285,8 +312,16 @@ class BackendOrchestrationService {
                     // image payload so vision-capable bot/agent profiles see them
                     // natively. D3: any unreadable image is reported (traced + notice),
                     // and the turn still answers (degrade).
-                    let (rawImagePayload, imageFailures) = await self.buildImagePayload(from: files)
+                    let (rawImagePayload, imageFailures) = await self.buildImagePayload(from: files, traceID: context.traceID)
                     await self.reportFileFailures(imageFailures, span: context, continuation: continuation)
+
+                    // [VISION] Single source of truth that the app SAW current-turn image
+                    // attachments (covers bot + agent + code, before any routing). Absence
+                    // of this line for an image-bearing turn means the attach pipeline
+                    // dropped them upstream. Correlates to the request via traceID.
+                    if let raw = rawImagePayload, !raw.isEmpty {
+                        logger.info("[VISION] trace:\(context.traceID) current-turn: \(raw.count) image block(s) built from \(files.count) attached file(s), profile '\(config.profile.displayName)' (\(config.profile.profileType.rawValue)), vision-capable=\(config.profile.supportsVisionInput)")
+                    }
 
                     // Vision capability gate (LOCAL providers only — cloud keeps its
                     // existing no-gate behavior). If the selected local model can't see
@@ -301,9 +336,26 @@ class BackendOrchestrationService {
                         attachedImagePayload = nil
                         let modelName = currentConfig.profile.primaryLLMConfig?.modelName ?? "This model"
                         continuation.yield(.content("⚠️ \(modelName) can't analyze images — answering from text only. Pick a vision-capable model to inspect the image.\n\n"))
-                        logger.info("Vision gate: dropped \(raw.count) image block(s) for non-vision local model '\(modelName)'")
+                        logger.info("[VISION] trace:\(context.traceID) gate: DROPPED \(raw.count) image block(s) for non-vision local model '\(modelName)' — answering from text only")
                     } else {
                         attachedImagePayload = rawImagePayload
+                        if let raw = rawImagePayload, !raw.isEmpty {
+                            logger.info("[VISION] trace:\(context.traceID) gate: PASSED \(raw.count) image block(s) → model will receive them natively")
+                        }
+                    }
+
+                    // [VISION] Explain the INTENTIONAL skip when a conversation already
+                    // has prior-turn images but this profile won't re-send them — most
+                    // commonly because the selected model isn't vision-capable (e.g. the
+                    // user swapped a vision model out), and otherwise an agent path that
+                    // carries episodic TEXT history only (MLX / chat-only Ollama). Without
+                    // this line, the absence of a "carrying N image(s)" line on a follow-up
+                    // turn is ambiguous — you can't tell an intentional skip from a dropped
+                    // image. `historyImageSkipReason` names the ACTUAL cause (do not hard-code
+                    // it here — the reason differs per profile/model and must stay accurate).
+                    let priorTurnImageCount = conversationHistory.reduce(0) { $0 + ($1.attachedImageFiles?.count ?? 0) }
+                    if priorTurnImageCount > 0, !currentConfig.profile.carriesHistoryImages {
+                        logger.info("[VISION] trace:\(context.traceID) \(priorTurnImageCount) prior-turn image(s) in history NOT re-sent to profile '\(currentConfig.profile.displayName)' (\(currentConfig.profile.profileType.rawValue)) — \(currentConfig.profile.historyImageSkipReason). It answers from the earlier text/episodic context, not the picture.")
                     }
 
                     switch currentConfig.profile.profileType {
@@ -408,7 +460,7 @@ class BackendOrchestrationService {
                             case .planGenerated, .planApproved, .subtaskStarted, .subtaskCompleted,
                                  .reflectionTrialStarted, .reflectionEvaluating, .reflectionRetrying, .reflectionAccepted,
                                  .delegationStarted, .delegationCompleted,
-                                 .compactionStarted, .compactionCompleted,
+                                 .compactionCompleted, .compactionFailed,
                                  .tokenUsage,
                                  .executionFinished:
                                 continuation.yield(event)
@@ -474,9 +526,30 @@ class BackendOrchestrationService {
                             }
                             // #24: read the image bytes OFF the main actor — same sync-`Data(contentsOf:)`
                             // hitch as `buildImagePayload`, here on the image-gen intent path.
+                            // Normalize each source image to JPEG: the image-to-image providers
+                            // stamp the source with a FIXED mime (OpenAI/Gemini hardcode image/png),
+                            // so an attached HEIC (the macOS default) / TIFF / etc. would otherwise
+                            // ship raw under a false label and 400 — the same bypass the vision path
+                            // closes. `ensureJPEG` passes real JPEGs through and transcodes the rest;
+                            // an undecodable source is dropped + logged (the turn degrades to
+                            // text-to-image rather than 400-ing the whole edit).
                             let imageURLs = imageFiles.map(\.url)
+                            let editTraceID = context.traceID
                             let attachedImages: [Data]? = imageURLs.isEmpty ? nil : await Task.detached(priority: .userInitiated) {
-                                imageURLs.compactMap { try? Data(contentsOf: $0) }
+                                imageURLs.compactMap { url -> Data? in
+                                    guard let raw = try? Data(contentsOf: url) else {
+                                        logger.warning("[VISION] trace:\(editTraceID) imageGen source '\(url.lastPathComponent)' unreadable — skipped")
+                                        return nil
+                                    }
+                                    guard let jpeg = ImageConstraints.ensureJPEG(raw) else {
+                                        logger.warning("[VISION] trace:\(editTraceID) imageGen source '\(url.lastPathComponent)' is not a decodable image — skipped (cannot normalize to JPEG for the provider)")
+                                        return nil
+                                    }
+                                    if jpeg.count != raw.count {
+                                        logger.info("[VISION] trace:\(editTraceID) imageGen source '\(url.lastPathComponent)' normalized → image/jpeg (\(raw.count) → \(jpeg.count) bytes)")
+                                    }
+                                    return jpeg
+                                }
                             }.value
 
                             let intent = await ImageIntentResolver.resolve(
@@ -726,7 +799,7 @@ class BackendOrchestrationService {
     /// into ephemeral references; the provider resolves+encodes at send time.
     /// Returns nil when no images are attached. A file that can't be read is logged
     /// and skipped (it still appears in the document path's skipped-files notice).
-    private func buildImagePayload(from files: [FileSystemItem]) async -> (payload: Payload?, failures: [FileRetrievalError]) {
+    private func buildImagePayload(from files: [FileSystemItem], traceID: String) async -> (payload: Payload?, failures: [FileRetrievalError]) {
         // Determine which files are images + their mime types on the main actor — these are
         // cheap UTType lookups. Capture only Sendable values for the off-actor read below.
         var items: [(url: URL, mime: String, name: String)] = []
@@ -758,7 +831,25 @@ class BackendOrchestrationService {
                 }
                 do {
                     let data = try Data(contentsOf: item.url)
-                    blocks.append(.image(ImagePayload(reference: .ephemeralData(data), mimeType: item.mime, alt: item.name)))
+                    // Not every container the OS hands us is loadable by every provider —
+                    // HEIC (the macOS/iOS default) is rejected by Ollama/Anthropic/OpenAI
+                    // and previously reached the wire raw, 400-ing the whole request with an
+                    // opaque "Failed to load image" error. Resolve to a sendable form:
+                    // jpeg/png/webp pass through untouched, anything else decodable is
+                    // transcoded to JPEG, and the truly-undecodable is omitted (reported,
+                    // not silent) so the turn still answers.
+                    guard let sendable = VisionImageFormat.resolveSendable(data: data) else {
+                        failures.append(.imageResolutionFailed(
+                            path: item.url.path,
+                            underlying: "'\(item.name)' could not be decoded as an image, so it was omitted from the request."
+                        ))
+                        logger.warning("[VISION] trace:\(traceID) omitted current-turn image '\(item.name)' (\(item.mime)) — bytes are not a decodable image, cannot transcode. The turn answers without it.")
+                        continue
+                    }
+                    if sendable.wasTranscoded {
+                        logger.info("[VISION] trace:\(traceID) transcoded current-turn image '\(item.name)' (\(item.mime)) → image/jpeg for provider compatibility (\(data.count) → \(sendable.data.count) bytes)")
+                    }
+                    blocks.append(.image(ImagePayload(reference: .ephemeralData(sendable.data), mimeType: sendable.mimeType, alt: item.name)))
                 } catch {
                     // Never silent: report the image read failure (chat degrades — the
                     // turn still answers, just without this image).
@@ -794,11 +885,19 @@ class BackendOrchestrationService {
             do {
                 let content = try await fileProcessorService.readFileContentOrThrow(for: file.url, maxSize: remainingBudget)
                 assembledContent += "\n\n--- Start of file: \(file.name) ---\n\(content)\n--- End of file: \(file.name) ---"
+                // ATT-1 visibility: this is the authoritative "the model saw it"
+                // record — pair it against MessageAttachmentBuilder's persistence
+                // logs to trace any transcript/model-input divergence.
+                logger.debug("Direct-injected '\(file.name)' (\(content.count) chars) into the model context.")
             } catch let retrievalError as FileRetrievalError {
                 failures.append(retrievalError)
             } catch {
                 failures.append(.readFailed(path: file.url.path, underlying: error.localizedDescription))
             }
+        }
+
+        if !files.isEmpty {
+            logger.log("Direct injection assembled: \(files.count) attachment(s) scanned, \(assembledContent.count) chars injected, \(failures.count) failure(s).")
         }
 
         return (assembledContent, failures)
@@ -1004,17 +1103,75 @@ enum PromptFitCheck {
     /// Fraction of the window reserved for the model's own output.
     static let responseHeadroom = 0.25
 
+    /// - Parameter imageTokens: image cost, already in TOKENS (not chars) because
+    ///   image cost has no relationship to any character count — see
+    ///   `ImageTokenHeuristic`. Kept as a separate term from `attachmentChars`,
+    ///   which excludes images by extension, so the two can never double-count.
+    ///   Defaults to 0 so existing callers and their pinned arithmetic are unaffected.
     static func estimatedTokens(
         attachmentChars: Int,
         knowledgeChars: Int,
         retrievalChars: Int,
         queryChars: Int,
-        historyChars: Int
+        historyChars: Int,
+        imageTokens: Int = 0
     ) -> Int {
         let totalChars = attachmentChars + knowledgeChars + retrievalChars
             + queryChars + historyChars + layerOverheadChars
-        return Int(Double(totalChars) / charsPerToken)
+        return Int(Double(totalChars) / charsPerToken) + imageTokens
     }
+
+    /// Token cost of the images in a set of composer attachments.
+    ///
+    /// Images were invisible to this gauge until now — `estimatedAttachmentChars`
+    /// filters them out by extension, so attaching a 6 MB screenshot to an 8K-window
+    /// local model produced no warning whatsoever. Dimensions are read from each
+    /// file's header (cheap, no decode); an unreadable header falls back to the flat
+    /// per-image estimate rather than dropping the image from the tally.
+    static func estimatedImageTokens(forImageURLs urls: [URL], provider: ApiProvider?) -> Int {
+        urls.reduce(0) { total, url in
+            total + ImageTokenHeuristic.tokens(pixels: ImageTokenHeuristic.pixelCount(of: url), provider: provider)
+        }
+    }
+
+    /// Token cost of images already in the conversation. Prior-turn images ride the
+    /// native history payload (see `HistoryTurn`), so they consume real context on
+    /// every subsequent turn — `historyChars` cannot see them because it reads
+    /// `content.textContent`, which is nil for media.
+    /// - Parameter maxMessages: how far back to look. The converter only ever ships
+    ///   the most recent turns (`.recentHistory` uses `limit: 10` PAIRS, and the char
+    ///   budget trims further), so summing the whole fetched history — up to 300
+    ///   messages — would over-state a 40-image conversation by ~36,000 tokens and
+    ///   post a permanent overflow banner on a prompt that comfortably fits.
+    /// - Parameter shipsHistoryImages: whether the profile's history strategy actually
+    ///   carries prior-turn images. The `.pointer` strategy emits skeletons only and
+    ///   ships ZERO images (`NativeHistoryConverter.buildPointerTurns` ignores them),
+    ///   so counting them would post a permanent, un-clearable overflow banner for cost
+    ///   that never ships. Pass `false` there. (`.hybrid` still over-counts images on
+    ///   turns older than its inline window — accepted as a coarse-gauge upper bound.)
+    static func estimatedHistoryImageTokens(in history: [ChatMessage], provider: ApiProvider?, shipsHistoryImages: Bool = true, maxMessages: Int = historyImageLookback) -> Int {
+        guard shipsHistoryImages else { return 0 }
+        let recent = history.suffix(max(0, maxMessages))
+        // Count every image that will ACTUALLY reach the wire. The history splice now
+        // TRANSCODES unsupported-but-decodable formats (HEIC/HEIF/TIFF/BMP/GIF) to JPEG
+        // rather than dropping them, so the gauge must count those too — counting only
+        // the already-loadable set would UNDER-state a HEIC-heavy conversation (HEIC is
+        // the macOS default) and fail to warn on a prompt that really is over budget.
+        // `isVisionEligible` is the cheap extension proxy for "will ship"; the wire
+        // decision stays byte-truthful in `resolveSendable`.
+        let count = recent.reduce(0) { total, message in
+            total + (message.attachedImageFiles?.filter {
+                VisionImageFormat.isVisionEligible(fileExtension: $0.fileExtension)
+            }.count ?? 0)
+        }
+        return ImageTokenHeuristic.tokens(imageCount: count, provider: provider)
+    }
+
+    /// 10 turn PAIRS = 20 messages, matching `NativeHistoryConverter`'s default
+    /// `limit:`. An upper bound, not an exact figure — the char budget and any
+    /// checkpoint can trim further, so this errs toward under-warning, which is the
+    /// safe direction for an advisory the user cannot act on.
+    static let historyImageLookback = 20
 
     static func exceeds(estimatedTokens: Int, windowTokens: Int) -> Bool {
         Double(estimatedTokens) > Double(windowTokens) * (1.0 - responseHeadroom)
@@ -1057,6 +1214,89 @@ extension BackendProfileModel {
     /// modality (`SupportedModalities.visionInput`).
     var supportsVisionInput: Bool {
         primaryLLMConfig?.supportedModalities.contains(.visionInput) ?? false
+    }
+
+    /// Whether PRIOR-TURN images will actually reach the model on this profile.
+    ///
+    /// Mirrors — and must stay in step with — the gates `AgentConnect` applies when
+    /// building `nativeHistoryTurns`. The fit gauge exists to tell the truth about
+    /// what a request will cost, so charging for images the pipeline is going to
+    /// drop is worse than not charging at all: the resulting banner cannot be
+    /// dismissed by removing files, because the phantom cost comes from history the
+    /// composer cannot edit.
+    ///
+    /// Two carriers, plus a universal VISION gate on top of both:
+    ///   • BOT profile → `ChatExecutor.buildHistoryImageBlocks` re-attaches prior-turn
+    ///     images on the atomic `generate(payload:)`/vision route, on ANY provider
+    ///     (cloud, Ollama, or MLX) — tool capability is irrelevant to that path.
+    ///   • AGENT profile → `nativeHistoryTurns` (cloud always; Ollama both capability
+    ///     tiers) or the legacy multimodal path; MLX agents never build history turns.
+    ///   • VISION model — required in every case (the first `guard` below). A non-vision
+    ///     model, e.g. after the user swaps models mid-conversation, drops ALL prior-turn
+    ///     media; this is the most common real-world skip. (Was once "bots are text-only
+    ///     for history by design" — no longer true: vision bots carry history images.)
+    ///
+    /// Ollama ships prior-turn images on BOTH agent generators, by two routes:
+    ///   • `.parallelActions` → `NativeStructuredGenerator` → the native turn splice.
+    ///   • `.singleAction`     → Markdown/XMLStructuredGenerator → the legacy
+    ///     `buildMultimodalMessages` path (2026-07-21).
+    /// So the gate matches `AgentConnect.isNativeProvider`'s Ollama arm (`!= .none`) —
+    /// an earlier version restricted this to `.parallelActions`, which under-counted
+    /// history-image tokens for single-action Ollama vision agents and let their
+    /// conversations overflow `num_ctx` with no pre-flight banner. `.none` is
+    /// chat-only (agents reject it), and MLX never gets `nativeHistoryTurns` at all.
+    var carriesHistoryImages: Bool {
+        guard supportsVisionInput else { return false }
+        switch profileType {
+        case .bot:
+            // Vision BOTS re-attach prior-turn images (ChatExecutor reads chatHistory)
+            // on ANY provider — cloud, Ollama, or MLX — since the atomic
+            // generate(payload:)/vision path handles them regardless of tool capability.
+            return true
+        case .agent:
+            // Agent path carries history via nativeHistoryTurns: cloud always; Ollama
+            // for both capability tiers (parallel = native splice, single = legacy);
+            // MLX never builds nativeHistoryTurns.
+            switch primaryLLMConfig?.apiProvider {
+            case .anthropic, .openAI, .google, .openRouter, .openAICompatible: return true
+            case .ollama: return primaryLLMConfig?.cognitiveCapability != ModelCognitiveCapability.none
+            case .mlx, .none: return false
+            }
+        case .workflow, .imageGen, .code:
+            return false
+        }
+    }
+
+    /// Human-readable reason `carriesHistoryImages` returned false, for the intentional
+    /// prior-turn-image skip log. Lives next to that gate and mirrors it branch-for-branch
+    /// so the two never drift. The dominant real case is a non-vision model (the user
+    /// swapped one in) — NOT any "by design" profile limit — and the log must say which,
+    /// so a reader validating the swap-to-non-vision safety path sees the true cause.
+    var historyImageSkipReason: String {
+        if !supportsVisionInput {
+            return "'\(primaryLLMConfig?.modelName ?? "the selected model")' is not vision-capable"
+        }
+        switch profileType {
+        case .bot:
+            // Defensive: a vision bot returns true above, so this is unreachable — but a
+            // truthful fallback beats a misleading one if the gate ever changes.
+            return "vision bot (unexpected — bots carry history images)"
+        case .agent:
+            switch primaryLLMConfig?.apiProvider {
+            case .mlx: return "MLX agents carry episodic TEXT history only, not per-turn images"
+            default:   return "this model's capability tier carries no per-turn history images"
+            }
+        case .workflow, .imageGen, .code:
+            return "\(profileType.rawValue) profiles don't carry history images"
+        }
+    }
+
+    /// The agent's resolved history strategy (default `.recentHistory` when unset,
+    /// matching `AgentConnect`). Non-agent profiles → nil. Used by the fit gauge to
+    /// avoid charging history-image tokens under `.pointer`, which ships none.
+    var resolvedHistoryStrategy: HistoryStrategy? {
+        if case .agent(let c) = details { return c.historyStrategy ?? .recentHistory }
+        return nil
     }
 
     /// LOCAL provider (MLX / Ollama), where vision detection is authoritative and the

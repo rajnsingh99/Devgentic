@@ -859,11 +859,11 @@ enum ProfileType: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var id: String { self.rawValue }
 
-    /// SF Symbol name for this profile type (SF Symbols 6, macOS 26+).
+    /// SF Symbol name for this profile type.
     var iconName: String {
         switch self {
-        case .bot:      return "text.bubble"
-        case .agent:    return "brain.head.profile"
+        case .bot:      return "bubble.left.and.text.bubble.right"
+        case .agent:    return "cpu"
         case .workflow:  return "point.3.connected.trianglepath.dotted"
         case .imageGen: return "wand.and.sparkles"
         case .code:     return "chevron.left.forwardslash.chevron.right"
@@ -873,8 +873,8 @@ enum ProfileType: String, Codable, CaseIterable, Identifiable, Sendable {
     /// Filled variant for large identity headers (48pt avatars).
     var iconNameFilled: String {
         switch self {
-        case .bot:      return "text.bubble.fill"
-        case .agent:    return "brain.head.profile.fill"
+        case .bot:      return "bubble.left.and.text.bubble.right.fill"
+        case .agent:    return "cpu.fill"
         case .workflow:  return "point.3.filled.connected.trianglepath.dotted"
         case .imageGen: return "wand.and.sparkles"
         case .code:     return "chevron.left.forwardslash.chevron.right"

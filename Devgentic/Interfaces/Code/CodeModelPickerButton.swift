@@ -57,7 +57,7 @@ struct CodeModelPickerButton: View {
         }
         .popover(isPresented: $csm.showModelPicker, arrowEdge: .bottom) {
             CodeModelSelectorPopover()
-                .frame(width: 320, height: 400)
+                .frame(width: 340, height: 440)
         }
     }
 }
@@ -82,6 +82,7 @@ private struct CodeModelSelectorPopover: View {
 
     @Environment(CodeSessionManager.self) private var codeSessionManager
     @Environment(\.appTheme) private var theme
+    @FocusState private var isSearchFocused: Bool
 
     /// Minimum parameter count (in billions) for Code mode.
     private let minimumParameterBillions: Double = 14.0
@@ -97,29 +98,36 @@ private struct CodeModelSelectorPopover: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Header
-            Text("Code Model")
-                .font(theme.fontHeadline)
-                .foregroundColor(theme.primaryText)
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, 8)
-
-            Divider()
+        VStack(alignment: .leading, spacing: 10) {
+            // Search Bar at Top (if not cloud provider)
+            if !isCloudProvider {
+                searchField
+                    .padding(.top, 14)
+            } else {
+                Spacer().frame(height: 6)
+            }
 
             // Provider Picker
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(CodeSessionManager.supportedProviders, id: \.self) { provider in
-                        providerChip(provider)
+                        ProviderChipView(
+                            provider: provider,
+                            isSelected: codeSessionManager.provider == provider,
+                            action: {
+                                codeSessionManager.updateProvider(provider)
+                                Task { await loadModelsIfNeeded() }
+                            }
+                        )
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
+                .padding(.horizontal, 14)
             }
 
-            Divider()
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.25))
+                .frame(height: 1)
+                .padding(.horizontal, 10)
 
             // Model Selection Area
             if isCloudProvider {
@@ -130,73 +138,98 @@ private struct CodeModelSelectorPopover: View {
 
             Spacer(minLength: 0)
         }
-        .background(theme.primaryBackground)
+        .onAppear {
+            DispatchQueue.main.async { isSearchFocused = true }
+        }
         .task {
             await loadModelsIfNeeded()
         }
     }
 
-    // MARK: - Provider Chip
+    // MARK: - Search Field
 
-    private func providerChip(_ provider: ApiProvider) -> some View {
-        let isSelected = codeSessionManager.provider == provider
-        let label: String = {
-            switch provider {
-            case .ollama:           return "Ollama"
-            case .mlx:              return "MLX"
-            case .anthropic:        return "Anthropic"
-            case .openAI:           return "OpenAI"
-            case .google:           return "Google"
-            case .openRouter:       return "OpenRouter"
-            case .openAICompatible: return "Custom"
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(isSearchFocused ? Color.cyan : theme.tertiaryText)
+
+            TextField("", text: $modelSearchText)
+                .textFieldStyle(.plain)
+                .font(theme.fontSubheadline)
+                .foregroundColor(theme.primaryText)
+                .focused($isSearchFocused)
+                .overlay(alignment: .leading) {
+                    if modelSearchText.isEmpty {
+                        Text("Search models...")
+                            .font(theme.fontSubheadline)
+                            .foregroundColor(theme.placeholderText)
+                            .allowsHitTesting(false)
+                    }
+                }
+
+            if !modelSearchText.isEmpty {
+                Button(action: { modelSearchText = "" }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundColor(theme.tertiaryText)
+                }
+                .buttonStyle(.plain)
             }
-        }()
-
-        return Button(action: {
-            codeSessionManager.updateProvider(provider)
-            Task { await loadModelsIfNeeded() }
-        }) {
-            Text(label)
-                .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
-                .foregroundColor(isSelected ? .white : theme.primaryText)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(
-                    Capsule().fill(isSelected ? Color.cyan : theme.controlBackground)
-                )
-                .overlay(
-                    Capsule().stroke(isSelected ? Color.clear : theme.secondaryText.opacity(0.2), lineWidth: 1)
-                )
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(theme.surfaceOverlayStrong)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(
+                    isSearchFocused ? Color.cyan.opacity(0.6) : theme.secondaryText.opacity(0.18),
+                    lineWidth: 1
+                )
+        )
+        .shadow(color: isSearchFocused ? Color.cyan.opacity(0.2) : Color.black.opacity(0.1), radius: 4)
+        .padding(.horizontal, 14)
     }
 
     // MARK: - Cloud Model Input
 
     private var cloudModelInput: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             // API Key
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text("API Key")
-                    .font(theme.fontCaption)
+                    .font(theme.fontCaption.weight(.semibold))
                     .foregroundColor(theme.secondaryText)
                 SecureField("Enter API key...", text: $apiKeyInput)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.plain)
                     .font(.system(size: 13))
+                    .foregroundColor(theme.primaryText)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(theme.surfaceOverlayStrong))
+                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.secondaryText.opacity(0.2), lineWidth: 1))
                     .onAppear { apiKeyInput = codeSessionManager.apiKey ?? "" }
-                    .onChange(of: apiKeyInput) { _, newVal in
+                    .onChange(of: apiKeyInput) { _, _ in
                         commitCloudModel()
                     }
             }
 
             // Model Name
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text("Model Name")
-                    .font(theme.fontCaption)
+                    .font(theme.fontCaption.weight(.semibold))
                     .foregroundColor(theme.secondaryText)
                 TextField("e.g. claude-sonnet-4-20250514", text: $cloudModelNameInput)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.plain)
                     .font(.system(size: 13))
+                    .foregroundColor(theme.primaryText)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(theme.surfaceOverlayStrong))
+                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.secondaryText.opacity(0.2), lineWidth: 1))
                     .onAppear { cloudModelNameInput = codeSessionManager.modelName }
                     .onChange(of: cloudModelNameInput) { _, _ in
                         commitCloudModel()
@@ -204,15 +237,13 @@ private struct CodeModelSelectorPopover: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.vertical, 14)
     }
 
     /// Writes the cloud model + API key to the persisted code profile with cloudNative cognitive data.
     private func commitCloudModel() {
         let trimmedModel = cloudModelNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedModel.isEmpty else { return }
-        // Cloud providers never use Ollama's `think` parameter — they have their own thinking
-        // mechanisms (Anthropic extendedThinking via advancedConfiguration, Gemini thinking_config).
         codeSessionManager.updateModel(
             trimmedModel,
             provider: codeSessionManager.provider,
@@ -226,32 +257,31 @@ private struct CodeModelSelectorPopover: View {
     // MARK: - Local Model List
 
     private var localModelList: some View {
-        VStack(spacing: 0) {
-            // Search
-            TextField("Search models...", text: $modelSearchText)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 13))
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-
+        VStack(spacing: 8) {
             if isLoadingModels {
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if eligibleModels.isEmpty {
                 VStack(spacing: 6) {
+                    Image(systemName: "cpu")
+                        .font(.system(size: 24))
+                        .foregroundColor(theme.tertiaryText)
                     Text("No eligible models found")
-                        .font(theme.fontCaption)
+                        .font(theme.fontSubheadline.weight(.semibold))
                         .foregroundColor(theme.secondaryText)
                     Text("Code mode requires 14B+ models with tool calling support.")
                         .font(.system(size: 11))
                         .foregroundColor(theme.secondaryText.opacity(0.7))
                         .multilineTextAlignment(.center)
                 }
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 20)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 2) {
+                ScrollView(showsIndicators: true) {
+                    LazyVStack(spacing: 6) {
                         ForEach(eligibleModels) { entry in
                             modelRow(entry)
                         }
@@ -271,47 +301,20 @@ private struct CodeModelSelectorPopover: View {
     }
 
     private func modelRow(_ entry: CodeModelEntry) -> some View {
-        let isSelected = codeSessionManager.modelName == entry.name
-        return Button(action: {
-            // Code mode: thinking is always disabled to keep tool-heavy ReAct loops fast.
-            // Users who want extended reasoning should use Chat mode.
-            codeSessionManager.updateModel(
-                entry.name,
-                provider: codeSessionManager.provider,
-                cognitiveProfile: entry.cognitiveProfile,
-                apiKey: nil,
-                baseURL: codeSessionManager.baseURL,
-                thinkingEnabled: false
-            )
-        }) {
-            HStack {
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundColor(isSelected ? .cyan : theme.secondaryText.opacity(0.4))
-                    .font(.system(size: 14))
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(entry.name)
-                        .font(.system(size: 13))
-                        .foregroundColor(theme.primaryText)
-                        .lineLimit(1)
-
-                    if let size = entry.parameterSize {
-                        Text(size)
-                            .font(.system(size: 10))
-                            .foregroundColor(theme.secondaryText)
-                    }
-                }
-
-                Spacer()
+        CodeModelRow(
+            entry: entry,
+            isSelected: codeSessionManager.modelName == entry.name,
+            onSelect: {
+                codeSessionManager.updateModel(
+                    entry.name,
+                    provider: codeSessionManager.provider,
+                    cognitiveProfile: entry.cognitiveProfile,
+                    apiKey: nil,
+                    baseURL: codeSessionManager.baseURL,
+                    thinkingEnabled: false
+                )
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(isSelected ? Color.cyan.opacity(0.1) : Color.clear)
-            )
-        }
-        .buttonStyle(.plain)
+        )
     }
 
     // MARK: - Model Loading
@@ -415,5 +418,142 @@ private struct CodeModelSelectorPopover: View {
                 )
             }
             .sorted { $0.name < $1.name }
+    }
+}
+
+// MARK: - Provider Chip Component
+
+private struct ProviderChipView: View {
+    let provider: ApiProvider
+    let isSelected: Bool
+    let action: () -> Void
+
+    @Environment(\.appTheme) private var theme
+    @State private var isHovered = false
+
+    private var label: String {
+        switch provider {
+        case .ollama:           return "Ollama"
+        case .mlx:              return "MLX"
+        case .anthropic:        return "Anthropic"
+        case .openAI:           return "OpenAI"
+        case .google:           return "Google"
+        case .openRouter:       return "OpenRouter"
+        case .openAICompatible: return "Custom"
+        }
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                if isSelected {
+                    Circle()
+                        .fill(Color.cyan)
+                        .frame(width: 6, height: 6)
+                        .shadow(color: Color.cyan.opacity(0.8), radius: 3)
+                }
+                Text(label)
+                    .font(.system(size: 12, weight: isSelected ? .bold : .medium))
+                    .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .background(
+                Capsule()
+                    .fill(isSelected ? Color.cyan.opacity(0.18) : (isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay))
+            )
+            .overlay(
+                Capsule()
+                    .strokeBorder(
+                        isSelected ? Color.cyan.opacity(0.65) : (isHovered ? theme.secondaryText.opacity(0.3) : Color.clear),
+                        lineWidth: 1
+                    )
+            )
+            .shadow(color: isSelected ? Color.cyan.opacity(0.25) : .clear, radius: 4)
+            .scaleEffect(isHovered ? 1.04 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .onHover { h in
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { isHovered = h }
+        }
+    }
+}
+
+// MARK: - Model Row Component
+
+private struct CodeModelRow: View {
+    let entry: CodeModelEntry
+    let isSelected: Bool
+    let onSelect: () -> Void
+
+    @Environment(\.appTheme) private var theme
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(isSelected ? Color.cyan.opacity(0.2) : (isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay))
+                        .frame(width: 24, height: 24)
+
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 14, weight: isSelected ? .bold : .regular))
+                        .foregroundColor(isSelected ? Color.cyan : theme.secondaryText.opacity(0.4))
+                        .shadow(color: isSelected ? Color.cyan.opacity(0.6) : .clear, radius: 4)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entry.name)
+                        .font(theme.fontSubheadline.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    if let size = entry.parameterSize {
+                        Text(size)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundColor(theme.secondaryText)
+                    }
+                }
+
+                Spacer(minLength: 4)
+
+                if let size = entry.parameterSize {
+                    Text(size)
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundColor(isSelected ? Color.cyan : theme.tertiaryText)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule().fill(isSelected ? Color.cyan.opacity(0.15) : theme.surfaceOverlayStrong)
+                        )
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isSelected
+                          ? Color.cyan.opacity(0.14)
+                          : (isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay.opacity(0.4)))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(
+                        isSelected
+                            ? Color.cyan.opacity(0.55)
+                            : (isHovered ? theme.secondaryText.opacity(0.3) : Color.clear),
+                        lineWidth: 1
+                    )
+            )
+            .shadow(color: isSelected ? Color.cyan.opacity(0.2) : (isHovered ? Color.black.opacity(0.15) : .clear), radius: 4, y: 2)
+            .scaleEffect(isHovered ? 1.015 : 1.0)
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+        .onHover { hover in
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { isHovered = hover }
+        }
     }
 }

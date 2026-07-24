@@ -95,7 +95,7 @@ final class SettingsCoordinator {
         guard let vm = viewModel else { return }
         UserDefaults.standard.set(vm.isIntelligenceCoreEnabled, forKey: AppSettings.isIntelligenceCoreEnabledKey)
         if !vm.isIntelligenceCoreEnabled {
-            Task { await IntelligenceCoreService.shared.unload() }
+            Task { await IntelligenceCoreService.shared.unloadNow(caller: .unknown) }
         }
     }
 

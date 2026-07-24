@@ -279,4 +279,154 @@ final class ChatHistoryViewModelTests: XCTestCase {
         let pasteboard = NSPasteboard.general
         XCTAssertEqual(pasteboard.string(forType: .string), "Copy me")
     }
+
+    // MARK: - Compaction Checkpoint Splice
+
+    /// A checkpoint is timestamped just AFTER the turns it summarized, so in a
+    /// descending array it belongs in the middle — appending or prepending it would
+    /// misorder the transcript and corrupt the history handed to the next turn.
+    func testInsertCheckpoint_PlacedByTimestamp_NotAppended() {
+        let convId = UUID()
+        let base = Date()
+        // Descending (newest first), as the view model stores them.
+        viewModel.currentChatMessages = (0..<5).reversed().map { i in
+            ChatMessage(
+                conversationId: convId,
+                timestamp: base.addingTimeInterval(Double(i)),
+                sender: .user,
+                content: .plainText("Message \(i)")
+            )
+        }
+
+        // Sits between message 1 (t=1) and message 2 (t=2).
+        let checkpoint = ChatMessage(
+            conversationId: convId,
+            timestamp: base.addingTimeInterval(1.5),
+            sender: .agent,
+            content: .checkpoint(summary: "Summary of turns 0-1")
+        )
+
+        viewModel.insertCheckpoint(checkpoint)
+
+        XCTAssertEqual(viewModel.currentChatMessages.count, 6)
+        let timestamps = viewModel.currentChatMessages.map(\.timestamp)
+        XCTAssertEqual(timestamps, timestamps.sorted(by: >),
+                       "History must remain sorted newest-first after the splice")
+        let idx = viewModel.currentChatMessages.firstIndex { $0.id == checkpoint.id }
+        XCTAssertEqual(idx, 3, "Checkpoint belongs between t=2 and t=1 in a descending array")
+    }
+
+    /// Mirrors the persistence-side upsert: a repeat must not double-render the card
+    /// or inflate the history handed to the backend.
+    func testInsertCheckpoint_IsIdempotentByID() {
+        let convId = UUID()
+        viewModel.currentChatMessages = [
+            ChatMessage(conversationId: convId, timestamp: Date().addingTimeInterval(10),
+                        sender: .user, content: .plainText("hi"))
+        ]
+        let checkpoint = ChatMessage(
+            conversationId: convId,
+            timestamp: Date(),
+            sender: .agent,
+            content: .checkpoint(summary: "Summary")
+        )
+
+        viewModel.insertCheckpoint(checkpoint)
+        viewModel.insertCheckpoint(checkpoint)
+
+        XCTAssertEqual(viewModel.currentChatMessages.count, 2, "A repeated checkpoint must not duplicate")
+    }
+
+    /// Background compaction can finish after the user switched chats. Splicing then would
+    /// inject a foreign message into whatever transcript happens to be open.
+    func testInsertCheckpoint_SkipsWhenDifferentConversationIsOpen() {
+        let openConv = UUID()
+        viewModel.currentChatMessages = [
+            ChatMessage(conversationId: openConv, timestamp: Date(), sender: .user, content: .plainText("hi"))
+        ]
+        let checkpoint = ChatMessage(
+            conversationId: UUID(), // a different conversation
+            timestamp: Date().addingTimeInterval(-60),
+            sender: .agent,
+            content: .checkpoint(summary: "Summary for another chat")
+        )
+
+        viewModel.insertCheckpoint(checkpoint)
+
+        XCTAssertEqual(viewModel.currentChatMessages.count, 1,
+                       "A checkpoint for another conversation must not enter this transcript")
+    }
+
+    /// "New chat" between scheduling and completion: nothing loaded → skip, or an orphan
+    /// card floats in the empty transcript until the next load wipes it.
+    func testInsertCheckpoint_SkipsWhenNothingLoaded() {
+        viewModel.currentChatMessages = []
+        let checkpoint = ChatMessage(
+            conversationId: UUID(),
+            timestamp: Date(),
+            sender: .agent,
+            content: .checkpoint(summary: "Summary")
+        )
+
+        viewModel.insertCheckpoint(checkpoint)
+
+        XCTAssertTrue(viewModel.currentChatMessages.isEmpty,
+                      "No conversation loaded → the persisted copy is the only correct home")
+    }
+
+    /// The checkpoint must be findable by the next turn's compaction check — that is the
+    /// whole point of the splice (otherwise the same turns get re-summarized every request).
+    func testInsertCheckpoint_IsDiscoverableAsCheckpointContent() {
+        let convId = UUID()
+        viewModel.currentChatMessages = [
+            ChatMessage(conversationId: convId, timestamp: Date(), sender: .user, content: .plainText("hi"))
+        ]
+        let checkpoint = ChatMessage(
+            conversationId: convId,
+            timestamp: Date().addingTimeInterval(-60),
+            sender: .agent,
+            content: .checkpoint(summary: "Prior summary")
+        )
+
+        viewModel.insertCheckpoint(checkpoint)
+
+        let found = viewModel.currentChatMessages.last {
+            if case .checkpoint = $0.content { return true }
+            return false
+        }
+        XCTAssertNotNil(found, "HistoryCompactionService.findLatestCheckpoint must be able to see it")
+    }
+
+    // MARK: - Descending Insertion Index (pure)
+
+    func testDescendingInsertionIndex_EmptyAndBoundaries() {
+        let convId = UUID()
+        let base = Date()
+        let msgs = [2.0, 1.0, 0.0].map { offset in
+            ChatMessage(conversationId: convId, timestamp: base.addingTimeInterval(offset),
+                        sender: .user, content: .plainText("m"))
+        }
+
+        XCTAssertEqual(ChatHistoryViewModel.descendingInsertionIndex(for: base, in: []), 0,
+                       "Empty history → index 0")
+        XCTAssertEqual(ChatHistoryViewModel.descendingInsertionIndex(
+            for: base.addingTimeInterval(5), in: msgs), 0, "Newest → front")
+        XCTAssertEqual(ChatHistoryViewModel.descendingInsertionIndex(
+            for: base.addingTimeInterval(-5), in: msgs), 3, "Oldest → end")
+        XCTAssertEqual(ChatHistoryViewModel.descendingInsertionIndex(
+            for: base.addingTimeInterval(1.5), in: msgs), 1, "Middle → after the newer entry")
+    }
+
+    /// Exact-tie goes before the equal-timestamped message, which keeps the checkpoint
+    /// ahead of anything sharing its instant rather than silently sinking below it.
+    func testDescendingInsertionIndex_ExactTie() {
+        let convId = UUID()
+        let base = Date()
+        let msgs = [1.0, 0.0].map { offset in
+            ChatMessage(conversationId: convId, timestamp: base.addingTimeInterval(offset),
+                        sender: .user, content: .plainText("m"))
+        }
+        XCTAssertEqual(ChatHistoryViewModel.descendingInsertionIndex(
+            for: base.addingTimeInterval(1.0), in: msgs), 0)
+    }
 }

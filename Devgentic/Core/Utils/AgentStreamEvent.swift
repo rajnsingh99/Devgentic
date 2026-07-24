@@ -179,15 +179,29 @@ enum AgentStreamEvent: Sendable {
 
     // MARK: - History Compaction
 
-    /// IC-powered history compaction has started. Emitted before the IC summarization call.
-    /// - turnsToCompact: Number of conversation turns being summarized.
-    /// - checkpointNumber: Sequential checkpoint number (1-based).
-    case compactionStarted(turnsToCompact: Int, checkpointNumber: Int)
-
     /// IC-powered history compaction completed successfully.
+    ///
+    /// (There is deliberately no `compactionStarted` counterpart any more: compaction runs
+    /// in the background, so a "started" chip could persist with no terminal row whenever
+    /// the stream ends first — reading as a hang forever. The completed/failed chips stand
+    /// alone; `CapabilityMilestoneKind.compactionStarted` survives only so historical
+    /// persisted timelines still decode.)
     /// - turnsCompacted: Number of turns that were summarized into the checkpoint.
     /// - summaryPreview: First ~120 chars of the checkpoint summary for UI display.
-    case compactionCompleted(turnsCompacted: Int, summaryPreview: String)
+    /// - checkpoint: The synthetic `.checkpoint` message itself. Carried across the stream
+    ///   boundary because the backend layer has no persistence access — the UI layer saves
+    ///   it and inserts it into the live history. Without this the checkpoint died with the
+    ///   request, so every later turn re-summarized the same turns from scratch (a full IC
+    ///   load + inference per request) and no checkpoint ever survived a restart.
+    case compactionCompleted(turnsCompacted: Int, summaryPreview: String, checkpoint: ChatMessage)
+
+    /// IC-powered history compaction failed or timed out.
+    ///
+    /// Without this, a failure was silent: the catch site only logged, so a user who had
+    /// just waited through a multi-second IC stall saw nothing at all — indistinguishable
+    /// from the model simply being slow. The run continues with uncompacted history.
+    /// - reason: Short, user-facing cause (timeout, empty summary, model unavailable).
+    case compactionFailed(reason: String)
 
     // MARK: - Terminal Outcome
 
@@ -210,6 +224,7 @@ enum WarningCategory: String, Sendable, Codable, Equatable, CaseIterable {
     case contextPressure   // nearing iteration / compaction threshold
     case circuitBreaker    // repetitive-action / loop safeguard tripping (imminent or already aborted)
     case resourceUnavailable // an attached/upstream file couldn't be read (report-and-skip)
+    case midRunError       // a failure the run survived (failed workflow node / planning subtask) — demoted from an `.error` card when prose streamed after it (ASM-1)
 
     var displayName: String {
         switch self {
@@ -221,6 +236,7 @@ enum WarningCategory: String, Sendable, Codable, Equatable, CaseIterable {
         case .contextPressure:  return "Context"
         case .circuitBreaker:   return "Loop Guard"
         case .resourceUnavailable: return "Attachment"
+        case .midRunError:      return "Error"
         }
     }
 
@@ -235,6 +251,7 @@ enum WarningCategory: String, Sendable, Codable, Equatable, CaseIterable {
         case .contextPressure:  return "gauge.with.dots.needle.67percent"
         case .circuitBreaker:   return "arrow.triangle.2.circlepath.circle"
         case .resourceUnavailable: return "doc.badge.exclamationmark"
+        case .midRunError:      return "exclamationmark.triangle"
         }
     }
 
@@ -246,7 +263,7 @@ enum WarningCategory: String, Sendable, Codable, Equatable, CaseIterable {
     /// to the node timeline.
     var bubblesToWorkflowLevel: Bool {
         switch self {
-        case .circuitBreaker, .contextPressure:
+        case .circuitBreaker, .contextPressure, .midRunError:
             return true
         case .retry, .throttle, .memoryPressure, .parseFailure, .formatCorrection, .resourceUnavailable:
             return false

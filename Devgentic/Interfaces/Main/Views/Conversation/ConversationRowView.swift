@@ -18,8 +18,6 @@ struct ConversationRowView: View {
 
     // Local state for hover effect
     @State private var isHovering = false
-    // Drives the amber "needs input" pulse on the accent rail.
-    @State private var needsInputPulse = false
     @Environment(\.appTheme) private var theme
 
     // Batch selection properties
@@ -29,6 +27,12 @@ struct ConversationRowView: View {
     /// [F2] This conversation has a pending HITL request — surface a "needs input" indicator in the
     /// sidebar so an unfocused (or background/remote/scheduled) run that's waiting is discoverable.
     var needsInput: Bool = false
+
+    /// [P8] Live streaming flag, computed at the call site from ActiveStreamManager —
+    /// the struct's own `conversation.isStreaming` is structurally always false (the
+    /// persisted column doesn't exist), so the pulse indicator below had never
+    /// rendered once. Same live-flag pattern as `needsInput` [F2].
+    var isStreamingLive: Bool = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -79,45 +83,30 @@ struct ConversationRowView: View {
     @ViewBuilder
     private var standardContentView: some View {
         HStack(alignment: .center, spacing: 0) {
-            // Left rail = STATE: Amber/warning rail only when the run needs user attention (input).
-            if needsInput {
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(
-                        LinearGradient(colors: railGradientColors, startPoint: .top, endPoint: .bottom)
-                    )
-                    .frame(width: 3, height: 14)
-                    .padding(.trailing, 6)
-                    .shadow(
-                        color: theme.warningColor.opacity(needsInputPulse ? 0.85 : 0.2),
-                        radius: needsInputPulse ? 7 : 2
-                    )
-                    .help("Needs your input")
-                    .accessibilityLabel("Needs your input")
-            } else {
-                Spacer().frame(width: 9)
-            }
-
-            // Title row
-            HStack(spacing: 5) {
-                // Backend origin dot (theme-aware palette) — decoupled from the state rail.
-                if hasBackendDot {
-                    Circle()
-                        .fill(theme.backendColor(for: conversation.backendType ?? .none))
-                        .frame(width: 6, height: 6)
-                }
-
-                Text(conversation.displayTitle)
-                    .font(theme.fontFootnote.weight(.medium))
-                    .foregroundColor(theme.primaryText)
-                    .lineLimit(1)
-            }
+            // Title. (The backend-origin dot and the amber HITL rail were REMOVED by
+            // user decision 2026-07-19 — no profile/backend colors in the sidebar;
+            // run state lives in the single pulse indicator on the right.)
+            Text(conversation.displayTitle)
+                .font(theme.fontFootnote.weight(.medium))
+                .foregroundColor(theme.primaryText)
+                .lineLimit(1)
 
             Spacer()
 
-            // Streaming indicator, Hover Actions, or Timestamp (mutually exclusive swap to prevent overlaps)
+            // ONE state indicator, two colors — or hover actions / timestamp
+            // (mutually exclusive swap to prevent overlaps).
+            // Priority: needs-input BEFORE streaming — a run parked on HITL still
+            // holds a live stream task, so both flags can be true at once, and
+            // "waiting on you" is the actionable truth ("generating" would lie).
             Group {
-                if conversation.isStreaming {
+                if needsInput {
+                    StreamingPulseIndicator(color: theme.warningColor)
+                        .help("Needs your input")
+                        .accessibilityLabel("Needs your input")
+                } else if isStreamingLive {
                     StreamingPulseIndicator()
+                        .help("Generating…")
+                        .accessibilityLabel("Generating a response")
                 } else if isHovering && !isSelectionMode {
                     hoverActionsView
                 } else {
@@ -127,16 +116,6 @@ struct ConversationRowView: View {
                 }
             }
             .layoutPriority(1)
-        }
-        // Drive the amber "needs input" pulse from a stable parent so it tracks the state reliably.
-        .onChange(of: needsInput, initial: true) { _, active in
-            if active {
-                withAnimation(.easeInOut(duration: 0.95).repeatForever(autoreverses: true)) {
-                    needsInputPulse = true
-                }
-            } else {
-                withAnimation(.easeInOut(duration: 0.2)) { needsInputPulse = false }
-            }
         }
     }
 
@@ -164,7 +143,7 @@ struct ConversationRowView: View {
     @ViewBuilder
     private var backgroundView: some View {
         if isSelected {
-            // Selected state — neutral accent tint (origin is carried by the dot, not the selection).
+            // Selected state — neutral accent tint.
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(theme.accentColor.opacity(0.08))
                 .overlay(
@@ -181,19 +160,6 @@ struct ConversationRowView: View {
         }
     }
 
-    // MARK: - Helpers
-
-    /// Whether to show the backend origin dot (hidden for conversations with no backend).
-    private var hasBackendDot: Bool {
-        if let backendType = conversation.backendType { return backendType != .none }
-        return false
-    }
-
-    /// Left-rail gradient = STATE: amber when the run needs input (highest priority), else the
-    /// selection accent — bright when selected, dim on hover.
-    private var railGradientColors: [Color] {
-        return [theme.warningColor, theme.warningColor.opacity(0.55)]
-    }
 }
 
 // MARK: - Preview Provider

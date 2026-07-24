@@ -343,6 +343,7 @@ extension WarningCategory {
         case .contextPressure:  return .memExhausted
         case .circuitBreaker:   return .cbRepetitiveAction     // most common CB trigger
         case .resourceUnavailable: return .fileReadFailed      // attachment/file couldn't be read
+        case .midRunError:      return .executionFailed        // demoted mid-run `.error` card (ASM-1) — original category is in the event text
         }
     }
 }

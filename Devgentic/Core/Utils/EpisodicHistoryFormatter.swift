@@ -355,7 +355,12 @@ struct EpisodicHistoryFormatter {
     ///   - history: The array of previous ChatMessages.
     ///   - limit: The maximum number of recent turn-pairs to include (default 4).
     /// - Returns: An XML `<episodic_memory>` block ready for prompt injection.
-    static func buildRecentHistoryString(from history: [ChatMessage], limit: Int = 4) -> String {
+    /// - Parameter includeImageNames: when true (vision profiles), each turn that had
+    ///   attached images renders an `<attached_images>` label so the model can map the
+    ///   re-provided image bytes to the turn they belong to. Left false for non-vision
+    ///   profiles, whose images are omitted — labeling images the model won't receive
+    ///   would be misleading.
+    static func buildRecentHistoryString(from history: [ChatMessage], limit: Int = 4, includeImageNames: Bool = false) -> String {
         // Extract checkpoint context — if a checkpoint exists, only format turns after it.
         let (checkpointSummary, filteredHistory) = extractCheckpointContext(from: history)
         let originalTurnCount = pairTurns(from: history).count
@@ -395,6 +400,14 @@ struct EpisodicHistoryFormatter {
             }
 
             xml += "    <turn status=\"\(turnStatus)\" goal=\"\(goal)\" recency=\"\(recencyLabel)\">\n"
+
+            // Image label — names the images the user attached on this turn so the model
+            // can map the re-provided image bytes (attached to the current message) back
+            // to the turn they belong to. Vision profiles only; text turns render nothing.
+            if includeImageNames, !turn.attachedImageNames.isEmpty {
+                let names = turn.attachedImageNames.map(xmlEscape).joined(separator: ", ")
+                xml += "      <attached_images>\(names)</attached_images>\n"
+            }
 
             // Agent response context — present on every turn so follow-ups
             // like "delete the first one" can resolve referents.
@@ -529,7 +542,7 @@ struct EpisodicHistoryFormatter {
     /// - Parameters:
     ///   - history: The array of ChatMessages.
     ///   - inlineCount: Number of most recent turns to render with full content (default 3).
-    static func buildHybridHistoryString(from history: [ChatMessage], inlineCount: Int = 3) -> String {
+    static func buildHybridHistoryString(from history: [ChatMessage], inlineCount: Int = 3, includeImageNames: Bool = false) -> String {
         // Extract checkpoint context — if a checkpoint exists, only format turns after it.
         let (checkpointSummary, filteredHistory) = extractCheckpointContext(from: history)
         let originalTurnCount = pairTurns(from: history).count
@@ -585,6 +598,10 @@ struct EpisodicHistoryFormatter {
                 }
             } else {
                 // Full inline — same format as buildRecentHistoryString
+                if includeImageNames, !turn.attachedImageNames.isEmpty {
+                    let names = turn.attachedImageNames.map(xmlEscape).joined(separator: ", ")
+                    xml += "      <attached_images>\(names)</attached_images>\n"
+                }
                 if let outcome = turn.outcome {
                     xml += "      <outcome>\(xmlEscape(outcome))</outcome>\n"
                 }
@@ -632,6 +649,10 @@ struct EpisodicHistoryFormatter {
     /// Internal visibility to allow shared use by ConversationHistoryTool for index stability.
     internal struct TurnPair {
         let userQuery: String
+        /// Filenames of images the USER attached on this turn. Rendered as an
+        /// `<attached_images>` label (vision profiles only) so the model can map the
+        /// re-provided image bytes back to the turn they belong to. Empty for text turns.
+        let attachedImageNames: [String]
         let actions: [MemoryAction]
         let userCorrection: String?
         /// Truncated agent response (max 200 chars). Always present — for cancelled turns,
@@ -654,10 +675,12 @@ struct EpisodicHistoryFormatter {
     static func pairTurns(from history: [ChatMessage]) -> [TurnPair] {
         var turns: [TurnPair] = []
         var pendingUserText: String? = nil
+        var pendingUserImages: [String] = []
 
         for message in history {
             if message.sender == .user {
                 pendingUserText = message.content.textContent ?? ""
+                pendingUserImages = message.attachedImageFiles?.map(\.name) ?? []
 
             } else if message.sender == .agent, let userText = pendingUserText {
                 var actions: [MemoryAction] = []
@@ -692,9 +715,12 @@ struct EpisodicHistoryFormatter {
                 // the user stops execution mid-session. Modern rows also have
                 // `terminalOutcome == .cancelled`; we OR the two signals so a row
                 // missing one but having the other is still classified correctly.
+                // Single source of truth for the literals (ChatMessage owns them —
+                // resolveFinalizedContent is the producer). `.contains` semantics kept
+                // here deliberately: this CLASSIFIES rows, it doesn't gate indexing.
                 let cancellationPlaceholders = [
-                    "*Operation stopped by user.*",
-                    "*Operation was stopped before a response could be generated.*"
+                    ChatMessage.legacyStoppedRunPlaceholder,
+                    ChatMessage.stoppedRunPlaceholder
                 ]
                 let wasCancelled = cancellationPlaceholders.contains(where: { responseText.contains($0) })
                     || message.terminalOutcome == .cancelled
@@ -719,6 +745,7 @@ struct EpisodicHistoryFormatter {
 
                 turns.append(TurnPair(
                     userQuery: userText,
+                    attachedImageNames: pendingUserImages,
                     actions: actions,
                     userCorrection: userCorrection,
                     outcome: outcome,
@@ -727,6 +754,7 @@ struct EpisodicHistoryFormatter {
                     terminalReason: message.terminalReason
                 ))
                 pendingUserText = nil
+                pendingUserImages = []
             }
         }
 
@@ -734,6 +762,7 @@ struct EpisodicHistoryFormatter {
         if let userText = pendingUserText {
             turns.append(TurnPair(
                 userQuery: userText,
+                attachedImageNames: pendingUserImages,
                 actions: [],
                 userCorrection: nil,
                 outcome: "No agent response",

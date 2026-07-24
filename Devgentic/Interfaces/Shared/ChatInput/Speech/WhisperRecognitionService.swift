@@ -13,10 +13,30 @@ import os
 // MARK: - Error Types
 
 /// An error enum for the WhisperRecognitionService.
-enum RecognitionError: Error {
+enum RecognitionError: Error, LocalizedError {
     case modelNotLoaded
     case transcriptionFailed(Error)
     case modelSwitchFailed(String)
+    /// [V2] Another surface holds the single app-wide stream slot.
+    case sessionBusy(activeOwner: VoiceSurface)
+    /// [V1] The realtime stream ended with no stop on record — WhisperKit swallowed a
+    /// mid-stream decode error. The service has already forced the engine closed.
+    case streamEndedUnexpectedly
+
+    var errorDescription: String? {
+        switch self {
+        case .modelNotLoaded:
+            return String(localized: "The speech model isn't loaded.")
+        case .transcriptionFailed(let error):
+            return String(localized: "Transcription failed: \(error.localizedDescription)")
+        case .modelSwitchFailed(let message):
+            return String(localized: "Couldn't switch speech models: \(message)")
+        case .sessionBusy(let owner):
+            return String(localized: "Voice input is already active in \(owner.displayName).")
+        case .streamEndedUnexpectedly:
+            return String(localized: "Voice input stopped unexpectedly. The microphone has been released — tap the mic to try again.")
+        }
+    }
 }
 
 // MARK: - State Types
@@ -39,9 +59,17 @@ struct StreamingTranscriptionState {
     let isSilenceDetected: Bool
 
     var fullText: String {
+        Self.joined(confirmed: confirmedText, partial: partialText)
+    }
+
+    /// Single source of truth for joining confirmed + partial text. The live display
+    /// and the FINAL transcript must agree — [V7] the final path used raw concatenation
+    /// ("there.How") while the user watched this space-joined version, so the text
+    /// changed underneath them at stop.
+    static func joined(confirmed: String, partial: String) -> String {
         // Join with a space separator if both parts have content to avoid
         // inconsistent spacing when switching between currentText and unconfirmedSegments
-        let parts = [confirmedText, partialText].filter { !$0.isEmpty }
+        let parts = [confirmed, partial].filter { !$0.isEmpty }
         let combined = parts.joined(separator: " ")
         // Collapse multiple whitespace runs into single spaces for stable display
         return combined
@@ -78,6 +106,9 @@ class WhisperRecognitionService {
     // MARK: - Private State
     private var whisperKit: WhisperKit?
     private var streamTranscriber: AudioStreamTranscriber?
+    /// [V1/V2/V6] Bookkeeping for the single app-wide stream slot — who holds it,
+    /// whether a stop is on record, and which teardown is authoritative.
+    private var ledger = VoiceSessionLedger()
     private var currentModelName: String
     private var _currentLanguage: String?
     private var _isAutoStopEnabled: Bool
@@ -91,6 +122,12 @@ class WhisperRecognitionService {
     // Cache for final transcript assembly
     private var lastConfirmedText: String = ""
     private var lastPartialText: String = ""
+
+    /// Whether ANY energy sample arrived this session — "proof the engine is
+    /// actually delivering audio" (Jarvis's phrase). Logged at finalize so a
+    /// dead-mic session (`_StartIO error 35` class) is identifiable from the
+    /// [VOICE] narrative alone, for every surface.
+    private var sessionSawAudio = false
 
     private let logger = DGLogger(category: "WhisperRecognitionService")
 
@@ -172,10 +209,12 @@ class WhisperRecognitionService {
     /// Asynchronously loads a WhisperKit model. Downloads on first run, cached thereafter.
     /// Uses a two-phase approach: download → prepare/prewarm, giving the UI finer-grained progress.
     private func loadModel(named modelName: String) async {
-        // Tear down existing transcriber and model
-        if streamTranscriber != nil {
-            await streamTranscriber?.stopStreamTranscription()
-            streamTranscriber = nil
+        // Tear down existing transcriber and model — through stopStreaming so the
+        // session ledger stays truthful (a direct transcriber stop would leave a
+        // phantom active session that rejects every future start as busy).
+        if ledger.isBusy {
+            logger.log("[VOICE] Model load requested while a session is active — stopping it first.")
+            _ = await stopStreaming()
         }
         whisperKit = nil
 
@@ -209,26 +248,44 @@ class WhisperRecognitionService {
 
     /// Starts real-time streaming transcription using AudioStreamTranscriber.
     /// This method blocks the calling task until `stopStreaming()` is called or VAD auto-stops.
-    /// - Parameter onStateChange: Callback fired on each transcription state update (bridged to MainActor).
+    /// - Parameters:
+    ///   - owner: Which surface is claiming the single app-wide stream slot — named in
+    ///     logs and in the `.sessionBusy` error another surface receives ([V2]).
+    ///   - onStateChange: Callback fired on each transcription state update (bridged to MainActor).
+    /// - Throws: `.sessionBusy` when another surface is recording; `.streamEndedUnexpectedly`
+    ///   when the stream died mid-run on a swallowed WhisperKit error ([V1] — the engine
+    ///   has been forced closed by then).
     func startStreaming(
+        owner: VoiceSurface,
         onStateChange: @escaping (StreamingTranscriptionState) -> Void
     ) async throws {
         guard let whisperKit = whisperKit, loadingState == .loaded else {
-            logger.error("startStreaming: model not loaded (state: \(String(describing: self.loadingState)))")
+            logger.error("[VOICE] startStreaming(\(owner.rawValue)): model not loaded (state: \(String(describing: self.loadingState)))")
             throw RecognitionError.modelNotLoaded
         }
 
         guard let tokenizer = whisperKit.tokenizer else {
-            logger.error("startStreaming: tokenizer is nil after model loaded")
+            logger.error("[VOICE] startStreaming(\(owner.rawValue)): tokenizer is nil after model loaded")
             throw RecognitionError.modelNotLoaded
         }
 
-        logger.log("Configuring streaming transcription (model: \(self.currentModelName), lang: \(self._currentLanguage ?? "auto"))")
+        // [V2] Single-slot guard. Every surface-level guard is per-instance, so this is
+        // the only place that can see a cross-surface collision (main composer recording
+        // while QuickAccess or Jarvis starts). Overwriting the live session here is what
+        // used to orphan a transcriber into a permanent decode loop.
+        guard let session = ledger.begin(owner: owner) else {
+            let holder = ledger.active?.owner ?? owner
+            logger.error("[VOICE] START REJECTED for '\(owner.rawValue)' — slot held by '\(holder.rawValue)' (session \(self.ledger.active?.shortID ?? "?")). Surfaces must stop the active session first.")
+            throw RecognitionError.sessionBusy(activeOwner: holder)
+        }
+
+        logger.log("[VOICE] Session \(session.shortID) START (owner: \(owner.rawValue), model: \(self.currentModelName), lang: \(self._currentLanguage ?? "auto"), autoStop: \(self._isAutoStopEnabled))")
 
         self.onStateChangeCallback = onStateChange
         self.consecutiveSilenceCount = 0
         self.lastConfirmedText = ""
         self.lastPartialText = ""
+        self.sessionSawAudio = false
 
         // Build DecodingOptions with language config
         var options = DecodingOptions()
@@ -268,27 +325,75 @@ class WhisperRecognitionService {
 
         self.streamTranscriber = transcriber
 
-        logger.log("Starting stream transcription (calling startStreamTranscription)...")
-        // Blocks until stopStreamTranscription() is called
-        try await transcriber.startStreamTranscription()
-        logger.log("Stream transcription ended normally.")
+        logger.log("[VOICE] Session \(session.shortID) opening audio engine (calling startStreamTranscription)...")
+        do {
+            // Blocks until stopStreamTranscription() is called
+            try await transcriber.startStreamTranscription()
+        } catch {
+            // WhisperKit's realtimeLoop currently swallows errors instead of rethrowing,
+            // but if a future version DOES throw, the engine must not stay open.
+            logger.error("[VOICE] Session \(session.shortID) stream THREW: \(error.localizedDescription) — forcing engine teardown.")
+            await transcriber.stopStreamTranscription()
+            _ = finalizeSession(session, reason: "stream-threw")
+            throw RecognitionError.transcriptionFailed(error)
+        }
+
+        // Post-return triage. Three ways the blocking call comes back:
+        if Task.isCancelled {
+            // Caller cancelled the owning task (QuickAccess stop(), main-composer
+            // cancelRecording(), Jarvis stopListening()) — realtimeLoop breaks on the
+            // swallowed CancellationError WITHOUT stopping the recorder. Every canceller
+            // pairs the cancel with an explicit stopStreaming(), which performs the real
+            // teardown; doing it here too would race that call's finalize.
+            logger.log("[VOICE] Session \(session.shortID) returned via task cancellation — teardown deferred to the paired stopStreaming().")
+            return
+        }
+        if ledger.isUnrequestedEnd(session.id) {
+            // [V1] Nothing requested this end: WhisperKit's realtimeLoop caught a decode
+            // error and broke with `state.isRecording` still true and the AVAudioEngine
+            // tap still open — then returned as if the session ended cleanly. The UI
+            // would show idle over a live microphone. Force the engine closed and
+            // surface the failure instead of pretending success.
+            logger.error("[VOICE] Session \(session.shortID) (owner: \(owner.rawValue)) ended WITHOUT a stop request — swallowed mid-stream decode failure (V1). Forcing engine teardown; surfacing error to the UI.")
+            await transcriber.stopStreamTranscription()
+            _ = finalizeSession(session, reason: "abnormal-end")
+            throw RecognitionError.streamEndedUnexpectedly
+        }
+        logger.log("[VOICE] Session \(session.shortID) ended via requested stop.")
     }
 
     /// Stops the active streaming transcription and returns the final combined text.
+    /// Safe to call from any surface and safe to double-call: teardown is keyed to the
+    /// session that started it ([V6]), so a stop resuming after its await can't clobber
+    /// state that no longer belongs to it.
     func stopStreaming() async -> String? {
-        guard let transcriber = streamTranscriber else {
-            logger.warning("stopStreaming called but no active stream transcriber exists.")
+        // Mark intent BEFORE any await ([V1]): the blocking startStreamTranscription()
+        // return races this continuation on the MainActor, and only the pending-stop
+        // record tells it this end was requested.
+        guard let session = ledger.markStopRequested(), let transcriber = streamTranscriber else {
+            logger.warning("[VOICE] stopStreaming: no active session — no-op.")
             return nil
         }
+        logger.log("[VOICE] Session \(session.shortID) STOP requested (owner: \(session.owner.rawValue)).")
 
         await transcriber.stopStreamTranscription()
 
-        let finalText = buildFinalTranscript()
+        return finalizeSession(session, reason: "stop-requested")
+    }
 
+    /// Single teardown point: ends ledger bookkeeping, builds the final transcript, and
+    /// clears the stream references. Returns `nil` when this session was already
+    /// finalized by a racing teardown ([V6] — the caller must not touch state then).
+    private func finalizeSession(_ session: VoiceSessionLedger.Session, reason: String) -> String? {
+        guard case .finalized = ledger.end(session.id) else {
+            logger.log("[VOICE] Session \(session.shortID) teardown skipped — already finalized elsewhere (attempted reason: \(reason)) (V6 guard).")
+            return nil
+        }
+        let finalText = buildFinalTranscript()
         self.streamTranscriber = nil
         self.onStateChangeCallback = nil
         self.consecutiveSilenceCount = 0
-
+        logger.log("[VOICE] Session \(session.shortID) FINALIZED (owner: \(session.owner.rawValue), reason: \(reason), transcript: \(finalText.count) chars, audio: \(sessionSawAudio ? "yes" : "NONE — engine likely failed to start")).")
         return finalText
     }
 
@@ -317,6 +422,8 @@ class WhisperRecognitionService {
                 newState.unconfirmedSegments.map { $0.text }.joined()
             )
         }
+
+        if !newState.bufferEnergy.isEmpty { sessionSawAudio = true }
 
         // Detect silence via low buffer energy
         let isSilent = detectSilence(energy: newState.bufferEnergy)
@@ -359,8 +466,11 @@ class WhisperRecognitionService {
     }
 
     private func buildFinalTranscript() -> String {
-        let combined = lastConfirmedText + lastPartialText
-        return stripSpecialTokens(combined)
+        // [V7] Share the live display's join — raw concatenation produced "there.How"
+        // while the overlay showed "there. How", so the text changed at stop.
+        stripSpecialTokens(StreamingTranscriptionState.joined(
+            confirmed: lastConfirmedText, partial: lastPartialText
+        ))
     }
 
     /// Strips WhisperKit special tokens (e.g. <|startoftranscript|>, <|en|>, <|0.00|>) from text.
@@ -375,7 +485,8 @@ class WhisperRecognitionService {
     /// Called by `WhisperModelDownloadService` before deleting model files on disk,
     /// so we don't hold stale references to deleted CoreML bundles.
     func unloadCurrentModel() async {
-        if streamTranscriber != nil {
+        if ledger.isBusy {
+            logger.log("[VOICE] Model unload requested while a session is active — stopping it first.")
             let _ = await stopStreaming()
         }
         whisperKit = nil
@@ -391,7 +502,8 @@ class WhisperRecognitionService {
         guard modelName != currentModelName || loadingState == .idle else { return }
         logger.log("Switching model from '\(self.currentModelName)' to '\(modelName)'.")
 
-        if streamTranscriber != nil {
+        if ledger.isBusy {
+            logger.log("[VOICE] Model switch requested while a session is active — stopping it first.")
             let _ = await stopStreaming()
         }
 

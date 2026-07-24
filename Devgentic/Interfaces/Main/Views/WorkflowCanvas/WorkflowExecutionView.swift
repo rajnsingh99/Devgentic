@@ -106,6 +106,10 @@ final class WorkflowExecutionState {
     /// Appends a timeline event to a specific node's timeline.
     func appendNodeTimelineEvent(_ event: TimelineEvent, for nodeID: UUID) {
         nodeTimelines[nodeID, default: []].append(event)
+        // [TL-2/P3 sweep] Per-node workflow timelines are the same defect class as the
+        // capability-card nested arrays — uncapped growth in memory, persistence, and
+        // render. Same rule, same cap.
+        ChatMessage.evictOverflow(&nodeTimelines[nodeID, default: []], context: "workflow-node")
     }
 
     // MARK: - Event Ingestion

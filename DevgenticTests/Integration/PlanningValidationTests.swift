@@ -123,4 +123,83 @@ final class PlanningValidationTests: XCTestCase {
         XCTAssertTrue(toolNames.contains("format_check"), "format_check output should be forwarded")
         XCTAssertTrue(toolNames.contains("run_tests"), "run_tests output should be forwarded")
     }
+
+    // MARK: - Phase-3 Composition (user-visible once synthesis is opt-in)
+
+    /// Phase 3's IC call used to BE the composition step. With synthesis strictly
+    /// opt-in, this text reaches the user verbatim on an un-opted run, so subtasks
+    /// must be labeled and separated by a BLANK line — a single newline let markdown
+    /// lazily continue the previous subtask's bullet list, running them together.
+    func testComposeSubtaskResults_MultipleSubtasks_LabelsAndSeparatesWithBlankLine() {
+        let subtasks = [
+            SubTask(id: "s1", description: "List the files"),
+            SubTask(id: "s2", description: "Check the port")
+        ]
+        let results = [
+            "s1": "Here's what I found:\n• fs_list: a.swift, b.swift",
+            "s2": "The port is 8080."
+        ]
+
+        let composed = PlanningExecutorWrapper.composeSubtaskResults(subtasks: subtasks, results: results)
+
+        XCTAssertTrue(composed.contains("### List the files"), "Each subtask should be labeled")
+        XCTAssertTrue(composed.contains("### Check the port"))
+        XCTAssertTrue(composed.contains("\n\n### Check the port"),
+                      "A blank line must separate subtasks so the previous bullet list terminates")
+        XCTAssertFalse(composed.contains("b.swift\n### "),
+                       "A bare newline between a bullet list and the next heading is the run-together bug")
+    }
+
+    /// Order follows the plan, not the dictionary's arbitrary iteration order.
+    func testComposeSubtaskResults_PreservesPlanOrder() {
+        let subtasks = [
+            SubTask(id: "s1", description: "First"),
+            SubTask(id: "s2", description: "Second"),
+            SubTask(id: "s3", description: "Third")
+        ]
+        let results = ["s3": "third result", "s1": "first result", "s2": "second result"]
+
+        let composed = PlanningExecutorWrapper.composeSubtaskResults(subtasks: subtasks, results: results)
+
+        guard let firstIdx = composed.range(of: "first result")?.lowerBound,
+              let secondIdx = composed.range(of: "second result")?.lowerBound,
+              let thirdIdx = composed.range(of: "third result")?.lowerBound else {
+            return XCTFail("All three results should appear; got: \(composed)")
+        }
+        XCTAssertTrue(firstIdx < secondIdx && secondIdx < thirdIdx, "Results must follow plan order")
+    }
+
+    /// A single-subtask plan has nothing to disambiguate — a heading over the only
+    /// answer is noise, and would leak plan scaffolding into a simple reply.
+    func testComposeSubtaskResults_SingleSubtask_ReturnsAnswerBare() {
+        let subtasks = [SubTask(id: "s1", description: "Say hi")]
+        let composed = PlanningExecutorWrapper.composeSubtaskResults(
+            subtasks: subtasks, results: ["s1": "Hello there."]
+        )
+        XCTAssertEqual(composed, "Hello there.")
+    }
+
+    /// Missing / empty results contribute nothing rather than blank labeled sections.
+    func testComposeSubtaskResults_SkipsMissingAndEmptyResults() {
+        let subtasks = [
+            SubTask(id: "s1", description: "Ran"),
+            SubTask(id: "s2", description: "Never ran"),
+            SubTask(id: "s3", description: "Blank"),
+            SubTask(id: "s4", description: "Also ran")
+        ]
+        let results = ["s1": "first", "s3": "   \n  ", "s4": "second"]
+
+        let composed = PlanningExecutorWrapper.composeSubtaskResults(subtasks: subtasks, results: results)
+
+        XCTAssertFalse(composed.contains("Never ran"), "A subtask with no result contributes nothing")
+        XCTAssertFalse(composed.contains("Blank"), "A whitespace-only result contributes nothing")
+        XCTAssertTrue(composed.contains("first") && composed.contains("second"))
+    }
+
+    /// All subtasks empty → empty string, which the caller maps to a nil
+    /// finalAgentThought so the deterministic fallback owns the response.
+    func testComposeSubtaskResults_NoResults_ReturnsEmpty() {
+        let subtasks = [SubTask(id: "s1", description: "A"), SubTask(id: "s2", description: "B")]
+        XCTAssertTrue(PlanningExecutorWrapper.composeSubtaskResults(subtasks: subtasks, results: [:]).isEmpty)
+    }
 }

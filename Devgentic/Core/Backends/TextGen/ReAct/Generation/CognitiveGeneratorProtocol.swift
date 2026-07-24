@@ -7,6 +7,11 @@
 
 
 import Foundation
+import os
+
+/// File-scoped logger for the prompt-builder helpers (protocol extensions have no
+/// `self` to borrow one from).
+private let promptLogger = Logger(subsystem: "com.devgentic", category: "PromptBuilder")
 
 // MARK: - Prompt Structural Wrapping
 
@@ -99,6 +104,145 @@ extension CognitiveGenerator {
 
     func compileProviderMessages(from context: SemanticContext) -> [ProviderMessage] {
         compileMessages(from: context).map { ProviderMessage(legacy: $0) }
+    }
+
+    /// Builds a multimodal `[ProviderMessage]` for the LEGACY/dialect agent path —
+    /// but ONLY when the turn actually carries images. Returns nil for a text-only
+    /// turn, so the caller stays on the byte-identical `[[String: String]]` text path
+    /// and existing conversations are completely unaffected.
+    ///
+    /// The legacy path rebuilds its prompt from scratch every iteration (no persistent
+    /// turn array like the native path's `liveConversationTurns`), so images are
+    /// attached every iteration by design — "attach once" would leave the model blind
+    /// to the image on iterations 2+. Cost is CONSTANT per iteration, not cumulative.
+    ///
+    /// Placement: the per-iteration trigger is APPENDED as a fresh trailing user turn
+    /// — exactly like the text path (`generatePromptedResponse`) — and current-turn
+    /// images ride THAT turn. This matters because on the agent path the query lives in
+    /// the system `<task>` layer, not a user turn, so `compileMessages` often emits NO
+    /// trailing current-turn user message (image-only attachment + sentinel scratchpad
+    /// → empty userContent → no user turn appended by PromptBuilder). Merging into "the
+    /// last user turn" would then land on a prior HISTORY turn and leave the request
+    /// ending on an assistant turn (an Ollama assistant-prefill, not a reply). Appending
+    /// guarantees a well-formed request ending on the current user turn. MLX collapses
+    /// all images onto this last user turn anyway; Ollama keeps them here per-message.
+    ///
+    /// History images bind to their OWN history turns (Ollama honors this per-message;
+    /// MLX collapses them too, but they still reach the model).
+    ///
+    /// Unsupported history-image formats (HEIC/TIFF/…) are omitted via
+    /// `VisionImageFormat`, never guessed — a rejected media_type would fail EVERY
+    /// iteration of the loop.
+    func buildMultimodalMessages(from context: SemanticContext, iteration: Int, label: String = "") -> [ProviderMessage]? {
+        let historyTurns = context.nativeHistoryTurns
+        let historyImageCount = historyTurns?.totalImageCount ?? 0
+        let currentImageBlocks = (context.userImagePayload ?? []).filter {
+            if case .image = $0 { return true }; return false
+        }
+        guard historyImageCount > 0 || !currentImageBlocks.isEmpty else { return nil }
+
+        let dicts = compileMessages(from: context)
+        let historyOffset: Int? = historyTurns.flatMap { turns in
+            Self.locateBlock(turns.asWireDicts(), in: dicts)
+        }
+
+        var messages = dicts.map { ProviderMessage(legacy: $0) }
+
+        // Attach history images to their turns.
+        if let turns = historyTurns, let offset = historyOffset, historyImageCount > 0 {
+            var omitted = 0
+            for (index, turn) in turns.enumerated() where !turn.imageMedia.isEmpty {
+                let target = offset + index
+                guard target < messages.count else { continue }
+                var blocks = messages[target].content
+                for image in turn.imageMedia {
+                    let diskURL: URL? = { if case .diskPath(let u) = image.reference { return u }; return nil }()
+                    // NOTE: unlike the current-turn path and the native `spliceHistoryImages`,
+                    // this legacy path OMITS unsupported formats (e.g. HEIC) instead of
+                    // transcoding them. Transcoding needs the decoded bytes, but this builder
+                    // is synchronous and passes the unresolved `reference` downstream (resolve
+                    // is deferred), so there's nothing to convert here. Scope: this path is
+                    // only Ollama `.singleAction` vision agents (rare); the current turn still
+                    // transcodes, so HEIC works on the turn it's attached — only a HEIC replayed
+                    // from history on this specific path degrades. Safe (omit ≠ 400), documented.
+                    guard let mime = VisionImageFormat.mimeType(forName: image.label, fallbackURL: diskURL) else {
+                        omitted += 1
+                        continue
+                    }
+                    blocks.append(.image(ImagePayload(reference: image.reference, mimeType: mime, alt: image.label)))
+                }
+                messages[target] = ProviderMessage(role: messages[target].role, content: blocks, toolCallId: messages[target].toolCallId)
+            }
+            if omitted > 0 {
+                promptLogger.warning("[HISTORY] \(label) omitted \(omitted) prior-turn image(s) of an unsupported format (legacy path) — the model will not see them; they remain in the transcript")
+            }
+        } else if historyImageCount > 0 {
+            promptLogger.warning("[HISTORY] \(label) could not locate the history block in the compiled prompt — \(historyImageCount) prior-turn image(s) omitted on the legacy path; the model will answer from text alone")
+        }
+
+        // Append the per-iteration trigger as a FRESH trailing user turn (matches the
+        // text path), carrying the current-turn images. Never merged into history.
+        var triggerBlocks: [MessageBlock] = [.text(promptTrigger(for: iteration))]
+        triggerBlocks.append(contentsOf: currentImageBlocks)
+        messages.append(ProviderMessage(role: "user", content: triggerBlocks))
+
+        return messages
+    }
+
+    /// Counts image blocks carried in a built payload: (currentTurn, history, total).
+    /// Current-turn images ride the LAST message (the appended trigger turn); the rest
+    /// are history. Used for the `[MULTIMODAL]` success log.
+    private func imageCounts(in messages: [ProviderMessage]) -> (current: Int, history: Int) {
+        func imgs(_ m: ProviderMessage) -> Int { m.content.filter { if case .image = $0 { return true }; return false }.count }
+        let current = messages.last.map(imgs) ?? 0
+        let total = messages.reduce(0) { $0 + imgs($1) }
+        return (current, max(0, total - current))
+    }
+
+    /// Runs one cognitive step for a PROMPTED-TOOLS generator (Markdown / XML / JSON /
+    /// MLX-native / XML-native — all of which pass `tools: nil` and render tools as
+    /// prompt text). Routes through the multimodal payload when the turn carries
+    /// images, otherwise the byte-identical text path.
+    ///
+    /// ⚠️ Uses `generateWithUsage(payload:)` DELIBERATELY, not `generate(payload:)`:
+    /// `APISpyModel` (which wraps every model on the ReAct path) forwards
+    /// `generateWithUsage(payload:)` to the concrete provider but NOT `generate(payload:)`
+    /// — the latter would hit the protocol default that strips images via
+    /// `toLegacyDict()`. This is the same missing-forward trap that bit the native-turn
+    /// path once before (see APISpyModel's `generateCognitiveStep(nativeMessages:)` note).
+    ///
+    /// NOT for `NativeToolTemplateGenerator`, which injects NATIVE tool schemas the
+    /// vision path cannot carry — it handles images by degrading (see its own body).
+    func generatePromptedResponse(
+        model: any LLMProvider,
+        context: SemanticContext,
+        iteration: Int,
+        responseSchema: Any?,
+        label: String = ""
+    ) async throws -> String {
+        if let payload = buildMultimodalMessages(from: context, iteration: iteration, label: label) {
+            // [MULTIMODAL] The legacy-path counterpart to the native "Seeded
+            // liveConversationTurns" line — the single confirmation that this request
+            // actually CARRIES images and by which path. Logged every iteration because
+            // the legacy path re-sends them each time (constant per-iteration cost).
+            let (current, history) = imageCounts(in: payload)
+            promptLogger.info("[MULTIMODAL] \(label) legacy request (iter \(iteration)) carrying \(current) current-turn + \(history) prior-turn image(s) across \(payload.count) message(s) → \(String(describing: type(of: model)))")
+            return try await model.generateWithUsage(payload: payload, tools: nil, responseSchema: responseSchema).text
+        }
+        var executionMessages = compileMessages(from: context)
+        executionMessages.append(["role": "user", "content": promptTrigger(for: iteration)])
+        return try await model.generate(messages: executionMessages, tools: nil, responseSchema: responseSchema)
+    }
+
+    /// Finds the contiguous run of `block` inside `haystack`, returning its start
+    /// index. Content-match rather than arithmetic so a change in the surrounding
+    /// prompt layers degrades to "no history images" instead of a wrong splice.
+    static func locateBlock(_ block: [[String: String]], in haystack: [[String: String]]) -> Int? {
+        guard !block.isEmpty, haystack.count >= block.count else { return nil }
+        for start in 0...(haystack.count - block.count) where Array(haystack[start..<(start + block.count)]) == block {
+            return start
+        }
+        return nil
     }
 
     /// Default trigger: clean universal base used by XML & Markdown generators.
@@ -244,9 +388,17 @@ enum PromptBuilder {
         // flow for native providers. Tool-execution context is already embedded in
         // the system prompt's episodic XML above — these turns no longer contain
         // `[Used: tool(...) → result]` summaries.
+        //
+        // `asWireDicts()` lowers each `HistoryTurn` to the legacy
+        // `["role":, "content":]` shape — byte-identical to what the converter used
+        // to emit inline, so existing text-only conversations keep their exact
+        // prompt bytes (and their KV-cache prefix). Media parts are DROPPED here on
+        // purpose: this array is `[[String: String]]` and has no seam that can carry
+        // an image. Native flows get their images spliced back in downstream by
+        // `ReActAgentExecutor.spliceHistoryImages`, which reads the unlowered turns.
         if layerConfig.includeEpisodicMemory {
             if let turns = context.nativeHistoryTurns, !turns.isEmpty {
-                messages.append(contentsOf: turns)
+                messages.append(contentsOf: turns.asWireDicts())
             }
         }
 

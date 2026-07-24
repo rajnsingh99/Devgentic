@@ -61,7 +61,11 @@ final class ConversationManagementCoordinator {
 
     func startNewConversation() {
         guard let vm = viewModel else { return }
-        vm.clearAttachedFiles()
+        // NB no `clearAttachedFiles()` here any more. The composer's per-conversation
+        // draft restore clears the box when the new (empty) conversation is selected —
+        // and clearing HERE actively broke it: this ran BEFORE the id changed, so the
+        // draft saved for the conversation being left captured zero attachments and the
+        // user lost them. See ComposerDraftStore.
         let newConversationID = createAndSelectNewConversation()
         chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
         logger.info("Started new conversation with ID \(newConversationID.uuidString).")
@@ -70,7 +74,9 @@ final class ConversationManagementCoordinator {
     /// Deselect the currently-open conversation and return to the welcome screen.
     func deselectConversationAndShowWelcome() {
         guard let vm = viewModel else { return }
-        vm.clearAttachedFiles()
+        // As in `startNewConversation`: the draft restore owns clearing the composer, and
+        // clearing before the id changes would discard the attachments of the very
+        // conversation we're stepping away from.
         vm.selectedConversationID = nil
         backendConfiguration.selectedProfileID = nil
         chatHistoryViewModel.currentChatMessages = []
@@ -242,6 +248,8 @@ final class ConversationManagementCoordinator {
     func deleteConversation(conversationID: UUID) {
         guard let vm = viewModel else { return }
         drainLiveExecution(conversationID: conversationID, vm: vm)
+        // Unsent draft text shouldn't outlive the conversation it belonged to.
+        ComposerDraftStore.shared.discard(for: conversationID)
         persistenceService.deleteConversation(with: conversationID)
         // Privacy: delete the conversation's traces too (FK cascades spans/events/configs),
         // so its raw content doesn't linger in traces.sqlite after deletion (§12.5).
@@ -264,6 +272,7 @@ final class ConversationManagementCoordinator {
         guard !ids.isEmpty, let vm = viewModel else { return }
         for id in ids {
             drainLiveExecution(conversationID: id, vm: vm)
+            ComposerDraftStore.shared.discard(for: id)
             persistenceService.deleteConversation(with: id)
             try? TraceStore.shared?.deleteTraces(forConversationID: id.uuidString)
             Task.detached(priority: .utility) {
@@ -291,7 +300,7 @@ final class ConversationManagementCoordinator {
             logger.warning("Cannot export: conversation \(conversationID.uuidString) not found.")
             return
         }
-        let title = conversationSD.toStruct().displayTitle
+        let title = conversationSD.toRowStruct().displayTitle
 
         Task { [persistenceService] in
             let messages = await persistenceService.fetchMessages(for: conversationID, offset: 0, limit: 10000)

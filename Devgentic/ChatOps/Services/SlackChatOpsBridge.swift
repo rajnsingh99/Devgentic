@@ -256,7 +256,7 @@ final class SlackChatOpsBridge {
 
         var buttons: [SlackBlockElement] = []
         for conversationSD in conversations.prefix(20) { // Slack allows up to 25 elements per actions block
-            let title = conversationSD.toStruct().displayTitle
+            let title = conversationSD.toRowStruct().displayTitle
             let convID = conversationSD.id
             let isActive = convID == config.slackActiveConversationID ? "⭐ " : ""
             let label = String("\(isActive)\(title)".prefix(75))
@@ -323,7 +323,7 @@ final class SlackChatOpsBridge {
         let activeConvTitle: String
         if let activeID = config.slackActiveConversationID,
            let conversationSD = vm.persistenceService.getConversation(withId: activeID) {
-            activeConvTitle = conversationSD.toStruct().displayTitle
+            activeConvTitle = conversationSD.toRowStruct().displayTitle
         } else {
             activeConvTitle = "None"
         }
@@ -388,7 +388,7 @@ final class SlackChatOpsBridge {
         awaitingClarification = false
         vm.selectedConversationID = uuid
 
-        let title = conversationSD.toStruct().displayTitle
+        let title = conversationSD.toRowStruct().displayTitle
         _ = try? await apiClient?.postMessage(
             channel: channelID,
             text: "✅ Switched to: *\(title)*\n\nJust type your message to continue."

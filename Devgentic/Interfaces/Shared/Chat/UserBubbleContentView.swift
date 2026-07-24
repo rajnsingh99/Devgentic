@@ -45,6 +45,28 @@ struct UserBubbleContentView: View {
                     .accessibilityLabel("\(attachedTextFiles.count) attached files")
                 }
 
+                // ATT-2: attached images finally render. Thumbnails come from the
+                // persisted bytes (the durable copy — the source URL goes stale), so
+                // they survive reload and source-file deletion alike.
+                if let attachedImageFiles = message.attachedImageFiles, !attachedImageFiles.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: theme.spacingSmall) {
+                            ForEach(attachedImageFiles) { file in
+                                AttachedImageCardView(file: file)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 4)
+                    }
+                    // Trailing anchor for the same reason as the file row above.
+                    .defaultScrollAnchor(.trailing, for: .alignment)
+                    // `.contain`, NOT `.combine` like the file row: each thumbnail
+                    // carries its own lightbox action, and combining would collapse
+                    // them into one blob VoiceOver can't activate.
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("\(attachedImageFiles.count) attached images")
+                }
+
                 if let textContent = message.content.textContent, !textContent.isEmpty {
                     UserMessageView(
                         text: textContent,

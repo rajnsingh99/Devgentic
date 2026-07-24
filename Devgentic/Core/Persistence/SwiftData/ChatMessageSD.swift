@@ -9,6 +9,8 @@
 import Foundation
 import SwiftData
 
+private let logger = DGLogger(category: "ChatMessageSD")
+
 @Model
 final class ChatMessageSD {
     @Attribute(.unique) var id: UUID
@@ -58,8 +60,22 @@ final class ChatMessageSD {
     // MARK: - Mapping
 
     func toChatMessage() -> ChatMessage {
-        let content = (try? JSONDecoder().decode(MessageContent.self, from: contentData))
-            ?? .error(title: "Decode Error", details: "Could not decode message content.")
+        // [P6] Blob-decode failures used to degrade SILENTLY: content became a card
+        // indistinguishable from an agent error, the timeline vanished, variants and
+        // token usage disappeared — with no log line to say the STORE was the problem.
+        // Every fallback below now states what was lost. NOTE the standing hazard:
+        // a decoded fallback is what gets RE-ENCODED on the next save of this message,
+        // overwriting the original (possibly recoverable) bytes — the log is the only
+        // trace the original ever existed.
+        let content: MessageContent
+        do {
+            content = try JSONDecoder().decode(MessageContent.self, from: contentData)
+        } catch {
+            logger.error("[DECODE] Message \(self.id.uuidString.prefix(8)): contentData UNDECODABLE (\(self.contentData.count) bytes, \(error.localizedDescription)) — showing a decode-error card in its place.")
+            // Title is pinned by ChatMessageSDTests; details are honest about the cause
+            // (deliberately unlocalized — persisted + RAG-fed, must stay stable).
+            content = .error(title: "Decode Error", details: "This message's stored content couldn't be read (\(contentData.count) bytes). The rest of the conversation is unaffected.")
+        }
 
         let message = ChatMessage(
             id: id,
@@ -75,15 +91,32 @@ final class ChatMessageSD {
         message.profileType = profileTypeRaw.flatMap { ProfileType(rawValue: $0) }
 
         if let data = agentResponseData {
-            message.agentResponse = try? JSONDecoder().decode(AgentResponse.self, from: data)
+            do {
+                message.agentResponse = try JSONDecoder().decode(AgentResponse.self, from: data)
+            } catch {
+                logger.warning("[DECODE] Message \(self.id.uuidString.prefix(8)): agentResponseData undecodable (\(data.count) bytes, \(error.localizedDescription)) — response variants lost for this load.")
+                // Explicit nil, matching the old `try?` assignment: ChatMessage.init
+                // auto-creates a default response for agent messages, and the pinned
+                // contract (testCorruptedAgentResponseDataIgnored) is that corrupt
+                // stored data yields NO response, not the synthesized default.
+                message.agentResponse = nil
+            }
         }
 
         if let data = timelineEventsData {
-            message.timelineEvents = (try? JSONDecoder().decode([TimelineEvent].self, from: data)) ?? []
+            do {
+                message.timelineEvents = try JSONDecoder().decode([TimelineEvent].self, from: data)
+            } catch {
+                logger.warning("[DECODE] Message \(self.id.uuidString.prefix(8)): timelineEventsData undecodable (\(data.count) bytes, \(error.localizedDescription)) — the run's timeline renders empty for this load.")
+            }
         }
 
         if let data = tokenUsageData {
-            message.tokenUsage = try? JSONDecoder().decode(TokenUsage.self, from: data)
+            do {
+                message.tokenUsage = try JSONDecoder().decode(TokenUsage.self, from: data)
+            } catch {
+                logger.warning("[DECODE] Message \(self.id.uuidString.prefix(8)): tokenUsageData undecodable (\(data.count) bytes) — usage badge lost for this load.")
+            }
         }
 
         message.terminalOutcome = terminalOutcomeRaw.flatMap { ExecutionOutcome(rawValue: $0) }

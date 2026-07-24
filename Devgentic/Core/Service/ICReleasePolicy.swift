@@ -1,0 +1,96 @@
+//
+//  ICReleasePolicy.swift
+//  Devgentic
+//
+//  Pure decision table for Intelligence Core model residency, extracted from
+//  `IntelligenceCoreService` so the concurrency policy is verifiable without loading an
+//  MLX model. The actor owns an instance and performs whatever `Action` it returns.
+//
+//  Two rules this encodes:
+//
+//  1. NEVER free while a generation is in flight. Previously `unload` nil'd the container
+//     and called `MLX.GPU.clearCache()` unconditionally, so any feature could clear the
+//     cache mid-inference and force the next caller to reload a model that was still
+//     resident. The in-flight generation survived (it captures the container before its
+//     first suspension), so this was thrash rather than corruption — but it was invisible.
+//
+//  2. Release is IDLE-DEBOUNCED, not immediate. The IC features run sequentially inside a
+//     single chat turn (RAG query rewriting → history compaction → response synthesis).
+//     Freeing the model the moment each finished made a turn pay 2-3 multi-second MLX
+//     loads. Deferring the free lets one load serve the whole turn while an idle app still
+//     gives the memory back.
+//
+//  `requestImmediateRelease` opts out of (2) for deliberate teardown — the user switching
+//  Core Intelligence off, or changing the IC model, where lingering residency would mean
+//  the next inference silently reuses the OLD model.
+//
+
+import Foundation
+
+struct ICReleasePolicy: Equatable {
+
+    /// What the actor should do as a result of a state change.
+    enum Action: Equatable {
+        /// Nothing to do — the model stays resident.
+        case none
+        /// Free after the idle grace period, unless new demand arrives first.
+        case scheduleIdleRelease
+        /// Free now.
+        case freeNow
+    }
+
+    /// Generations currently in flight.
+    private(set) var activeLeases: Int = 0
+    /// Some feature has finished and wants the model released eventually.
+    private(set) var releaseRequested: Bool = false
+    /// A teardown asked to skip the idle grace period.
+    private(set) var immediateRequested: Bool = false
+
+    // MARK: - Transitions
+
+    /// A generation is starting.
+    mutating func beginLease() {
+        activeLeases += 1
+    }
+
+    /// A generation finished (successfully or not). Frees only when it was the last one
+    /// AND someone had asked for release.
+    mutating func endLease() -> Action {
+        activeLeases = max(0, activeLeases - 1)
+        guard activeLeases == 0 else { return .none }
+        if immediateRequested { return .freeNow }
+        return releaseRequested ? .scheduleIdleRelease : .none
+    }
+
+    /// New demand for the model — cancels any pending release, since the model is wanted.
+    mutating func didLoad() {
+        releaseRequested = false
+        immediateRequested = false
+    }
+
+    /// A feature is done with the model (the normal path).
+    mutating func requestRelease() -> Action {
+        releaseRequested = true
+        return activeLeases == 0 ? .scheduleIdleRelease : .none
+    }
+
+    /// Deliberate teardown — skip the idle wait, but still never free under an in-flight
+    /// generation; `endLease` will free it moments later instead.
+    mutating func requestImmediateRelease() -> Action {
+        releaseRequested = true
+        immediateRequested = true
+        return activeLeases == 0 ? .freeNow : .none
+    }
+
+    /// The model was actually freed.
+    mutating func didFree() {
+        releaseRequested = false
+        immediateRequested = false
+    }
+
+    /// Whether an idle release that has now elapsed should still go ahead. A request that
+    /// arrived while the timer slept must cancel it.
+    var shouldHonorElapsedIdleRelease: Bool {
+        releaseRequested && activeLeases == 0
+    }
+}

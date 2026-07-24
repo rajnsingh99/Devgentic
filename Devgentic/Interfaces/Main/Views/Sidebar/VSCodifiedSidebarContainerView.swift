@@ -66,11 +66,21 @@ struct VSCodifiedSidebarContainerView: View {
                     .frame(maxHeight: .infinity)
 
                 if isSidebarVisible {
-                    // Vertical Separator (Padded so it doesn't touch the outer border)
+                    // Vertical Separator
                     Rectangle()
-                        .fill(theme.surfaceOverlayStrong.opacity(0.3))
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    theme.secondaryText.opacity(0.12),
+                                    theme.surfaceOverlayStrong.opacity(0.4),
+                                    theme.secondaryText.opacity(0.08)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
                         .frame(width: 1)
-                        .padding(.vertical, 16)
+                        .padding(.vertical, 14)
 
                     // Sidebar Content Pane + Drag Handle
                     SideBarPaneView(selectedTab: selectedTabBinding, sidebarWidth: $sidebarWidth)
@@ -86,11 +96,22 @@ struct VSCodifiedSidebarContainerView: View {
             .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(theme.secondaryBackground)
-                    .shadow(color: theme.shadowColor, radius: 15, x: 0, y: 6)
+                    .shadow(color: theme.shadowColor.opacity(0.6), radius: 20, x: 0, y: 8)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(theme.surfaceOverlayStrong.opacity(0.5), lineWidth: 1)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.18),
+                                theme.secondaryText.opacity(0.15),
+                                theme.accentColor.opacity(0.2)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
             )
             .padding(.leading, 12)
             .padding(.vertical, 12)
@@ -105,7 +126,6 @@ struct VSCodifiedSidebarContainerView: View {
             }
         }
         .onAppear {
-            // Seed width on first launch if the persisted value is missing/invalid
             if sidebarWidth < minSidebarWidth {
                 sidebarWidth = defaultSidebarWidth
             }
@@ -114,19 +134,29 @@ struct VSCodifiedSidebarContainerView: View {
 
     // MARK: - Resize Handle
 
-    /// A custom resizer handle on the pane's trailing edge. Displays a fine
-    /// vertical hairline that fades in on hover/drag and snaps to theme colors.
     private var resizeHandle: some View {
         ZStack {
             Rectangle()
                 .fill(Color.clear)
             
-            // Central hairline indicator
-            Rectangle()
-                .fill(isResizing ? theme.accentColor : theme.dividerColor.opacity(0.8))
-                .frame(width: 1)
-                .padding(.vertical, 8)
-                .opacity(isHoveringHandle || isResizing ? 1.0 : 0.0)
+            // Central hairline indicator with magnetic glow
+            ZStack {
+                Rectangle()
+                    .fill(isResizing ? theme.accentColor : theme.secondaryText.opacity(0.4))
+                    .frame(width: 1.5)
+                    .shadow(color: isResizing ? theme.accentColor.opacity(0.8) : .clear, radius: 4)
+
+                if isHoveringHandle || isResizing {
+                    VStack(spacing: 3) {
+                        Circle().fill(theme.accentColor).frame(width: 2.5, height: 2.5)
+                        Circle().fill(theme.accentColor).frame(width: 2.5, height: 2.5)
+                        Circle().fill(theme.accentColor).frame(width: 2.5, height: 2.5)
+                    }
+                    .shadow(color: theme.accentColor.opacity(0.8), radius: 3)
+                }
+            }
+            .padding(.vertical, 12)
+            .opacity(isHoveringHandle || isResizing ? 1.0 : 0.0)
         }
         .contentShape(Rectangle())
         .frame(width: 8)

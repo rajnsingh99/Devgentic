@@ -7,6 +7,58 @@
 
 import SwiftUI
 
+// MARK: - Header Action Button Component
+struct SidebarHeaderActionButton: View {
+    let title: LocalizedStringKey
+    let systemImage: String
+    var shortcut: String? = nil
+    let action: () -> Void
+
+    @Environment(\.appTheme) private var theme
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(theme.accentColor)
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(theme.primaryText)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(
+                        isHovered ? theme.accentColor.opacity(0.45) : theme.secondaryText.opacity(0.18),
+                        lineWidth: 1
+                    )
+            )
+            .shadow(
+                color: isHovered ? theme.accentColor.opacity(0.15) : Color.black.opacity(0.08),
+                radius: isHovered ? 4 : 2,
+                x: 0,
+                y: 1
+            )
+            .scaleEffect(isHovered ? 1.03 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+                isHovered = hovering
+            }
+        }
+        .help(shortcut != nil ? "\(title) (\(shortcut!))" : title)
+        .accessibilityLabel(shortcut != nil ? "\(title) (\(shortcut!))" : title)
+    }
+}
+
 // MARK: - Sidebar Header View
 /// The top header of a sidebar, displaying the title and an optional action button.
 struct SidebarHeaderView: View {
@@ -27,22 +79,12 @@ struct SidebarHeaderView: View {
             Spacer()
 
             if let buttonTitle, let systemImage, let onAction {
-                Button(action: onAction) {
-                    HStack(spacing: 4) {
-                        Image(systemName: systemImage)
-                            .font(.system(.caption, weight: .semibold))
-                        Text(buttonTitle)
-                            .font(.system(.caption, weight: .medium))
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(theme.accentColor.opacity(0.15))
-                    .foregroundColor(theme.accentColor)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .help(shortcut != nil ? "\(buttonTitle) (\(shortcut!))" : buttonTitle)
-                .accessibilityLabel(shortcut != nil ? "\(buttonTitle) (\(shortcut!))" : buttonTitle)
+                SidebarHeaderActionButton(
+                    title: buttonTitle,
+                    systemImage: systemImage,
+                    shortcut: shortcut,
+                    action: onAction
+                )
             }
         }
     }
@@ -67,8 +109,8 @@ struct SidebarSearchBarView: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .foregroundColor(isFocused ? theme.accentColor : theme.secondaryText)
-                .font(theme.fontBody)
+                .foregroundColor(isFocused ? theme.accentColor : theme.tertiaryText)
+                .font(.system(size: 13, weight: .semibold))
                 .animation(.easeInOut(duration: 0.2), value: isFocused)
                 .accessibilityHidden(true)
 
@@ -80,7 +122,6 @@ struct SidebarSearchBarView: View {
                     debouncedUpdate(newValue)
                 }
                 .onChange(of: searchText) { _, newValue in
-                    // Sync back when parent clears search programmatically
                     if newValue != localText {
                         localText = newValue
                     }
@@ -94,7 +135,7 @@ struct SidebarSearchBarView: View {
                     }
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(.caption))
+                        .font(.system(size: 12))
                         .foregroundColor(theme.tertiaryText)
                 }
                 .buttonStyle(.plain)
@@ -104,18 +145,20 @@ struct SidebarSearchBarView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(theme.surfaceOverlay)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(theme.surfaceOverlayStrong)
+        )
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(
-                    isFocused ? theme.accentColor.opacity(0.5) : theme.surfaceOverlayStrong,
-                    lineWidth: isFocused ? 1.0 : 0.5
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(
+                    isFocused ? theme.accentColor.opacity(0.65) : theme.secondaryText.opacity(0.18),
+                    lineWidth: 1
                 )
         )
         .shadow(
-            color: isFocused ? theme.accentColor.opacity(0.15) : Color.clear,
-            radius: 6, x: 0, y: 0
+            color: isFocused ? theme.accentColor.opacity(0.2) : Color.black.opacity(0.1),
+            radius: 5, x: 0, y: 1
         )
         .animation(.easeInOut(duration: 0.2), value: isFocused)
         .onDisappear { debounceTask?.cancel() }
@@ -173,6 +216,63 @@ struct BatchHeaderTextButton: View {
     }
 }
 
+// MARK: - Shared Category Chip (Filter Bubble)
+struct CategoryChip: View {
+    let title: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    @Environment(\.appTheme) private var theme
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                .foregroundColor(
+                    isSelected
+                        ? theme.primaryText
+                        : (isHovered ? theme.primaryText : theme.secondaryText)
+                )
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(
+                    Capsule()
+                        .fill(
+                            isSelected
+                                ? theme.surfaceOverlayStrong
+                                : (isHovered ? theme.surfaceOverlay : theme.surfaceOverlay.opacity(0.4))
+                        )
+                )
+                .overlay(
+                    Capsule()
+                        .strokeBorder(
+                            isSelected
+                                ? theme.accentColor.opacity(0.55)
+                                : (isHovered ? theme.secondaryText.opacity(0.25) : theme.secondaryText.opacity(0.12)),
+                            lineWidth: 1
+                        )
+                )
+                .shadow(
+                    color: isSelected
+                        ? theme.accentColor.opacity(0.18)
+                        : (isHovered ? Color.black.opacity(0.12) : Color.clear),
+                    radius: isSelected ? 5 : 3,
+                    x: 0,
+                    y: 1
+                )
+                .scaleEffect(isHovered ? 1.04 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+                isHovered = hovering
+            }
+        }
+        .animation(.spring(response: 0.28, dampingFraction: 0.75), value: isSelected)
+    }
+}
+
 // MARK: - Sidebar Empty State (Optional Shared)
 struct SidebarEmptyStateView: View {
     let title: LocalizedStringKey
@@ -182,6 +282,7 @@ struct SidebarEmptyStateView: View {
     var onAction: (() -> Void)? = nil
 
     @Environment(\.appTheme) private var theme
+    @State private var isHovered = false
 
     var body: some View {
         VStack(spacing: 20) {
@@ -224,17 +325,39 @@ struct SidebarEmptyStateView: View {
                 Button(action: onAction) {
                     HStack(spacing: 6) {
                         Image(systemName: "plus")
-                            .font(.system(.subheadline, weight: .semibold))
+                            .font(.system(.subheadline, weight: .bold))
+                            .foregroundColor(theme.accentColor)
                         Text(buttonTitle)
-                            .font(theme.fontSubheadline.weight(.medium))
+                            .font(theme.fontSubheadline.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
-                    .background(theme.accentColor)
-                    .foregroundColor(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(
+                                isHovered ? theme.accentColor.opacity(0.55) : theme.accentColor.opacity(0.35),
+                                lineWidth: 1
+                            )
+                    )
+                    .shadow(
+                        color: isHovered ? theme.accentColor.opacity(0.2) : Color.black.opacity(0.1),
+                        radius: isHovered ? 6 : 4,
+                        x: 0,
+                        y: 2
+                    )
+                    .scaleEffect(isHovered ? 1.03 : 1.0)
                 }
                 .buttonStyle(.plain)
+                .onHover { hovering in
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+                        isHovered = hovering
+                    }
+                }
             }
 
             Spacer()

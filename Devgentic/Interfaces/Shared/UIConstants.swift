@@ -32,7 +32,10 @@ enum ViewZIndex {
 /// Standardized layout values for the single-window interface.
 enum ViewLayout {
     /// Maximum content width for all container views and DynamicIslandBar.
-    static let maxContentWidth: CGFloat = 1000
+    /// Tuned to ~880 (down from 1000) so long-form chat lines stay in a more readable
+    /// measure; the transcript, composer, and DynamicIslandBar all share this value so
+    /// they remain width-aligned.
+    static let maxContentWidth: CGFloat = 880
     /// Standard padding for ScrollView content in container views.
     static let containerPadding: CGFloat = 24
     /// Standard sidebar row padding.

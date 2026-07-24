@@ -79,8 +79,11 @@ final class ComposerVoiceController {
                 self?.isRecording = false
                 return
             }
-            // startStreaming BLOCKS until stopStreaming() or VAD auto-stop.
-            try? await svc.startStreaming { [weak self] state in
+            // startStreaming BLOCKS until stopStreaming() or VAD auto-stop. Throws are
+            // deliberately absorbed here — [V2] busy (another surface holds the slot)
+            // and [V1] unexpected-end (the service already forced the engine closed)
+            // both land in the same reset below; the service logs the specifics.
+            try? await svc.startStreaming(owner: .quickAccess) { [weak self] state in
                 Task { @MainActor [weak self] in
                     guard let self, self.isRecording else { return }
                     self.onTextChange?(self.baseText + state.fullText)

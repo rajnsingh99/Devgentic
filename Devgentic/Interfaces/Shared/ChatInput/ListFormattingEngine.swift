@@ -86,14 +86,28 @@ final class ListFormattingEngine {
 
     // MARK: - Enter Key Handling
 
+    /// One marker rewrite needed to keep a list sequential after an item is inserted or
+    /// removed. `range` addresses ONLY the digits — so the item's original separator
+    /// (". ", ".\t", …) survives untouched — and is expressed in the ORIGINAL string's
+    /// coordinates.
+    struct Renumbering: Equatable {
+        let range: NSRange
+        let replacement: String
+    }
+
     /// Result of handling an Enter key press in a list context.
+    ///
+    /// Both mutating cases carry `renumbering`: the rewrites for the items that FOLLOW,
+    /// so a mid-list edit doesn't leave duplicate or gapped numbers. The edits are
+    /// ordered LAST-first and every range sits after the edit point, so a caller applies
+    /// them as-is (then does its own insertion/removal) with no offset arithmetic.
     enum EnterAction {
         /// No list context — let the caller handle normally (e.g. send message).
         case passthrough
-        /// Insert the next numbered item (e.g. "\n2. ").
-        case continueList(insertionText: String)
-        /// The list item was empty — remove the marker and end the list.
-        case terminateList(paragraphRange: NSRange)
+        /// Insert the next numbered item (e.g. "\n2. ") and resequence what follows.
+        case continueList(insertionText: String, renumbering: [Renumbering])
+        /// The list item was empty — remove the marker, end the list, resequence what follows.
+        case terminateList(paragraphRange: NSRange, renumbering: [Renumbering])
     }
 
     /// Determines what should happen when the user presses Enter.
@@ -113,10 +127,58 @@ final class ListFormattingEngine {
         }
 
         if isEmptyListItem(in: string, paragraphRange: paragraphRange) {
-            return .terminateList(paragraphRange: paragraphRange)
+            // This item is being removed, so the items after it slide up to take its number.
+            return .terminateList(
+                paragraphRange: paragraphRange,
+                renumbering: renumberingAfter(paragraphRange: paragraphRange, in: string, continuingFrom: number)
+            )
         }
 
         let nextNumber = number + 1
-        return .continueList(insertionText: "\n\(nextNumber). ")
+        return .continueList(
+            insertionText: "\n\(nextNumber). ",
+            // The new item takes `nextNumber`, so everything after it starts one higher.
+            renumbering: renumberingAfter(paragraphRange: paragraphRange, in: string, continuingFrom: nextNumber + 1)
+        )
+    }
+
+    // MARK: - Renumbering
+
+    /// Like `detectListItem`, but yields the range of just the digits — the part a
+    /// renumber rewrites (leaving the separator alone).
+    private static func detectNumber(in string: NSString, paragraphRange: NSRange) -> (number: Int, digitsRange: NSRange)? {
+        guard let match = numberedListPattern.firstMatch(in: string as String, options: [], range: paragraphRange),
+              let number = Int(string.substring(with: match.range(at: 1))) else {
+            return nil
+        }
+        return (number, match.range(at: 1))
+    }
+
+    /// Rewrites for the contiguous numbered items FOLLOWING `paragraphRange`, so they run
+    /// sequentially from `firstNumber`. Stops at the first paragraph that isn't a numbered
+    /// item (blank line, prose, end of text) — that's where the list ends, and a separate
+    /// list further down must not be renumbered. Items already correct produce no edit, so
+    /// appending at the end of a list yields an empty array and costs nothing.
+    ///
+    /// Returned LAST-first: applying in that order keeps every later range valid even when
+    /// a rewrite changes width (e.g. "9" → "10").
+    static func renumberingAfter(paragraphRange: NSRange, in string: NSString, continuingFrom firstNumber: Int) -> [Renumbering] {
+        var edits: [Renumbering] = []
+        var expected = firstNumber
+        var location = paragraphRange.location + paragraphRange.length
+
+        while location < string.length {
+            let para = string.paragraphRange(for: NSRange(location: location, length: 0))
+            guard let (number, digitsRange) = detectNumber(in: string, paragraphRange: para) else { break }
+            if number != expected {
+                edits.append(Renumbering(range: digitsRange, replacement: String(expected)))
+            }
+            expected += 1
+            let next = para.location + para.length
+            guard next > location else { break }   // defensive: never spin on a zero-length paragraph
+            location = next
+        }
+
+        return edits.reversed()
     }
 }

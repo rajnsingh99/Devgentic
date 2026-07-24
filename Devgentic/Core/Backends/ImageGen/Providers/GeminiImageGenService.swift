@@ -116,8 +116,10 @@ struct GeminiImageGenService: ImageGenProvider, Sendable {
                     "parts": [
                         ["text": fullPrompt],
                         [
+                            // Source normalized to JPEG upstream (imageGen path), so this
+                            // fixed label is truthful — a raw HEIC/etc. here would 400.
                             "inline_data": [
-                                "mime_type": "image/png",
+                                "mime_type": "image/jpeg",
                                 "data": b64Image
                             ]
                         ]

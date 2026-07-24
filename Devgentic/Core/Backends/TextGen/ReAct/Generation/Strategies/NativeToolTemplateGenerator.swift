@@ -112,6 +112,18 @@ struct NativeToolTemplateGenerator: CognitiveGenerator {
         var executionMessages = compileMessages(from: context)
         executionMessages.append(["role": "user", "content": promptTrigger(for: iteration)])
 
+        // Vision DEGRADES here, unlike the other legacy generators. This path injects
+        // NATIVE tool schemas via the chat template's `{% if tools %}` branch, which
+        // requires `streamChat`/`applyChatTemplate(tools:)`; the MLX vision path
+        // (`streamVisionChat`) has no tools parameter, so an image would force a choice
+        // between seeing the picture and calling tools. For an AGENT, tools win — an
+        // agent that can't act is useless. Log the drop with its consequence.
+        let hasImages = (context.userImagePayload?.contains { if case .image = $0 { return true }; return false } ?? false)
+            || (context.nativeHistoryTurns?.totalImageCount ?? 0) > 0
+        if hasImages {
+            logLLMOps.warning("[VISION] [\(self.logTag):\(reqId)] image(s) present but this model uses NATIVE tool-call templates, which the MLX vision path cannot combine with tool injection — answering from text + tools only; the model will NOT see the image(s)")
+        }
+
         // Build OpenAI-style tool schemas for the chat template's `{% if tools %}` branch.
         let nativeTools = nativeSchemaAdapter.formatForNativeAPI(context.availableTools)
         logLLMOps.info("🔧 [\(self.logTag):\(reqId)] Passing \(nativeTools?.count ?? 0) native tool schema(s) to chat template")

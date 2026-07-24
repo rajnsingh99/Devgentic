@@ -40,7 +40,13 @@ final class AttachedImageFileSD {
     var name: String
     var url: String
     var fileExtension: String
-    var binaryData: Data
+    /// The transcript's durable copy of the image — `AttachedImageCardView` renders
+    /// from these bytes because the source `url` goes stale (moved/deleted files,
+    /// sandbox scope not surviving relaunch). `.externalStorage` keeps the blob out
+    /// of the SQLite row (sidecar file, managed by the store) so fetching messages
+    /// doesn't drag megabytes of pixels through the row cache. Storage-option-only
+    /// change: lightweight migration; existing inline blobs remain readable.
+    @Attribute(.externalStorage) var binaryData: Data
     var size: Int64
 
     func toStruct() -> AttachedImageFile {

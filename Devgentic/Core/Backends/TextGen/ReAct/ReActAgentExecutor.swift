@@ -268,7 +268,8 @@ actor ReActAgentExecutor: Executor {
                             promptLayerConfig: input.workflowContext != nil ? .workflow : .agent,
                             workflowContext: input.workflowContext,
                             attachmentContext: input.attachmentContext,
-                            knowledgeBaseContext: input.knowledgeBaseContext
+                            knowledgeBaseContext: input.knowledgeBaseContext,
+                            userImagePayload: input.userPayload
                         )
 
                         // G12: Seed native conversation turns on iter 1. System prompt and
@@ -279,6 +280,19 @@ actor ReActAgentExecutor: Executor {
                         if currentIteration == 1, let nativeGen = nativeGenerator {
                             let canonicalMessages = nativeGen.compileMessages(from: context)
                             liveConversationTurns = canonicalMessages.map { nativeGen.toolTurnAdapter.normalizeCanonical(message: $0) }
+
+                            // Re-attach prior-turn images. `compileMessages` returns
+                            // `[[String: String]]`, so history arrives here text-only even
+                            // when the user attached images two turns ago — that erasure is
+                            // why a follow-up question used to get "no image was provided".
+                            // Text-only histories no-op here and stay byte-identical.
+                            let (historyImagesSpliced, historyImagesOmitted) = await spliceHistoryImages(
+                                into: &liveConversationTurns,
+                                historyTurns: input.nativeHistoryTurns,
+                                canonical: canonicalMessages,
+                                adapter: nativeGen.toolTurnAdapter,
+                                correlation: "trace:\(input.traceContext.traceID)"
+                            )
 
                             // Capability-seeded context (Planning dependency results, Reflexion
                             // prior-trial output) lives only in the working-memory scratchpad,
@@ -319,7 +333,7 @@ actor ReActAgentExecutor: Executor {
                             // #22: everything seeded so far (system + history + kickoff) is the
                             // protected prefix — compaction never touches indices below this.
                             nativePrefixCount = liveConversationTurns.count
-                            logger.info("🧵 [Native] Seeded liveConversationTurns (\(liveConversationTurns.count) initial turns, \(resolvedUserImages.count) image(s), priorContext=\(hasSeededContext ? "\(seededContext.count) chars" : "none"))")
+                            logger.info("🧵 [Native] trace:\(input.traceContext.traceID) Seeded liveConversationTurns (\(liveConversationTurns.count) initial turns, \(resolvedUserImages.count) image(s) this turn, \(historyImagesSpliced) from history\(historyImagesOmitted > 0 ? ", \(historyImagesOmitted) omitted" : ""), priorContext=\(hasSeededContext ? "\(seededContext.count) chars" : "none"))")
                         }
 
                         // [G1 Piece 2] RESUME PREAMBLE — runs on iteration 1 for BOTH the native and the
@@ -1101,13 +1115,18 @@ actor ReActAgentExecutor: Executor {
                                     iteration: currentIteration
                                 )
                                 continuation.yield(.warning(category: .circuitBreaker, message: "Aborting: \(abortReason)"))
-                                // Circuit breaker abort: always force synthesis so the user
-                                // gets a coherent explanation, not raw partial reasoning.
+                                // A circuit-breaker abort no longer forces synthesis. The
+                                // abort is already communicated by the warning event above,
+                                // the failed tool rows, and the terminal reason below —
+                                // it does not justify handing the run to the IC model
+                                // against the user's opt-in. Whatever partial reasoning
+                                // exists is surfaced as-is; a run with nothing usable
+                                // still lands on the deterministic template floor.
                                 let response = await ResponseSynthesizer.synthesize(
                                     summary: executionSummary,
                                     personaInstructions: input.instructions,
                                     originalQuery: input.userInput,
-                                    forceSynthesis: true,
+                                    synthesisOptedIn: input.responseSynthesisEnabled,
                                     suppressLLM: input.suppressLLMSynthesis,
                                     onUsage: { accumulatedTokenUsage.accumulate($0) }
                                 )
@@ -1237,7 +1256,13 @@ actor ReActAgentExecutor: Executor {
                         personaInstructions: input.instructions,
                         originalQuery: input.userInput,
                         isNativeFlow: input.generatorStrategy is NativeStructuredGenerator,
-                        forceSynthesis: input.responseSynthesisEnabled || !effectiveFailures.isEmpty,
+                        // Opt-in ONLY. `effectiveFailures` deliberately does NOT appear
+                        // here any more: an unrecovered failure used to force synthesis,
+                        // which punched through the native fast-path and handed a
+                        // complete answer to the IC model for a lossy rewrite. It still
+                        // drives the terminal outcome + reason below — that is the
+                        // honest failure signal, and it is the one the UI consumes.
+                        synthesisOptedIn: input.responseSynthesisEnabled,
                         suppressLLM: input.suppressLLMSynthesis,
                         onUsage: { accumulatedTokenUsage.accumulate($0) }
                     )
@@ -1389,23 +1414,63 @@ actor ReActAgentExecutor: Executor {
 
 // MARK: - G12 Native-Turn Helpers
 
+/// Logger for the file-scope native-turn helpers, which have no `self` to borrow one from.
+fileprivate let nativeTurnLogger = Logger(subsystem: "com.devgentic", category: "NativeTurns")
+
 /// Approximate serialized character footprint of a native turn dict — recursively sums
 /// string lengths and dictionary keys. Used to budget the native conversation payload
 /// (`liveConversationTurns`) without paying a full JSON-serialization cost per check (#22).
 /// `internal` (not `fileprivate`) so the compaction logic is directly unit-testable.
+///
+/// IMAGES ARE NOT COUNTED AT BASE64 LENGTH. They used to be, and it made this gauge
+/// wildly wrong: a 1 MB screenshot scored ~1,370,000 chars against an 8K–98K budget,
+/// so a single image looked like a ~14× overflow. The compactor below would then drop
+/// every droppable tool exchange, hit its keep-recent floor, and give up — shipping an
+/// over-budget request anyway, minus the tool results the run actually needed. An
+/// image's real cost is ~1–2k tokens regardless of file size, so it is charged flat
+/// via `ImageTokenHeuristic`.
 func approximateTurnChars(_ value: Any) -> Int {
+    approximateTurnChars(value, key: nil)
+}
+
+/// Keys under which each provider adapter parks image bytes:
+///   - Ollama: `"images": [base64, …]`
+///   - Gemini: `"inlineData": {mimeType, data}`
+///   - OpenAI: `"image_url": {url: "data:image/…;base64,…"}`
+/// Claude nests its payload under `"source"` with `type == "base64"`, which is
+/// matched structurally below rather than by key (`source` is too generic).
+private func isImagePayloadKey(_ key: String) -> Bool {
+    key == "images" || key == "inlineData" || key == "image_url"
+}
+
+private func approximateTurnChars(_ value: Any, key: String?) -> Int {
+    if let key, isImagePayloadKey(key) {
+        return imagePayloadChars(value)
+    }
     switch value {
     case let s as String:
+        // OpenAI inlines an image as a `data:` URL string.
+        if s.hasPrefix("data:image/") { return ImageTokenHeuristic.budgetCharsPerImage }
         return s.count
     case let dict as [String: Any]:
-        return dict.reduce(0) { $0 + $1.key.count + approximateTurnChars($1.value) }
+        // Claude: {"type": "base64", "media_type": …, "data": <base64>}
+        if (dict["type"] as? String) == "base64" { return ImageTokenHeuristic.budgetCharsPerImage }
+        return dict.reduce(0) { $0 + $1.key.count + approximateTurnChars($1.value, key: $1.key) }
     case let array as [Any]:
-        return array.reduce(0) { $0 + approximateTurnChars($1) }
+        // Carry the parent key down so `"images": [b64, b64]` charges per element.
+        return array.reduce(0) { $0 + approximateTurnChars($1, key: key) }
     case let number as NSNumber:
         return number.stringValue.count
     default:
         return 0
     }
+}
+
+private func imagePayloadChars(_ value: Any) -> Int {
+    if let array = value as? [Any] {
+        return array.count * ImageTokenHeuristic.budgetCharsPerImage
+    }
+    return ImageTokenHeuristic.budgetCharsPerImage
 }
 
 /// Compacts the native conversation payload when it outgrows `budgetChars`, dropping the
@@ -1449,7 +1514,13 @@ func compactNativeConversation(
         exchangeStarts.append(i)
     }
     // Need more exchanges than we promise to keep, else nothing is safely droppable.
-    guard exchangeStarts.count > keepRecent else { return 0 }
+    // This is the dead-end case: we are OVER budget and cannot legally shrink. The
+    // request ships anyway and the provider decides — historically with no local
+    // breadcrumb at all, so an over-context 400 looked like it came from nowhere.
+    guard exchangeStarts.count > keepRecent else {
+        nativeTurnLogger.warning("[NATIVE] Payload is \(totalChars) chars against a \(budgetChars) budget but only \(exchangeStarts.count) droppable exchange(s) exist (keep-floor \(keepRecent)) — CANNOT compact. Sending over budget; expect a provider context-length error.")
+        return 0
+    }
 
     // Drop oldest exchanges until under budget, never below the keep-recent floor.
     // `cut` walks forward to the start of the first KEPT exchange; everything in
@@ -1496,10 +1567,110 @@ fileprivate func sortObservationsByToolCallOrder(
     }
 }
 
+/// Locates the contiguous run of `block` inside `haystack`, returning its start index.
+///
+/// `PromptBuilder` appends the lowered history turns in one `append(contentsOf:)`, so
+/// they are contiguous by construction. Matching on content rather than computing an
+/// index keeps this correct if the surrounding prompt layers ever change shape — a
+/// failed match degrades to "no history images" instead of splicing into the wrong turn.
+fileprivate func locateTurnBlock(_ block: [[String: String]], in haystack: [[String: String]]) -> Int? {
+    guard !block.isEmpty, haystack.count >= block.count else { return nil }
+    for start in 0...(haystack.count - block.count) where Array(haystack[start..<(start + block.count)]) == block {
+        return start
+    }
+    return nil
+}
+
+/// Splices prior-turn images into the already-normalized history turns.
+///
+/// WHY A SPLICE: history reaches the native path through `compileMessages`, whose
+/// return type is `[[String: String]]` — text-only, and shared with the bot path.
+/// Rather than widen that type (which would touch six generators and the MLX Jinja
+/// renderer), the history is lowered to text there and its images are re-attached
+/// here, where the provider adapter can serialize them natively.
+///
+/// FAILURE POLICY — deliberately ASYMMETRIC with the current turn. `resolveUserImages`
+/// THROWS on an unreadable current-turn image (the user just attached it; failing
+/// loudly is correct). Here we warn-log and OMIT: killing a live run because an image
+/// from three turns ago was moved on disk would be worse than answering without it.
+/// This is the one place transcript and model input are allowed to diverge, so every
+/// omission is logged with its consequence.
+///
+/// Returns the number of images successfully spliced and the number omitted.
+fileprivate func spliceHistoryImages(
+    into turns: inout [[String: Any]],
+    historyTurns: [HistoryTurn]?,
+    canonical: [[String: String]],
+    adapter: any ToolTurnAdapter,
+    correlation: String
+) async -> (spliced: Int, omitted: Int) {
+    let logger = nativeTurnLogger
+    guard let historyTurns, !historyTurns.isEmpty else { return (0, 0) }
+    let totalImages = historyTurns.totalImageCount
+    guard totalImages > 0 else { return (0, 0) }
+
+    guard let offset = locateTurnBlock(historyTurns.asWireDicts(), in: canonical) else {
+        logger.warning("[HISTORY] \(correlation) could not locate the \(historyTurns.count)-turn history block inside the compiled prompt — omitting all \(totalImages) prior-turn image(s); the model will answer without seeing them")
+        return (0, totalImages)
+    }
+
+    var spliced = 0
+    var omitted = 0
+
+    for (index, turn) in historyTurns.enumerated() {
+        let images = turn.imageMedia
+        guard !images.isEmpty else { continue }
+
+        let target = offset + index
+        // Bound read into a local: `turns` is `inout`, and os.Logger's interpolation
+        // is an autoclosure, which cannot capture it.
+        let liveTurnCount = turns.count
+        guard target < liveTurnCount else {
+            omitted += images.count
+            logger.warning("[HISTORY] \(correlation) history turn \(index) maps past the end of the live turn array (\(target) >= \(liveTurnCount)) — omitting \(images.count) image(s); the model will not see them")
+            continue
+        }
+
+        var resolved: [ResolvedImage] = []
+        for image in images {
+            // Resolve the bytes, then normalize to something every provider can load.
+            // A history image is replayed on EVERY subsequent request, so an unsupported
+            // media_type (HEIC, the macOS default) would once have 400'd the conversation
+            // permanently — now `resolveSendable` transcodes it to JPEG instead. Only the
+            // truly-undecodable is omitted (it stays visible in the transcript regardless).
+            do {
+                let data = try await image.reference.resolve()
+                guard let sendable = VisionImageFormat.resolveSendable(data: data) else {
+                    omitted += 1
+                    logger.warning("[HISTORY] \(correlation) omitted image '\(image.label ?? "unnamed")' (history turn \(index)): bytes are not a decodable image, cannot transcode — the model will not see it; it remains visible in the transcript.")
+                    continue
+                }
+                if sendable.wasTranscoded {
+                    logger.info("[HISTORY] \(correlation) transcoded prior-turn image '\(image.label ?? "unnamed")' (history turn \(index)) → image/jpeg for provider compatibility")
+                }
+                resolved.append(ResolvedImage(mimeType: sendable.mimeType, base64: sendable.data.base64EncodedString()))
+            } catch {
+                omitted += 1
+                logger.warning("[HISTORY] \(correlation) omitted image '\(image.label ?? "unnamed")' (history turn \(index)): \(error.localizedDescription) — the model will not see this image; it remains visible in the transcript")
+            }
+        }
+
+        guard !resolved.isEmpty else { continue }
+        turns[target] = adapter.userTurn(text: turn.text, images: resolved)
+        spliced += resolved.count
+    }
+
+    return (spliced, omitted)
+}
+
 /// Pre-resolves attached image payloads to base64 for the agent's native kickoff
 /// user turn (adapters are synchronous, so resolution happens here). Throws if an
 /// image can't be retrieved — surfaced as an execution error (consistent with the
 /// bot path), never a silent drop. Empty/nil payload → no images.
+///
+/// Contrast `spliceHistoryImages`, which OMITS rather than throws: a current-turn
+/// image the user just attached must fail loudly; a stale one from an earlier turn
+/// must not kill the run.
 fileprivate func resolveUserImages(_ payload: Payload?) async throws -> [ResolvedImage] {
     guard let payload else { return [] }
     var resolved: [ResolvedImage] = []

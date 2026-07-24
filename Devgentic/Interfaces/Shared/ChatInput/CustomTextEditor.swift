@@ -83,13 +83,15 @@ struct CustomTextEditor: NSViewRepresentable {
         context.coordinator.isProgrammaticallyChangingText = false
         
         let scrollView = NSScrollView()
-        // FIX: Enable layer backing on ScrollView as well
         scrollView.wantsLayer = true
+        scrollView.layer?.masksToBounds = true
         scrollView.borderType = .noBorder
         scrollView.hasVerticalScroller = true
         scrollView.documentView = textView
         scrollView.drawsBackground = false
         let clipView = scrollView.contentView
+        clipView.wantsLayer = true
+        clipView.layer?.masksToBounds = true
         clipView.drawsBackground = false
         clipView.backgroundColor = .clear
         scrollView.scrollerStyle = .overlay
@@ -384,7 +386,57 @@ struct CustomTextEditor: NSViewRepresentable {
             insertText(attrStr, replacementRange: selectedRange())
         }
 
+        /// Applies a list Enter (continuation or termination) through
+        /// `insertText(_:replacementRange:)` rather than writing to `textStorage` directly.
+        ///
+        /// The previous path mutated the storage from inside `shouldChangeTextIn` and
+        /// returned `false`, which bypassed NSTextView's undo registration entirely: list
+        /// edits weren't undoable, and each one desynced the typing-undo stack — the same
+        /// stale-range hazard that made a post-send ⌘Z abort the process. `insertText` runs
+        /// the full editing machinery (shouldChangeText → mutate → didChangeText), so every
+        /// edit registers undo and `textDidChange` syncs the binding for free.
+        ///
+        /// Doing this from `keyDown` (rather than the delegate) matters: there is no edit
+        /// in flight here, so calling into the editing machinery can't re-enter the
+        /// `shouldChangeTextIn` callback that would otherwise be on the stack.
+        ///
+        /// The whole Enter — renumbering included — is ONE undo group, so a single ⌘Z
+        /// reverses it instead of peeling off one renumbered marker at a time.
+        private func applyListEdit(
+            replacing target: NSRange,
+            with text: String,
+            renumbering: [ListFormattingEngine.Renumbering],
+            cursorAfter: Int
+        ) {
+            let attrs = coordinator?.defaultTypingAttributes ?? typingAttributes
+            breakUndoCoalescing()
+            undoManager?.beginUndoGrouping()
+            // Renumber edits are ordered last-first and every range sits AFTER `target`,
+            // so applying them first keeps both their own ranges and `target` valid —
+            // even when a rewrite widens the marker (9 → 10).
+            for edit in renumbering {
+                insertText(NSAttributedString(string: edit.replacement, attributes: attrs),
+                           replacementRange: edit.range)
+            }
+            insertText(NSAttributedString(string: text, attributes: attrs), replacementRange: target)
+            setSelectedRange(NSRange(location: cursorAfter, length: 0))
+            undoManager?.endUndoGrouping()
+            typingAttributes = attrs
+        }
+
         override func keyDown(with event: NSEvent) {
+            // While an input method has MARKED (composing) text, Return confirms the
+            // candidate and the arrow keys move through the candidate list — they belong
+            // to the IME, not to us. Intercepting them made the composer unusable in
+            // Japanese / Chinese / Korean: Return sent the half-composed message instead
+            // of committing the candidate, and arrows hijacked candidate selection for
+            // suggestions / query history. Defer everything to AppKit until composition
+            // ends; normal handling resumes on the next key once `hasMarkedText()` is false.
+            if hasMarkedText() {
+                super.keyDown(with: event)
+                return
+            }
+
             let suggestionsActive = coordinator?.parent.showPromptSuggestions == true || coordinator?.parent.showFileSuggestions == true
             
             if suggestionsActive {
@@ -418,9 +470,22 @@ struct CustomTextEditor: NSViewRepresentable {
                     case .passthrough:
                         coordinator?.parent.onCommit(self.attributedString())
                         return
-                    case .continueList, .terminateList:
-                        // Fall through to super.keyDown which triggers insertNewline → shouldChangeTextIn
-                        super.keyDown(with: event)
+                    case .continueList(let insertionText, let renumbering):
+                        let cursor = self.selectedRange()
+                        applyListEdit(
+                            replacing: cursor,
+                            with: insertionText,
+                            renumbering: renumbering,
+                            cursorAfter: cursor.location + (insertionText as NSString).length
+                        )
+                        return
+                    case .terminateList(let paragraphRange, let renumbering):
+                        applyListEdit(
+                            replacing: paragraphRange,
+                            with: "",
+                            renumbering: renumbering,
+                            cursorAfter: paragraphRange.location
+                        )
                         return
                     }
                 }
@@ -489,49 +554,14 @@ struct CustomTextEditor: NSViewRepresentable {
             isTyping = false
             if let tv = notification.object as? NSTextView, parent.text != tv.string { parent.text = tv.string }
         }
-        func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
-            // Intercept newlines to handle list continuation/termination
-            guard let replacement = replacementString, replacement == "\n",
-                  let textStorage = textView.textStorage else { return true }
-
-            let action = ListFormattingEngine.handleEnterKey(
-                textStorage: textStorage,
-                selectedRange: affectedCharRange
-            )
-
-            switch action {
-            case .passthrough:
-                return true
-
-            case .continueList(let insertionText):
-                isProgrammaticallyChangingText = true
-                let attrs = defaultTypingAttributes
-                textStorage.replaceCharacters(
-                    in: affectedCharRange,
-                    with: NSAttributedString(string: insertionText, attributes: attrs)
-                )
-                let newCursorPos = affectedCharRange.location + (insertionText as NSString).length
-                textView.setSelectedRange(NSRange(location: newCursorPos, length: 0))
-                textView.typingAttributes = defaultTypingAttributes
-                isProgrammaticallyChangingText = false
-                parent.text = textView.string
-                textView.didChangeText()
-                return false
-
-            case .terminateList(let paragraphRange):
-                isProgrammaticallyChangingText = true
-                textStorage.replaceCharacters(
-                    in: paragraphRange,
-                    with: NSAttributedString(string: "", attributes: defaultTypingAttributes)
-                )
-                textView.setSelectedRange(NSRange(location: paragraphRange.location, length: 0))
-                textView.typingAttributes = defaultTypingAttributes
-                isProgrammaticallyChangingText = false
-                parent.text = textView.string
-                textView.didChangeText()
-                return false
-            }
-        }
+        // NB list continuation/termination is NOT handled here any more. It lived in this
+        // delegate callback and mutated `textStorage` directly before returning `false`,
+        // which bypassed NSTextView's undo registration — the edits weren't undoable and
+        // they desynced the typing-undo stack. It now runs in `CustomNSTextView.keyDown`
+        // via `insertText(_:replacementRange:)` (see `applyListEdit`), where no edit is in
+        // flight and undo registers normally. Consequence: a newline arriving from a path
+        // OTHER than the main Return key (numeric-keypad Enter, pasting a bare "\n") now
+        // inserts a plain newline instead of continuing the list.
 
         func textDidChange(_ notification: Notification) {
             guard let textView = self.textView else { return }

@@ -55,4 +55,48 @@ final class ConversationSD {
             backendEntityId: backendEntityId
         )
     }
+
+    /// [P1] Row-weight projection for the sidebar. `toStruct()` maps EVERY message
+    /// through `toChatMessage()` — four JSON blob decodes per message — and the
+    /// sidebar called it per row, per render, on the MainActor, re-running on every
+    /// mid-stream flush (each flush touches `timestamp`, invalidating the @Query).
+    /// A row displays five fields; the only one needing message data is the derived
+    /// title, which needs at most the FIRST message carrying non-empty text.
+    ///
+    /// The probe message reuses `Conversation.displayTitle`'s own selection +
+    /// truncation logic (one-element `messages`), so row titles can never drift from
+    /// the full projection's. `isStreaming` reads false either way — the persisted
+    /// column doesn't exist (known P8), so the full decode bought nothing there.
+    func toRowStruct() -> Conversation {
+        var probe: ChatMessage?
+        let hasUserTitle = !(userDefinedTitle?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        if !hasUserTitle {
+            for sd in messages.sorted(by: { $0.timestamp < $1.timestamp }) {
+                guard let content = try? JSONDecoder().decode(MessageContent.self, from: sd.contentData) else { continue }
+                switch content {
+                case .plainText(let text), .markdownText(let text):
+                    guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                    probe = ChatMessage(
+                        conversationId: id,
+                        timestamp: sd.timestamp,
+                        sender: SenderRole(rawValue: sd.senderType) ?? .user,
+                        content: content
+                    )
+                default:
+                    continue
+                }
+                break
+            }
+        }
+        return Conversation(
+            id: id,
+            messages: probe.map { [$0] } ?? [],
+            timestamp: timestamp,
+            userDefinedTitle: userDefinedTitle,
+            isPinned: isPinned,
+            openAIThreadID: openAIThreadID,
+            backendType: backendType.flatMap { BackendType(rawValue: $0) },
+            backendEntityId: backendEntityId
+        )
+    }
 }

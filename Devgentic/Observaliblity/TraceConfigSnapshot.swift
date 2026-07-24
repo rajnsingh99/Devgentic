@@ -248,7 +248,10 @@ struct TraceConfigSnapshot: Codable, Sendable {
             "developerMode":             d.bool(forKey: AppSettings.developerModeKey),
             "intelligenceCore":          d.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey),
             "historyCompaction":         d.object(forKey: AppSettings.ciFeatureHistoryCompactionKey) as? Bool ?? true,
-            "responseSynthesis":         d.object(forKey: AppSettings.ciFeatureResponseSynthesisKey) as? Bool ?? true,
+            // Per-family Response Synthesis opt-in (default false — never automatic).
+            "responseSynthesisMLX":      d.bool(forKey: AppSettings.ciFeatureResponseSynthesisMLXKey),
+            "responseSynthesisOllama":   d.bool(forKey: AppSettings.ciFeatureResponseSynthesisOllamaKey),
+            "responseSynthesisRemote":   d.bool(forKey: AppSettings.ciFeatureResponseSynthesisRemoteKey),
             "userPersonal":              d.bool(forKey: AppSettings.ciFeatureUserPersonalKey),
             "ragRewriting":              d.bool(forKey: AppSettings.ciFeatureRAGRewritingKey),
             "suggestion":                d.bool(forKey: AppSettings.ciFeatureSuggestionKey)

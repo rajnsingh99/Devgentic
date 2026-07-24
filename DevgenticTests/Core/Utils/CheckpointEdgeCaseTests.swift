@@ -97,7 +97,7 @@ final class CheckpointEdgeCaseTests: XCTestCase {
             makeAgentMessage("New response", timestamp: t0.addingTimeInterval(4))
         ]
 
-        let turns = NativeHistoryConverter.buildNativeTurns(from: history, limit: 10, charBudget: 50_000)
+        let turns = NativeHistoryConverter.buildNativeTurns(from: history, limit: 10, charBudget: 50_000).asWireDicts()
 
         // Verify alternating roles: user, assistant, user, assistant
         XCTAssertGreaterThanOrEqual(turns.count, 4, "Should have context pair + actual turn pair")
@@ -216,7 +216,7 @@ final class CheckpointEdgeCaseTests: XCTestCase {
         }
 
         // Small charBudget — should still include context pair + some turns
-        let turns = NativeHistoryConverter.buildNativeTurns(from: history, limit: 10, charBudget: 200)
+        let turns = NativeHistoryConverter.buildNativeTurns(from: history, limit: 10, charBudget: 200).asWireDicts()
         XCTAssertGreaterThanOrEqual(turns.count, 2, "Should at least include the checkpoint context pair")
         XCTAssertTrue(turns[0]["content"]?.contains("Prior conversation summary") ?? false)
     }

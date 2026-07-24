@@ -135,6 +135,11 @@ struct UserFeedbackView: View {
         switch viewModel.activeTraceRecord?.status ?? .completed {
         case .completed:
             text = "Completed"; color = .green
+        case .completedWithWarnings:
+            // Amber, not green: the user got an answer, but something failed on the way
+            // (a tool call, a circuit-breaker abort). This badge previously read a flat
+            // "Completed" for those runs.
+            text = "Completed with warnings"; color = .orange
         case .failed:
             text = "Failed"; color = theme.errorColor
         case .error:

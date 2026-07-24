@@ -92,16 +92,22 @@ struct RecordingOverlayView: View {
 }
 
 // MARK: - Isolated Waveform View
-// Uses local state and .onReceive to achieve true isolation.
+// Reads the @Observable store DIRECTLY — observation tracking already re-renders
+// only the views that read a changed property, which is the isolation the old
+// `@State` mirror + `.onChange`/`.onAppear` sync was hand-building (that pattern
+// predates @Observable, and each hook was a write-state-during-view-update hazard:
+// the "Modifying state during view update" warnings adjacent to voice teardown).
 
 private struct WaveformBarView: View {
     let store: RecordingDisplayStore
-    @State private var powerLevels: [Float] = []
     @Environment(\.appTheme) private var theme
 
     private let maxBarHeight: CGFloat = 40.0
 
     var body: some View {
+        // Bound in body (not only inside the Canvas closure) so @Observable
+        // tracking registers the dependency; the render closure captures the value.
+        let powerLevels = store.powerLevels
         Canvas { context, size in
             let count = powerLevels.count
             guard count > 0 else { return }
@@ -140,19 +146,16 @@ private struct WaveformBarView: View {
             }
         }
         .frame(height: maxBarHeight, alignment: .center)
-        // Only update this specific view when powerLevels changes
-        .onChange(of: store.powerLevels) { _, newLevels in
-            self.powerLevels = newLevels
-        }
-        .onAppear { self.powerLevels = store.powerLevels }
     }
 }
 
 // MARK: - Isolated Timer Text View
+// Reads `store.recordingTime` directly — see WaveformBarView's note. The
+// `isPulsing` @State stays: it drives the repeatForever animation (the standard
+// idiom, same as StreamingPulseIndicator), not a store mirror.
 
 private struct TimerTextView: View {
     let store: RecordingDisplayStore
-    @State private var recordingTime: TimeInterval = 0.0
     @State private var isPulsing = false
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -170,15 +173,10 @@ private struct TimerTextView: View {
                 // conveyed by the overlay itself and the running timer.
                 .onAppear { if !reduceMotion { isPulsing = true } }
 
-            Text(formatTime(recordingTime))
+            Text(formatTime(store.recordingTime))
                 .font(.system(.body, design: .monospaced))
                 .foregroundColor(theme.secondaryText)
         }
-        // Only update this specific view when recordingTime changes
-        .onChange(of: store.recordingTime) { _, newTime in
-            self.recordingTime = newTime
-        }
-        .onAppear { self.recordingTime = store.recordingTime }
     }
 
     private func formatTime(_ interval: TimeInterval) -> String {
@@ -189,6 +187,12 @@ private struct TimerTextView: View {
 }
 
 // MARK: - Isolated Live Transcription Text View
+// ⚠️ This @State is NOT a store mirror and deliberately survived the mirror purge
+// (WaveformBarView / TimerTextView, 2026-07-19): it is DERIVED state that lags the
+// store on purpose — the smart buffering below holds the last-known-good transcript
+// through WhisperKit's sliding-window shrinks instead of letting the text visibly
+// vanish. Replacing it with a direct `store.liveTranscriptionText` read would
+// regress that behavior.
 
 private struct LiveTranscriptionTextView: View {
     let store: RecordingDisplayStore

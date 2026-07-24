@@ -176,7 +176,12 @@ final class MainApplicationViewModel {
 
     private func performInterfaceSwitch(to mode: InterfaceMode) {
         interfaceMode = mode
-        clearAttachedFiles()
+        // Deselecting is what clears the composer now: the per-conversation draft restore
+        // swaps in the "new chat" draft (see ComposerDraftStore). The old
+        // `clearAttachedFiles()` ran BEFORE this line, so the draft saved for the
+        // conversation being left captured zero attachments and the user lost them.
+        // Both branches stay consistent — if the id was already nil the box already holds
+        // that same new-chat draft, so there is nothing to swap.
         selectedConversationID = nil
         backendConfiguration.selectedProfileID = nil
         chatHistoryViewModel.currentChatMessages = []
@@ -212,7 +217,7 @@ final class MainApplicationViewModel {
               let conversationSD = persistenceService.getConversation(withId: selectedID) else {
             return "Devgentic"
         }
-        return conversationSD.toStruct().displayTitle
+        return conversationSD.toRowStruct().displayTitle
     }
 
     // MARK: - Initialization

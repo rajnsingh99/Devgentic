@@ -36,6 +36,16 @@ final class RAGIndexingService: @unchecked Sendable {
             logger.debug("Skipping vectorization: message is an error.")
             return
         }
+
+        // Synthetic stopped-run placeholders (cancelled/empty runs) carry no
+        // retrievable fact — indexing them polluted conversation memory (a cancelled
+        // run's "*Operation was stopped…*" was embedded and stored, observed
+        // on-device 2026-07-19). Exact-match gate: a message that merely quotes the
+        // phrase is real content and still indexes.
+        if let text = message.content.textContent, ChatMessage.isSyntheticPlaceholder(text) {
+            logger.debug("[RAG] Skipping vectorization for message \(message.id.uuidString.prefix(8)): synthetic stopped-run placeholder, nothing retrievable.")
+            return
+        }
         
         // Extract the markdown blocks pre-parsed by the UI model
         let blocks = message.getBlocksForIndexing()
@@ -126,6 +136,21 @@ final class RAGIndexingService: @unchecked Sendable {
     /// Index multiple attached files for conversation-memory retrieval on LATER
     /// turns. Runs post-retrieval in the orchestrator (Section 3b), so a file never
     /// re-surfaces via RAG in the same turn it was injected.
+    /// Whether an attached file should be attempted for conversation-memory RAG
+    /// indexing. Static + pure so the eligibility contract is testable without
+    /// the embedding stack.
+    ///
+    /// ATT-1: this must mirror the backend's direct-injection rule (skip only
+    /// images) — the old `canExtract || isTextFile` gate was extension-keyed, so
+    /// extension-less files (Makefile, LICENSE, .env) that the model DID see on
+    /// turn 1 were unfindable by turn-2+ retrieval. Readability is decided by
+    /// the read probe at index time, not by the extension.
+    static func isRAGEligible(_ file: FileSystemItem, fileProcessor: FileProcessorService) -> Bool {
+        guard !file.isDirectory else { return false }
+        let mime = fileProcessor.getFileMimeType(for: file.url)
+        return !fileProcessor.isImageFile(mimeType: mime, url: file.url)
+    }
+
     func indexAttachedFiles(
         files: [FileSystemItem],
         conversationID: UUID,
@@ -134,15 +159,8 @@ final class RAGIndexingService: @unchecked Sendable {
         let fileProcessor = FileProcessorService()
 
         for file in files {
-            let registry = DocumentExtractionRegistry.shared
-            let canExtract = registry.canExtract(from: file.url)
-            let isText = fileProcessor.isTextFile(
-                mimeType: fileProcessor.getFileMimeType(for: file.url),
-                url: file.url
-            )
-
-            guard canExtract || isText else {
-                logger.info("Skipping non-extractable file for RAG: \(file.name)")
+            guard Self.isRAGEligible(file, fileProcessor: fileProcessor) else {
+                logger.info("Skipping RAG indexing for '\(file.name)' — image or folder, not text-indexable.")
                 continue
             }
 

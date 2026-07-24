@@ -167,4 +167,63 @@ final class TextTriggerAnalyzerTests: XCTestCase {
         XCTAssertEqual(result?.type, .file)
         XCTAssertEqual(result?.query, "second")
     }
+
+    // MARK: - Astral characters / UTF-16 offsets (C3)
+    //
+    // `cursorLocation` is an NSRange location (UTF-16), but the bounds guard compared it
+    // against `text.count` (grapheme clusters). One emoji before the cursor made the
+    // offset exceed the Character count, the guard bailed, and @/# suggestions silently
+    // died for the rest of the message. Separately, `UnicodeScalar(_:)` returns nil for a
+    // surrogate half, which aborted the backward scan when an emoji sat inside the query.
+
+    /// Cursor at the end, addressed the way the text view does it — a UTF-16 offset.
+    private func atEnd(_ text: String) -> TextTriggerAnalyzer.Result? {
+        TextTriggerAnalyzer.analyze(text: text, cursorLocation: (text as NSString).length)
+    }
+
+    /// The precondition that made the bug possible: for astral text the UTF-16 offset and
+    /// the Character count diverge. If this ever stops being true the guard below is moot.
+    func testUTF16OffsetExceedsCharacterCountForEmoji() {
+        let s = "👍 @fil"
+        XCTAssertGreaterThan((s as NSString).length, s.count,
+                             "An emoji makes the UTF-16 offset exceed the grapheme count")
+    }
+
+    func testTriggerSurvivesEmojiEarlierInTheLine() {
+        let result = atEnd("👍 @fil")
+        XCTAssertEqual(result?.type, .file)
+        XCTAssertEqual(result?.query, "fil", "An emoji before the cursor must not kill the trigger")
+    }
+
+    func testTriggerSurvivesMultipleEmoji() {
+        XCTAssertEqual(atEnd("🎉🚀 @f")?.query, "f")
+    }
+
+    func testPromptTriggerSurvivesEmoji() {
+        let result = atEnd("👍 hey #pro")
+        XCTAssertEqual(result?.type, .prompt)
+        XCTAssertEqual(result?.query, "pro")
+    }
+
+    /// An emoji INSIDE the query: the backward scan must step over the surrogate pair
+    /// rather than give up when it can't form a UnicodeScalar from half of one.
+    func testEmojiInsideQueryDoesNotAbortTheScan() {
+        let result = atEnd("@fi👍l")
+        XCTAssertEqual(result?.type, .file)
+        XCTAssertEqual(result?.query, "fi👍l")
+    }
+
+    // Boundary rules must be UNCHANGED by the fix — an emoji is not whitespace.
+
+    func testEmojiDirectlyBeforeSymbolIsStillNotATrigger() {
+        XCTAssertNil(atEnd("👍@fil"), "Like `email@domain`: the symbol must follow whitespace or start of line")
+    }
+
+    func testEmailStillIgnoredAfterFix() {
+        XCTAssertNil(atEnd("user@doma"))
+    }
+
+    func testSpaceAfterQueryStillBreaksTheScan() {
+        XCTAssertNil(atEnd("@file more"))
+    }
 }

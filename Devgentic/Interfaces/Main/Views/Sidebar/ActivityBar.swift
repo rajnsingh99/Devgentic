@@ -28,17 +28,18 @@ struct PulsingBadgeView: View {
     var body: some View {
         ZStack {
             Circle()
-                .strokeBorder(color.opacity(0.5), lineWidth: 1.5)
-                .frame(width: 12, height: 12)
-                .scaleEffect(isPulsing ? 1.5 : 0.8)
-                .opacity(isPulsing ? 0.0 : 0.8)
-            
+                .strokeBorder(color.opacity(0.6), lineWidth: 1.5)
+                .frame(width: 13, height: 13)
+                .scaleEffect(isPulsing ? 1.6 : 0.8)
+                .opacity(isPulsing ? 0.0 : 0.9)
+
             Circle()
                 .fill(color)
-                .frame(width: 6, height: 6)
+                .frame(width: 7, height: 7)
+                .shadow(color: color.opacity(0.8), radius: 3)
         }
         .onAppear {
-            withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: false)) {
+            withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: false)) {
                 isPulsing = true
             }
         }
@@ -56,7 +57,6 @@ struct HomeButton: View {
 
     var body: some View {
         Button {
-            // Return router to chat first so the welcome view is visible
             if !router.isShowingChat {
                 router.returnToChat()
                 logger.debug("Router returned to chat via Home button.")
@@ -69,30 +69,34 @@ struct HomeButton: View {
                 isSidebarVisible = false
                 logger.debug("Hid sidebar pane via Home button.")
             }
-            selectedTab = nil // Deselect any active tab
+            selectedTab = nil
         } label: {
             Image(systemName: "house.fill")
-                .font(.system(.title3))
+                .font(.system(.title3, weight: .semibold))
+                .foregroundColor(isHovering ? theme.primaryText : theme.secondaryText)
                 .frame(width: 38, height: 38)
                 .background(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(isHovering ? theme.surfaceOverlay : Color.clear)
+                        .fill(isHovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay.opacity(0.5))
                 )
-                .scaleEffect(isHovering ? 1.08 : 1.0)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(isHovering ? theme.secondaryText.opacity(0.3) : Color.clear, lineWidth: 1)
+                )
+                .shadow(color: isHovering ? Color.black.opacity(0.15) : .clear, radius: 4, y: 2)
+                .scaleEffect(isHovering ? 1.06 : 1.0)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(ScaleButtonStyle())
-        .foregroundColor(theme.secondaryText)
+        .buttonStyle(.plain)
         .help("Home")
         .accessibilityLabel("Home")
         .onHover { hovering in
-            withAnimation(.spring(response: 0.25, dampingFraction: 0.65)) {
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                 isHovering = hovering
             }
         }
     }
 }
-
 
 struct ActivityBarButton: View {
     let tab: SidebarTab
@@ -109,9 +113,6 @@ struct ActivityBarButton: View {
         return selectedTab == tab && isSidebarVisible
     }
 
-    /// Shows a badge dot on a tab to signal attention-worthy state:
-    /// active downloads, or a prompt-library load error. Rendered as a
-    /// small accent-color dot in the top-right (see `.overlay` below).
     private var showBadge: Bool {
         switch tab {
         case .downloads:
@@ -123,8 +124,6 @@ struct ActivityBarButton: View {
         }
     }
 
-    /// Tint for the badge — errors use `errorColor`, activity uses `accentColor`.
-    /// Keeps the dot visually meaningful at a glance.
     private var badgeColor: Color {
         switch tab {
         case .promptLibrary where PromptService.shared.loadState.isError:
@@ -139,29 +138,30 @@ struct ActivityBarButton: View {
             handleButtonTap()
         } label: {
             Image(systemName: tab.iconName)
-                .font(.system(.title3))
+                .font(.system(.title3, weight: isActive ? .semibold : .medium))
+                .foregroundColor(isActive ? theme.primaryText : (isHovering ? theme.primaryText : theme.secondaryText))
                 .frame(width: 38, height: 38)
-                .scaleEffect(isHovering ? 1.08 : 1.0)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(isActive
+                              ? theme.surfaceOverlayStrong
+                              : (isHovering ? theme.surfaceOverlay : theme.surfaceOverlay.opacity(0.3)))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(isHovering && !isActive ? theme.secondaryText.opacity(0.2) : Color.clear, lineWidth: 1)
+                )
+                .shadow(color: isHoverHoverActiveShadow, radius: 4, y: 1)
+                .scaleEffect(isHovering ? 1.05 : 1.0)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(ScaleButtonStyle())
-        .foregroundColor(isActive ? theme.accentColor : theme.secondaryText)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(isActive ? theme.accentColor.opacity(0.15) :
-                      isHovering ? theme.surfaceOverlay : Color.clear)
-        )
-        .shadow(
-            color: isActive ? theme.accentColor.opacity(0.2) :
-                   isHovering ? theme.accentColor.opacity(0.08) : Color.clear,
-            radius: isActive ? 6 : 4, x: 0, y: 0
-        )
+        .buttonStyle(.plain)
         .overlay(alignment: .leading) {
             if isActive {
                 Capsule()
                     .fill(theme.accentColor)
-                    .frame(width: 3, height: 24)
-                    .offset(x: -5)
+                    .frame(width: 3, height: 18)
+                    .offset(x: -4)
                     .transition(.scale.combined(with: .opacity))
             }
         }
@@ -172,15 +172,19 @@ struct ActivityBarButton: View {
                     .transition(.scale.combined(with: .opacity))
             }
         }
-        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: isActive)
+        .animation(.spring(response: 0.28, dampingFraction: 0.75), value: isActive)
         .animation(.easeInOut(duration: 0.3), value: showBadge)
         .help(tab.title)
         .accessibilityLabel(tab.title)
         .onHover { hovering in
-            withAnimation(.spring(response: 0.25, dampingFraction: 0.65)) {
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                 isHovering = hovering
             }
         }
+    }
+
+    private var isHoverHoverActiveShadow: Color {
+        isHovering ? Color.black.opacity(0.12) : .clear
     }
 
     private func handleButtonTap() {
@@ -204,16 +208,15 @@ struct ActivityBarView: View {
     private let topTabs: [SidebarTab] = [.conversations, .explorer, .promptLibrary, .scheduler, .backendProfiles, .downloads]
     private let bottomTabs: [SidebarTab] = [.settings]
 
-
     var body: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 7) {
             HomeButton(isSidebarVisible: $isSidebarVisible, selectedTab: $selectedTab)
 
             // Visual separator between Home and tab buttons
             Capsule()
-                .fill(theme.dividerColor)
-                .frame(width: 24, height: 1)
-                .padding(.vertical, 2)
+                .fill(theme.dividerColor.opacity(0.6))
+                .frame(width: 22, height: 1)
+                .padding(.vertical, 3)
 
             ForEach(topTabs) { tab in
                 ActivityBarButton(
@@ -233,7 +236,7 @@ struct ActivityBarView: View {
                 )
             }
         }
-        .padding(.vertical, 10)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     }
 }
