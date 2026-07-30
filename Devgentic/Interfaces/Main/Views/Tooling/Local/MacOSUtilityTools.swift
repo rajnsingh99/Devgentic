@@ -237,16 +237,15 @@ struct FinderTagsTool: DevgenticTool {
             let searchPath = (arguments.path as NSString?)?.expandingTildeInPath ?? NSHomeDirectory()
 
             let process = Process()
-            let outPipe = Pipe()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
             process.arguments = ["-onlyin", searchPath, "kMDItemUserTags == '\(searchTag)'"]
-            process.standardOutput = outPipe
 
             do {
-                try process.run()
-                process.waitUntilExit()
-                let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                // ProcessRunner drains stdout AND stderr concurrently. This site piped
+                // stderr to a `Pipe()` nobody ever read — not a discard, a 64 KB buffer
+                // that hangs the child once full.
+                let output = try ProcessRunner.run(process).standardOutput
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
 
                 if output.isEmpty {
                     return "No files found with tag '\(searchTag)' in \(searchPath)."
@@ -343,17 +342,15 @@ struct DiskUsageTool: DevgenticTool {
             let expandedPath = (path as NSString).expandingTildeInPath
 
             let process = Process()
-            let outPipe = Pipe()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/du")
             process.arguments = ["-sh", expandedPath]
-            process.standardOutput = outPipe
-            process.standardError = Pipe()
 
             do {
-                try process.run()
-                process.waitUntilExit()
-                let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                // ProcessRunner drains stdout AND stderr concurrently. This site piped
+                // stderr to a `Pipe()` nobody ever read — not a discard, a 64 KB buffer
+                // that hangs the child once full.
+                let output = try ProcessRunner.run(process).standardOutput
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
                 return "Folder size: \(output)"
             } catch {
                 return "Error: \(error.localizedDescription)"
@@ -364,17 +361,15 @@ struct DiskUsageTool: DevgenticTool {
             let topN = arguments.top_n ?? 10
 
             let process = Process()
-            let outPipe = Pipe()
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
             process.arguments = ["-c", "find \"\(searchPath)\" -type f -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/DerivedData/*' -exec du -h {} + 2>/dev/null | sort -rh | head -\(topN)"]
-            process.standardOutput = outPipe
-            process.standardError = Pipe()
 
             do {
-                try process.run()
-                process.waitUntilExit()
-                let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                // ProcessRunner drains stdout AND stderr concurrently. This site piped
+                // stderr to a `Pipe()` nobody ever read — not a discard, a 64 KB buffer
+                // that hangs the child once full.
+                let output = try ProcessRunner.run(process).standardOutput
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
 
                 if output.isEmpty {
                     return "No files found in '\(searchPath)'."
@@ -459,18 +454,16 @@ struct DisplayManagementTool: DevgenticTool {
 
         case "get_brightness":
             let process = Process()
-            let outPipe = Pipe()
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
             // Use ioreg to read brightness from AppleBacklightDisplay
             process.arguments = ["-c", "ioreg -c AppleBacklightDisplay | grep -i brightness | tail -1"]
-            process.standardOutput = outPipe
-            process.standardError = Pipe()
 
             do {
-                try process.run()
-                process.waitUntilExit()
-                let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                // ProcessRunner drains stdout AND stderr concurrently. This site piped
+                // stderr to a `Pipe()` nobody ever read — not a discard, a 64 KB buffer
+                // that hangs the child once full.
+                let output = try ProcessRunner.run(process).standardOutput
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
 
                 if output.isEmpty {
                     return "Could not read brightness. External displays may not support programmatic brightness control."
@@ -497,7 +490,6 @@ struct DisplayManagementTool: DevgenticTool {
 
             // Fallback: use CoreDisplay private API via shell
             let process = Process()
-            let outPipe = Pipe()
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
             // Try the brightness CLI if available, otherwise use osascript
             process.arguments = ["-c", """
@@ -508,14 +500,13 @@ struct DisplayManagementTool: DevgenticTool {
                 echo "Brightness CLI not found. Install via: brew install brightness"
             fi
             """]
-            process.standardOutput = outPipe
-            process.standardError = Pipe()
 
             do {
-                try process.run()
-                process.waitUntilExit()
-                let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                // ProcessRunner drains stdout AND stderr concurrently. This site piped
+                // stderr to a `Pipe()` nobody ever read — not a discard, a 64 KB buffer
+                // that hangs the child once full.
+                let output = try ProcessRunner.run(process).standardOutput
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
 
                 if output.contains("not found") {
                     return "\(output)"
@@ -621,7 +612,6 @@ struct LoginItemsTool: DevgenticTool {
         switch arguments.action {
         case "list":
             let process = Process()
-            let outPipe = Pipe()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
             process.arguments = ["-e", """
             tell application "System Events"
@@ -633,14 +623,13 @@ struct LoginItemsTool: DevgenticTool {
                 return output
             end tell
             """]
-            process.standardOutput = outPipe
-            process.standardError = Pipe()
 
             do {
-                try process.run()
-                process.waitUntilExit()
-                let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                // ProcessRunner drains stdout AND stderr concurrently. This site piped
+                // stderr to a `Pipe()` nobody ever read — not a discard, a 64 KB buffer
+                // that hangs the child once full.
+                let output = try ProcessRunner.run(process).standardOutput
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
 
                 if output.isEmpty {
                     return "No login items found."
@@ -740,17 +729,15 @@ struct ExternalDevicesTool: DevgenticTool {
 
     private func shellCommand(_ executable: String, _ args: [String]) async -> String {
         let process = Process()
-        let outPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = args
-        process.standardOutput = outPipe
-        process.standardError = Pipe()
 
         do {
-            try process.run()
-            process.waitUntilExit()
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            var output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            // ProcessRunner drains stdout AND stderr concurrently. This site piped
+            // stderr to a `Pipe()` nobody ever read — not a discard, a 64 KB buffer
+            // that hangs the child once full.
+            var output = try ProcessRunner.run(process).standardOutput
+                .trimmingCharacters(in: .whitespacesAndNewlines)
 
             let maxOutput = 6000
             if output.count > maxOutput {
@@ -933,23 +920,18 @@ struct AppleNotesTool: DevgenticTool {
 
     private func runAppleScript(_ script: String, prefix: String) async -> String {
         let process = Process()
-        let outPipe = Pipe()
-        let errPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         process.arguments = ["-e", script]
-        process.standardOutput = outPipe
-        process.standardError = errPipe
 
         do {
-            try process.run()
-            process.waitUntilExit()
+            // Both streams drained CONCURRENTLY. Reading them in sequence — as this did —
+            // blocks on whichever is read second while the other pipe fills: the two-pipe form
+            // of the deadlock, and the one a naive "swap the two lines" fix does not touch.
+            let run = try ProcessRunner.run(process)
+            let output = run.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+            let errOutput = run.standardError.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let errOutput = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-            if process.terminationStatus != 0 {
+            if !run.succeeded {
                 return "Error: \(errOutput.isEmpty ? "AppleScript execution failed" : errOutput)"
             }
 

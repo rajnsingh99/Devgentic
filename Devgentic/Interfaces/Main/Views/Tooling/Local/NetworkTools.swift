@@ -41,24 +41,23 @@ struct CheckNetworkStatusTool: DevgenticTool {
         let ssidProcess = Process()
         ssidProcess.executableURL = URL(fileURLWithPath: "/bin/zsh")
         ssidProcess.arguments = ["-c", "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I | awk '/ SSID/ {print substr($0, index($0, $2))}'"]
-        let ssidPipe = Pipe()
-        ssidProcess.standardOutput = ssidPipe
-        try? ssidProcess.run()
-        ssidProcess.waitUntilExit()
-        let ssidData = ssidPipe.fileHandleForReading.readDataToEndOfFile()
-        let ssid = String(data: ssidData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Unknown"
+        // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe only
+        // after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
+        //
+        // `try?`, matching the original: this tool reports SEVERAL facts and degrades one at a
+        // time. `airport` was removed in recent macOS, so a launch failure here is expected —
+        // it must cost the SSID line, not the whole network report.
+        let ssid = (try? ProcessRunner.run(ssidProcess).standardOutput)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "Unknown"
         info += "Wi-Fi SSID: \(ssid.isEmpty ? "Not connected" : ssid)\n"
 
         // IP address
         let ipProcess = Process()
         ipProcess.executableURL = URL(fileURLWithPath: "/bin/zsh")
         ipProcess.arguments = ["-c", "ipconfig getifaddr en0 2>/dev/null || echo 'No IP'"]
-        let ipPipe = Pipe()
-        ipProcess.standardOutput = ipPipe
-        try? ipProcess.run()
-        ipProcess.waitUntilExit()
-        let ipData = ipPipe.fileHandleForReading.readDataToEndOfFile()
-        let ip = String(data: ipData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Unknown"
+        // Same graceful-degradation contract as the SSID probe above.
+        let ip = (try? ProcessRunner.run(ipProcess).standardOutput)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "Unknown"
         info += "Local IP: \(ip)\n"
 
         return info
@@ -178,15 +177,16 @@ struct DNSLookupTool: DevgenticTool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/nslookup")
         process.arguments = [arguments.hostname]
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = outPipe
 
         do {
-            try process.run()
-            process.waitUntilExit()
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
+            // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe
+            // only after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
+            //
+            // combinedOutput, not standardOutput: this site set `standardError = outPipe`,
+            // so its single read returned both. `nslookup` reports a failed lookup
+            // ("can't find <host>: NXDOMAIN") on stderr and exits non-zero with EMPTY
+            // stdout — reading stdout alone turns every failed lookup into blank output.
+            let output = try ProcessRunner.run(process).combinedOutput
             return "DNS Lookup for '\(arguments.hostname)':\n\(output)"
         } catch {
             return "DNS lookup failed: \(error.localizedDescription)"

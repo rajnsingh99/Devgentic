@@ -237,44 +237,75 @@ final class ConversationManagementCoordinator {
     /// cancellation handler (deny / nil); `cancel(for:)` (which also posts `.hitl*Resolved`) and
     /// `resolveAll` are belt-and-suspenders so the unified queue is cleared even on the remote path.
     private func drainLiveExecution(conversationID: UUID, vm: MainApplicationViewModel) {
+        let short = conversationID.uuidString.prefix(8)
+        // Four separate teardowns, each previously silent. Deleting a conversation with a
+        // run in flight is exactly when you need to see them.
         vm.activeStreamManager.cancelStreams(forConversation: conversationID)
         vm.interactionCenter.resolveAll(conversationID: conversationID)
-        Task { await ExecutionSuspensionService.shared.cancel(for: conversationID) }
+        logger.info("[DELETE] \(short) — cancelled in-flight streams and resolved pending interactions.")
+        Task {
+            await ExecutionSuspensionService.shared.cancel(for: conversationID)
+            logger.info("[DELETE] \(short) — released any parked (HITL-suspended) operations.")
+        }
         // Drop this conversation's "Allow for this chat" tool grants — the conversation is being
         // deleted, so its durable per-conversation allowlist should go with it.
-        Task { await SessionToolApprovals.shared.clear(conversationID: conversationID) }
+        Task {
+            await SessionToolApprovals.shared.clear(conversationID: conversationID)
+            logger.info("[DELETE] \(short) — cleared 'Allow for this chat' tool grants.")
+        }
     }
 
     func deleteConversation(conversationID: UUID) {
         guard let vm = viewModel else { return }
+        let short = conversationID.uuidString.prefix(8)
+        logger.info("[DELETE] Deleting conversation \(short) — draining live execution first.")
         drainLiveExecution(conversationID: conversationID, vm: vm)
         // Unsent draft text shouldn't outlive the conversation it belonged to.
         ComposerDraftStore.shared.discard(for: conversationID)
+        logger.info("[DELETE] \(short) — discarded any unsent composer draft.")
         persistenceService.deleteConversation(with: conversationID)
         // Privacy: delete the conversation's traces too (FK cascades spans/events/configs),
         // so its raw content doesn't linger in traces.sqlite after deletion (§12.5).
-        try? TraceStore.shared?.deleteTraces(forConversationID: conversationID.uuidString)
+        //
+        // The failure was swallowed by `try?`: a throw here left the conversation's raw
+        // prompts and responses in traces.sqlite with nothing said, which defeats the
+        // privacy guarantee this line exists to provide.
+        do {
+            try TraceStore.shared?.deleteTraces(forConversationID: conversationID.uuidString)
+            logger.info("[DELETE] \(short) — traces removed from traces.sqlite (spans/events/configs cascade).")
+        } catch {
+            logger.error("[DELETE] \(short) — FAILED to delete traces: \(error.localizedDescription). The conversation's raw prompts and responses REMAIN in traces.sqlite.")
+        }
         // Same for its vector memory (chunks + parents): without this the RAG store
         // is append-only — the deleted conversation's content would linger in the
         // HNSW index, and on disk, forever.
         Task.detached(priority: .utility) {
             VectorStoreService.shared.deleteDocuments(forConversation: conversationID)
         }
-        vm.workflowExecutionStates.removeValue(forKey: conversationID)
-        vm.workflowRunHistory.removeValue(forKey: conversationID)
+        let hadExecState = vm.workflowExecutionStates.removeValue(forKey: conversationID) != nil
+        let hadRunHistory = vm.workflowRunHistory.removeValue(forKey: conversationID) != nil
         WorkflowRunHistoryStore.shared.clearHistory(forConversation: conversationID)
+        logger.info("[DELETE] \(short) — in-memory workflow state cleared (exec state: \(hadExecState), run history: \(hadRunHistory)). Vector cleanup runs off the main actor and logs separately.")
         if vm.selectedConversationID == conversationID {
             vm.selectedConversationID = nil
         }
+        logger.info("[DELETE] \(short) — teardown complete.")
     }
 
     func deleteMultipleConversations(ids: Set<UUID>) {
         guard !ids.isEmpty, let vm = viewModel else { return }
+        logger.info("[DELETE] Bulk delete of \(ids.count) conversation(s) starting.")
+        var traceFailures = 0
         for id in ids {
             drainLiveExecution(conversationID: id, vm: vm)
             ComposerDraftStore.shared.discard(for: id)
             persistenceService.deleteConversation(with: id)
-            try? TraceStore.shared?.deleteTraces(forConversationID: id.uuidString)
+            do {
+                try TraceStore.shared?.deleteTraces(forConversationID: id.uuidString)
+            } catch {
+                traceFailures += 1
+                logger.error("[DELETE] \(id.uuidString.prefix(8)) — FAILED to delete traces: \(error.localizedDescription). Raw prompts/responses REMAIN in traces.sqlite.")
+            }
             Task.detached(priority: .utility) {
                 VectorStoreService.shared.deleteDocuments(forConversation: id)
             }
@@ -284,6 +315,11 @@ final class ConversationManagementCoordinator {
         }
         if let currentSelected = vm.selectedConversationID, ids.contains(currentSelected) {
             vm.selectedConversationID = nil
+        }
+        if traceFailures > 0 {
+            logger.error("[DELETE] Bulk delete finished — \(traceFailures) of \(ids.count) conversation(s) left traces behind in traces.sqlite.")
+        } else {
+            logger.info("[DELETE] Bulk delete finished — \(ids.count) conversation(s) torn down cleanly.")
         }
     }
 

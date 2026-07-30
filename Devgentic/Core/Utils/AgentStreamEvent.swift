@@ -367,20 +367,32 @@ struct ToolOutput: Sendable, Identifiable, Equatable {
     let params: String
     let output: String
     let isSuccess: Bool
+    /// For file-writing tools: the target file's content captured JUST BEFORE the write
+    /// ("" when the file didn't exist yet; nil when not captured — non-file tool, or the
+    /// file was unreadable/over the snapshot cap). Powers the timeline's "View changes"
+    /// diff in the Code Viewer.
+    let preWriteContent: String?
+    /// For EDIT tools (whose params carry only find/replace strings): the file's content
+    /// read back JUST AFTER a successful edit — the post-state the params can't provide.
+    /// Nil for full-content writers (their params ARE the post-state) and failures.
+    let postWriteContent: String?
 
-    init(id: UUID = UUID(), toolName: String, params: String = "", output: String, isSuccess: Bool) {
+    init(id: UUID = UUID(), toolName: String, params: String = "", output: String, isSuccess: Bool, preWriteContent: String? = nil, postWriteContent: String? = nil) {
         self.id = id
         self.toolName = toolName
         self.params = params
         self.output = output
         self.isSuccess = isSuccess
+        self.preWriteContent = preWriteContent
+        self.postWriteContent = postWriteContent
     }
 }
 
-// Backward-compatible Codable: legacy persisted data may lack the `params` field.
+// Backward-compatible Codable: legacy persisted data may lack the `params`,
+// `preWriteContent`, and `postWriteContent` fields.
 extension ToolOutput: Codable {
     enum CodingKeys: String, CodingKey {
-        case id, toolName, params, output, isSuccess
+        case id, toolName, params, output, isSuccess, preWriteContent, postWriteContent
     }
 
     init(from decoder: Decoder) throws {
@@ -390,6 +402,8 @@ extension ToolOutput: Codable {
         params = try c.decodeIfPresent(String.self, forKey: .params) ?? ""
         output = try c.decode(String.self, forKey: .output)
         isSuccess = try c.decode(Bool.self, forKey: .isSuccess)
+        preWriteContent = try c.decodeIfPresent(String.self, forKey: .preWriteContent)
+        postWriteContent = try c.decodeIfPresent(String.self, forKey: .postWriteContent)
     }
 }
 

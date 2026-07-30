@@ -54,6 +54,18 @@ struct ContextWindowUsage: Equatable, Sendable {
     /// size (e.g. an MLX model with no metadata → 8K). Surfaced so a surprising
     /// denominator is explainable from the UI itself.
     let windowIsFallback: Bool
+    /// True when this profile retrieves conversation memory at send time. That payload is
+    /// chosen by the query, so the composer cannot size it — the breakdown says so instead of
+    /// letting the send-time banner appear from nowhere.
+    let usesRetrieval: Bool
+    /// True when ONE user turn can produce SEVERAL model calls — an agent re-sends the whole
+    /// prompt on every tool step, and `TokenUsage.accumulate` sums them.
+    ///
+    /// This is why the breakdown showed two numbers that looked like a contradiction:
+    /// `usedTokens` estimates a SINGLE next send, while `lastTurn.inputTokens` is the SUM
+    /// over an entire multi-step turn. "~12K / 128K" above "Last turn 40K in" is not an error
+    /// — they answer different questions, and nothing said so.
+    let turnSpansMultipleCalls: Bool
 
     var fraction: Double { windowTokens > 0 ? Double(usedTokens) / Double(windowTokens) : 0 }
     /// Clamped for the bar/ring — the raw `fraction` can exceed 1.0 when the
@@ -61,11 +73,26 @@ struct ContextWindowUsage: Equatable, Sendable {
     var displayFraction: Double { min(1.0, max(0, fraction)) }
     var percent: Int { Int((fraction * 100).rounded()) }
 
+    /// The share of the window actually available to the PROMPT — the rest is reserved for
+    /// the model's reply, and the send-time check refuses to go past it.
+    static var usableFraction: Double { 1.0 - PromptFitCheck.responseHeadroom }
+
+    /// True once the conversation exceeds the whole window, not merely the usable share.
+    /// Distinct from `.over`, which now means "past the limit the engine enforces".
+    var exceedsWindow: Bool { fraction >= 1.0 }
+
+    /// Bands derived from `responseHeadroom` rather than hard-coded, so the ring turns red at
+    /// exactly the point `PromptFitCheck.exceeds` posts its banner.
+    ///
+    /// They used to disagree: red at 100%, banner at 75%. Between those the user saw an amber
+    /// ring beside a red "content will be cut off" advisory — the gauge implying headroom the
+    /// engine had already decided was gone.
     var level: ContextGaugeLevel {
+        let limit = Self.usableFraction
         switch fraction {
-        case ..<0.75: return .normal
-        case 0.75..<1.0: return .high
-        default: return .over
+        case ..<(limit * 0.8): return .normal
+        case ..<limit:         return .high
+        default:               return .over
         }
     }
 
@@ -88,9 +115,16 @@ struct ContextWindowUsage: Equatable, Sendable {
 /// thresholds reads as noise. `normal` uses the accent (Claude's blue-donut cue);
 /// `high`/`over` escalate to the warning/error roles.
 enum ContextGaugeLevel {
-    case normal   // < 75%
-    case high     // 75–100%
-    case over     // ≥ 100% — conversation exceeds the window
+    // The thresholds are fractions of `ContextWindowUsage.usableFraction` (= 1 −
+    // PromptFitCheck.responseHeadroom), not of the whole window. The window percentages in
+    // brackets are what today's 25% headroom works out to; they move if the headroom does.
+    case normal   // below 80% of the usable share (< 60% of the window)
+    case high     // 80–100% of the usable share (60–75% of the window)
+    case over     // the usable share is gone (≥ 75% of the window): the prompt is now eating
+                  // the room reserved for the reply, which is exactly where
+                  // `PromptFitCheck.exceeds` posts its "content will be cut" banner. This does
+                  // NOT mean the conversation outgrew the window — that is `exceedsWindow`,
+                  // a separate property that needs the full 100%.
 
     func color(_ theme: any Theme) -> Color {
         switch self {
@@ -112,6 +146,11 @@ extension ContextWindowUsage {
     ///   generic history/attachment estimate can't see from the composer — today, Code
     ///   mode's `.devgentic/context.md` project context, added into the system prompt on
     ///   every message. 0 for ordinary chat.
+    /// - Parameter messages: the history the NEXT request would carry, **OLDEST-FIRST** —
+    ///   from `ChatHistoryViewModel.resolveContextHistory(for:)`, NOT `currentChatMessages`.
+    ///   Passing the render window is the bug this signature exists to prevent: the window is
+    ///   a pagination artefact (20 on open, +10 per scroll) and sizing a request from it made
+    ///   the ring move when the user scrolled.
     @MainActor
     static func resolve(
         profile: BackendProfileModel?,
@@ -134,12 +173,26 @@ extension ContextWindowUsage {
         let (window, trained) = windows(for: config, profileID: profile.id)
         let windowIsFallback = (trained == nil)
 
-        let used = estimatedOccupancyTokens(config: config, messages: messages, attachedFiles: attachedFiles, extraKnowledgeChars: extraKnowledgeChars)
+        // `resolvedHistoryStrategy` is nil for bot / code profiles; the estimator resolves
+        // that to `.recentHistory`, matching AgentConnect's own non-agent fallback. All
+        // three profile types the gauge shows for DO receive episodic memory
+        // (`PromptLayerConfig.bot/.agent/.code` all set `includeEpisodicMemory`), so none of
+        // them is being charged for payload it never sees.
+        let used = estimatedOccupancyTokens(
+            config: config,
+            profile: profile,
+            messages: messages,
+            attachedFiles: attachedFiles,
+            historyStrategy: profile.resolvedHistoryStrategy,
+            contextWindow: window,
+            extraKnowledgeChars: extraKnowledgeChars
+        )
 
         // Ground truth for the breakdown: the newest completed agent turn's REAL usage.
-        // `currentChatMessages` is DESCENDING (newest first), so the first agent message
-        // carrying usage is the most recent one.
-        let lastTurn = messages.first(where: { $0.sender == .agent && $0.tokenUsage != nil })?.tokenUsage
+        // The resolved history is ASCENDING (oldest first), so the LAST agent message
+        // carrying usage is the most recent one. This read `.first` while being handed the
+        // descending render window; both changed together and must stay in step.
+        let lastTurn = messages.last(where: { $0.sender == .agent && $0.tokenUsage != nil })?.tokenUsage
 
         logger.debug("[CTXGAUGE] \(config.modelName) — ~\(used)/\(window) tok (\(window > 0 ? Int((Double(used) / Double(window)) * 100) : 0)%), fallbackWindow=\(windowIsFallback), lastTurnReal=\(lastTurn.map { "\($0.inputTokens)in/\($0.outputTokens)out" } ?? "none"), conv=\(conversationID?.uuidString.prefix(8).description ?? "none")")
 
@@ -151,7 +204,11 @@ extension ContextWindowUsage {
             provider: config.apiProvider,
             profileID: profile.id,
             lastTurn: lastTurn,
-            windowIsFallback: windowIsFallback
+            windowIsFallback: windowIsFallback,
+            // Matches `profileUsesConversationRAG` in the orchestrator.
+            usesRetrieval: profile.profileType == .bot || profile.profileType == .agent,
+            // Agent and Code both run the ReAct loop (`ExecutorFactory`); a bot is one call.
+            turnSpansMultipleCalls: profile.profileType == .agent || profile.profileType == .code
         )
     }
 
@@ -189,17 +246,28 @@ extension ContextWindowUsage {
     /// context) that IS counted — it's a fixed per-message injection, not a send-time
     /// unknown.
     ///
+    /// Episodic memory IS counted (since 2026-07-28). It used to be invisible here:
+    /// `textContent` is nil for tool params, outcomes and `<effect>` diffs, so a
+    /// conversation full of file edits — the case most likely to overflow — read as almost
+    /// empty. The blob is rendered for real rather than approximated, which is affordable
+    /// because this recomputes on turn boundaries, not keystrokes.
+    ///
     /// Documented, deliberate under-counts that keep this a STABLE, conservative gauge:
     ///   • the unsent draft (excluded so the ring doesn't jump per keystroke),
-    ///   • profile knowledge-base sources + per-conversation RAG (assembled at send-time,
-    ///     not here — distinct from the code project context above, which the caller supplies),
-    ///   • prior-turn history images (their recency window needs the ascending request
-    ///     order; this view array is descending — current-attachment images are counted).
+    ///   • per-conversation RAG (chosen by the query; surfaced as a note instead).
+    ///
+    /// Profile knowledge sources and prior-turn images ARE counted now. The images were
+    /// excluded because "the recency window needs ascending order and this array is
+    /// descending" — no longer true since the gauge began resolving history the way the
+    /// request does.
     @MainActor
     static func estimatedOccupancyTokens(
         config: ProviderConfig,
+        profile: BackendProfileModel,
         messages: [ChatMessage],
         attachedFiles: [FileSystemItem],
+        historyStrategy: HistoryStrategy?,
+        contextWindow: Int,
         extraKnowledgeChars: Int = 0
     ) -> Int {
         // A brand-new chat with nothing attached reads as empty, not as the ~0.7K the
@@ -208,22 +276,78 @@ extension ContextWindowUsage {
         // correctly reads as already partly full.
         guard !messages.isEmpty || !attachedFiles.isEmpty || extraKnowledgeChars > 0 else { return 0 }
 
-        let historyChars = messages.reduce(0) { $0 + ($1.content.textContent?.count ?? 0) }
+        // The request strips error turns before building the prompt
+        // (`BackendOrchestrationService`, "Sanitize History"), so charging for them here
+        // reports payload that is never sent.
+        let messages = messages.filter {
+            if case .error = $0.content { return false }
+            return true
+        }
+
+        // No reversal: `messages` is already oldest-first, which is what `pairTurns` needs.
+        // It previously had to be reversed because the caller passed the descending render
+        // window — the reversal and the wrong source were the same bug.
+        // Warmed here because the composer always renders before a send, so the orchestrator's
+        // (non-MainActor) fit check finds a populated snapshot.
+        ToolSchemaSizes.refreshFromRegistry()
+        let toolSchemaChars = PromptFitCheck.estimatedToolSchemaChars(for: profile)
+        let knowledgeSourceChars = PromptFitCheck.estimatedKnowledgeSourceChars(for: profile)
+
+        let episodicChars = PromptFitCheck.estimatedEpisodicChars(
+            in: messages,
+            strategy: historyStrategy,
+            contextWindow: contextWindow,
+            toolsAvailable: profile.profileType != .bot,
+            // Same expression the request uses (`AgentConnect`), not the local
+            // `supportedModalities` check below it: the two disagree for `.code` profiles, and
+            // the ring's whole claim is that it measures what actually ships. Omitting it
+            // defaulted to false and left every `<attached_images>` line in the blob
+            // unmeasured — an under-count, i.e. the direction that fails to warn.
+            includeImageNames: profile.supportsVisionInput
+        )
+        // Measured, not summed. The raw `textContent` sum over every message ignored the
+        // per-strategy turn limit AND the char budget's trimming AND whether the provider
+        // receives prose at all — on MLX it charged a full transcript that never ships,
+        // reading 248% of an 8K window where the truth was 24%.
+        let proseChars = PromptFitCheck.estimatedHistoryProseChars(
+            in: messages,
+            carriesProse: profile.carriesHistoryProse,
+            strategy: historyStrategy,
+            contextWindow: contextWindow
+        )
+        let historyChars = proseChars + episodicChars
+        // Strategy-aware: a `.stateless` profile ships a path manifest, not the files, so
+        // charging their bytes over-warned by orders of magnitude on a large attachment.
+        // Also drops files the reader will refuse rather than clipping them to the budget.
         let attachmentChars = PromptFitCheck.estimatedAttachmentChars(
-            forFileSizes: PreSendFitHint.estimatableSizes(of: attachedFiles)
+            for: attachedFiles, profile: profile
         )
 
         // Priced only when the model accepts vision — a non-vision model has its images
         // stripped before the wire, so charging for them would inflate the gauge for
         // payload that never ships.
         let supportsVision = config.supportedModalities.contains(.visionInput)
-        let imageTokens = supportsVision
+        let currentImageTokens = supportsVision
             ? PromptFitCheck.estimatedImageTokens(forImageURLs: PreSendFitHint.imageURLs(of: attachedFiles), provider: config.apiProvider)
             : 0
+        // Prior-turn images, on the same gate and the same 20-message lookback the send-time
+        // check uses — so a vision conversation with several screenshots no longer reads
+        // ~10K tokens lighter here than it does at send.
+        let historyImageTokens = PromptFitCheck.estimatedHistoryImageTokens(
+            in: messages,
+            provider: config.apiProvider,
+            shipsHistoryImages: profile.carriesHistoryImages && historyStrategy != .pointer
+        )
+        let imageTokens = currentImageTokens + historyImageTokens
+
+        // Without the breakdown, "the ring says 80% on a short chat" is undiagnosable — the
+        // total alone can't distinguish a big attachment from an edit-heavy history whose
+        // cost is entirely invisible in the transcript.
+        logger.debug("[CTXGAUGE] Breakdown — episodic \(episodicChars) chars (strategy=\(historyStrategy?.rawValue ?? "recentHistory/non-agent default"), \(messages.count) msg), prose \(proseChars) chars (carried=\(profile.carriesHistoryProse)), attachments \(attachmentChars) chars, knowledge \(extraKnowledgeChars) chars, tools \(toolSchemaChars) chars, kb \(knowledgeSourceChars) chars, images \(currentImageTokens)+\(historyImageTokens) tok.")
 
         return PromptFitCheck.estimatedTokens(
             attachmentChars: attachmentChars,
-            knowledgeChars: extraKnowledgeChars,
+            knowledgeChars: extraKnowledgeChars + toolSchemaChars + knowledgeSourceChars,
             retrievalChars: 0,
             queryChars: 0,
             historyChars: historyChars,
@@ -336,6 +460,16 @@ struct ContextWindowBreakdown: View {
     }
 
     private var headline: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Next send")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(theme.secondaryText)
+                .textCase(.uppercase)
+            headlineFigures
+        }
+    }
+
+    private var headlineFigures: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(usage.usedDisplay)
                 .font(.system(size: 22, weight: .semibold, design: .rounded))
@@ -368,7 +502,7 @@ struct ContextWindowBreakdown: View {
             Image(systemName: "number.circle")
                 .font(.system(size: 11))
                 .foregroundColor(theme.secondaryText)
-            Text("Last turn")
+            Text(usage.turnSpansMultipleCalls ? "Last turn (all steps)" : "Last turn (actual)")
                 .font(.system(size: 11))
                 .foregroundColor(theme.secondaryText)
             Spacer()
@@ -386,10 +520,34 @@ struct ContextWindowBreakdown: View {
         if let trained = usage.cappedBelowTrained {
             cappedNote(trained: trained)
         }
-        if usage.level == .over {
+        // Two different statements. `.over` now means "past the usable share"; only
+        // `exceedsWindow` means the conversation genuinely outgrew the window.
+        if usage.exceedsWindow {
             noteRow(
                 icon: "arrow.triangle.2.circlepath",
                 text: "This conversation is larger than the window — older turns are trimmed or summarized before each send."
+            )
+        } else if usage.level == .over {
+            noteRow(
+                icon: "exclamationmark.triangle",
+                text: "Past the \(Int(ContextWindowUsage.usableFraction * 100))% the prompt can use — the rest of the window is reserved for the reply, so content will be cut before sending."
+            )
+        }
+        // Retrieval is chosen by the query and cannot be known before you send, so it is not
+        // in the figure above. Saying so beats letting the send-time banner look like a
+        // contradiction.
+        if usage.usesRetrieval {
+            noteRow(
+                icon: "magnifyingglass",
+                text: "Conversation memory adds retrieved context at send time — not included above."
+            )
+        }
+        // Without this the breakdown reads as self-contradictory: an estimate for ONE send
+        // sitting directly above a measured total for a turn that made many.
+        if usage.turnSpansMultipleCalls, usage.lastTurn != nil {
+            noteRow(
+                icon: "arrow.trianglehead.2.clockwise",
+                text: "\"Next send\" estimates one request. \"Last turn\" is the measured total across every model call in that turn — this profile re-sends the prompt on each tool step, so it is normally the larger number."
             )
         }
         if usage.windowIsFallback {

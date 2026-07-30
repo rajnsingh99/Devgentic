@@ -49,14 +49,11 @@ struct ToggleSystemSettingsTool: DevgenticTool {
                 let checkProcess = Process()
                 checkProcess.executableURL = URL(fileURLWithPath: "/usr/sbin/networksetup")
                 checkProcess.arguments = ["-getairportpower", "Wi-Fi"]
-                let outPipe = Pipe()
-                checkProcess.standardOutput = outPipe
 
                 do {
-                    try checkProcess.run()
-                    checkProcess.waitUntilExit()
-                    let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-                    let output = String(data: data, encoding: .utf8) ?? ""
+                    // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe
+                    // only after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
+                    let output = try ProcessRunner.run(checkProcess).standardOutput
 
                     let newState = output.contains("On") ? "off" : "on"
 
@@ -100,14 +97,11 @@ struct ManageDisplaysTool: DevgenticTool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
         process.arguments = ["SPDisplaysDataType"]
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
 
         do {
-            try process.run()
-            process.waitUntilExit()
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
+            // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe
+            // only after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
+            let output = try ProcessRunner.run(process).standardOutput
             return "Displays Info:\n\(output)"
         } catch {
             return "Error retrieving display info: \(error)"

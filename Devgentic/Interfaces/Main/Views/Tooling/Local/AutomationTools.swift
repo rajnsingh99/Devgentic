@@ -39,15 +39,16 @@ struct RunMacShortcutTool: DevgenticTool {
             }
         }
         
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = outPipe
         
         do {
-            try process.run()
-            process.waitUntilExit()
-            let outputData = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: outputData, encoding: .utf8) ?? ""
+            // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe
+            // only after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
+            //
+            // combinedOutput, not standardOutput: this site set `standardError = outPipe`,
+            // so its single read returned both. The `shortcuts` CLI reports a missing or
+            // failed shortcut on stderr — reading stdout alone reports "Shortcut executed"
+            // with empty output for a shortcut that never ran.
+            let output = try ProcessRunner.run(process).combinedOutput
             return "Shortcut executed. Output:\n\(output)"
         } catch {
             return "Error running shortcut: \(error.localizedDescription)"

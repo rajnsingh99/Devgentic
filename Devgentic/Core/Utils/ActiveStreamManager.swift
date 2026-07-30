@@ -384,6 +384,12 @@ final class ActiveStreamManager {
 
                     case .toolCall(let name, let params, let sourceNodeID, let stepId):
                         agentMessage.agentState = .acting(.tool(name: name))
+                        // Live agent tabs (badge-only): announce a STARTING file write so
+                        // the Code Viewer can open/update a background tab.
+                        if let payload = AgentLiveWriteEvent.began(toolName: name, params: params, conversationID: conversationID) {
+                            NotificationCenter.default.post(name: AgentLiveWriteEvent.began, object: nil,
+                                                            userInfo: [AgentLiveWriteEvent.payloadKey: payload])
+                        }
                         let toolEvent = TimelineEvent.toolExecution(
                             ToolExecutionData(id: UUID(), name: name, params: params, output: nil, isSuccess: nil, isExecuting: true, stepId: stepId)
                         )
@@ -458,6 +464,10 @@ final class ActiveStreamManager {
 
                     case .toolSucceeded(let output, let durationMs, let sourceNodeID):
                         agentMessage.agentState = .thinking(.reflecting)
+                        if let payload = AgentLiveWriteEvent.completed(toolName: output.toolName, params: output.params, isSuccess: true, preWriteContent: output.preWriteContent, conversationID: conversationID) {
+                            NotificationCenter.default.post(name: AgentLiveWriteEvent.completed, object: nil,
+                                                            userInfo: [AgentLiveWriteEvent.payloadKey: payload])
+                        }
                         // Card-nested rows first (plan step / reflection attempt); fall back
                         // to the top-level / workflow-node completion path.
                         if !(capabilityCardsEnabled && sourceNodeID == nil
@@ -476,6 +486,10 @@ final class ActiveStreamManager {
 
                     case .toolFailed(let output, let category, let suggestion, let sourceNodeID):
                         agentMessage.agentState = .thinking(.reflecting)
+                        if let payload = AgentLiveWriteEvent.completed(toolName: output.toolName, params: output.params, isSuccess: false, preWriteContent: output.preWriteContent, conversationID: conversationID) {
+                            NotificationCenter.default.post(name: AgentLiveWriteEvent.completed, object: nil,
+                                                            userInfo: [AgentLiveWriteEvent.payloadKey: payload])
+                        }
                         if !(capabilityCardsEnabled && sourceNodeID == nil
                              && capabilityRouter.completeTool(output: output, failureCategory: category, durationMs: nil)) {
                             Self.completeToolTimelineEvent(
@@ -876,15 +890,35 @@ final class ActiveStreamManager {
         agentMessage: ChatMessage,
         workflowExecutionState: WorkflowExecutionState?
     ) {
+        // Bound what enters the timeline. `output` is an UNCAPPED string that lands in the
+        // message's timeline blob — re-encoded whole on every flush and decoded eagerly on
+        // every conversation load — so one verbose command (a build log, a large file dump)
+        // could balloon a conversation permanently. Truncation is explicit: the marker is
+        // visible to the user AND to a resumed run's LLM history, which
+        // `TimelineTurnReconstructor` rebuilds from this field.
+        let cappedOutput = ToolExecutionData.cappedOutput(output.output)
+        if cappedOutput.count != output.output.count {
+            logger.warning("[TOOL_OUTPUT] '\(output.toolName)' returned \(output.output.count) chars — truncated to \(ToolExecutionData.maxPersistedOutputLength) for the timeline. The full text reached the model on THIS run; a resumed run sees the truncation marker instead.")
+        }
+
         let updater: (inout ToolExecutionData) -> Void = { data in
             // Refresh params to what ACTUALLY executed — when the user edits args in the HITL banner
             // (A3), output.params carries the corrected values; the card was built from the originals.
             data.params = output.params
-            data.output = output.output
+            data.output = cappedOutput
             data.isSuccess = output.isSuccess
             data.failureCategory = failureCategory
             data.durationMs = durationMs
             data.isExecuting = false
+            data.preWriteContent = output.preWriteContent
+            data.postWriteContent = output.postWriteContent
+            // Derive the change ONCE, here, while the snapshots are in hand. The episodic
+            // formatter runs per request; deriving it there re-diffed every historical
+            // write on every prompt build.
+            data.effect = ActionEffect.from(toolExecution: data)
+            // Same reasoning, same seam: parsed once here rather than re-scanned on every
+            // prompt build. Nil for every tool that doesn't annotate a status.
+            data.exitCode = ShellExitStatus.parse(cappedOutput)
         }
 
         if let wfState = workflowExecutionState, let nodeID = sourceNodeID {

@@ -118,34 +118,10 @@ struct DynamicToolTagParser: CognitiveParserProtocol {
             return decoded
         }
 
-        // Sanitize: trailing commas, Python literals, null values
-        var sanitized = jsonString
-
-        // Remove trailing commas before } or ]
-        if let regex = try? NSRegularExpression(pattern: #",\s*([}\]])"#) {
-            sanitized = regex.stringByReplacingMatches(
-                in: sanitized,
-                range: NSRange(sanitized.startIndex..., in: sanitized),
-                withTemplate: "$1"
-            )
-        }
-
-        // Python literal normalization
-        let replacements: [(String, String)] = [
-            (#"\bFalse\b"#, "false"),
-            (#"\bTrue\b"#, "true"),
-            (#"\bNone\b"#, "null"),
-            (#"\bnull\b"#, "null"),
-        ]
-        for (pattern, replacement) in replacements {
-            if let regex = try? NSRegularExpression(pattern: pattern) {
-                sanitized = regex.stringByReplacingMatches(
-                    in: sanitized,
-                    range: NSRange(sanitized.startIndex..., in: sanitized),
-                    withTemplate: replacement
-                )
-            }
-        }
+        // Sanitize trailing commas and Python literals — OUTSIDE string values only, so a
+        // tool argument carrying file content keeps its own commas and `None`/`NULL` tokens.
+        // (The old block also mapped `\bnull\b` → `null`, a no-op, and is dropped.)
+        let sanitized = JSONStructuralSanitizer.repairingStructure(jsonString)
 
         if let data = sanitized.data(using: .utf8),
            let decoded = try? JSONDecoder().decode([String: JSONValue].self, from: data) {

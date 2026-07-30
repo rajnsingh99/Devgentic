@@ -189,7 +189,7 @@ struct ChatHistoryView: View {
                         // conversation switch). When the bar is closed this costs nothing — the old
                         // always-rebuild here re-lowercased the whole history on every append.
                         if searchViewModel.isSearchActive, !searchViewModel.searchQuery.isEmpty {
-                            searchViewModel.performSearch(in: chatHistoryViewModel.currentChatMessages)
+                            searchViewModel.performSearch(in: chatHistoryViewModel.searchCorpus)
                         }
 
                         if !chatHistoryViewModel.isLoadingPage && !chatHistoryViewModel.isInitiallyLoadingConversation {
@@ -228,18 +228,22 @@ struct ChatHistoryView: View {
                     }
                     // MARK: - Search Navigation
                     .onChange(of: searchViewModel.currentMatchIndex) { _, _ in
-                        if let targetID = searchViewModel.currentMatchMessageID {
-                            withAnimation(motionSafe(.easeInOut(duration: 0.3))) {
-                                proxy.scrollTo(targetID, anchor: .center)
-                            }
-                        }
+                        scrollToCurrentMatch(proxy: proxy)
                     }
                     // MARK: - Search Query Changes (Debounced)
                     .onChange(of: searchViewModel.debouncedQuery) { _, _ in
-                        searchViewModel.performSearch(in: chatHistoryViewModel.currentChatMessages)
-                        if let targetID = searchViewModel.currentMatchMessageID {
-                            withAnimation(motionSafe(.easeInOut(duration: 0.3))) {
-                                proxy.scrollTo(targetID, anchor: .center)
+                        searchViewModel.performSearch(in: chatHistoryViewModel.searchCorpus)
+                        scrollToCurrentMatch(proxy: proxy)
+                    }
+                    // MARK: - Search Corpus (store-backed)
+                    // Loaded once when the bar opens so search reaches past the scroll
+                    // window; a per-keystroke fetch would decode every message's timeline.
+                    .onChange(of: searchViewModel.isSearchActive) { _, isActive in
+                        guard isActive else { return }
+                        Task {
+                            await chatHistoryViewModel.prepareSearchCorpus()
+                            if !searchViewModel.searchQuery.isEmpty {
+                                searchViewModel.performSearch(in: chatHistoryViewModel.searchCorpus)
                             }
                         }
                     }
@@ -247,6 +251,15 @@ struct ChatHistoryView: View {
                     // MARK: - Search Bar Overlay
                     if searchViewModel.isSearchActive {
                         ChatSearchBar(searchViewModel: searchViewModel)
+                            // Same content lane as the message column and the composer —
+                            // a full-bleed bar reads as chrome belonging to the window
+                            // rather than to this conversation, and its right edge ran
+                            // under the Code Viewer's floating pill.
+                            .frame(maxWidth: ViewLayout.maxContentWidth)
+                            // Yield the corner the floating pill floats in, so the two
+                            // never collide on a window too narrow for both.
+                            .padding(.trailing, chatHistoryViewModel.isCodeViewerMinimized
+                                     ? ChatUIConstants.codeViewerPillFootprint : 0)
                             .padding(.top, 8)
                             .transition(.move(edge: .top).combined(with: .opacity))
                             .zIndex(ViewZIndex.searchBar)
@@ -381,6 +394,30 @@ struct ChatHistoryView: View {
     }
 
     // MARK: - Scroll Helper
+    /// Scrolls to the active search match, paging older messages in first when the match
+    /// lives outside the rendered window. Without the page-in, a store-backed match that
+    /// isn't resident has no view to scroll to and the jump silently does nothing.
+    private func scrollToCurrentMatch(proxy: ScrollViewProxy) {
+        guard let targetID = searchViewModel.currentMatchMessageID else { return }
+
+        if chatHistoryViewModel.currentChatMessages.contains(where: { $0.id == targetID }) {
+            withAnimation(motionSafe(.easeInOut(duration: 0.3))) {
+                proxy.scrollTo(targetID, anchor: .center)
+            }
+            return
+        }
+
+        Task {
+            let reachable = await chatHistoryViewModel.ensureMessageIsResident(targetID)
+            guard reachable else { return }
+            // Let the newly-loaded rows lay out before scrolling to one of them.
+            await Task.yield()
+            withAnimation(motionSafe(.easeInOut(duration: 0.3))) {
+                proxy.scrollTo(targetID, anchor: .center)
+            }
+        }
+    }
+
     private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {
         guard let newestMessageID = chatHistoryViewModel.currentChatMessages.first?.id else { return }
 

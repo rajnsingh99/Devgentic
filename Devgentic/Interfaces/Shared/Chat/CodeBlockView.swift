@@ -25,7 +25,9 @@ struct CodeBlockView: View {
     var fontSize: CGFloat = ChatUIConstants.defaultCodeFontSize
     @State private var isCopied = false
     @State private var isHovering = false
+    @State private var isOpenHovering = false
     @Environment(\.appTheme) private var theme
+    @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel: ChatHistoryViewModel?
 
     /// Content with trailing newlines stripped for DISPLAY — LLM fences usually end
     /// with "\n", which rendered as a phantom empty line inflating the block.
@@ -59,68 +61,89 @@ struct CodeBlockView: View {
     var body: some View {
         VStack(spacing: 0) {
             // MARK: - Mac Window Header
-            HStack {
+            HStack(spacing: 8) {
                 // Language Badge (Aligned Left)
                 Text(language.isEmpty ? "plaintext" : language.lowercased())
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced)) // Fixed size: monospaced
-                    .foregroundColor(theme.secondaryText)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(theme.primaryText.opacity(0.85))
                     .padding(.horizontal, 8)
-                    .padding(.vertical, 2)
-                    .background(theme.surfaceOverlay)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .padding(.leading, 4)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(theme.surfaceOverlayStrong))
+                    .overlay(Capsule().stroke(theme.secondaryText.opacity(0.2), lineWidth: 0.5))
 
                 if let fileName, !fileName.isEmpty {
-                    Label(fileName, systemImage: "doc.text")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(theme.secondaryText)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .accessibilityLabel("From file \(fileName)")
+                    HStack(spacing: 4) {
+                        Image(systemName: "doc.text.fill")
+                            .font(.system(size: 10))
+                        Text(fileName)
+                            .font(.system(size: 10, weight: .medium))
+                    }
+                    .foregroundColor(theme.primaryText.opacity(0.85))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .accessibilityLabel("From file \(fileName)")
                 }
 
                 if lineCount > 1 {
                     Text("\(lineCount) lines")
-                        .font(.system(size: 10, weight: .medium)) // Fixed size: header metadata
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundColor(theme.tertiaryText)
                 }
 
                 Spacer()
 
-                // Copy Button
-                Button(action: copyToClipboard) {
-                    HStack(spacing: 4) {
-                        Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
-                            .font(.system(.caption2))
-                        Text(isCopied ? "Copied" : "Copy")
-                            .font(.system(.caption2, weight: .medium))
+                // Action Cluster: Open in Viewer + Copy Button
+                HStack(spacing: 6) {
+                    if let viewModel = chatHistoryViewModel {
+                        Button {
+                            let snippet = CodeSnippet(codeBlock: language, content: content)
+                            viewModel.openTab(for: snippet, fileName: fileName)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.up.forward.app")
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text("Viewer")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .foregroundColor(theme.accentColor)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3.5)
+                            .background(Capsule().fill(theme.accentColor.opacity(isOpenHovering ? 0.22 : 0.12)))
+                            .overlay(Capsule().stroke(theme.accentColor.opacity(isOpenHovering ? 0.45 : 0.25), lineWidth: 0.5))
+                        }
+                        .buttonStyle(.plain)
+                        .onHover { hovering in withAnimation(.easeInOut(duration: 0.15)) { isOpenHovering = hovering } }
+                        .help("Open snippet in Code Viewer")
                     }
-                    .foregroundColor(isCopied ? theme.successColor : theme.secondaryText)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(isHovering ? theme.surfaceOverlay : Color.clear)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
+
+                    // Copy Button
+                    Button(action: copyToClipboard) {
+                        HStack(spacing: 4) {
+                            Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text(isCopied ? "Copied" : "Copy")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .foregroundColor(isCopied ? theme.successColor : theme.primaryText.opacity(0.8))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3.5)
+                        .background(Capsule().fill(isHovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay))
+                        .overlay(Capsule().stroke(theme.secondaryText.opacity(0.2), lineWidth: 0.5))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isCopied ? "Copied" : "Copy code")
+                    .onHover { hovering in withAnimation(.easeInOut(duration: 0.15)) { isHovering = hovering } }
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(isCopied ? "Copied" : "Copy code")
-                .onHover { hovering in withAnimation { isHovering = hovering } }
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.vertical, 7)
             .background(theme.codeBlockHeaderBackground)
 
-            Divider()
-                .background(theme.surfaceOverlayStrong)
+            Rectangle()
+                .fill(theme.surfaceOverlayStrong)
+                .frame(height: 0.5)
 
             // MARK: - Editor Content
-            // Use the new async wrapper view, which handles highlighting in the background.
-            //
-            // The ScrollView is introduced ONLY for a block that genuinely exceeds the cap.
-            // Wrapping unconditionally regressed `testCodeBlockHugsContentDespiteTallProposal`:
-            // a ScrollView accepts the full proposed height, so a 3-line block inside the
-            // viewport-tall newest chat row became 420pt of mostly empty space — the exact
-            // greedy-height bug that test exists to prevent. Short blocks therefore keep the
-            // original, unwrapped path byte for byte.
             if exceedsHeightCap {
                 ScrollView(.vertical) {
                     AsyncHighlightedCodeView(language: language, code: displayContent, fontSize: fontSize)
@@ -137,12 +160,12 @@ struct CodeBlockView: View {
             }
         }
         .fixedSize(horizontal: false, vertical: true)
-        .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusPanel))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: theme.cornerRadiusPanel)
-                .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
         )
-        .shadow(color: theme.shadowColor, radius: 6, x: 0, y: 3)
+        .shadow(color: theme.shadowColor.opacity(0.3), radius: 6, x: 0, y: 3)
     }
 
     private func copyToClipboard() {

@@ -174,16 +174,22 @@ struct GetWiFiInfoTool: DevgenticTool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport")
         process.arguments = ["-I"]
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = outPipe
 
         do {
-            try process.run()
-            process.waitUntilExit()
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "No Wi-Fi data"
-            return "Wi-Fi Info:\n\(output)"
+            // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe
+            // only after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
+            //
+            // combinedOutput, not standardOutput: this site set `standardError = outPipe`,
+            // so its single read returned both. Recent macOS ships this `airport` binary as
+            // a stub that refuses to run and says so on stderr — reading stdout alone turns
+            // that into a bare "No Wi-Fi data", which reads as "you have no Wi-Fi" rather
+            // than "this tool no longer works", and the agent cannot tell the two apart.
+            //
+            // The String -> Data -> String round-trip left over from `readDataToEndOfFile()`
+            // is gone; ProcessRunner already decoded the bytes.
+            let output = try ProcessRunner.run(process).combinedOutput
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return "Wi-Fi Info:\n\(output.isEmpty ? "No Wi-Fi data" : output)"
         } catch {
             return "Error getting Wi-Fi info: \(error.localizedDescription)"
         }
@@ -221,13 +227,11 @@ struct ManageBluetoothTool: DevgenticTool {
             return "Error: Unknown action '\(arguments.action)'. Use status or list_devices."
         }
 
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
 
         do {
-            try process.run()
-            process.waitUntilExit()
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+            // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe
+            // only after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
+            let data = Data(try ProcessRunner.run(process).standardOutput.utf8)
             var output = String(data: data, encoding: .utf8) ?? "No data"
 
             let maxOutput = 4000

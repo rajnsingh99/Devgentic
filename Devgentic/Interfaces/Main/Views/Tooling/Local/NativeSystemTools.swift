@@ -77,20 +77,17 @@ struct TerminalTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        do {
-            if let id = conversationID {
-                // Stateful Execution via ShellSessionManager
-                // Uses the Conversation ID to persist 'cd' changes.
-                let output = try await ShellSessionManager.shared.execute(command: arguments.command, conversationID: id)
-                return output
-            } else {
-                // Fallback: Stateless Execution (Legacy/Bot Mode)
-                let output = try await ShellSessionManager.shared.execute(command: arguments.command, conversationID: UUID()) // Ephemeral ID
-                return output
-            }
-        } catch {
-            return "Command failed: \(error.localizedDescription)"
-        }
+        // Deliberately NOT wrapped in do/catch. This tool sets `outputMayContainErrorText`,
+        // which switches off the mediator's output sniffing, so a returned string can never
+        // be classified as a failure — throwing is the ONLY channel a tool-level failure has.
+        // The previous `catch { return "Command failed: …" }` closed it, and "Command failed:"
+        // does not even match the sniffer's "error"-prefix shape, so a failure to launch the
+        // shell at all was recorded as a successful tool call.
+        //
+        // A stateful conversation ID persists `cd` across calls; bot / legacy mode gets an
+        // ephemeral one, which simply means no directory memory.
+        let sessionID = conversationID ?? UUID()
+        return try await ShellSessionManager.shared.execute(command: arguments.command, conversationID: sessionID)
     }
 }
 

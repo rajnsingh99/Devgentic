@@ -69,7 +69,12 @@ enum FileContextStrategy: String, Codable, CaseIterable, Sendable, Hashable {
     static func defaultStrategy(for profileType: ProfileType) -> FileContextStrategy {
         switch profileType {
         case .bot:      return .directInjection
-        case .agent:    return .directInjection
+        // Agents have file tools, so handing them PATHS beats handing them prose: the
+        // agent reads exactly what it needs, and — the reason this changed (2026-07-25) —
+        // it learns where the file actually lives. Under injection it saw only a basename
+        // and, asked to edit an attachment, emitted that bare name as the write path,
+        // which resolves to HOME. Injection remains selectable for read-and-explain work.
+        case .agent:    return .stateless
         case .workflow:  return .directInjection
         case .imageGen: return .stateless
         case .code:     return .stateless

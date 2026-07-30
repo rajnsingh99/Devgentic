@@ -83,8 +83,21 @@ struct TokenUsage: Codable, Sendable, Hashable {
         return TokenUsage(inputTokens: input, outputTokens: output)
     }
 
-    /// Heuristic estimation for providers that don't report token counts (MLX).
-    /// Uses ~4 characters per token (BPE average for English prose).
+    /// Heuristic fallback for the few paths that have no provider-reported count.
+    ///
+    /// NOT "providers that don't report" — every provider does, MLX included
+    /// (`MLXService` reports exact `promptTokenCount`). This fires when a specific CALL has no
+    /// usage to report: `ResponseSynthesizer` (whose IC returns only a String), a stop-sequence
+    /// or circuit-breaker break that skips MLX's `.info` event, and capability strategies whose
+    /// sub-calls report nothing.
+    ///
+    /// ⚠️ 4.0, deliberately NOT `PromptFitCheck.charsPerToken` (3.0). That constant answers
+    /// "will this fit", where over-estimating is the safe direction. This answers "what did it
+    /// cost", where over-estimating inflates a spend figure the user may act on.
+    ///
+    /// ⚠️ The result is `accumulate`d into the same fields as real provider data, with only
+    /// `isEstimated` OR'd across the sum — so once one fabricated value joins a multi-iteration
+    /// total, the real/estimated split is unrecoverable and the whole figure reads as "~".
     static func estimated(inputChars: Int, outputChars: Int) -> TokenUsage {
         TokenUsage(
             inputTokens: max(1, inputChars / 4),

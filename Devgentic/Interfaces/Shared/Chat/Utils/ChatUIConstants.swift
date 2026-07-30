@@ -50,4 +50,31 @@ enum ChatUIConstants {
     /// Base point size for code. Scales with `chatFontSize` at the call site; this is the
     /// value used when no chat size is available.
     static let defaultCodeFontSize: CGFloat = 12
+
+    /// Narrowest the chat column may be squeezed by the Code Viewer's split mode before
+    /// the inset stops growing (the panel then overlaps the difference, as overlay mode
+    /// always did). Roughly the width at which message bubbles remain readable.
+    static let splitModeMinChatWidth: CGFloat = 360
+
+    /// Width of the Code Viewer's resize divider. Shared between the panel (which draws
+    /// it) and the split-mode chat inset (which must account for it — insetting by the
+    /// panel width alone left the chat flush against the divider edge).
+    static let codeViewerDividerWidth: CGFloat = 4
+
+    /// Breathing room between the chat column's trailing edge and the Code Viewer's
+    /// divider in split mode.
+    static let splitModeChatGutter: CGFloat = 16
+
+    /// Horizontal space the minimized Code Viewer pill occupies at the top-trailing corner
+    /// (its own width plus the 18pt inset it floats at). The chat search bar reserves this
+    /// while the pill is showing: capping the bar to the content lane is not enough on a
+    /// narrow window, where the centred bar's right edge still reaches under the pill.
+    static let codeViewerPillFootprint: CGFloat = 104
+
+    /// Bounds for the Code Viewer's ⌘+/⌘− font stepping. The floor keeps code legible;
+    /// the ceiling keeps a wrapped 1200pt panel from becoming a word-per-line column.
+    static let codeViewerFontSizeRange: ClosedRange<Double> = 9...28
+
+    /// ⌘0 reset target — matches the `codeEditFontSize` @AppStorage default.
+    static let codeViewerDefaultFontSize: Double = 13
 }

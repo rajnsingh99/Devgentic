@@ -36,7 +36,7 @@ final class BackendHistoryResolutionTests: XCTestCase {
         let stored = [message(0, "older turn")]
         let justSent = message(10, "the question I just asked")
 
-        let merged = MessagingCoordinator.mergeHistory(stored: stored, inMemory: [justSent])
+        let merged = BackendHistoryResolver.merge(stored: stored, inMemory: [justSent])
 
         XCTAssertEqual(merged.count, 2)
         XCTAssertEqual(merged.last?.content.textContent, "the question I just asked",
@@ -50,7 +50,7 @@ final class BackendHistoryResolutionTests: XCTestCase {
         // The UI window only holds the newest few.
         let inMemory = Array(stored.suffix(3))
 
-        let merged = MessagingCoordinator.mergeHistory(stored: stored, inMemory: inMemory)
+        let merged = BackendHistoryResolver.merge(stored: stored, inMemory: inMemory)
 
         XCTAssertEqual(merged.count, 50, "History must not be capped to the UI's window")
     }
@@ -66,7 +66,7 @@ final class BackendHistoryResolutionTests: XCTestCase {
             content: .plainText("live version")
         )
 
-        let merged = MessagingCoordinator.mergeHistory(stored: [shared], inMemory: [live])
+        let merged = BackendHistoryResolver.merge(stored: [shared], inMemory: [live])
 
         XCTAssertEqual(merged.count, 1, "Same id must not appear twice")
         XCTAssertEqual(merged.first?.content.textContent, "live version",
@@ -79,18 +79,64 @@ final class BackendHistoryResolutionTests: XCTestCase {
         let stored = [message(3, "c"), message(1, "a")]
         let inMemory = [message(4, "d"), message(2, "b")]
 
-        let merged = MessagingCoordinator.mergeHistory(stored: stored, inMemory: inMemory)
+        let merged = BackendHistoryResolver.merge(stored: stored, inMemory: inMemory)
 
         XCTAssertEqual(merged.map { $0.content.textContent }, ["a", "b", "c", "d"])
     }
 
     func testMerge_EmptyInputs() {
-        XCTAssertTrue(MessagingCoordinator.mergeHistory(stored: [], inMemory: []).isEmpty)
+        XCTAssertTrue(BackendHistoryResolver.merge(stored: [], inMemory: []).isEmpty)
 
         let only = message(0, "only")
-        XCTAssertEqual(MessagingCoordinator.mergeHistory(stored: [], inMemory: [only]).count, 1,
+        XCTAssertEqual(BackendHistoryResolver.merge(stored: [], inMemory: [only]).count, 1,
                        "A brand-new conversation has nothing stored yet")
-        XCTAssertEqual(MessagingCoordinator.mergeHistory(stored: [only], inMemory: []).count, 1)
+        XCTAssertEqual(BackendHistoryResolver.merge(stored: [only], inMemory: []).count, 1)
+    }
+
+    // MARK: - Slice before a target (regeneration / resume replay)
+
+    /// A retry must not replay less context than the original send. This previously sliced
+    /// `currentChatMessages` by index, so regenerating the newest message of a freshly
+    /// opened long conversation replayed only the ~19 loaded messages.
+    func testSlice_TakesEverythingStrictlyBeforeTheTarget() {
+        let history = (0..<10).map { message(TimeInterval($0), "m\($0)") }
+        let target = history[7]
+
+        let slice = MessagingCoordinator.historySlice(before: target, in: history)
+
+        XCTAssertEqual(slice.count, 7)
+        XCTAssertEqual(slice.map { $0.content.textContent }, (0..<7).map { "m\($0)" })
+        XCTAssertFalse(slice.contains { $0.id == target.id }, "The target itself is excluded")
+    }
+
+    /// Identity, not timestamp — a message and its reply can be persisted in the same
+    /// instant, and a timestamp cut would then keep or drop both.
+    func testSlice_CutsByIdentityWhenTimestampsTie() {
+        let shared = base.addingTimeInterval(5)
+        let userTurn = ChatMessage(conversationId: convID, timestamp: shared, sender: .user, content: .plainText("q"))
+        let agentTurn = ChatMessage(conversationId: convID, timestamp: shared, sender: .agent, content: .plainText("a"))
+        let history = [message(0, "older"), userTurn, agentTurn]
+
+        let slice = MessagingCoordinator.historySlice(before: agentTurn, in: history)
+
+        XCTAssertEqual(slice.count, 2, "The tied user turn must be KEPT — it precedes the target")
+        XCTAssertEqual(slice.last?.content.textContent, "q")
+    }
+
+    /// Target beyond the resolved window (older than the 300-message cap): fall back to a
+    /// timestamp cut rather than replaying the whole conversation past it.
+    func testSlice_FallsBackToTimestampWhenTargetIsAbsent() {
+        let history = (0..<5).map { message(TimeInterval($0), "m\($0)") }
+        let absent = message(2.5, "not in the window")
+
+        let slice = MessagingCoordinator.historySlice(before: absent, in: history)
+
+        XCTAssertEqual(slice.map { $0.content.textContent }, ["m0", "m1", "m2"])
+    }
+
+    func testSlice_TargetIsOldestYieldsEmpty() {
+        let history = (0..<5).map { message(TimeInterval($0), "m\($0)") }
+        XCTAssertTrue(MessagingCoordinator.historySlice(before: history[0], in: history).isEmpty)
     }
 
     /// A compaction checkpoint is a real message in the store; it must survive the merge so
@@ -103,7 +149,7 @@ final class BackendHistoryResolutionTests: XCTestCase {
             content: .checkpoint(summary: "Summary of turns 0-14")
         )
 
-        let merged = MessagingCoordinator.mergeHistory(
+        let merged = BackendHistoryResolver.merge(
             stored: [message(0, "turn"), checkpoint],
             inMemory: [message(2, "newer")]
         )

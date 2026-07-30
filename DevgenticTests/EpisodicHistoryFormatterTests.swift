@@ -22,7 +22,16 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
         )
     }
 
-    private func makeAgentMessage(_ text: String, toolEvents: [(name: String, params: String, output: String?, isSuccess: Bool)] = []) -> ChatMessage {
+    /// `failureCategory` is REQUIRED on every fixture rather than optional-by-omission.
+    /// `classify()` branches on it, and a failed row WITHOUT one falls to the legacy fallback
+    /// — generic `.failed`, no user-correction, no Ghost Protocol ban — that exists only for
+    /// rows persisted before the field. Four tests in this file had been red since that
+    /// refactor because they still supplied the OLD signal: the denial phrasing in `output`,
+    /// which the classifier deliberately no longer reads.
+    private func makeAgentMessage(
+        _ text: String,
+        toolEvents: [(name: String, params: String, output: String?, isSuccess: Bool, failureCategory: ToolFailureCategory?)] = []
+    ) -> ChatMessage {
         let msg = ChatMessage(
             conversationId: testConversationID,
             sender: .agent,
@@ -35,6 +44,7 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
                 params: event.params,
                 output: event.output,
                 isSuccess: event.isSuccess,
+                failureCategory: event.failureCategory,
                 isExecuting: false
             ))
         }
@@ -45,14 +55,15 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
 
     func testEmptyHistory() {
         let result = EpisodicHistoryFormatter.buildRecentHistoryString(from: [])
-        XCTAssertEqual(result, "<episodic_memory><recent/></episodic_memory>")
+        XCTAssertEqual(result, "<episodic_memory>\n  <recent/>\n</episodic_memory>",
+                       "the emitted blob is indented and always has been — this assertion never matched it")
     }
 
     func testSingleSuccessfulTurn() {
         let history: [ChatMessage] = [
             makeUserMessage("List files in /tmp"),
             makeAgentMessage("Found 3 files.", toolEvents: [
-                (name: "list_directory", params: "{\"path\":\"/tmp\"}", output: "file1.txt\nfile2.txt\nfile3.txt", isSuccess: true)
+                (name: "list_directory", params: "{\"path\":\"/tmp\"}", output: "file1.txt\nfile2.txt\nfile3.txt", isSuccess: true, failureCategory: nil)
             ])
         ]
 
@@ -72,7 +83,7 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
         let history: [ChatMessage] = [
             makeUserMessage("Delete cache folder"),
             makeAgentMessage("Permission denied.", toolEvents: [
-                (name: "delete_file", params: "{\"path\":\"/tmp/cache\"}", output: "User explicitly denied permission for destructive operation", isSuccess: false)
+                (name: "delete_file", params: "{\"path\":\"/tmp/cache\"}", output: "User explicitly denied permission for destructive operation", isSuccess: false, failureCategory: .userDenied)
             ])
         ]
 
@@ -104,7 +115,7 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
         let history: [ChatMessage] = [
             makeUserMessage("Run rm -rf /"),
             makeAgentMessage("Denied.", toolEvents: [
-                (name: "execute_shell", params: "{\"command\":\"rm -rf /\"}", output: "User explicitly denied permission", isSuccess: false)
+                (name: "execute_shell", params: "{\"command\":\"rm -rf /\"}", output: "User explicitly denied permission", isSuccess: false, failureCategory: .userDenied)
             ])
         ]
 
@@ -117,7 +128,7 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
         let history: [ChatMessage] = [
             makeUserMessage("Search for Python files"),
             makeAgentMessage("Found files.", toolEvents: [
-                (name: "fs_smart_search", params: "{\"search_term\":\"*.py\",\"search_scope\":\"/tmp\"}", output: nil, isSuccess: true)
+                (name: "fs_smart_search", params: "{\"search_term\":\"*.py\",\"search_scope\":\"/tmp\"}", output: nil, isSuccess: true, failureCategory: nil)
             ])
         ]
 
@@ -132,7 +143,7 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
         let history: [ChatMessage] = [
             makeUserMessage("Old query"),
             makeAgentMessage("Old response.", toolEvents: [
-                (name: "list_directory", params: "", output: "result", isSuccess: true)
+                (name: "list_directory", params: "", output: "result", isSuccess: true, failureCategory: nil)
             ])
         ]
 
@@ -147,8 +158,8 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
         let history: [ChatMessage] = [
             makeUserMessage("Read and search files"),
             makeAgentMessage("Done.", toolEvents: [
-                (name: "read_file", params: "{\"path\":\"/tmp/a.txt\"}", output: "content", isSuccess: true),
-                (name: "fs_smart_search", params: "{\"search_term\":\"hello\"}", output: "found", isSuccess: true)
+                (name: "read_file", params: "{\"path\":\"/tmp/a.txt\"}", output: "content", isSuccess: true, failureCategory: nil),
+                (name: "fs_smart_search", params: "{\"search_term\":\"hello\"}", output: "found", isSuccess: true, failureCategory: nil)
             ])
         ]
 
@@ -162,7 +173,7 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
         let history: [ChatMessage] = [
             makeUserMessage("Find files with \"special\" <chars> & symbols"),
             makeAgentMessage("Done.", toolEvents: [
-                (name: "fs_smart_search", params: "{\"search_term\":\"<>&\\\"\"}", output: nil, isSuccess: true)
+                (name: "fs_smart_search", params: "{\"search_term\":\"<>&\\\"\"}", output: nil, isSuccess: true, failureCategory: nil)
             ])
         ]
 
@@ -181,11 +192,11 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
         let history: [ChatMessage] = [
             makeUserMessage("Delete file"),
             makeAgentMessage("Failed.", toolEvents: [
-                (name: "delete_file", params: "{\"path\":\"/tmp/x\"}", output: "Permission denied", isSuccess: false)
+                (name: "delete_file", params: "{\"path\":\"/tmp/x\"}", output: "Permission denied", isSuccess: false, failureCategory: .permissionRejected)
             ]),
             makeUserMessage("Try again"),
             makeAgentMessage("OK.", toolEvents: [
-                (name: "read_file", params: "{\"path\":\"/tmp/x\"}", output: "contents", isSuccess: true)
+                (name: "read_file", params: "{\"path\":\"/tmp/x\"}", output: "contents", isSuccess: true, failureCategory: nil)
             ])
         ]
 
@@ -199,7 +210,7 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
         let history: [ChatMessage] = [
             makeUserMessage("Search for logs"),
             makeAgentMessage("Found logs.", toolEvents: [
-                (name: "fs_smart_search", params: "{\"search_term\":\"*.log\",\"search_scope\":\"/var\"}", output: "found 5", isSuccess: true)
+                (name: "fs_smart_search", params: "{\"search_term\":\"*.log\",\"search_scope\":\"/var\"}", output: "found 5", isSuccess: true, failureCategory: nil)
             ])
         ]
 
@@ -217,11 +228,39 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
         XCTAssertNil(action.errorReason)
     }
 
+    /// The legacy path the four denial tests above were exercising by ACCIDENT until their
+    /// fixtures were corrected: a failed row with no category, as persisted before
+    /// `failureCategory` existed. `classify()` treats it as a generic failure and deliberately
+    /// does NOT ban the tool — Ghost Protocol on unclassified data would also ban timeouts and
+    /// transient errors it was never meant to cover.
+    ///
+    /// Also pins that the denial phrasing in `output` is no longer a signal. Reading it was
+    /// the old scheme, and re-introducing it would resurrect the string-matching this suite's
+    /// staleness came from.
+    func testLegacyFailureWithoutCategoryStaysSoft() {
+        let history: [ChatMessage] = [
+            makeUserMessage("Delete file"),
+            makeAgentMessage("Failed.", toolEvents: [
+                (name: "delete_file", params: "{}", output: "User explicitly denied permission",
+                 isSuccess: false, failureCategory: nil)
+            ])
+        ]
+
+        let xml = EpisodicHistoryFormatter.buildRecentHistoryString(from: history)
+        XCTAssertTrue(xml.contains("status=\"failed\""), "no category → generic failure")
+        XCTAssertFalse(xml.contains("status=\"denied\""), "the output TEXT must not be re-read as a signal")
+        XCTAssertFalse(xml.contains("<user_correction>"), "no correction without a typed denial")
+
+        let graph = EpisodicHistoryFormatter.buildGraph(from: history, sessionID: "test")
+        XCTAssertTrue(graph.negativeConstraints.isEmpty,
+                      "an unclassified failure must not ban the tool: \(graph.negativeConstraints)")
+    }
+
     func testBuildGraphUserCorrection() {
         let history: [ChatMessage] = [
             makeUserMessage("Delete everything"),
             makeAgentMessage("Denied.", toolEvents: [
-                (name: "delete_file", params: "{}", output: "User explicitly denied permission", isSuccess: false)
+                (name: "delete_file", params: "{}", output: "User explicitly denied permission", isSuccess: false, failureCategory: .userDenied)
             ])
         ]
 

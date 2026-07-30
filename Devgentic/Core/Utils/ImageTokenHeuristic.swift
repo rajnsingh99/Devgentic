@@ -78,14 +78,16 @@ enum ImageTokenHeuristic {
 
     /// Chars-per-token used by the CHARACTER-denominated budgets.
     ///
-    /// Deliberately NOT `PromptFitCheck.charsPerToken` (3.0). That constant converts
-    /// chars→tokens for the advisory gauge; the budgets this weight feeds are built
-    /// the other way round at 4 chars/token —
-    /// `AgentConnect.charBudget = contextWindow * 0.6 * 4` and
-    /// `nativeContextBudgetChars = contextWindow * 0.75 * 4`. Pricing an image at 3.0
-    /// against a budget denominated at 4.0 reserved only 900 tokens' worth of room
-    /// for a 1,200-token image — a systematic 25% under-charge.
-    static let budgetCharsPerToken = 4.0
+    /// This weight MUST match the denomination of the budgets it is spent against or every
+    /// image is systematically mispriced. It was pinned at 4.0 while `PromptFitCheck` priced
+    /// at 3.0, because the budgets themselves were built at 4.0 — pricing an image at 3.0
+    /// against a 4.0 budget reserved only 900 tokens' worth of room for a 1,200-token image,
+    /// a 25% under-charge.
+    ///
+    /// Both budgets (`historyCharBudget`, `nativePayloadCharBudget`) are now denominated at
+    /// `PromptFitCheck.charsPerToken`, so this TRACKS it instead of restating a number that
+    /// has to be kept in step by hand. The mismatch is now unrepresentable, not documented.
+    static var budgetCharsPerToken: Double { PromptFitCheck.charsPerToken }
 
     /// Char-equivalent weight, for the budgets that count characters rather than
     /// tokens (`NativeHistoryConverter.charBudget`, `approximateTurnChars`).

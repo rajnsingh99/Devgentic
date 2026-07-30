@@ -10,8 +10,10 @@
 //    HistoryTurn(role: .user,      parts: [.text(userText), .media(image)…])
 //    HistoryTurn(role: .assistant, parts: [.text(agentText)])
 //
-//  Agent text includes a compact tool summary when tools were used,
-//  preserving tool execution context without requiring native tool_call/tool_result roles.
+//  Agent text is PROSE ONLY — no tool summary. `buildAssistantContent` used to prepend
+//  `[Used: tool(args) → result]` lines, and models reliably imitated the format instead of
+//  calling tools, inventing markers and fabricating outputs. Tool-execution context lives
+//  in the system prompt's `<episodic_memory>` XML (`EpisodicHistoryFormatter`) instead.
 //
 //  IMAGES: a user turn carries `.media` parts for every image attached to that
 //  message, so a follow-up question about an image sent two turns ago still sees
@@ -67,6 +69,41 @@ struct NativeHistoryConverter {
     ///     pass `false` when the target model can't see images (vision gate), so the
     ///     budget reflects what will actually be sent.
     /// - Returns: An array of `HistoryTurn` with alternating user/assistant roles.
+    /// The ONE place a history strategy becomes native turn pairs.
+    ///
+    /// `AgentConnect` builds the request through this and the fit gauges size the request
+    /// through it, so what they measure is what ships. The episodic channel already works
+    /// this way (`EpisodicHistoryFormatter.build`); before that, four hand-rolled copies of
+    /// the same switch drifted and silently lost content on one of them.
+    ///
+    /// - Parameter correlation: nil-equivalent ("") for measurement — the builders only log
+    ///   when given one, so sizing the prompt does not emit trim warnings for prompts that
+    ///   were never sent.
+    static func build(
+        strategy: HistoryStrategy,
+        from history: [ChatMessage],
+        charBudget: Int,
+        includeImages: Bool = false,
+        correlation: String = ""
+    ) -> [HistoryTurn] {
+        switch strategy {
+        case .recentHistory:
+            return buildNativeTurns(from: history, limit: EpisodicHistoryFormatter.recentTurnLimit,
+                                    charBudget: charBudget, includeImages: includeImages,
+                                    correlation: correlation)
+        case .fullHistory:
+            return buildNativeTurns(from: history, limit: nil, charBudget: charBudget,
+                                    includeImages: includeImages, correlation: correlation)
+        case .pointer:
+            return buildPointerTurns(from: history, includeImages: includeImages,
+                                     correlation: correlation)
+        case .hybrid:
+            return buildHybridTurns(from: history, inlineCount: EpisodicHistoryFormatter.hybridInlineCount,
+                                    charBudget: charBudget, includeImages: includeImages,
+                                    correlation: correlation)
+        }
+    }
+
     static func buildNativeTurns(
         from history: [ChatMessage],
         limit: Int?,

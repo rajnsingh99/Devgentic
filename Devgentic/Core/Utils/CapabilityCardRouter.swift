@@ -19,6 +19,9 @@
 //
 
 import Foundation
+import os
+
+private let logger = DGLogger(category: "CapabilityCardRouter")
 
 @MainActor
 final class CapabilityCardRouter {
@@ -232,11 +235,25 @@ final class CapabilityCardRouter {
             }) else { return }
             if case .toolExecution(var d) = events[idx] {
                 d.params = output.params
-                d.output = output.output
+                // Cap, snapshots and effect must match `completeToolTimelineEvent` exactly.
+                // This is the SECOND place a tool row is finalised — the card-nested one —
+                // and it silently lacked all three, so with Plan & Execute or Reflexion on
+                // (i.e. most agent runs) the row kept an UNCAPPED output, lost its
+                // pre/post-write snapshots, and never derived an effect: the change record
+                // the agent needs to answer "undo that" simply never existed. Found by the
+                // 2026-07-26 re-scope audit.
+                let capped = ToolExecutionData.cappedOutput(output.output)
+                if capped.count != output.output.count {
+                    logger.warning("[TOOL_OUTPUT] '\(output.toolName)' returned \(output.output.count) chars — truncated to \(ToolExecutionData.maxPersistedOutputLength) for the timeline (card-nested row).")
+                }
+                d.output = capped
                 d.isSuccess = output.isSuccess
                 d.failureCategory = failureCategory
                 d.durationMs = durationMs
                 d.isExecuting = false
+                d.preWriteContent = output.preWriteContent
+                d.postWriteContent = output.postWriteContent
+                d.effect = ActionEffect.from(toolExecution: d)
                 events[idx] = .toolExecution(d)
                 completed = true
             }

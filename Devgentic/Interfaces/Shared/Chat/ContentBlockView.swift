@@ -122,6 +122,17 @@ struct ContentBlockView: View, Equatable {
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.appTheme) private var theme
 
+    /// `code span → absolute path` for the spans in this block that name a readable file RIGHT
+    /// NOW — the only ones that become tappable. Filled off-main by `verifyFileReferences`;
+    /// empty until it lands and whenever nothing resolves, which is the feature's silent default.
+    ///
+    /// Keyed by SPAN, not path: a bare filename like `AbstractionDemo.java` cannot be
+    /// re-derived from the resolved path at render time, so the mapping has to be carried.
+    ///
+    /// Deliberately `@State` and NOT part of `==`: the memoized equality below exists to skip
+    /// re-rendering unchanged blocks, and state changes re-run `body` regardless.
+    @State private var resolvedFileLinks: [String: String] = [:]
+
     /// Code sits a step below body prose (the same convention `MarkdownTableView` uses for
     /// cells), but it now MOVES with `chatFontSize` instead of being pinned at 12pt —
     /// a reader at 20pt prose was getting 12pt code with no way to change it.
@@ -337,6 +348,78 @@ struct ContentBlockView: View, Equatable {
                     .padding(.bottom, 4) // Align with baseline
             }
         }
+        // Existence checking is a `stat` per candidate and can hang for seconds on an
+        // unresponsive network mount, so it never runs in `body`. Until this lands the set
+        // is empty and the spans render as ordinary inline code — the silent default.
+        // Re-keyed on the text so a streaming block re-verifies as its paths arrive.
+        .task(id: text) {
+            await verifyFileReferences(in: text)
+        }
+        .environment(\.openURL, OpenURLAction { url in
+            guard let path = FileReferenceResolver.path(fromLinkURL: url) else {
+                return .systemAction
+            }
+            openFileReference(path)
+            return .handled
+        })
+    }
+
+    /// Resolves which inline-code spans in `text` are openable files, off the main thread.
+    ///
+    /// Two kinds resolve: an absolute path by its shape, and a bare filename by matching a file
+    /// this conversation actually read or wrote. Either way the file must STILL be a readable
+    /// regular file, so a reference to something the agent has since deleted quietly reverts to
+    /// plain text.
+    private func verifyFileReferences(in text: String) async {
+        guard chatHistoryViewModel.canPresentCodeViewer else { return }
+
+        // The index is built on the main actor because it reads the loaded messages. It is a
+        // plain walk of already-decoded timeline events — writes contribute `effect.path` with
+        // no parsing at all, and only small param blobs are decoded (see `maxParamsScanLength`),
+        // so a write carrying a whole file never gets JSON-parsed here.
+        let index = FileReferenceResolver.fileIndex(from: chatHistoryViewModel.currentChatMessages)
+        let candidates = FileReferenceResolver.candidateLinks(inMarkdown: text, index: index)
+        guard !candidates.isEmpty else {
+            if !resolvedFileLinks.isEmpty { resolvedFileLinks = [:] }
+            return
+        }
+
+        let paths = Set(candidates.values)
+        let existing = await Task.detached(priority: .utility) {
+            FileReferenceResolver.verifyExisting(paths)
+        }.value
+        let resolved = candidates.filter { existing.contains($0.value) }
+
+        guard !Task.isCancelled, resolved != resolvedFileLinks else { return }
+        if resolved.count < candidates.count {
+            // Named a file that is no longer there. Silent on screen by design, but the reason
+            // a span the user expected to be tappable isn't should be visible somewhere.
+            let missing = candidates.filter { !existing.contains($0.value) }.values.sorted()
+            logger.debug("[FileRef] \(missing.count) reference(s) left unlinked — no readable file at: \(missing.joined(separator: ", ")).")
+        }
+        logger.debug("[FileRef] Linked \(resolved.count)/\(candidates.count) reference(s) in this block.")
+        resolvedFileLinks = resolved
+    }
+
+    /// Reads the file and hands it to the Code Viewer. Mirrors `AgentTimelineView.openInViewer`
+    /// — same off-main read, same explicit failure path. A file can be moved or deleted
+    /// between the verification above and the tap.
+    private func openFileReference(_ path: String) {
+        let viewModel = chatHistoryViewModel
+        Task {
+            let content = await Task.detached(priority: .userInitiated) {
+                try? String(contentsOfFile: path, encoding: .utf8)
+            }.value
+            guard let content, !content.isEmpty else {
+                logger.warning("[CodeViewer] File-reference open of '\(path)' failed — unreadable, empty, or gone since it was verified; nothing opened.")
+                return
+            }
+            viewModel.openTimelineFileInCodeViewer(
+                fileName: (path as NSString).lastPathComponent,
+                filePath: path,
+                content: content
+            )
+        }
     }
 
     private func isPathContent(_ text: String) -> Bool {
@@ -367,8 +450,6 @@ struct ContentBlockView: View, Equatable {
 
     private func createStyledString(from text: String, font: Font, weight: Font.Weight) -> AttributedString {
         // Capture theme colors for use inside AttributedString manipulation
-        let inlineCodeBg = theme.inlineCodeBackground
-        let inlineCodeFg = theme.inlineCodeText
         let textColor = theme.primaryText
         let inlineCodeHighlight = theme.inlineCodeHighlight
 
@@ -382,9 +463,30 @@ struct ContentBlockView: View, Equatable {
                 // applied explicitly. It previously fell into the generic `else` below
                 // and was silently dropped (`*text*` rendered upright).
                 if intent.contains(.code) {
-                    attributedString[run.range].backgroundColor = inlineCodeBg
+                    // Colour + monospace ONLY — no background chip. The filled pill read as
+                    // visual noise in a paragraph that names a handful of symbols, and it
+                    // fought with the search highlight, which is the one background in this
+                    // string that carries meaning.
                     attributedString[run.range].foregroundColor = inlineCodeHighlight
-                    attributedString[run.range].font = .system(.body, design: .monospaced)
+                    // `font.monospaced()` rather than `.system(.body, …)`: the hardcoded body
+                    // size ignored the surrounding context, which the chip used to disguise.
+                    // Inline code in a heading now matches the heading.
+                    attributedString[run.range].font = font.weight(weight).monospaced()
+
+                    // Tappable when — and only when — this span resolved to a file that
+                    // exists. `resolvedFileLinks` is filled off-main by `verifyFileReferences`,
+                    // so an unresolved span simply isn't a link. `.link` is the only per-run
+                    // interactive attribute a `Text` supports; the underline it brings is the
+                    // affordance that separates a tappable reference from ordinary code.
+                    let span = String(attributedString[run.range].characters)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let path = resolvedFileLinks[span],
+                       let url = FileReferenceResolver.linkURL(forVerifiedPath: path) {
+                        attributedString[run.range].link = url
+                        // Re-assert the colour: SwiftUI tints links with the accent otherwise,
+                        // which is close to but not the same as the inline-code hue.
+                        attributedString[run.range].foregroundColor = inlineCodeHighlight
+                    }
                 } else if intent.contains(.stronglyEmphasized), intent.contains(.emphasized) {
                     attributedString[run.range].font = font.weight(.semibold).italic()
                     attributedString[run.range].foregroundColor = textColor

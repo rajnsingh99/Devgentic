@@ -257,20 +257,15 @@ struct PythonicListParser: CognitiveParserProtocol {
     /// Converts a Python list/dict literal to JSON by normalizing literals + quotes,
     /// then decodes. Handles the common case; rare edge cases fall back to string.
     private func parseNestedStructureAsJSON(_ raw: String) -> JSONValue? {
-        var s = raw
-        // Python literals → JSON.
-        let subs: [(String, String)] = [
-            (#"\bTrue\b"#, "true"),
-            (#"\bFalse\b"#, "false"),
-            (#"\bNone\b"#, "null")
-        ]
-        for (pattern, replacement) in subs {
-            if let regex = try? NSRegularExpression(pattern: pattern) {
-                s = regex.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: replacement)
-            }
-        }
-        // Single-quote strings → double-quote (best-effort — may break strings containing `'`).
-        s = convertSingleQuotedStrings(s)
+        // ORDER IS LOAD-BEARING. Quote conversion must come FIRST: until it runs, this
+        // literal's strings are SINGLE-quoted, so a double-quote-aware sanitizer would see
+        // the whole payload as structure and rewrite `None` inside a string value — e.g. an
+        // argument carrying Python source, `content='if x is None: pass'`. Converting first
+        // means the literal pass can tell a token from a string. (Literals are bare tokens,
+        // so quote conversion is unaffected by running before them.)
+        var s = convertSingleQuotedStrings(raw)
+        // Python literals → JSON, plus trailing commas: `[1, 2,]` is valid Python, not JSON.
+        s = JSONStructuralSanitizer.repairingStructure(s)
 
         if let data = s.data(using: .utf8),
            let value = try? JSONDecoder().decode(JSONValue.self, from: data) {

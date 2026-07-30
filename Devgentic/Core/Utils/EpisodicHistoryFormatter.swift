@@ -18,17 +18,41 @@
 //  XML schema:
 //    <episodic_memory>
 //      <recent>
-//        <turn status="completed|failed|cancelled" goal="..." recency="1 turn ago">
+//        <turn status="completed|partial|failed|cancelled" goal="..." recency="1 turn ago">
 //          <outcome>Truncated agent response</outcome>
 //          <termination>Reason for forced termination (e.g. circuit-breaker abort)</termination>
-//          <action tool="tool_name" status="success|failed|denied">
+//          <action tool="tool_name" status="..." exit="1">
 //            <params key="value" .../>
-//            <error>Error reason (150 char max)</error>
+//            <error>Error reason (1024 chars — errorCharacterLimit — then a truncation note)</error>
+//            <effect file="X.java" path="/abs/path" added="14" removed="5" ...>diff</effect>
 //          </action>
 //          <user_correction>User denied: tool_name</user_correction>
 //        </turn>
 //      </recent>
 //    </episodic_memory>
+//
+//  `<action status>` is the full `ActionStatus.xmlValue` vocabulary, not a three-value one:
+//    active | success | denied | permission_denied | failed | timeout | invalid_args |
+//    not_found | cancelled
+//  `exit` is the shell COMMAND's exit status and appears only when non-zero. It is separate
+//  from `status` on purpose: the tool succeeded — it ran the command — while the command
+//  itself did not. Collapsing them would abort runs on a `grep` miss.
+//
+//  `<effect>` carries AT MOST ONE of the following markers — never two. They are mutually
+//  exclusive by construction (see `renderEffect`), because each answers a different "what can
+//  I do about this?", and a pair of them would answer it two ways at once:
+//    truncated="true"   the diff BODY hit `diffCharacterLimit` — only ever with a body present
+//    baseline="none"    no pre-write snapshot existed, so the change could not be reconstructed
+//    diff="elided"      a body exists but the aggregate budget dropped it this turn
+//    diff="on_demand"   body withheld; fetch it with get_conversation_history(N)
+//    diff="withheld"    body withheld and NOT fetchable — the profile has no tools this turn
+//  The element is self-closing whenever it has no body, which is every pointer turn.
+//
+//  Not shown above, all emitted by `envelope` / `wrapWithCheckpoint`:
+//    <tool_availability>          when a tool-less profile is handed a tool transcript
+//    <compacted_context checkpoint_turns="N">  a checkpoint summary, preceding <recent>
+//    <recent/>                    self-closing when no turns survive the filter — the
+//                                 post-compaction shape, where the summary is the only history
 //
 //  Status authority: when `ChatMessage.terminalOutcome` is set (modern rows), it
 //  overrides action-derived turn status. This catches the case where every tool
@@ -59,10 +83,109 @@ struct EpisodicHistoryFormatter {
             .replacingOccurrences(of: "'", with: "&apos;")
     }
 
+    /// The `<effect>` element for one action — what it changed on disk. This is what makes
+    /// "undo that" answerable: without it the model knows it called `write_file` and nothing
+    /// about the result.
+    ///
+    /// `baseline="none"` marks a write whose prior content was never captured (the file was
+    /// over `preWriteSnapshotByteLimit`, or wasn't readable as UTF-8). Its `removed="0"` is a
+    /// PLACEHOLDER, and without the marker the model reads a destructive overwrite of a large
+    /// file as a clean create — and will offer to undo something it cannot reconstruct.
+    ///
+    /// `diff="elided"` marks a measured change whose BODY was dropped to fit the aggregate
+    /// effect budget. It is deliberately not `baseline="none"`: that one means the pre-image
+    /// was never captured, so the change is unrecoverable and `removed="0"` is a placeholder.
+    /// Elided means the opposite — it WAS measured, the counts are real, and the diff is
+    /// still on the timeline row. Spelling both the same way would re-create exactly the
+    /// ambiguity `baseline="none"` exists to remove.
+    ///
+    /// `diff="on_demand"` marks a measured change the POINTER strategy deliberately did not
+    /// inline. Unlike `elided`, the model can still get it: this turn's `<outcome>` names the
+    /// `get_conversation_history(N)` call that returns it.
+    ///
+    /// Internal rather than private so the contract above is testable.
+    static func renderEffect(_ effect: ActionEffect, diff availability: EffectDiff = .inline) -> String {
+        let hasBody = effect.diff != nil
+        let carriesBody = hasBody && availability == .inline
+        // `truncated` describes the BODY. With no body there is nothing for "partial" to
+        // describe, and it would contradict the availability marker.
+        let truncatedAttr = (effect.isTruncated && carriesBody) ? " truncated=\"true\"" : ""
+        let baselineAttr = hasBody ? "" : " baseline=\"none\""
+        // Nothing to elide or fetch when the diff never existed, so an unmeasured write is
+        // never relabelled — it stays `baseline="none"` under every availability.
+        let diffAttr = hasBody ? availability.attribute : ""
+
+        let openTag = "        <effect file=\"\(xmlEscape(effect.fileName))\" path=\"\(xmlEscape(effect.path))\" added=\"\(effect.linesAdded)\" removed=\"\(effect.linesRemoved)\"\(truncatedAttr)\(baselineAttr)\(diffAttr)"
+
+        // Self-closing when there is no body — an empty open/close pair is two lines and
+        // ~26 wasted characters on every bodyless effect, and pointer turns are all body-less.
+        guard carriesBody, let body = effect.diff else { return openTag + "/>\n" }
+        return openTag + ">\n\(xmlEscape(body))\n        </effect>\n"
+    }
+
+    /// Whether an `<effect>` body is in the prompt — and if not, what the model can do about
+    /// it. One attribute, mutually exclusive values, because the three cases have different
+    /// action implications: conflating any two re-creates the ambiguity `baseline="none"`
+    /// exists to remove.
+    enum EffectDiff {
+        /// The body is rendered inline.
+        case inline
+        /// Measured, dropped to fit the aggregate budget. NOT retrievable by the model —
+        /// the full diff is on the timeline row, which is a user-facing surface.
+        case elided
+        /// Measured, deliberately not inlined by the pointer strategy. Retrievable via the
+        /// `get_conversation_history(N)` call this turn's `<outcome>` names.
+        case onDemand
+        /// Measured, but this profile has NO TOOLS — a diff is a revert instrument, and a
+        /// profile that cannot call `write_file` cannot act on one. Distinct from `elided`
+        /// (which means the budget dropped it) because the reason is permanent for this turn,
+        /// and from `on_demand` (which promises a retrieval) because there is no tool to
+        /// retrieve with. The counts and path still render: "what did you change?" stays
+        /// answerable, only "undo it" does not.
+        case withheld
+
+        var attribute: String {
+            switch self {
+            case .inline:   return ""
+            case .elided:   return " diff=\"elided\""
+            case .onDemand: return " diff=\"on_demand\""
+            case .withheld: return " diff=\"withheld\""
+            }
+        }
+    }
+
     /// Truncates a string to a maximum length, appending "..." if truncated.
+    ///
+    /// Fine for a goal, an outcome or a param — nobody ACTS on those, so "there was more" is
+    /// all the reader needs. Errors get `cappedError` instead; see below.
     private static func truncate(_ string: String, maxLength: Int) -> String {
         if string.count <= maxLength { return string }
         return String(string.prefix(maxLength - 3)) + "..."
+    }
+
+    /// Longest tool-failure text carried into memory.
+    ///
+    /// Was 150 — shorter than most compiler errors and nearly every stack trace, so the model
+    /// routinely saw a clipped first line and adapted to a cause it could not read. Error text
+    /// is the highest-value prose in the blob: it is WHY the agent must do something different,
+    /// and unlike a successful read it cannot be re-derived by calling the tool again.
+    ///
+    /// A quarter of `ActionEffect.diffCharacterLimit`. Bounded in aggregate by the iteration
+    /// cap (15–20 tool calls per turn), so even an all-failing turn carries ~20 KB — the same
+    /// order as a single effect diff, and far less than the diffs a working turn carries.
+    static let errorCharacterLimit = 1_024
+
+    /// Truncation that states what it dropped, matching `ToolExecutionData.cappedOutput`.
+    ///
+    /// The generic `truncate` appends "..." and nothing else. That is a decision input here:
+    /// a silently clipped stack trace makes the model adapt to a cause it never saw, and the
+    /// real error is often several frames down. Naming the loss lets it ask for more instead
+    /// of guessing.
+    static func cappedError(_ text: String) -> String {
+        guard text.count > errorCharacterLimit else { return text }
+        let dropped = text.count - errorCharacterLimit
+        return String(text.prefix(errorCharacterLimit))
+            + "… [truncated \(dropped) characters of error output]"
     }
 
     // MARK: - Params Parsing
@@ -122,7 +245,7 @@ struct EpisodicHistoryFormatter {
             )
         }
 
-        let truncatedOutput = data.output.map { truncate($0, maxLength: 150) }
+        let truncatedOutput = data.output.map { cappedError($0) }
 
         if let category = data.failureCategory {
             return ActionClassification(
@@ -299,7 +422,9 @@ struct EpisodicHistoryFormatter {
                             intent: data.name,
                             status: classification.status,
                             params: parseParams(data.params),
-                            errorReason: classification.errorReason
+                            errorReason: classification.errorReason,
+                            effect: data.effect,
+                            exitCode: data.exitCode
                         )
                         actions.append(action)
                     }
@@ -344,6 +469,403 @@ struct EpisodicHistoryFormatter {
         )
     }
 
+    // MARK: - Shared Turn Renderers
+    //
+    // There are exactly TWO ways to render a turn — inline and pointer — and every
+    // strategy is a choice of which to use for which turns. They live here, once.
+    //
+    // Each strategy used to hand-roll its own copy, and the copies drifted:
+    // `buildHybridHistoryString`'s inline branch was commented "same format as
+    // buildRecentHistoryString" while emitting no `<effect>` and unsorted `<params>`,
+    // so a hybrid profile could not answer "undo that" for a write that had just
+    // happened. Fixing that one branch would have left the mechanism that produced it
+    // intact; composing from a single renderer makes the whole class of drift
+    // impossible instead.
+
+    /// ` exit="N"` for a shell command that returned non-zero, empty otherwise.
+    ///
+    /// This is the whole later-turn fix: the exit code was surfaced in the observation and
+    /// then lost, because successful tool output is deliberately not carried. So on the next
+    /// prompt a failed `swift build` was indistinguishable from a passing one — the model
+    /// could read its own `status="success"` and conclude the build was fine.
+    private static func exitAttribute(_ action: MemoryAction) -> String {
+        guard let code = action.exitCode, code != 0 else { return "" }
+        return " exit=\"\(code)\""
+    }
+
+    /// Turn status, resolved through one authority cascade for every strategy.
+    /// `terminalOutcome` wins because it catches circuit-breaker aborts and iteration
+    /// exhaustion, where every tool technically succeeded but the run did not.
+    private static func turnStatus(for turn: TurnPair) -> String {
+        if let authoritative = authoritativeStatus(from: turn.terminalOutcome) { return authoritative }
+        if turn.wasCancelled { return "cancelled" }
+        if turn.actions.contains(where: { $0.status.isFailure }) { return "failed" }
+        return "completed"
+    }
+
+    private static func recencyLabel(turnsAgo: Int) -> String {
+        turnsAgo == 1 ? "1 turn ago" : "\(turnsAgo) turns ago"
+    }
+
+    /// The opening `<turn>` tag, identical for both renderers.
+    private static func turnOpenTag(_ turn: TurnPair, recency: String) -> String {
+        let goal = xmlEscape(truncate(turn.userQuery, maxLength: 80))
+        return "    <turn status=\"\(turnStatus(for: turn))\" goal=\"\(goal)\" recency=\"\(recency)\">\n"
+    }
+
+    /// A turn rendered in FULL: outcome, params, errors, and what each action changed.
+    private static func renderInlineTurn(_ turn: TurnPair, recency: String, includeImageNames: Bool,
+                                         elidedActionIDs: Set<UUID> = [],
+                                         toolsAvailable: Bool = true) -> String {
+        var xml = turnOpenTag(turn, recency: recency)
+
+        // Image label — names the images the user attached on this turn so the model
+        // can map the re-provided image bytes (attached to the current message) back
+        // to the turn they belong to. Vision profiles only; text turns render nothing.
+        if includeImageNames, !turn.attachedImageNames.isEmpty {
+            let names = turn.attachedImageNames.map(xmlEscape).joined(separator: ", ")
+            xml += "      <attached_images>\(names)</attached_images>\n"
+        }
+
+        // Agent response context — present on every turn so follow-ups
+        // like "delete the first one" can resolve referents.
+        if let outcome = turn.outcome {
+            xml += "      <outcome>\(xmlEscape(outcome))</outcome>\n"
+        }
+
+        if let termination = renderTerminationElement(
+            terminalOutcome: turn.terminalOutcome,
+            terminalReason: turn.terminalReason,
+            indent: "      "
+        ) {
+            xml += termination
+        }
+
+        for action in turn.actions {
+            // `xmlValue` covers all 9 ActionStatus cases — an earlier switch collapsed
+            // everything but success/denied into "failed", losing timeouts, permission
+            // rejections, and not-found tools.
+            // `exit` is SEPARATE from `status` on purpose. `status` is whether the TOOL ran;
+            // `exit` is what the COMMAND returned. Merging them would make `grep` with no
+            // match a tool failure, and three of those abort the run via the circuit breaker.
+            // Only non-zero is emitted — a zero exit is the default and costs nothing to omit.
+            xml += "      <action tool=\"\(xmlEscape(action.toolName))\" status=\"\(action.status.xmlValue)\"\(exitAttribute(action))>\n"
+
+            // Sorted by key: Dictionary order is seeded per process, so an unsorted
+            // emit rendered the same conversation differently on every launch.
+            if !action.params.isEmpty {
+                let paramAttrs = action.params
+                    .sorted(by: { $0.key < $1.key })
+                    .map { "\($0.key)=\"\(xmlEscape($0.value))\"" }
+                    .joined(separator: " ")
+                xml += "        <params \(paramAttrs)/>\n"
+            }
+
+            if let error = action.errorReason {
+                xml += "        <error>\(xmlEscape(error))</error>\n"
+            }
+
+            // What the action actually changed. This is what makes "undo that"
+            // answerable — without it the model knows it called write_file and
+            // nothing about the result.
+            //
+            // An elided action keeps the ELEMENT and its counts and loses only the diff
+            // body, so the model still knows the file changed and by how much. Dropping
+            // the whole element would read as "nothing happened", which is the failure
+            // `<effect>` was introduced to fix.
+            if let effect = action.effect {
+                let availability: EffectDiff
+                if !toolsAvailable { availability = .withheld }
+                else if elidedActionIDs.contains(action.id) { availability = .elided }
+                else { availability = .inline }
+                xml += renderEffect(effect, diff: availability)
+            }
+
+            xml += "      </action>\n"
+        }
+
+        if let correction = turn.userCorrection {
+            xml += "      <user_correction>\(xmlEscape(correction))</user_correction>\n"
+        }
+
+        xml += "    </turn>\n"
+        return xml
+    }
+
+    /// A turn rendered as a SKELETON: tool names and statuses only, with the outcome
+    /// pointing at `get_conversation_history(index)` for on-demand detail. Params and
+    /// effects are omitted deliberately — that omission is the strategy.
+    ///
+    /// Errors are the standing exception: a failure is a durable consequence, not a
+    /// detail the model can re-derive by looking again.
+    ///
+    /// `toolsAvailable` decides how an effect is marked: `diff="on_demand"` names a retrieval
+    /// the model can perform, so a tool-less profile gets `diff="withheld"` instead — the
+    /// counts still render, only the promise of a fetch is dropped. The parameter has no
+    /// default because a silent one is exactly how both call sites came to make that promise
+    /// to profiles that have no tools to keep it with.
+    private static func renderPointerTurn(_ turn: TurnPair, index: Int, recency: String,
+                                          toolsAvailable: Bool) -> String {
+        var xml = turnOpenTag(turn, recency: recency)
+        // The retrieval instruction is only true when there is something to retrieve WITH.
+        // Marking the effects `withheld` while this line still said "Call
+        // get_conversation_history(N)" left the blob contradicting itself: the envelope
+        // preface says the profile has no tools this turn, and every turn body told it to
+        // call one. A skeleton that cannot be expanded should say so rather than name a tool.
+        xml += toolsAvailable
+            ? "      <outcome>Call get_conversation_history(\(index)) for details.</outcome>\n"
+            : "      <outcome>Summary only — full detail is not retrievable this turn.</outcome>\n"
+
+        if let termination = renderTerminationElement(
+            terminalOutcome: turn.terminalOutcome,
+            terminalReason: turn.terminalReason,
+            indent: "      "
+        ) {
+            xml += termination
+        }
+
+        for action in turn.actions {
+            let open = "      <action tool=\"\(xmlEscape(action.toolName))\" status=\"\(action.status.xmlValue)\"\(exitAttribute(action))"
+
+            var children = ""
+            if let error = action.errorReason {
+                children += "        <error>\(xmlEscape(error))</error>\n"
+            }
+            // A file mutation is a durable consequence, not a detail the model can re-derive
+            // by looking again — the same reason errors are the skeleton's standing
+            // exception. Counts only, ~90 chars: enough to know something changed and that
+            // it is worth asking about. The body comes from `get_conversation_history(N)`.
+            if let effect = action.effect {
+                children += renderEffect(effect, diff: toolsAvailable ? .onDemand : .withheld)
+            }
+
+            xml += children.isEmpty ? open + "/>\n" : open + ">\n" + children + "      </action>\n"
+        }
+
+        if let correction = turn.userCorrection {
+            xml += "      <user_correction>\(xmlEscape(correction))</user_correction>\n"
+        }
+
+        xml += "    </turn>\n"
+        return xml
+    }
+
+    /// Wraps rendered turns in the `<episodic_memory>` envelope and applies the checkpoint
+    /// preamble — the single exit for every strategy.
+    ///
+    /// Shared because two strategies used to `return ""` on an empty post-checkpoint
+    /// history BEFORE reaching the wrap. Compaction leaves the checkpoint as the last
+    /// message, so the very next turn filtered to zero turns and threw away the summary
+    /// that had just been computed to stand in for the turns it replaced — and, because
+    /// `AgentConnect` gates `ConversationHistoryTool` on the rendered text, the means to
+    /// fetch it back went with it. An empty history is `<recent/>`, not silence.
+    private static func envelope(turnsXML: String, checkpointSummary: String?, compactedTurnCount: Int,
+                                 toolsAvailable: Bool = true) -> String {
+        // Without this a tool-less profile reads a full `<action tool="write_file">` transcript
+        // with no schemas to match — the same mimicry pressure that made tool summaries in
+        // assistant turns produce imitated tool calls instead of real ones. The actions are
+        // TRUE history and worth keeping; what was missing was the sentence saying so.
+        let preface = (!toolsAvailable && turnsXML.contains("<action "))
+            ? "  <tool_availability>The actions below are HISTORY from earlier in this conversation. You have NO tools available this turn — do not attempt to call them. File changes show their line counts; the diffs themselves are not carried, so you cannot revert them.</tool_availability>\n"
+            : ""
+
+        let inner = turnsXML.isEmpty
+            ? "<episodic_memory>\n  <recent/>\n</episodic_memory>"
+            : "<episodic_memory>\n\(preface)  <recent>\n\(turnsXML)  </recent>\n</episodic_memory>"
+        return wrapWithCheckpoint(summary: checkpointSummary, turnCount: compactedTurnCount, innerXML: inner)
+    }
+
+    // MARK: - Aggregate Effect Budget
+
+    /// Which effect diffs fit this prompt, and what it cost to find out.
+    private struct EffectBudgetOutcome {
+        let elidedActionIDs: Set<UUID>
+        let carriedCount: Int
+        let carriedChars: Int
+        /// Chronological, for the log — the pass itself walks backwards.
+        let elidedFileNames: [String]
+        /// Nil when no budget was supplied, i.e. every diff was carried.
+        let budget: Int?
+
+        var elidedCount: Int { elidedFileNames.count }
+        var totalCount: Int { carriedCount + elidedCount }
+    }
+
+    /// Decides which effect diffs must lose their body to fit the prompt.
+    ///
+    /// Walks NEWEST first and stops at the first diff that does not fit — the same
+    /// newest-first, stop-on-overflow rule `NativeHistoryConverter` applies to turn pairs,
+    /// so both history channels trim by one policy. Stopping rather than greedily skipping
+    /// keeps the carried set a contiguous recent window the model can reason about ("I can
+    /// see the last N changes") instead of a scattered subset with holes in it.
+    ///
+    /// Newest-first because "undo that" refers to the most recent write. Only the diff
+    /// BODY is budgeted; the element and its counts always render.
+    private static func applyEffectBudget(to inlineTurns: ArraySlice<TurnPair>, budget: Int?) -> EffectBudgetOutcome {
+        var candidates: [(id: UUID, fileName: String, chars: Int)] = []
+        for turn in inlineTurns.reversed() {
+            for action in turn.actions.reversed() {
+                guard let effect = action.effect, let diff = effect.diff else { continue }
+                candidates.append((action.id, effect.fileName, diff.count))
+            }
+        }
+
+        guard let budget else {
+            return EffectBudgetOutcome(
+                elidedActionIDs: [],
+                carriedCount: candidates.count,
+                carriedChars: candidates.reduce(0) { $0 + $1.chars },
+                elidedFileNames: [],
+                budget: nil
+            )
+        }
+
+        var spent = 0
+        var carried = 0
+        var overflowed = false
+        var elidedIDs: Set<UUID> = []
+        var elidedNames: [String] = []
+
+        for candidate in candidates {
+            if !overflowed, spent + candidate.chars <= budget {
+                spent += candidate.chars
+                carried += 1
+            } else {
+                overflowed = true
+                elidedIDs.insert(candidate.id)
+                elidedNames.append(candidate.fileName)
+            }
+        }
+
+        return EffectBudgetOutcome(
+            elidedActionIDs: elidedIDs,
+            carriedCount: carried,
+            carriedChars: spent,
+            elidedFileNames: elidedNames.reversed(),
+            budget: budget
+        )
+    }
+
+    /// Episodic memory had NO size observability at all: nothing logged the blob, so a
+    /// context overflow caused by effect growth was undiagnosable from logs. An elision is
+    /// a silent drop, so it is logged at info with its consequence spelled out; the quiet
+    /// case still records the size at debug so growth is visible before it bites.
+    private static func logEpisodicBudget(strategy: String, messages: Int, turnsRendered: Int,
+                                          inlineTurns: Int, onDemandEffects: Int, xmlChars: Int,
+                                          outcome: EffectBudgetOutcome, correlation: String?,
+                                          toolsAvailable: Bool = true) {
+        // No correlation → this render is a MEASUREMENT (the fit gauges build the blob to
+        // size it), not a request. Logging it would put phantom "[EPISODIC] ELIDED …" lines
+        // in the log for prompts that were never sent.
+        guard let correlation else { return }
+        let tag = "\(correlation) "
+        let shape = "\(strategy): \(messages) msg → \(turnsRendered) turn(s), \(xmlChars) chars XML"
+
+        // Rendering nothing is the loudest case, not the quietest: it is the signature of the
+        // post-compaction turn, where the checkpoint is the last message and the filter leaves
+        // no turns behind it. Two strategies used to return "" here and lose the summary too.
+        guard turnsRendered > 0 else {
+            episodicLogger.info("[EPISODIC] \(tag)\(shape) — NO turns rendered. The model sees an empty <recent/>; if a checkpoint exists its <compacted_context> summary is the only history it gets this turn.")
+            return
+        }
+
+        if outcome.elidedCount > 0, let budget = outcome.budget {
+            let names = outcome.elidedFileNames.joined(separator: ", ")
+            episodicLogger.info("[EPISODIC] \(tag)\(shape), \(inlineTurns) inline — ELIDED \(outcome.elidedCount) of \(outcome.totalCount) effect diff(s) to fit the \(budget)-char aggregate budget (oldest first): \(names). Those actions keep their counts and are marked diff=\"elided\", but the model cannot describe or revert those specific changes from memory this turn; the full diffs remain on the timeline rows.")
+            return
+        }
+
+        // Pointer skeletons carry effects too now — counts only, bodies behind the tool. They
+        // are NOT budgeted (no bodies to budget), so reporting them through the budget
+        // outcome alone would log "0 effect(s)" for a turn that recorded twenty file changes.
+        // Hybrid can have both kinds at once, so both are reported.
+        var parts: [String] = []
+        if outcome.totalCount > 0 {
+            let ceiling = outcome.budget.map(String.init) ?? "unbudgeted"
+            parts.append("\(outcome.totalCount) inline effect(s) carrying \(outcome.carriedChars)/\(ceiling) diff chars")
+        }
+        if onDemandEffects > 0 {
+            // The marker these render under depends on whether the profile HAS the retrieval
+            // tool. Hardcoding "on_demand" here logged a promise the blob no longer makes for
+            // tool-less profiles, which is exactly the drift this log exists to catch.
+            parts.append(toolsAvailable
+                ? "\(onDemandEffects) effect(s) as diff=\"on_demand\" — counts only, bodies via get_conversation_history(N)"
+                : "\(onDemandEffects) effect(s) as diff=\"withheld\" — counts only, and no tool exists this turn to fetch the bodies")
+        }
+        let carried = parts.isEmpty ? "no file changes recorded" : parts.joined(separator: " + ")
+        episodicLogger.debug("[EPISODIC] \(tag)\(shape), \(inlineTurns) inline, \(carried).")
+    }
+
+    /// Turns after the latest checkpoint, plus how many the checkpoint stands in for.
+    /// `compactedTurnCount` is 0 without a checkpoint so the preamble is omitted entirely.
+    private static func turnContext(from history: [ChatMessage]) -> (turns: [TurnPair], summary: String?, compactedCount: Int) {
+        let (summary, filteredHistory) = extractCheckpointContext(from: history)
+        let turns = pairTurns(from: filteredHistory)
+        let compacted = summary != nil ? (pairTurns(from: history).count - turns.count) : 0
+        return (turns, summary, compacted)
+    }
+
+    // MARK: - Strategy Dispatch
+
+    /// Turn windows each strategy renders. Constants rather than literals at the call site
+    /// because `AgentConnect` spends them and the fit gauges measure what was spent — if the
+    /// two ever disagree, the gauge lies about the exact payload it exists to measure.
+    static let recentTurnLimit = 10
+    static let hybridInlineCount = 3
+
+    /// The ONE place a history strategy becomes a rendered blob.
+    ///
+    /// `AgentConnect` builds the prompt through this and the fit gauges size the prompt
+    /// through it, so the number the gauge reports IS the payload that ships — not a
+    /// parallel estimate keeping its own copy of the render rules. This file exists because
+    /// copies drift; an estimator would have been a fourth one.
+    ///
+    /// - Parameter correlation: nil for measurement (silent), a `conv:…/trace:…` string on
+    ///   the request path (logs).
+    /// - Important: `history` must be ASCENDING (oldest first). `pairTurns` walks forward
+    ///   matching each user message to the agent reply that follows it, so a descending
+    ///   array — which is what the chat view holds — mispairs every turn.
+    /// - Parameter toolsAvailable: false for a BOT, which `AgentConnect` gives `rawTools = []`
+    ///   and `ChatExecutor` sends `tools: nil`. Its history can still contain a full tool
+    ///   transcript from when the conversation ran under an agent profile.
+    static func build(strategy: HistoryStrategy,
+                      from history: [ChatMessage],
+                      includeImageNames: Bool = false,
+                      effectBudget: Int? = nil,
+                      correlation: String? = nil,
+                      toolsAvailable: Bool = true) -> String {
+        // EVERY branch forwards `toolsAvailable`. Two of them did not, and because the
+        // builders below it defaulted the flag to true, a tool-less profile silently got the
+        // agent rendering: no `<tool_availability>` preface, full diff bodies inline, and
+        // `diff="on_demand"` effects naming a `get_conversation_history` call it cannot make.
+        // A diff is a revert instrument and the pointer outcome is a fetch instruction —
+        // neither belongs in a prompt for a profile that was sent `tools: nil`.
+        switch strategy {
+        case .recentHistory:
+            return buildRecentHistoryString(from: history, limit: recentTurnLimit,
+                                            includeImageNames: includeImageNames,
+                                            effectBudget: effectBudget, correlation: correlation,
+                                            strategyLabel: strategy.rawValue,
+                                            toolsAvailable: toolsAvailable)
+        case .fullHistory:
+            return buildRecentHistoryString(from: history, limit: history.count,
+                                            includeImageNames: includeImageNames,
+                                            effectBudget: effectBudget, correlation: correlation,
+                                            strategyLabel: strategy.rawValue,
+                                            toolsAvailable: toolsAvailable)
+        case .pointer:
+            return buildPointerHistoryString(from: history, correlation: correlation,
+                                             strategyLabel: strategy.rawValue,
+                                             toolsAvailable: toolsAvailable)
+        case .hybrid:
+            return buildHybridHistoryString(from: history, inlineCount: hybridInlineCount,
+                                            includeImageNames: includeImageNames,
+                                            effectBudget: effectBudget, correlation: correlation,
+                                            strategyLabel: strategy.rawValue,
+                                            toolsAvailable: toolsAvailable)
+        }
+    }
+
     // MARK: - XML Episodic Memory Builder
 
     /// Builds an XML episodic memory string for LLM prompt injection.
@@ -360,110 +882,34 @@ struct EpisodicHistoryFormatter {
     ///   re-provided image bytes to the turn they belong to. Left false for non-vision
     ///   profiles, whose images are omitted — labeling images the model won't receive
     ///   would be misleading.
-    static func buildRecentHistoryString(from history: [ChatMessage], limit: Int = 4, includeImageNames: Bool = false) -> String {
-        // Extract checkpoint context — if a checkpoint exists, only format turns after it.
-        let (checkpointSummary, filteredHistory) = extractCheckpointContext(from: history)
-        let originalTurnCount = pairTurns(from: history).count
-
-        // Pair user-agent messages into logical turns (from filtered history)
-        let turns = pairTurns(from: filteredHistory)
-
-        if turns.isEmpty {
-            let emptyXML = "<episodic_memory>\n  <recent/>\n</episodic_memory>"
-            let compactedTurnCount = checkpointSummary != nil ? originalTurnCount : 0
-            return wrapWithCheckpoint(summary: checkpointSummary, turnCount: compactedTurnCount, innerXML: emptyXML)
-        }
-
+    static func buildRecentHistoryString(from history: [ChatMessage], limit: Int = 4, includeImageNames: Bool = false,
+                                         effectBudget: Int? = nil, correlation: String? = nil,
+                                         strategyLabel: String = "recent",
+                                         toolsAvailable: Bool = true) -> String {
+        let (turns, summary, compacted) = turnContext(from: history)
         let recentTurns = turns.suffix(limit)
-        let totalTurns = turns.count
+        // No bodies are rendered without tools, so there is nothing for the budget to spend.
+        let budgeted = applyEffectBudget(to: recentTurns, budget: toolsAvailable ? effectBudget : nil)
 
-        var xml = "<episodic_memory>\n  <recent>\n"
-
+        // Recency counts back from the newest RENDERED turn — the last one is "1 turn
+        // ago". Turns older than `limit` are not rendered at all.
+        var body = ""
         for (index, turn) in recentTurns.enumerated() {
-            let absoluteIndex = totalTurns - recentTurns.count + index
-            let turnsAgo = totalTurns - absoluteIndex
-            let recencyLabel = turnsAgo == 1 ? "1 turn ago" : "\(turnsAgo) turns ago"
-
-            let goal = xmlEscape(truncate(turn.userQuery, maxLength: 80))
-            // Authoritative status (from executor) overrides action-derived classification.
-            // Catches circuit-breaker aborts and iteration exhaustion where every tool
-            // technically succeeded — those would otherwise read as "completed".
-            let turnStatus: String
-            if let authoritative = Self.authoritativeStatus(from: turn.terminalOutcome) {
-                turnStatus = authoritative
-            } else if turn.wasCancelled {
-                turnStatus = "cancelled"
-            } else if turn.actions.contains(where: { $0.status.isFailure }) {
-                turnStatus = "failed"
-            } else {
-                turnStatus = "completed"
-            }
-
-            xml += "    <turn status=\"\(turnStatus)\" goal=\"\(goal)\" recency=\"\(recencyLabel)\">\n"
-
-            // Image label — names the images the user attached on this turn so the model
-            // can map the re-provided image bytes (attached to the current message) back
-            // to the turn they belong to. Vision profiles only; text turns render nothing.
-            if includeImageNames, !turn.attachedImageNames.isEmpty {
-                let names = turn.attachedImageNames.map(xmlEscape).joined(separator: ", ")
-                xml += "      <attached_images>\(names)</attached_images>\n"
-            }
-
-            // Agent response context — present on every turn so follow-ups
-            // like "delete the first one" can resolve referents.
-            if let outcome = turn.outcome {
-                xml += "      <outcome>\(xmlEscape(outcome))</outcome>\n"
-            }
-
-            // Termination element — explicit reason for non-completed terminal outcomes
-            // (circuit-breaker abort, iteration exhaustion, cancellation). Renders only
-            // when the executor recorded both an outcome and a reason; legacy rows skip.
-            if let termination = Self.renderTerminationElement(
-                terminalOutcome: turn.terminalOutcome,
-                terminalReason: turn.terminalReason,
-                indent: "      "
-            ) {
-                xml += termination
-            }
-
-            for action in turn.actions {
-                // `xmlValue` covers all 9 ActionStatus cases (success, denied,
-                // permission_denied, failed, timeout, invalid_args, not_found,
-                // cancelled, active). The previous switch only covered SUCCESS/DENIED
-                // and silently collapsed everything else into "failed", losing
-                // signal for timeouts, permission rejections, and not-found tools.
-                xml += "      <action tool=\"\(xmlEscape(action.toolName))\" status=\"\(action.status.xmlValue)\">\n"
-
-                // Params as XML attributes
-                if !action.params.isEmpty {
-                    let paramAttrs = action.params
-                        .sorted(by: { $0.key < $1.key })
-                        .map { "\($0.key)=\"\(xmlEscape($0.value))\"" }
-                        .joined(separator: " ")
-                    xml += "        <params \(paramAttrs)/>\n"
-                }
-
-                // Error reason for failed/denied actions
-                if let error = action.errorReason {
-                    xml += "        <error>\(xmlEscape(error))</error>\n"
-                }
-
-                xml += "      </action>\n"
-            }
-
-            // User correction signal
-            if let correction = turn.userCorrection {
-                xml += "      <user_correction>\(xmlEscape(correction))</user_correction>\n"
-            }
-
-            xml += "    </turn>\n"
+            body += renderInlineTurn(
+                turn,
+                recency: recencyLabel(turnsAgo: recentTurns.count - index),
+                includeImageNames: includeImageNames,
+                elidedActionIDs: budgeted.elidedActionIDs,
+                toolsAvailable: toolsAvailable
+            )
         }
 
-        xml += "  </recent>\n</episodic_memory>"
-
-        // Wrap with checkpoint preamble if a compacted context exists.
-        let compactedTurnCount = checkpointSummary != nil ? (originalTurnCount - turns.count) : 0
-        return wrapWithCheckpoint(summary: checkpointSummary, turnCount: compactedTurnCount, innerXML: xml)
+        let xml = envelope(turnsXML: body, checkpointSummary: summary, compactedTurnCount: compacted,
+                           toolsAvailable: toolsAvailable)
+        logEpisodicBudget(strategy: strategyLabel, messages: history.count, turnsRendered: recentTurns.count,
+                          inlineTurns: recentTurns.count, onDemandEffects: 0, xmlChars: xml.count,
+                          outcome: budgeted, correlation: correlation)
+        return xml
     }
 
     // MARK: - Pointer History (Skeleton + Tool)
@@ -471,176 +917,80 @@ struct EpisodicHistoryFormatter {
     /// Builds an XML episodic memory string where every turn is a skeleton.
     /// Outcomes point to `get_conversation_history(INDEX)` for on-demand retrieval.
     /// Actions include tool name and status only — no params (save tokens).
-    static func buildPointerHistoryString(from history: [ChatMessage]) -> String {
-        let (_, filteredHistory) = extractCheckpointContext(from: history)
-        let turns = pairTurns(from: filteredHistory)
-        guard !turns.isEmpty else { return "" }
+    ///
+    /// A `<compacted_context>` preamble still rides along when a checkpoint exists: the
+    /// skeleton replaces DETAIL, not the summary standing in for turns that were
+    /// compacted away. This used to discard the summary outright.
+    static func buildPointerHistoryString(from history: [ChatMessage], correlation: String? = nil,
+                                          strategyLabel: String = "pointer",
+                                          toolsAvailable: Bool = true) -> String {
+        let (turns, summary, compacted) = turnContext(from: history)
 
-        var xml = "<episodic_memory>\n  <recent>\n"
-        let totalTurns = turns.count
-
+        var body = ""
         for (index, turn) in turns.enumerated() {
-            let turnsAgo = totalTurns - index
-            let recency = turnsAgo == 1 ? "1 turn ago" : "\(turnsAgo) turns ago"
-            // Same authority cascade as buildRecentHistoryString — terminalOutcome
-            // takes precedence; fall back to action-derived classification for legacy rows.
-            let status: String
-            if let authoritative = Self.authoritativeStatus(from: turn.terminalOutcome) {
-                status = authoritative
-            } else if turn.wasCancelled {
-                status = "cancelled"
-            } else if turn.actions.contains(where: { $0.status.isFailure }) {
-                status = "failed"
-            } else {
-                status = "completed"
-            }
-            let goal = xmlEscape(truncate(turn.userQuery, maxLength: 80))
-
-            xml += "    <turn status=\"\(status)\" goal=\"\(goal)\" recency=\"\(recency)\">\n"
-            xml += "      <outcome>Call get_conversation_history(\(index)) for details.</outcome>\n"
-
-            if let termination = Self.renderTerminationElement(
-                terminalOutcome: turn.terminalOutcome,
-                terminalReason: turn.terminalReason,
-                indent: "      "
-            ) {
-                xml += termination
-            }
-
-            // Skeleton actions — tool name + status only, no params
-            for action in turn.actions {
-                let toolStatus = action.status.xmlValue
-                xml += "      <action tool=\"\(xmlEscape(action.toolName))\" status=\"\(toolStatus)\"/>\n"
-
-                // Always preserve error signals
-                if let error = action.errorReason {
-                    // Rewrite the action as non-self-closing to include error
-                    xml.removeLast("      <action tool=\"\(xmlEscape(action.toolName))\" status=\"\(toolStatus)\"/>\n".count)
-                    xml += "      <action tool=\"\(xmlEscape(action.toolName))\" status=\"\(toolStatus)\">\n"
-                    xml += "        <error>\(xmlEscape(error))</error>\n"
-                    xml += "      </action>\n"
-                }
-            }
-
-            if let correction = turn.userCorrection {
-                xml += "      <user_correction>\(xmlEscape(correction))</user_correction>\n"
-            }
-
-            xml += "    </turn>\n"
+            body += renderPointerTurn(turn, index: index, recency: recencyLabel(turnsAgo: turns.count - index),
+                                      toolsAvailable: toolsAvailable)
         }
 
-        xml += "  </recent>\n</episodic_memory>"
+        let xml = envelope(turnsXML: body, checkpointSummary: summary, compactedTurnCount: compacted,
+                           toolsAvailable: toolsAvailable)
+        // No effect BODIES here by construction, but every mutating action still renders a
+        // counts-only `diff="on_demand"` effect — reporting those through the budget outcome
+        // would log "0 effect(s)" for a conversation that recorded twenty file changes.
+        // Skeletons also grow linearly with conversation length, so the size is worth seeing.
+        let onDemand = turns.reduce(0) { $0 + $1.actions.filter { $0.effect != nil }.count }
+        logEpisodicBudget(strategy: strategyLabel, messages: history.count, turnsRendered: turns.count,
+                          inlineTurns: 0, onDemandEffects: onDemand, xmlChars: xml.count,
+                          outcome: applyEffectBudget(to: [], budget: nil), correlation: correlation,
+                          toolsAvailable: toolsAvailable)
         return xml
     }
 
     // MARK: - Hybrid History (Recent Full + Older Pointers)
 
     /// Builds an XML episodic memory string with a split strategy:
-    /// - Older turns: pointer skeletons (same as `buildPointerHistoryString`)
-    /// - Recent turns (last `inlineCount`): full content with outcomes, params, errors
+    /// - Older turns: pointer skeletons (`renderPointerTurn`, as `buildPointerHistoryString`)
+    /// - Recent turns (last `inlineCount`): full content (`renderInlineTurn`, as
+    ///   `buildRecentHistoryString`) — outcomes, params, errors, and effects
+    ///
+    /// Both segments call the SAME renderers the other two strategies call. The previous
+    /// inline branch was a copy that claimed parity in a comment and had lost `<effect>`.
     ///
     /// - Parameters:
     ///   - history: The array of ChatMessages.
     ///   - inlineCount: Number of most recent turns to render with full content (default 3).
-    static func buildHybridHistoryString(from history: [ChatMessage], inlineCount: Int = 3, includeImageNames: Bool = false) -> String {
-        // Extract checkpoint context — if a checkpoint exists, only format turns after it.
-        let (checkpointSummary, filteredHistory) = extractCheckpointContext(from: history)
-        let originalTurnCount = pairTurns(from: history).count
+    static func buildHybridHistoryString(from history: [ChatMessage], inlineCount: Int = 3, includeImageNames: Bool = false,
+                                         effectBudget: Int? = nil, correlation: String? = nil,
+                                         strategyLabel: String = "hybrid",
+                                         toolsAvailable: Bool = true) -> String {
+        let (turns, summary, compacted) = turnContext(from: history)
+        let pointerCount = max(0, turns.count - inlineCount)
+        // Only the inline segment carries effect bodies, so only it is budgeted — and with no
+        // tools it carries none, because `renderInlineTurn` marks every effect `withheld`
+        // ahead of consulting `elidedActionIDs`. Budgeting anyway would compute an elision set
+        // that changes no output and then log "ELIDED N of M" for bodies that were dropped for
+        // an entirely different, permanent reason. Same gate `buildRecentHistoryString` uses.
+        let budgeted = applyEffectBudget(to: turns.dropFirst(pointerCount),
+                                         budget: toolsAvailable ? effectBudget : nil)
 
-        let turns = pairTurns(from: filteredHistory)
-        guard !turns.isEmpty else { return "" }
-
-        let totalTurns = turns.count
-        let pointerCount = max(0, totalTurns - inlineCount)
-
-        var xml = "<episodic_memory>\n  <recent>\n"
-
+        var body = ""
         for (index, turn) in turns.enumerated() {
-            let turnsAgo = totalTurns - index
-            let recency = turnsAgo == 1 ? "1 turn ago" : "\(turnsAgo) turns ago"
-            let isPointer = index < pointerCount
-            // Same authority cascade as the other emitters.
-            let status: String
-            if let authoritative = Self.authoritativeStatus(from: turn.terminalOutcome) {
-                status = authoritative
-            } else if turn.wasCancelled {
-                status = "cancelled"
-            } else if turn.actions.contains(where: { $0.status.isFailure }) {
-                status = "failed"
-            } else {
-                status = "completed"
-            }
-            let goal = xmlEscape(truncate(turn.userQuery, maxLength: 80))
-
-            xml += "    <turn status=\"\(status)\" goal=\"\(goal)\" recency=\"\(recency)\">\n"
-
-            if isPointer {
-                // Pointer skeleton — outcome points to tool, actions have no params
-                xml += "      <outcome>Call get_conversation_history(\(index)) for details.</outcome>\n"
-
-                if let termination = Self.renderTerminationElement(
-                    terminalOutcome: turn.terminalOutcome,
-                    terminalReason: turn.terminalReason,
-                    indent: "      "
-                ) {
-                    xml += termination
-                }
-
-                for action in turn.actions {
-                    let toolStatus = action.status.xmlValue
-                    if let error = action.errorReason {
-                        xml += "      <action tool=\"\(xmlEscape(action.toolName))\" status=\"\(toolStatus)\">\n"
-                        xml += "        <error>\(xmlEscape(error))</error>\n"
-                        xml += "      </action>\n"
-                    } else {
-                        xml += "      <action tool=\"\(xmlEscape(action.toolName))\" status=\"\(toolStatus)\"/>\n"
-                    }
-                }
-            } else {
-                // Full inline — same format as buildRecentHistoryString
-                if includeImageNames, !turn.attachedImageNames.isEmpty {
-                    let names = turn.attachedImageNames.map(xmlEscape).joined(separator: ", ")
-                    xml += "      <attached_images>\(names)</attached_images>\n"
-                }
-                if let outcome = turn.outcome {
-                    xml += "      <outcome>\(xmlEscape(outcome))</outcome>\n"
-                }
-
-                if let termination = Self.renderTerminationElement(
-                    terminalOutcome: turn.terminalOutcome,
-                    terminalReason: turn.terminalReason,
-                    indent: "      "
-                ) {
-                    xml += termination
-                }
-
-                for action in turn.actions {
-                    let toolStatus = action.status.xmlValue
-                    let paramsAttrs = action.params.map { " \($0.key)=\"\(xmlEscape($0.value))\"" }.joined()
-                    xml += "      <action tool=\"\(xmlEscape(action.toolName))\" status=\"\(toolStatus)\">\n"
-
-                    if !action.params.isEmpty {
-                        xml += "        <params\(paramsAttrs)/>\n"
-                    }
-                    if let error = action.errorReason {
-                        xml += "        <error>\(xmlEscape(error))</error>\n"
-                    }
-                    xml += "      </action>\n"
-                }
-            }
-
-            if let correction = turn.userCorrection {
-                xml += "      <user_correction>\(xmlEscape(correction))</user_correction>\n"
-            }
-
-            xml += "    </turn>\n"
+            let recency = recencyLabel(turnsAgo: turns.count - index)
+            body += index < pointerCount
+                ? renderPointerTurn(turn, index: index, recency: recency, toolsAvailable: toolsAvailable)
+                : renderInlineTurn(turn, recency: recency, includeImageNames: includeImageNames,
+                                   elidedActionIDs: budgeted.elidedActionIDs,
+                                   toolsAvailable: toolsAvailable)
         }
 
-        xml += "  </recent>\n</episodic_memory>"
-
-        // Wrap with checkpoint preamble if a compacted context exists.
-        let compactedTurnCount = checkpointSummary != nil ? (originalTurnCount - turns.count) : 0
-        return wrapWithCheckpoint(summary: checkpointSummary, turnCount: compactedTurnCount, innerXML: xml)
+        let xml = envelope(turnsXML: body, checkpointSummary: summary, compactedTurnCount: compacted,
+                           toolsAvailable: toolsAvailable)
+        let hybridOnDemand = turns.prefix(pointerCount).reduce(0) { $0 + $1.actions.filter { $0.effect != nil }.count }
+        logEpisodicBudget(strategy: strategyLabel, messages: history.count, turnsRendered: turns.count,
+                          inlineTurns: turns.count - pointerCount, onDemandEffects: hybridOnDemand,
+                          xmlChars: xml.count, outcome: budgeted, correlation: correlation,
+                          toolsAvailable: toolsAvailable)
+        return xml
     }
 
     // MARK: - Turn Pairing
@@ -657,7 +1007,20 @@ struct EpisodicHistoryFormatter {
         let userCorrection: String?
         /// Truncated agent response (max 200 chars). Always present — for cancelled turns,
         /// synthesized from completed/failed tool names to preserve follow-up referents.
+        /// This is the PROMPT form: it rides every request, so it stays small.
         let outcome: String?
+        /// The same response UNTRUNCATED — the detail `get_conversation_history(N)` serves
+        /// when the model asks for what the skeleton deliberately withheld.
+        ///
+        /// The tool used to hand back `outcome`, i.e. the identical 200-char clip the prompt
+        /// already carried, so a `pointer` agent could never recover more than 200 characters
+        /// of any answer it had given and a `recentHistory` agent got a round trip that
+        /// returned exactly what it already had.
+        ///
+        /// Falls back to the synthesized outcome for cancelled/empty turns: there is no
+        /// fuller version, and the synthesis (which names the tools that did complete) beats
+        /// the raw placeholder text.
+        let fullResponse: String
         /// True when the user stopped the agent mid-execution before a response was generated.
         let wasCancelled: Bool
         /// Authoritative terminal outcome from the executor's `.executionFinished` event.
@@ -700,7 +1063,9 @@ struct EpisodicHistoryFormatter {
                             intent: data.name,
                             status: classification.status,
                             params: parseParams(data.params),
-                            errorReason: classification.errorReason
+                            errorReason: classification.errorReason,
+                            effect: data.effect,
+                            exitCode: data.exitCode
                         ))
                     }
                 }
@@ -726,6 +1091,7 @@ struct EpisodicHistoryFormatter {
                     || message.terminalOutcome == .cancelled
 
                 let outcome: String?
+                let fullResponse: String
                 if wasCancelled || responseText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     // Cancelled or empty — synthesize outcome from completed tool actions
                     // so the next turn has factual context about what was done before termination.
@@ -739,8 +1105,11 @@ struct EpisodicHistoryFormatter {
                     } else {
                         outcome = "(Terminated by user before any tools ran)"
                     }
+                    // No real response exists, so there is nothing fuller to serve.
+                    fullResponse = outcome ?? ""
                 } else {
                     outcome = truncate(responseText, maxLength: 200)
+                    fullResponse = responseText
                 }
 
                 turns.append(TurnPair(
@@ -749,6 +1118,7 @@ struct EpisodicHistoryFormatter {
                     actions: actions,
                     userCorrection: userCorrection,
                     outcome: outcome,
+                    fullResponse: fullResponse,
                     wasCancelled: wasCancelled,
                     terminalOutcome: message.terminalOutcome,
                     terminalReason: message.terminalReason
@@ -766,6 +1136,7 @@ struct EpisodicHistoryFormatter {
                 actions: [],
                 userCorrection: nil,
                 outcome: "No agent response",
+                fullResponse: "No agent response",
                 wasCancelled: true,
                 terminalOutcome: .cancelled,
                 terminalReason: "Agent never responded to this query"
@@ -775,3 +1146,5 @@ struct EpisodicHistoryFormatter {
         return turns
     }
 }
+
+private let episodicLogger = DGLogger(category: "Episodic")

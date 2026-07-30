@@ -240,34 +240,174 @@ final class ChatHistoryViewModelTests: XCTestCase {
     func testShowCodeInViewer() {
         viewModel.showCodeInViewer(language: "swift", code: "let x = 1")
 
-        XCTAssertNotNil(viewModel.codeViewerContent)
-        XCTAssertEqual(viewModel.codeViewerContent?.snippets.count, 1)
-        XCTAssertEqual(viewModel.codeViewerContent?.currentIndex, 0)
+        XCTAssertTrue(viewModel.isCodeViewerPanelPresented)
+        XCTAssertEqual(viewModel.codeViewerTabs.count, 1)
+        XCTAssertEqual(viewModel.activeCodeViewerTabID, viewModel.codeViewerTabs.first?.id,
+                       "The opened tab must be the active one")
     }
 
-    func testHideCodeViewer() {
+    func testCloseAllCodeViewerTabs() {
         viewModel.showCodeInViewer(language: "swift", code: "let x = 1")
-        viewModel.hideCodeViewer()
+        viewModel.closeAllCodeViewerTabs()
 
-        XCTAssertNil(viewModel.codeViewerContent)
-        XCTAssertFalse(viewModel.isShowingDiff)
-        XCTAssertNil(viewModel.originalCodeForDiff)
+        XCTAssertTrue(viewModel.codeViewerTabs.isEmpty)
+        XCTAssertFalse(viewModel.isCodeViewerVisible)
+        XCTAssertNil(viewModel.activeCodeViewerTabID)
     }
 
-    func testNavigateSnippets() {
+    /// Minimize keeps the tabs alive (the floating reopen button takes over); reopen
+    /// brings the same tabs back.
+    func testMinimizeKeepsTabsThenReopen() {
+        viewModel.showCodeInViewer(language: "swift", code: "let x = 1")
+
+        viewModel.minimizeCodeViewer()
+        XCTAssertFalse(viewModel.isCodeViewerVisible)
+        XCTAssertEqual(viewModel.codeViewerTabs.count, 1, "Minimize must NOT drop the tabs")
+        XCTAssertTrue(viewModel.isCodeViewerMinimized)
+
+        viewModel.reopenCodeViewer()
+        XCTAssertTrue(viewModel.isCodeViewerVisible)
+        XCTAssertTrue(viewModel.isCodeViewerPanelPresented)
+    }
+
+    func testNavigateTabs() {
         let snippet1 = CodeSnippet(language: "swift", code: "let a = 1")
         let snippet2 = CodeSnippet(language: "python", code: "a = 1")
-        viewModel.codeViewerContent = (snippets: [snippet1, snippet2], currentIndex: 0)
+        viewModel.codeViewerTabs = [CodeViewerTab(snippet: snippet1), CodeViewerTab(snippet: snippet2)]
+        viewModel.activeCodeViewerTabID = viewModel.codeViewerTabs.first?.id
+        viewModel.isCodeViewerVisible = true
 
         viewModel.navigateToNextSnippet()
-        XCTAssertEqual(viewModel.codeViewerContent?.currentIndex, 1)
+        XCTAssertEqual(viewModel.activeCodeViewerTabID, viewModel.codeViewerTabs[1].id)
 
         viewModel.navigateToPreviousSnippet()
-        XCTAssertEqual(viewModel.codeViewerContent?.currentIndex, 0)
+        XCTAssertEqual(viewModel.activeCodeViewerTabID, viewModel.codeViewerTabs[0].id)
 
-        // Should not go below 0
+        // Should not move before the first tab
         viewModel.navigateToPreviousSnippet()
-        XCTAssertEqual(viewModel.codeViewerContent?.currentIndex, 0)
+        XCTAssertEqual(viewModel.activeCodeViewerTabID, viewModel.codeViewerTabs[0].id)
+    }
+
+    /// Presentation is a mode that survives minimize/reopen but clears with the tabs.
+    func testPresentationTogglesAndClearsWithTabs() {
+        viewModel.showCodeInViewer(language: "swift", code: "let x = 1")
+        XCTAssertEqual(viewModel.codeViewerPresentation, .overlay, "Fresh viewer opens in overlay")
+
+        viewModel.toggleCodeViewerExpansion()
+        XCTAssertEqual(viewModel.codeViewerPresentation, .full)
+
+        // Survives minimize → reopen (the pill round-trip must not lose the mode).
+        viewModel.minimizeCodeViewer()
+        viewModel.reopenCodeViewer()
+        XCTAssertEqual(viewModel.codeViewerPresentation, .full)
+
+        viewModel.toggleCodeViewerExpansion()
+        XCTAssertEqual(viewModel.codeViewerPresentation, .overlay)
+
+        // Clears when the viewer fully dismisses.
+        viewModel.toggleCodeViewerExpansion()
+        viewModel.closeAllCodeViewerTabs()
+        XCTAssertEqual(viewModel.codeViewerPresentation, .overlay, "Dismissing the viewer must reset presentation")
+    }
+
+    /// Closing the LAST tab (not just close-all) also resets presentation.
+    func testClosingLastTabResetsPresentation() {
+        viewModel.showCodeInViewer(language: "swift", code: "let x = 1")
+        viewModel.toggleCodeViewerExpansion()
+
+        guard let tabID = viewModel.codeViewerTabs.first?.id else { return XCTFail("No tab opened") }
+        viewModel.closeCodeViewerTab(id: tabID)
+
+        XCTAssertTrue(viewModel.codeViewerTabs.isEmpty)
+        XCTAssertEqual(viewModel.codeViewerPresentation, .overlay)
+    }
+
+    /// Split toggles against overlay, and full-width remembers it entered from split.
+    func testSplitToggleAndFullRoundTrip() {
+        viewModel.showCodeInViewer(language: "swift", code: "let x = 1")
+
+        viewModel.toggleCodeViewerSplit()
+        XCTAssertEqual(viewModel.codeViewerPresentation, .split)
+
+        // full from split → back lands in split, not overlay.
+        viewModel.toggleCodeViewerExpansion()
+        XCTAssertEqual(viewModel.codeViewerPresentation, .full)
+        viewModel.toggleCodeViewerExpansion()
+        XCTAssertEqual(viewModel.codeViewerPresentation, .split,
+                       "Restoring from full must return to the mode it was entered from")
+
+        // From full, the split button goes STRAIGHT to split.
+        viewModel.toggleCodeViewerExpansion()   // → full
+        viewModel.toggleCodeViewerSplit()
+        XCTAssertEqual(viewModel.codeViewerPresentation, .split)
+
+        viewModel.toggleCodeViewerSplit()
+        XCTAssertEqual(viewModel.codeViewerPresentation, .overlay)
+    }
+
+    // MARK: - Editable tabs
+
+    /// Drafts live beside the immutable snippet; typing back to the original clears dirty.
+    func testDraftLifecycleAndDirtyState() {
+        viewModel.showCodeInViewer(language: "swift", code: "let a = 1")
+        guard let id = viewModel.codeViewerTabs.first?.id else { return XCTFail("No tab") }
+        XCTAssertFalse(viewModel.codeViewerTabs[0].isDirty)
+
+        viewModel.updateCodeViewerDraft(tabID: id, content: "let a = 2")
+        XCTAssertTrue(viewModel.codeViewerTabs[0].isDirty)
+        XCTAssertEqual(viewModel.codeViewerTabs[0].effectiveCode, "let a = 2")
+        XCTAssertEqual(viewModel.codeViewerTabs[0].snippet.code, "let a = 1",
+                       "The snippet is the immutable chat block — edits must not mutate it")
+
+        viewModel.updateCodeViewerDraft(tabID: id, content: "let a = 1")
+        XCTAssertFalse(viewModel.codeViewerTabs[0].isDirty,
+                       "Typing back to the restore point clears the dirty state")
+    }
+
+    /// Closing a dirty tab pends a confirmation; force-close discards. Clean closes never pend.
+    func testDirtyCloseRequiresConfirmation() {
+        viewModel.showCodeInViewer(language: "swift", code: "A")
+        guard let id = viewModel.codeViewerTabs.first?.id else { return XCTFail("No tab") }
+        viewModel.updateCodeViewerDraft(tabID: id, content: "B")
+
+        viewModel.closeCodeViewerTab(id: id)
+        XCTAssertEqual(viewModel.pendingCloseTabID, id, "Dirty close must pend, not close")
+        XCTAssertEqual(viewModel.codeViewerTabs.count, 1, "Tab must survive until confirmed")
+
+        viewModel.forceCloseCodeViewerTab(id: id)
+        XCTAssertTrue(viewModel.codeViewerTabs.isEmpty)
+        XCTAssertNil(viewModel.pendingCloseTabID)
+    }
+
+    func testDirtyCloseAllRequiresConfirmation() {
+        viewModel.showCodeInViewer(language: "swift", code: "A")
+        viewModel.showCodeInViewer(language: "python", code: "b = 1")
+        guard let dirtyID = viewModel.codeViewerTabs.first?.id else { return XCTFail("No tab") }
+        viewModel.updateCodeViewerDraft(tabID: dirtyID, content: "CHANGED")
+
+        viewModel.closeAllCodeViewerTabs()
+        XCTAssertTrue(viewModel.isPendingCloseAll, "Close-all with a dirty tab must pend")
+        XCTAssertEqual(viewModel.codeViewerTabs.count, 2, "Tabs must survive until confirmed")
+
+        viewModel.forceCloseAllCodeViewerTabs()
+        XCTAssertTrue(viewModel.codeViewerTabs.isEmpty)
+        XCTAssertFalse(viewModel.isPendingCloseAll)
+    }
+
+    /// Accumulation: opening blocks from different messages adds tabs rather than replacing.
+    func testTabsAccumulateAcrossOpens() {
+        viewModel.showCodeInViewer(language: "swift", code: "let a = 1")
+        viewModel.showCodeInViewer(language: "python", code: "b = 2")
+
+        XCTAssertEqual(viewModel.codeViewerTabs.count, 2, "Second open must ADD a tab, not replace")
+        XCTAssertEqual(viewModel.activeCodeViewerTabID, viewModel.codeViewerTabs.last?.id,
+                       "The most recently opened tab is focused")
+
+        // Re-opening an identical block focuses the existing tab instead of duplicating it.
+        viewModel.showCodeInViewer(language: "swift", code: "let a = 1")
+        XCTAssertEqual(viewModel.codeViewerTabs.count, 2, "Re-opening the same block must not duplicate a tab")
+        XCTAssertEqual(viewModel.activeCodeViewerTabID, viewModel.codeViewerTabs.first?.id,
+                       "Re-opening focuses the existing tab")
     }
 
     // MARK: - Copy to Clipboard

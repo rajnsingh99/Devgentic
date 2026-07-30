@@ -345,6 +345,12 @@ private func executeSingleTool(
         continuation.yield(.delegationStarted(task: task))
     }
 
+    // [CodeViewer] Pre-write snapshot for file-writing tools, captured from the
+    // POST-HITL-edit arguments (the path that will actually be written). This is what
+    // the timeline's "View changes" affordance diffs against — nothing else records the
+    // file's prior state once the write lands.
+    let preWriteContent = await preWriteSnapshot(toolName: toolName, arguments: effectiveArguments)
+
     let dispatchStart = Date()
     let result = await toolMediator.executePreparedTool(
         toolName: toolName,
@@ -361,8 +367,12 @@ private func executeSingleTool(
         continuation.yield(.delegationCompleted(summary: summary))
     }
 
+    // Edit tools' params carry only find/replace strings — read the post-state back so
+    // the timeline can diff what actually changed.
+    let postWriteContent = await postWriteSnapshot(toolName: toolName, arguments: effectiveArguments, isSuccess: result.isSuccess)
+
     // Emit structured success/failure — category drives negativeConstraints policy and UI affordance.
-    let output = ToolOutput(toolName: toolName, params: effectiveParams, output: result.llmObservation, isSuccess: result.isSuccess)
+    let output = ToolOutput(toolName: toolName, params: effectiveParams, output: result.llmObservation, isSuccess: result.isSuccess, preWriteContent: preWriteContent, postWriteContent: postWriteContent)
     if let category = result.failureCategory {
         continuation.yield(.toolFailed(output, category: category))
     } else {
@@ -405,6 +415,78 @@ private func executeSingleTool(
 }
 
 // MARK: - Testable Helpers
+
+/// Tools whose successful execution mutates a file on disk — all of them get a PRE-write
+/// snapshot for the timeline's "View changes" diff.
+private let preSnapshotToolNames: Set<String> = [
+    "write_file", "overwrite_file", "create_new_file", "edit_code_single", "edit_code_batch"
+]
+
+/// Tools whose params DON'T carry the full post-state (`edit_code_*` carry find/replace
+/// strings only) — these get a POST-write read-back after success. Ground truth beats
+/// replicating the tool's replacement semantics (uniqueness rules, matching behavior)
+/// in the UI, where they would silently drift.
+private let postSnapshotToolNames: Set<String> = ["edit_code_single", "edit_code_batch"]
+
+/// Snapshot cap: source files land far below this; anything bigger isn't worth
+/// carrying in a persisted timeline event just to render a diff.
+private let preWriteSnapshotByteLimit = 512_000
+
+/// The file-target path of a mutating tool call, honoring both spellings: native tools
+/// take `path`, split tools `file_path`.
+private func fileTargetPath(in arguments: [String: JSONValue]) -> String? {
+    guard let path = arguments["path"]?.stringValue ?? arguments["file_path"]?.stringValue,
+          !path.isEmpty else { return nil }
+    return (path as NSString).expandingTildeInPath
+}
+
+/// Size-capped UTF-8 read of a snapshot target. Nil = unreadable or over the cap.
+private func snapshotContents(atPath resolved: String) -> String? {
+    guard let attributes = try? FileManager.default.attributesOfItem(atPath: resolved),
+          (attributes[.size] as? Int ?? .max) <= preWriteSnapshotByteLimit,
+          let content = try? String(contentsOfFile: resolved, encoding: .utf8) else {
+        return nil
+    }
+    return content
+}
+
+/// The target file's content just before a file-mutating tool runs. Semantics:
+/// "" = the file doesn't exist yet (a diff against empty shows the whole write as
+/// added — meaningful); nil = not a file-mutating tool, no path argument, or the file
+/// is unreadable/over the cap (no diff affordance, logged).
+private func preWriteSnapshot(toolName: String, arguments: [String: JSONValue]) async -> String? {
+    guard preSnapshotToolNames.contains(toolName),
+          let resolved = fileTargetPath(in: arguments) else { return nil }
+
+    // Off the cooperative pool: this reads up to `preWriteSnapshotByteLimit` bytes
+    // synchronously, and blocking a cooperative thread starves every other concurrent
+    // task in the agent run.
+    return await Task.detached(priority: .utility) { () -> String? in
+        guard FileManager.default.fileExists(atPath: resolved) else { return "" }
+        guard let content = snapshotContents(atPath: resolved) else {
+            logger.info("[CodeViewer] Pre-write snapshot skipped for '\(resolved)' — unreadable or over \(preWriteSnapshotByteLimit) bytes; the timeline row will open without a diff.")
+            return nil
+        }
+        return content
+    }.value
+}
+
+/// The target file's content just after a SUCCESSFUL edit-tool run — the post-state the
+/// params can't provide. Nil = tool doesn't need read-back, the call failed, or the file
+/// is unreadable/over the cap (row gets no viewer affordance, logged).
+private func postWriteSnapshot(toolName: String, arguments: [String: JSONValue], isSuccess: Bool) async -> String? {
+    guard isSuccess, postSnapshotToolNames.contains(toolName),
+          let resolved = fileTargetPath(in: arguments) else { return nil }
+
+    // Off the cooperative pool — see `preWriteSnapshot`.
+    return await Task.detached(priority: .utility) { () -> String? in
+        guard let content = snapshotContents(atPath: resolved) else {
+            logger.info("[CodeViewer] Post-edit snapshot skipped for '\(resolved)' — unreadable or over \(preWriteSnapshotByteLimit) bytes; the timeline row will open without a diff.")
+            return nil
+        }
+        return content
+    }.value
+}
 
 func deduplicateToolCalls(_ toolCalls: [PendingToolCall]) -> [PendingToolCall] {
     // Phase 1: Exact dedup — remove calls with identical name + serialized params.
@@ -481,11 +563,33 @@ func serializeToolParams(_ params: [String: JSONValue]) -> String {
 /// signatures for deduplication and circuit-breaker fingerprinting.
 ///
 /// Handles: trailing slashes, tilde expansion, `.` / `..` segments, doubled slashes.
+///
+/// Applies ONLY to arguments that are actually paths, chosen by KEY. It used to sniff the
+/// VALUE for a leading `/`, `~` or `./` — which is true of any file whose first line is a
+/// `//` comment, so `write_file`'s `content` was run through `standardizingPath`. That
+/// silently (a) collapsed every `//` to `/`, turning Java/Swift/C line comments into syntax
+/// errors, and (b) truncated the content at PATH_MAX (1024 bytes). The corrupted string
+/// became the HITL banner's preview, the live Code Viewer tab, `ToolExecutionData.params`
+/// and therefore the episodic `effect` diff — so the user approved a write they could only
+/// partly see, and the model read its own mangled output back on the next turn and
+/// reproduced it. Field-observed 2026-07-27 (live-tab lengths 1014/1018/1019/1021 for files
+/// of 1.5K–2.9K, and `+/ Program 3:` in the rendered diff).
+private let pathArgumentKeys: Set<String> = [
+    "path", "file_path", "filepath", "filePath", "file", "filename", "destination",
+    "destination_path", "destinationPath", "source", "source_path", "sourcePath",
+    "src", "dest", "target", "target_path", "targetPath", "new_path", "newPath",
+    "current_path", "currentPath", "folder", "folderPath", "directory",
+    "directoryPath", "dir", "copy_path", "original", "item"
+]
+
 func normalizePathArguments(_ params: [String: JSONValue]) -> [String: JSONValue] {
-    params.mapValues { value in
-        guard case .string(let str) = value,
+    params.reduce(into: [String: JSONValue]()) { result, entry in
+        let (key, value) = entry
+        guard pathArgumentKeys.contains(key),
+              case .string(let str) = value,
               str.hasPrefix("/") || str.hasPrefix("~") || str.hasPrefix("./") else {
-            return value
+            result[key] = value
+            return
         }
         var normalized = str
         // Strip trailing slash (unless root "/")
@@ -496,7 +600,7 @@ func normalizePathArguments(_ params: [String: JSONValue]) -> [String: JSONValue
         normalized = (normalized as NSString).expandingTildeInPath
         // Resolve . and .. components, collapse double slashes
         normalized = (normalized as NSString).standardizingPath
-        return .string(normalized)
+        result[key] = .string(normalized)
     }
 }
 

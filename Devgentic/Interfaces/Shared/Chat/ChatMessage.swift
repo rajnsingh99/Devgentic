@@ -46,13 +46,91 @@ struct ToolExecutionData: Equatable, Identifiable, Sendable {
     /// flat timeline back into per-iteration assistant(tool_calls)→tool(result) turns (G1 Piece 2).
     /// Optional + nil for legacy rows / non-ReAct paths.
     var stepId: Int? = nil
+    /// For file-writing tools: the target file's content just before the write ("" = the
+    /// file didn't exist; nil = not captured). Set on completion from `ToolOutput`; drives
+    /// the timeline's "View changes" → Code Viewer diff. Size-capped at capture.
+    ///
+    /// SESSION-SCOPED: deliberately NOT persisted (see `encode(to:)`). Keeping it would put
+    /// up to a megabyte of file content per write into the message's timeline blob —
+    /// which is re-encoded whole on every flush and decoded eagerly on every conversation
+    /// load. See `Docs/large-tool-payload-storage.md` for the eventual fix.
+    var preWriteContent: String? = nil
+    /// For EDIT tools (find/replace params, no full content): the file read back after a
+    /// successful edit — the post-state the params can't provide. Size-capped at capture.
+    /// Session-scoped like `preWriteContent`.
+    var postWriteContent: String? = nil
+
+    /// What this call changed on disk — derived from the snapshots ONCE, when the tool
+    /// finishes.
+    ///
+    /// Computed here rather than where it's consumed because the episodic formatter runs on
+    /// EVERY request: deriving it there re-ran an O(n²) LCS for every historical write on
+    /// every prompt build (a 4000-line diff measured ~6s in test).
+    ///
+    /// Unlike the snapshots above this IS persisted — it's a bounded summary (4KB cap), and
+    /// a resumed conversation that can't say what it changed can't undo it. See
+    /// `Docs/codeviewer-rescope-design.md` §12 D1.
+    var effect: ActionEffect? = nil
+    /// The COMMAND's exit status for shell-family tools, nil for everything else.
+    ///
+    /// Not a failure signal — the tool ran fine. `grep` exits 1 for "no match" and `diff` for
+    /// "files differ", so classifying non-zero as a tool failure would abort a run after three
+    /// consecutive searches (`CognitiveCircuitBreaker` aborts at 3 consecutive failures).
+    /// It is carried because a verdict cannot be re-derived: re-running `swift build` after an
+    /// edit answers a different question than the original run did.
+    var exitCode: Int32? = nil
+
+    /// Longest tool output retained in the timeline. Generous by design: it must not bite
+    /// normal tool results, only pathological ones (build logs, huge file dumps). Beyond
+    /// this the output is truncated with an explicit marker — never silently.
+    ///
+    /// This value is load-bearing beyond display: `TimelineTurnReconstructor` rebuilds a
+    /// resumed run's LLM tool observations from `output`, so the marker is what tells the
+    /// model its view of that observation is incomplete.
+    static let maxPersistedOutputLength = 32_768
+
+    /// Truncates `text` to `maxPersistedOutputLength`, appending a marker that states what
+    /// was dropped. Returns the input unchanged when it already fits. Pure, for testing.
+    static func cappedOutput(_ text: String) -> String {
+        guard text.count > maxPersistedOutputLength else { return text }
+        let dropped = text.count - maxPersistedOutputLength
+        return String(text.prefix(maxPersistedOutputLength))
+            + "\n\n… [truncated \(dropped) characters — the full output was not retained]"
+    }
 }
 
 // Backward-compatible Codable: persisted history from prior builds lacks
-// `failureCategory`, `durationMs`, and `stepId` — decode them as optional and default to nil.
+// `failureCategory`, `durationMs`, `stepId`, `preWriteContent`, and `postWriteContent` —
+// decode them as optional and default to nil.
+//
+// ENCODE is explicit (not synthesized) so the file-snapshot fields can be OMITTED from
+// persistence while still decoding cleanly on the way in. Rationale: the snapshots exist
+// to power the timeline's "View changes" affordance during the session that produced the
+// write, which is when anyone looks. Persisting them put up to 1MB per write into the
+// timeline blob — permanently, re-encoded on every flush. Decode still reads them so any
+// rows already written by an earlier build keep working.
 extension ToolExecutionData: Codable {
     enum CodingKeys: String, CodingKey {
-        case id, name, params, output, isSuccess, failureCategory, durationMs, isExecuting, stepId
+        case id, name, params, output, isSuccess, failureCategory, durationMs, isExecuting, stepId, preWriteContent, postWriteContent, effect, exitCode
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(params, forKey: .params)
+        try c.encodeIfPresent(output, forKey: .output)
+        try c.encodeIfPresent(isSuccess, forKey: .isSuccess)
+        try c.encodeIfPresent(failureCategory, forKey: .failureCategory)
+        try c.encodeIfPresent(durationMs, forKey: .durationMs)
+        try c.encode(isExecuting, forKey: .isExecuting)
+        try c.encodeIfPresent(stepId, forKey: .stepId)
+        // preWriteContent / postWriteContent intentionally omitted — session-scoped.
+        // `effect` IS encoded: it is the bounded summary derived from them, and it is what
+        // lets a resumed run describe (and undo) what it changed.
+        try c.encodeIfPresent(effect, forKey: .effect)
+        // Like `effect`: a verdict the next turn cannot re-derive.
+        try c.encodeIfPresent(exitCode, forKey: .exitCode)
     }
 
     init(from decoder: Decoder) throws {
@@ -64,8 +142,12 @@ extension ToolExecutionData: Codable {
         isSuccess = try c.decodeIfPresent(Bool.self, forKey: .isSuccess)
         failureCategory = try c.decodeIfPresent(ToolFailureCategory.self, forKey: .failureCategory)
         durationMs = try c.decodeIfPresent(Int.self, forKey: .durationMs)
+        exitCode = try c.decodeIfPresent(Int32.self, forKey: .exitCode)
         isExecuting = try c.decode(Bool.self, forKey: .isExecuting)
         stepId = try c.decodeIfPresent(Int.self, forKey: .stepId)
+        preWriteContent = try c.decodeIfPresent(String.self, forKey: .preWriteContent)
+        postWriteContent = try c.decodeIfPresent(String.self, forKey: .postWriteContent)
+        effect = try c.decodeIfPresent(ActionEffect.self, forKey: .effect)
     }
 }
 
@@ -770,7 +852,11 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         case .plainText(let text):
             return max(1, text.count / 4)
         case .error(let title, let details, _, _):
-            return max(1, ((title?.count ?? 0) + details.count) / 4)
+            // Measures the string that actually ships. Every other case here estimates
+            // exactly what `textContent` returns; this one summed the raw fields and missed
+            // both the ": " separator and the "Error" default title the rendered form
+            // carries — the only case where the estimator and the shipped text disagreed.
+            return max(1, "\(title ?? "Error"): \(details)".count / 4)
         case .mediaArtifact:
             return 0
         case .checkpoint(let summary):

@@ -60,8 +60,13 @@ enum PreSendFitHint {
         // and the orchestration path, so widening it would change Code-mode vision
         // behaviour as a side effect of adding a hint.
         let llmConfig = profile.resolvedLLMConfig
-        let window = EffectiveContextWindow.resolve(for: llmConfig)
-        let trained = EffectiveContextWindow.trainedWindow(for: llmConfig)
+        // Resolved through the SAME call the ring uses, so both composer surfaces agree on the
+        // denominator — including MLX healing, which only the ring used to run. An unhealed
+        // MLX profile therefore read a real 32K in the ring and 8K here, and because the
+        // shared dedupe key ends in `|window`, the send-time banner then stopped updating this
+        // one in place: two banners, two numbers, neither replacing the other.
+        let (window, trained) = llmConfig.map { ContextWindowUsage.windows(for: $0, profileID: profile.id) }
+            ?? (EffectiveContextWindow.resolve(for: nil), nil)
 
         // Gated on vision so the composer never warns about images a non-vision model
         // will have stripped before they reach the wire. Matches the send-time gate, so
@@ -77,7 +82,7 @@ enum PreSendFitHint {
             : 0
 
         let estimated = PromptFitCheck.estimatedTokens(
-            attachmentChars: PromptFitCheck.estimatedAttachmentChars(forFileSizes: estimatableSizes(of: attachedFiles)),
+            attachmentChars: PromptFitCheck.estimatedAttachmentChars(for: attachedFiles, profile: profile),
             knowledgeChars: 0,
             retrievalChars: 0,
             queryChars: typedText.count,

@@ -281,36 +281,21 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
         //    or when single quotes co-exist with double quotes in a mixed format.
         result = normalizeSingleQuotes(result)
 
-        // 2. Unquoted key normalization: {key: "val"} → {"key": "val"}
-        //    JavaScript-style unquoted object keys are invalid JSON.
-        //    Matches a bare identifier after { , [ or newline in key position (before ':').
-        //    Only targets keys — values like `null`, `true`, `false` are handled by step 4.
-        if let regex = try? NSRegularExpression(
-            pattern: #"(?<=[\{\[,\n])\s*([a-zA-Z_]\w*)\s*:"#
-        ) {
-            result = regex.stringByReplacingMatches(
-                in: result,
-                range: NSRange(result.startIndex..., in: result),
-                withTemplate: " \"$1\":")
-        }
-
-        // 3. Trailing comma removal: {"key": "val",} → {"key": "val"}
-        let trailingCommaPattern = #",\s*([}\]])"#
-        if let regex = try? NSRegularExpression(pattern: trailingCommaPattern) {
-            result = regex.stringByReplacingMatches(
-                in: result,
-                range: NSRange(result.startIndex..., in: result),
-                withTemplate: "$1"
-            )
-        }
-
-        // 4. Python-style literal normalization.
-        //    Models (especially Llama 3.1) emit Python literals instead of JSON:
-        //      NULL / None → null,  True → true,  False → false,  NaN → null
-        //    Safe here because sanitizeJSON() only runs on extracted JSON objects
-        //    (after brace-depth extraction), not on free-text reasoning.
-        //    Word-boundary anchors (\b) prevent corrupting keys like "nullable".
-        result = normalizePythonLiterals(result)
+        // 2-4. Structural repairs, applied OUTSIDE string values only:
+        //        • unquoted keys      {key: "v"}     → {"key": "v"}
+        //        • trailing commas    {"k": 1,}      → {"k": 1}
+        //        • Python literals    True/None/NULL → true/null
+        //
+        //      These were three whole-payload regexes. "Safe because this only runs on
+        //      extracted JSON objects" was the reasoning, and it was wrong: an extracted JSON
+        //      object CONTAINS the file the model is writing, as the string value of
+        //      `arguments.content`. `\bNaN\b` turned Java's `Double.NaN` into `Double.null`,
+        //      and `,\s*([}\]])` deleted real trailing commas out of array initializers —
+        //      silently, because the payload stayed valid JSON either way.
+        //
+        //      Note this necessarily runs BEFORE step 7 escapes raw newlines; the walker
+        //      keys on quotes, not lines, so string tracking holds regardless.
+        result = JSONStructuralSanitizer.repairingStructure(result, quotingUnquotedKeys: true)
 
         // 5. Unwrap stringified arguments: "arguments": "{...}" → "arguments": {...}
         //    Some models serialize the arguments dict as a JSON string instead of an object.
@@ -377,33 +362,6 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
         }
 
         return String(result)
-    }
-
-    /// Replaces Python-style literals with their JSON equivalents.
-    /// Uses word-boundary matching to avoid corrupting embedded strings
-    /// (e.g., a key named "nullable" won't be mangled).
-    private static func normalizePythonLiterals(_ json: String) -> String {
-        var result = json
-
-        // Order matters: longest tokens first to avoid partial matches.
-        let replacements: [(pattern: String, replacement: String)] = [
-            (#"\bFalse\b"#,  "false"),   // Python bool
-            (#"\bTrue\b"#,   "true"),    // Python bool
-            (#"\bNone\b"#,   "null"),    // Python null
-            (#"\bNULL\b"#,   "null"),    // Uppercase null (MySQL / C-style leak)
-            (#"\bNaN\b"#,    "null"),    // Python float NaN → safest as null
-        ]
-
-        for (pattern, replacement) in replacements {
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
-            result = regex.stringByReplacingMatches(
-                in: result,
-                range: NSRange(result.startIndex..., in: result),
-                withTemplate: replacement
-            )
-        }
-
-        return result
     }
 
     /// Replaces single quotes used as JSON delimiters with double quotes.

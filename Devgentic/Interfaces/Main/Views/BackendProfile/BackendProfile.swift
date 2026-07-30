@@ -32,6 +32,18 @@ extension BackendProfileSnapshot {
         case .workflow, .imageGen: return nil
         }
     }
+
+    /// Names of the tools this profile actually has switched on. Empty for types that
+    /// carry no tools (bot/workflow/imageGen) — the `.stateless` file strategy is only
+    /// meaningful when something can act on the paths it hands over.
+    var enabledToolNames: Set<String> {
+        switch details {
+        case .agent(let config), .code(let config):
+            return Set(config.tools.filter(\.isEnabled).map(\.name))
+        default:
+            return []
+        }
+    }
 }
 
 // MARK: - Type-Specific Config Structs

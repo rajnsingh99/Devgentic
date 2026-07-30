@@ -260,7 +260,7 @@ class AgentConnect: @unchecked Sendable {
                     // Distinct from the small scratchpad budget above — the native path
                     // sends the full conversation, so it gets the larger slice; the ReAct
                     // loop compacts oldest tool exchanges past this to bound growth.
-                    let nativeContextBudgetChars = max(8000, Int(Double(contextWindow) * 0.75) * 4)
+                    let nativeContextBudgetChars = PromptFitCheck.nativePayloadCharBudget(forContextWindow: contextWindow)
 
                     // Resolve history strategy from profile (default: .recentHistory)
                     let historyStrategy: HistoryStrategy
@@ -300,7 +300,9 @@ class AgentConnect: @unchecked Sendable {
                     // Even tool-less agents benefit from conversation context.
                     var effectiveHistory = chatHistory // Mutable copy — compaction may insert a checkpoint
                     if !effectiveHistory.isEmpty {
-                        let charBudget = max(4000, Int(Double(contextWindow) * 0.6) * 4) // 60% of context, ~4 chars/token, floor 4K
+                        // Shared with the fit gauges via PromptFitCheck so the number they
+                        // report is measured against the same allocation this spends.
+                        let charBudget = PromptFitCheck.historyCharBudget(forContextWindow: contextWindow)
 
                         // --- IC-Powered History Compaction (Background) ---
                         // Moved OFF the request path (2026-07-20). The 30s "timeout" around
@@ -368,56 +370,25 @@ class AgentConnect: @unchecked Sendable {
                         //     flow and learns tool-call structure from the in-request
                         //     iteration scratchpad alone.
                         //   - MLX (non-native): keeps `recentHistory` only, no turn pairs.
-                        switch historyStrategy {
-                        case .recentHistory:
-                            recentHistory = EpisodicHistoryFormatter.buildRecentHistoryString(
-                                from: effectiveHistory, limit: 10,
-                                includeImageNames: profile.supportsVisionInput
-                            )
-                            if isNativeProvider {
-                                nativeHistoryTurns = NativeHistoryConverter.buildNativeTurns(
-                                    from: effectiveHistory, limit: 10, charBudget: charBudget,
-                                    includeImages: historyImagesEnabled,
-                                    correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)"
-                                )
-                            }
-                        case .fullHistory:
-                            recentHistory = EpisodicHistoryFormatter.buildRecentHistoryString(
-                                from: effectiveHistory, limit: effectiveHistory.count,
-                                includeImageNames: profile.supportsVisionInput
-                            )
-                            if isNativeProvider {
-                                nativeHistoryTurns = NativeHistoryConverter.buildNativeTurns(
-                                    from: effectiveHistory, limit: nil, charBudget: charBudget,
-                                    includeImages: historyImagesEnabled,
-                                    correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)"
-                                )
-                            }
+                        // Episodic XML — one dispatch for all four strategies, shared with
+                        // the fit gauges so what they measure is what ships.
+                        recentHistory = EpisodicHistoryFormatter.build(
+                            strategy: historyStrategy,
+                            from: effectiveHistory,
+                            includeImageNames: profile.supportsVisionInput,
+                            effectBudget: ActionEffect.diffBudget(forHistoryCharBudget: charBudget),
+                            correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)",
+                            toolsAvailable: !isBotFlow
+                        )
 
-                        case .pointer:
-                            recentHistory = EpisodicHistoryFormatter.buildPointerHistoryString(
-                                from: effectiveHistory
+                        if isNativeProvider {
+                            nativeHistoryTurns = NativeHistoryConverter.build(
+                                strategy: historyStrategy,
+                                from: effectiveHistory,
+                                charBudget: charBudget,
+                                includeImages: historyImagesEnabled,
+                                correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)"
                             )
-                            if isNativeProvider {
-                                nativeHistoryTurns = NativeHistoryConverter.buildPointerTurns(
-                                    from: effectiveHistory,
-                                    includeImages: historyImagesEnabled,
-                                    correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)"
-                                )
-                            }
-
-                        case .hybrid:
-                            recentHistory = EpisodicHistoryFormatter.buildHybridHistoryString(
-                                from: effectiveHistory, inlineCount: 3,
-                                includeImageNames: profile.supportsVisionInput
-                            )
-                            if isNativeProvider {
-                                nativeHistoryTurns = NativeHistoryConverter.buildHybridTurns(
-                                    from: effectiveHistory, inlineCount: 3, charBudget: charBudget,
-                                    includeImages: historyImagesEnabled,
-                                    correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)"
-                                )
-                            }
                         }
 
                         // Only inject get_conversation_history tool if pointer references
@@ -436,7 +407,7 @@ class AgentConnect: @unchecked Sendable {
 
                         if hasPointers {
                             activeTools.append(
-                                wrapTool(ConversationHistoryTool(chatHistory: effectiveHistory), requiresConfirmation: false)
+                                wrapTool(ConversationHistoryTool(chatHistory: effectiveHistory, correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)"), requiresConfirmation: false)
                             )
                         }
                     }
@@ -734,7 +705,7 @@ class AgentConnect: @unchecked Sendable {
                     let memoryConfig = MemoryBudgetConfig.derive(contextWindow: contextWindow, tier: modelTier)
                     // #22: native turn-payload budget (~75% of context window as chars) —
                     // bounds liveConversationTurns growth on workflow agent nodes too.
-                    let nativeContextBudgetChars = max(8000, Int(Double(contextWindow) * 0.75) * 4)
+                    let nativeContextBudgetChars = PromptFitCheck.nativePayloadCharBudget(forContextWindow: contextWindow)
 
                     // Resilience config
                     let retryPolicy: RetryPolicy

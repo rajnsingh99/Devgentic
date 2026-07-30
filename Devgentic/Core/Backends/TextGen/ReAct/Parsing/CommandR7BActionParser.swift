@@ -116,22 +116,15 @@ struct CommandR7BActionParser: CognitiveParserProtocol {
         return nil
     }
 
+    /// Repairs trailing commas and Python literals in the model's JSON.
+    ///
+    /// Delegates to the shared sanitizer so the repair happens OUTSIDE string values only.
+    /// This used to be eleven copies of the same two whole-payload regexes, each of which
+    /// also rewrote the file content carried in a `write_file` call's `arguments.content` —
+    /// deleting real trailing commas from array initializers and turning `Double.NaN` into
+    /// `Double.null`. See `JSONStructuralSanitizer` for the full account.
     private func sanitizeJSON(_ raw: String) -> String {
-        var s = raw
-        if let regex = try? NSRegularExpression(pattern: #",\s*([}\]])"#) {
-            s = regex.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: "$1")
-        }
-        let subs: [(String, String)] = [
-            (#"\bTrue\b"#, "true"),
-            (#"\bFalse\b"#, "false"),
-            (#"\bNone\b"#, "null")
-        ]
-        for (pattern, replacement) in subs {
-            if let regex = try? NSRegularExpression(pattern: pattern) {
-                s = regex.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: replacement)
-            }
-        }
-        return s
+        JSONStructuralSanitizer.repairingStructure(raw)
     }
 
     private func extractReasoning(from text: String, extractedCount: Int) -> String {

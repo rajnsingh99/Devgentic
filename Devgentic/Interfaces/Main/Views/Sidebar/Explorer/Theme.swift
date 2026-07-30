@@ -101,8 +101,6 @@ struct ThemeDecorator: Theme {
     var placeholderText: Color { base.placeholderText }
     var controlAccent: Color { accentOverride ?? base.controlAccent }
     var userBubbleBackground: Color { accentOverride ?? base.userBubbleBackground }
-    var inlineCodeBackground: Color { base.inlineCodeBackground }
-    var inlineCodeText: Color { base.inlineCodeText }
     var inlineCodeHighlight: Color { accentColor }
     var accentMuted: Color { accentColor.opacity(0.7) }
     var codeBlockHeaderBackground: Color { base.codeBlockHeaderBackground }
@@ -278,13 +276,11 @@ protocol Theme {
     /// Background for the current user's chat bubble.
     var userBubbleBackground: Color { get }
 
-    /// Background for inline `code` spans inside markdown.
-    var inlineCodeBackground: Color { get }
-
-    /// Text color for inline `code` spans.
-    var inlineCodeText: Color { get }
-
-    /// Distinct foreground color for inline `code` spans to stand out from body text.
+    /// Foreground color for inline `code` spans, so they stand out from body text.
+    ///
+    /// Colour is the ONLY treatment: the filled background chip was retired 2026-07-27
+    /// (it read as noise in a paragraph naming several symbols, and competed with the
+    /// search highlight, which is the one background here that means something).
     var inlineCodeHighlight: Color { get }
 
     /// A muted variant of the accent color.
@@ -401,8 +397,6 @@ extension Theme {
     var placeholderText: Color { Color(nsColor: .placeholderTextColor) }
     var controlAccent: Color { Color(nsColor: .controlAccentColor) }
     var userBubbleBackground: Color { Color(hex: "#388E8E") }
-    var inlineCodeBackground: Color { Color(red: 0.2, green: 0.2, blue: 0.22) }
-    var inlineCodeText: Color { Color(red: 0.9, green: 0.9, blue: 0.9) }
     var inlineCodeHighlight: Color { accentColor }
     var accentMuted: Color { accentColor.opacity(0.7) }
     var codeBlockHeaderBackground: Color { Color(red: 0.15, green: 0.15, blue: 0.17) }
@@ -576,8 +570,6 @@ extension AppThemes {
         var placeholderText: Color { Color(hex: "#6272a4") }
         var controlAccent: Color { Color(hex: "#bd93f9") }
         var userBubbleBackground: Color { Color(hex: "#bd93f9") }
-        var inlineCodeBackground: Color { Color(hex: "#44475a") }
-        var inlineCodeText: Color { Color(hex: "#f8f8f2") }
         var inlineCodeHighlight: Color { Color(hex: "#ff79c6") }    // Dracula Pink
         var codeBlockHeaderBackground: Color { Color(hex: "#282a36") }
         var codeBlockEditorBackground: Color { Color(hex: "#1e1e2e") }
@@ -637,8 +629,6 @@ extension AppThemes {
         var placeholderText: Color { Color(hex: "#a0a1a7") }
         var controlAccent: Color { Color(hex: "#4078f2") }
         var userBubbleBackground: Color { Color(hex: "#4078f2") }
-        var inlineCodeBackground: Color { Color(hex: "#f0f0f0") }
-        var inlineCodeText: Color { Color(hex: "#383a42") }
         var inlineCodeHighlight: Color { Color(hex: "#a626a4") }    // One Light Purple
         var codeBlockHeaderBackground: Color { Color(hex: "#f0f0f0") }
         var codeBlockEditorBackground: Color { Color(hex: "#fafafa") }
@@ -704,8 +694,6 @@ extension AppThemes {
         var placeholderText: Color { Color(hex: "#5c6370") }
         var controlAccent: Color { Color(hex: "#61afef") }
         var userBubbleBackground: Color { Color(hex: "#61afef") }
-        var inlineCodeBackground: Color { Color(hex: "#2c313a") }
-        var inlineCodeText: Color { Color(hex: "#abb2bf") }
         var inlineCodeHighlight: Color { Color(hex: "#d19a66") }    // One Dark Orange
         var codeBlockHeaderBackground: Color { Color(hex: "#21252b") }
         var codeBlockEditorBackground: Color { Color(hex: "#282c34") }
@@ -773,10 +761,8 @@ extension AppThemes {
         var placeholderText: Color { Color(hex: "#b3b3b3") }
         var controlAccent: Color { Color(hex: "#1DB954") }
         var userBubbleBackground: Color { Color(hex: "#1DB954") }
-        var inlineCodeBackground: Color { Color(hex: "#282828") }
-        var inlineCodeText: Color { .white }
         var inlineCodeHighlight: Color { Color(hex: "#1DB954") }    // Spotify Green
-        var codeBlockHeaderBackground: Color { Color(hex: "#1DB954").opacity(0.1) }
+        var codeBlockHeaderBackground: Color { Color(hex: "#181818") }
         var codeBlockEditorBackground: Color { Color(hex: "#0c0c0c") } // Even darker for contrast
         var surfaceOverlay: Color { Color.white.opacity(0.05) }
         var surfaceOverlayStrong: Color { Color.white.opacity(0.1) }

@@ -154,7 +154,17 @@ actor ReActAgentExecutor: Executor {
                     let readingToolNames: Set<String> = [
                         "read_file", "find_definition", "code_search", "file_overview", "codebase_map"
                     ]
-                    let gatedToolNames: Set<String> = ["update_project_context"]
+                    // Narrowed to what THIS run actually registered. The filter below was
+                    // already a no-op for a non-Code profile, but the unlock branch was not:
+                    // an ordinary Agent run has no `update_project_context`, yet the first
+                    // successful read still fired the gate and injected the Code interface's
+                    // "use update_project_context to persist findings into .devgentic/
+                    // context.md" instructions. Field-observed 2026-07-25: the agent obeyed
+                    // them, found no such tool, reached for `write_file` instead, and wrote
+                    // a project-context document to ~/.devgentic/context.md rather than
+                    // editing the file the user had asked about.
+                    let gatedToolNames: Set<String> = Set(["update_project_context"])
+                        .intersection(input.tools.map(\.name))
                     // Small-tier models (≤14B — e.g. qwen2.5-coder:14b) thrash against a
                     // threshold of 2 because they tend to start with one structural tool and
                     // immediately want to persist. Lower the bar for them; medium/large
@@ -842,7 +852,8 @@ actor ReActAgentExecutor: Executor {
                         for obs in observations where obs.isSuccess && readingToolNames.contains(obs.toolName) {
                             readingToolSuccessCount += 1
                         }
-                        if !readingGateLoggedUnlock && readingToolSuccessCount >= readingGateThreshold {
+                        if !readingGateLoggedUnlock, !gatedToolNames.isEmpty,
+                           readingToolSuccessCount >= readingGateThreshold {
                             readingGateLoggedUnlock = true
                             logger.info("🔓 Reading gate unlocked (\(readingToolSuccessCount)/\(readingGateThreshold) successful reading tools) — gated tools now available: \(gatedToolNames.sorted().joined(separator: ", "))")
 

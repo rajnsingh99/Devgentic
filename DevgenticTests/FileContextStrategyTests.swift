@@ -6,7 +6,7 @@
 //
 //  Covers the strategy resolution contract after the 2026-07 redesign:
 //  contextualRAG is deprecated (decodable, never resolvable), bot is pinned
-//  to directInjection, and resolve() heals persisted values a type can't honor.
+//  per profile type, and resolve() heals persisted values a type can't honor.
 //
 
 import XCTest
@@ -20,7 +20,9 @@ final class FileContextStrategyTests: XCTestCase {
 
     func testDefaultStrategy_PerProfileType() {
         XCTAssertEqual(FileContextStrategy.defaultStrategy(for: .bot), .directInjection)
-        XCTAssertEqual(FileContextStrategy.defaultStrategy(for: .agent), .directInjection)
+        // Changed 2026-07-25: agents have file tools, and injection hid the file's real
+        // location from them (they saw only a basename and wrote back to HOME).
+        XCTAssertEqual(FileContextStrategy.defaultStrategy(for: .agent), .stateless)
         XCTAssertEqual(FileContextStrategy.defaultStrategy(for: .workflow), .directInjection)
         XCTAssertEqual(FileContextStrategy.defaultStrategy(for: .imageGen), .stateless)
         XCTAssertEqual(FileContextStrategy.defaultStrategy(for: .code), .stateless)
@@ -62,7 +64,7 @@ final class FileContextStrategyTests: XCTestCase {
 
     func testResolve_NilFallsBackToDefault() {
         XCTAssertEqual(FileContextStrategy.resolve(nil, for: .bot), .directInjection)
-        XCTAssertEqual(FileContextStrategy.resolve(nil, for: .agent), .directInjection)
+        XCTAssertEqual(FileContextStrategy.resolve(nil, for: .agent), .stateless)
         XCTAssertEqual(FileContextStrategy.resolve(nil, for: .code), .stateless)
     }
 
@@ -74,7 +76,8 @@ final class FileContextStrategyTests: XCTestCase {
     func testResolve_HealsLegacyContextualRAG() {
         // Pre-redesign bots defaulted to contextualRAG; persisted values must heal at read.
         XCTAssertEqual(FileContextStrategy.resolve(.contextualRAG, for: .bot), .directInjection)
-        XCTAssertEqual(FileContextStrategy.resolve(.contextualRAG, for: .agent), .directInjection)
+        // Heals to the type's CURRENT default, which for agents is now stateless.
+        XCTAssertEqual(FileContextStrategy.resolve(.contextualRAG, for: .agent), .stateless)
     }
 
     func testResolve_HealsStatelessOnBot() {

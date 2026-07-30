@@ -285,16 +285,52 @@ private struct PermissionInteractionBanner: View {
 
     /// A2: a parsed file operation, when this confirmation is a file-mutating tool.
     private var fileChange: FileChange? {
-        FileChange.parse(toolName: confirmation.toolName, arguments: confirmation.arguments)
+        FileChange.parse(toolName: confirmation.toolName, arguments: effectiveArguments)
     }
 
-    /// A3: top-level string arguments that can be corrected inline (skip huge values like file content).
+    /// A3: top-level string arguments the user can correct before approving.
+    ///
+    /// The old 2000-char cap silently EXCLUDED `content` for any file over that size — the
+    /// one argument most worth checking simply never appeared in the editor, with nothing
+    /// said about why. Everything is editable now; long or multi-line values get a real
+    /// multi-line editor instead of a one-line field (field-observed 2026-07-25: a whole
+    /// Java file collapsed to `package dsa.jan26;` in a single-line TextField).
     private var editableArgs: [(key: String, value: String)] {
         guard case .object(let dict)? = confirmation.arguments else { return [] }
         return dict.compactMap { (k, v) -> (key: String, value: String)? in
-            if case .string(let s) = v, s.count <= 2000 { return (key: k, value: s) }
+            if case .string(let s) = v { return (key: k, value: s) }
             return nil
         }.sorted { $0.key < $1.key }
+    }
+
+    /// Values that can't be read or corrected on one line.
+    private func needsMultilineEditor(_ value: String) -> Bool {
+        value.contains("\n") || value.count > 120
+    }
+
+    /// The arguments as they stand right now — the model's, with any edits applied. Drives
+    /// the diff preview so it keeps describing what Allow will ACTUALLY do.
+    private var effectiveArguments: JSONValue? {
+        guard case .object(let original)? = confirmation.arguments else { return confirmation.arguments }
+        guard !editedValues.isEmpty else { return confirmation.arguments }
+        var result = original
+        for (key, value) in editedValues { result[key] = .string(value) }
+        return .object(result)
+    }
+
+    /// True once the user has actually changed something away from the model's proposal.
+    private var hasPendingEdits: Bool {
+        editableArgs.contains { arg in
+            guard let edited = editedValues[arg.key] else { return false }
+            return edited != arg.value
+        }
+    }
+
+    private func discardEdits() {
+        withAnimation(.easeInOut(duration: 0.15)) {
+            editedValues.removeAll()
+            editing = false
+        }
     }
 
     private var hasEditableArgs: Bool { !editableArgs.isEmpty }
@@ -380,32 +416,98 @@ private struct PermissionInteractionBanner: View {
                 }
 
                 if editing {
-                    // A3: inline-editable string arguments (paths, commands, queries). Scroll-capped
-                    // so a tool with many args can't push the chat input off-screen.
+                    // The diff STAYS while editing. Hiding it was how a destructive
+                    // overwrite got approved: opening the editor removed the only signal
+                    // that 2849 chars were being replaced by 531. It now reads from the
+                    // edited arguments, so it tracks what Allow will actually write.
+                    if let fileChange {
+                        FileChangePreviewView(change: fileChange)
+                    }
+
+                    // A3: inline-editable string arguments. Scroll-capped so a tool with
+                    // many args can't push the chat input off-screen.
                     ScrollView(.vertical, showsIndicators: true) {
-                        VStack(alignment: .leading, spacing: 5) {
+                        VStack(alignment: .leading, spacing: 7) {
                             ForEach(editableArgs, id: \.key) { arg in
-                                HStack(alignment: .top, spacing: 6) {
-                                    Text(arg.key)
-                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                        .foregroundColor(theme.tertiaryText)
-                                        .frame(minWidth: 48, alignment: .leading)
-                                    TextField("", text: Binding(
-                                        get: { editedValues[arg.key] ?? arg.value },
-                                        set: { editedValues[arg.key] = $0 }
-                                    ))
-                                    .textFieldStyle(.plain)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(theme.primaryText)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 5)
-                                    .background(RoundedRectangle(cornerRadius: 6).fill(theme.surfaceOverlay.opacity(0.6)))
-                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(theme.warningColor.opacity(0.4), lineWidth: 1))
+                                let binding = Binding(
+                                    get: { editedValues[arg.key] ?? arg.value },
+                                    set: { editedValues[arg.key] = $0 }
+                                )
+                                if needsMultilineEditor(arg.value) {
+                                    // File content and other multi-line values: a real
+                                    // editor. A one-line field showed only `package …;`
+                                    // and hid everything the write would replace.
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        HStack(spacing: 6) {
+                                            Text(arg.key)
+                                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                                .foregroundColor(theme.tertiaryText)
+                                            Text("\(binding.wrappedValue.count) chars · \(binding.wrappedValue.components(separatedBy: "\n").count) lines")
+                                                .font(.system(size: 9, design: .monospaced))
+                                                .foregroundColor(theme.tertiaryText.opacity(0.8))
+                                            Spacer(minLength: 0)
+                                        }
+                                        // NOT a plain `TextEditor`: macOS would rewrite `"`
+                                        // into curly quotes and `--` into an em dash as you
+                                        // type, and this value is a FILE about to be written.
+                                        VerbatimTextEditor(
+                                            text: binding,
+                                            textColor: theme.primaryText
+                                        )
+                                            .frame(minHeight: 120, maxHeight: 260)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 4)
+                                            .background(RoundedRectangle(cornerRadius: 6).fill(theme.surfaceOverlay.opacity(0.6)))
+                                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(theme.warningColor.opacity(0.4), lineWidth: 1))
+                                    }
+                                } else {
+                                    HStack(alignment: .top, spacing: 6) {
+                                        Text(arg.key)
+                                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                            .foregroundColor(theme.tertiaryText)
+                                            .frame(minWidth: 48, alignment: .leading)
+                                        // Also substitution-free: `needsMultilineEditor` is
+                                        // just "\n or >120 chars", so a SHORT file's content
+                                        // lands here too — and a path with `--` in it would
+                                        // be em-dashed by the field editor either way.
+                                        VerbatimTextEditor(
+                                            text: binding,
+                                            textColor: theme.primaryText,
+                                            isSingleLine: true
+                                        )
+                                            .frame(height: 20)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 5)
+                                            .background(RoundedRectangle(cornerRadius: 6).fill(theme.surfaceOverlay.opacity(0.6)))
+                                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(theme.warningColor.opacity(0.4), lineWidth: 1))
+                                    }
                                 }
                             }
                         }
                     }
-                    .frame(maxHeight: 150)
+                    .frame(maxHeight: 330)
+
+                    HStack(spacing: 8) {
+                        if hasPendingEdits {
+                            Text("Edited — Allow will use your version")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(theme.warningColor)
+                        }
+                        Spacer(minLength: 0)
+                        // There was no way back to the model's proposal once edited:
+                        // toggling the editor deliberately preserves in-progress edits, so
+                        // without this the only escape was Deny and re-run.
+                        Button(action: discardEdits) {
+                            Text(hasPendingEdits ? "Discard edits" : "Cancel")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(theme.secondaryText)
+                        }
+                        .buttonStyle(.plain)
+                        .help(hasPendingEdits
+                              ? String(localized: "Restore the arguments the model proposed")
+                              : String(localized: "Close the editor"))
+                    }
+
                     if !editsValid {
                         Text("A field you edited can't be left empty.")
                             .font(.system(size: 10, weight: .medium))

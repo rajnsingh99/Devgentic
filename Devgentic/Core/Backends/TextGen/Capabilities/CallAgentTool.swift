@@ -48,6 +48,17 @@ private actor ConcurrencyLimiter {
 
 enum CallAgentTool {
 
+    /// Context window assumed for a spawned sub-agent, independent of the parent's real one.
+    ///
+    /// Deliberately conservative: sub-agents are short-lived leaf nodes with no chat history
+    /// and no instructions, so they are sized for the smallest model the parent might be
+    /// running rather than for the parent's window.
+    ///
+    /// Named because TWO budgets derive from it — the working-memory config and the native
+    /// payload cap — and they must agree. They previously agreed only by a comment asking the
+    /// next reader to keep two literals in step.
+    static let spawnedContextWindow = 8_192
+
     /// Creates the `call_agent` AgentTool for injection into the parent agent's tool set.
     ///
     /// - Parameters:
@@ -113,7 +124,7 @@ enum CallAgentTool {
                     // Conservative memory budget: spawned agents are short-lived leaf nodes.
                     let traceContext = TraceContext(subAgentName: "spawned-agent", provider: parentProvider)
                     let spawnedMemory = WindowedLinearMemory(
-                        config: MemoryBudgetConfig.derive(contextWindow: 8192, tier: .small, maxIterations: maxIterations)
+                        config: MemoryBudgetConfig.derive(contextWindow: spawnedContextWindow, tier: .small, maxIterations: maxIterations)
                     )
                     var input = AgentInput(
                         userInput: taskDescription,
@@ -135,8 +146,18 @@ enum CallAgentTool {
                     // #22: bound the spawned agent's native turn payload too (it runs the
                     // same G12 native path on cloud/Ollama providers). Without this the
                     // field defaults to 0 = compaction disabled, reintroducing unbounded
-                    // growth for delegated runs. Matches the 8192-window memory config above.
-                    input.nativeContextBudgetChars = max(8000, Int(Double(8192) * 0.75) * 4)
+                    // growth for delegated runs.
+                    //
+                    // Derived from `PromptFitCheck`, not hand-rolled. This line used to read
+                    // `max(8000, Int(Double(8192) * 0.75) * 4)`, converting the window to
+                    // chars at 4 chars/token while every budget and gauge in the app prices
+                    // at `charsPerToken` (3.0). The intent was "75% of the window", but 24,576
+                    // chars ÷ 3.0 is 8,192 tokens — the ENTIRE window. So the cap that exists
+                    // to leave room for the response only engaged once history had already
+                    // consumed all of it, which is the same as not having a cap.
+                    input.nativeContextBudgetChars = PromptFitCheck.nativePayloadCharBudget(
+                        forContextWindow: spawnedContextWindow
+                    )
 
                     // Run plain ReAct — NO capabilities, NO call_agent
                     let executor = ReActAgentExecutor(maxIterations: maxIterations)

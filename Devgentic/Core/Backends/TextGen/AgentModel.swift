@@ -368,13 +368,22 @@ struct AgentTool: Sendable {
 extension AgentTool {
     /// Flattens the tool schema into a concise Markdown definition for smaller models.
     func toMarkdownDefinition() -> String {
-        var def = "### \(self.name)\n"
-        def += "- Description: \(self.description)\n"
-        
-        if !self.parameters.properties.isEmpty {
+        Self.markdownDefinition(name: name, description: description, parameters: parameters)
+    }
+
+    /// The same rendering for any (name, description, parameters) triple.
+    ///
+    /// Extracted so the fit gauges can SIZE a tool payload straight from the registry without
+    /// constructing executable tools — measuring the real serializer rather than approximating
+    /// it, the same discipline the history and episodic terms use.
+    static func markdownDefinition(name: String, description: String, parameters: ToolParameters) -> String {
+        var def = "### \(name)\n"
+        def += "- Description: \(description)\n"
+
+        if !parameters.properties.isEmpty {
             def += "- Arguments:\n"
-            for (key, param) in self.parameters.properties {
-                let req = self.parameters.required.contains(key) ? "required" : "optional"
+            for (key, param) in parameters.properties {
+                let req = parameters.required.contains(key) ? "required" : "optional"
                 def += "  - `\(key)` (\(param.type), \(req)): \(param.description)\n"
             }
         }

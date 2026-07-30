@@ -86,6 +86,59 @@ enum ActionStatus: String, Codable, Sendable {
 // MARK: - Hierarchical Memory Models
 
 /// Represents a specific action or sub-task the agent took.
+/// What a mutating action actually DID — the change itself, never the whole file.
+///
+/// Without this the agent has no memory of its own edits: `MemoryAction` recorded the tool
+/// name, 200-char-truncated params and a status, and output only ever landed in
+/// `errorReason` on the FAILURE path. Asked to undo a write, the model answered "I do not
+/// have access to a version control system… restoring the file perfectly is impossible" —
+/// while the app was holding the pre-write snapshot the whole time (field-observed
+/// 2026-07-25). Reverting is not a tooling problem; it was a memory problem.
+///
+/// Persisted (unlike the raw snapshots it derives from) so a resumed or reopened
+/// conversation can still describe and undo what it changed — see
+/// `Docs/codeviewer-rescope-design.md` §12 D1.
+struct ActionEffect: Sendable, Codable, Equatable {
+    /// Absolute path the action changed.
+    let path: String
+    let linesAdded: Int
+    let linesRemoved: Int
+    /// The changed lines with a little context — never the file. Nil when the change could
+    /// not be reconstructed (no pre-write snapshot).
+    let diff: String?
+    /// True when `diff` hit the size cap. Surfaced in the XML so the model is never told a
+    /// partial change is the whole one.
+    let isTruncated: Bool
+
+    /// Longest diff carried into memory. Episodic memory rides in EVERY subsequent prompt,
+    /// so this is a per-action budget, not a display limit. An eighth of the timeline's
+    /// 32KB output cap: enough for a real edit, small enough that several per turn are safe.
+    static let diffCharacterLimit = 4_096
+
+    /// Aggregate ceiling for ALL effect diffs in one rendered episodic blob.
+    ///
+    /// `diffCharacterLimit` bounds ONE action and nothing bounded the sum, so "small
+    /// enough that several per turn are safe" was an assumption the code never enforced:
+    /// a turn with ten writes carried up to 40 KB, multiplied again across
+    /// `buildRecentHistoryString`'s ten turns, and across the whole conversation under
+    /// `fullHistory`. Episodic memory rides in EVERY prompt, so that is unbounded growth
+    /// on the hot path — on a small local model it crowds out the request itself.
+    ///
+    /// Derived from the history char budget rather than invented. `AgentConnect` already
+    /// allocates that to the sibling `NativeHistoryConverter`, and both channels ride the
+    /// SAME prompt: a second independent allocation would double-spend the window. Effects
+    /// take a quarter of it, floored so one ordinary write always renders whole even on a
+    /// tiny context.
+    static func diffBudget(forHistoryCharBudget charBudget: Int) -> Int {
+        max(diffCharacterLimit + 512, charBudget / 4)
+    }
+
+    var fileName: String { (path as NSString).lastPathComponent }
+
+    /// One-line form for compact renderers: `X.java +14 −5`.
+    var summary: String { "\(fileName) +\(linesAdded) −\(linesRemoved)" }
+}
+
 /// Maps to the LLM's `goalSummary`. Replaces the old `SubTask` model.
 /// Decoupled from database identity constraints.
 struct MemoryAction: Sendable, Codable, Identifiable {
@@ -97,8 +150,15 @@ struct MemoryAction: Sendable, Codable, Identifiable {
     var errorReason: String?
     var logs: [String]
     var artifacts: [MediaArtifact]
+    /// What this action changed on disk, for mutating tools. Nil for reads, failures, and
+    /// anything that didn't touch a file.
+    var effect: ActionEffect?
+    /// The COMMAND's exit status for shell-family tools. Carried separately from `status`
+    /// because the TOOL succeeded — it ran the command — while the command itself may not
+    /// have. Collapsing the two would abort runs on `grep` misses.
+    var exitCode: Int32?
 
-    init(id: UUID = UUID(), toolName: String = "", intent: String, status: ActionStatus = .active, params: [String: String] = [:], errorReason: String? = nil, logs: [String] = [], artifacts: [MediaArtifact] = []) {
+    init(id: UUID = UUID(), toolName: String = "", intent: String, status: ActionStatus = .active, params: [String: String] = [:], errorReason: String? = nil, logs: [String] = [], artifacts: [MediaArtifact] = [], effect: ActionEffect? = nil, exitCode: Int32? = nil) {
         self.id = id
         self.toolName = toolName
         self.intent = intent
@@ -107,6 +167,8 @@ struct MemoryAction: Sendable, Codable, Identifiable {
         self.errorReason = errorReason
         self.logs = logs
         self.artifacts = artifacts
+        self.effect = effect
+        self.exitCode = exitCode
     }
 }
 

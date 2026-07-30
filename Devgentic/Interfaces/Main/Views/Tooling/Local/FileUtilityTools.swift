@@ -84,16 +84,12 @@ struct GrepFilesTool: DevgenticTool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
         process.arguments = grepArgs
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = errPipe
 
         do {
-            try process.run()
-            process.waitUntilExit()
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
+            // `grep -rn` writes one "Permission denied" line per unreadable directory to
+            // STDERR. This site attached stderr to a pipe it never read, so over a home
+            // directory that buffer fills and grep blocks forever. ProcessRunner drains both.
+            let output = try ProcessRunner.run(process).standardOutput
 
             if output.isEmpty {
                 return "No matches found for '\(arguments.pattern)' in \(arguments.path)."
@@ -144,14 +140,11 @@ struct DiffFilesTool: DevgenticTool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/diff")
         process.arguments = ["-u", pathA, pathB]
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
 
         do {
-            try process.run()
-            process.waitUntilExit()
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
+            // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe
+            // only after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
+            let output = try ProcessRunner.run(process).standardOutput
 
             if output.isEmpty {
                 return "Files are identical."
@@ -223,15 +216,16 @@ struct PreviewFileTool: DevgenticTool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cmd)
         process.arguments = ["-n", String(lineCount), expandedPath]
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = outPipe
 
         do {
-            try process.run()
-            process.waitUntilExit()
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
+            // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe
+            // only after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
+            //
+            // combinedOutput, not standardOutput: this site set `standardError = outPipe`,
+            // so its single read returned both. `head`/`tail` write "No such file or
+            // directory" and permission errors to stderr with empty stdout — reading stdout
+            // alone renders an unreadable file as a successful preview of nothing.
+            let output = try ProcessRunner.run(process).combinedOutput
             return "\(arguments.mode ?? "head") \(lineCount) lines of \(arguments.path):\n\(output)"
         } catch {
             return "Error: \(error.localizedDescription)"
@@ -265,25 +259,40 @@ struct GetFileHashTool: DevgenticTool {
         let expandedPath = (arguments.path as NSString).expandingTildeInPath
         let algo = (arguments.algorithm ?? "sha256").lowercased()
 
-        let cmd: String
+        // Invoked DIRECTLY, never through a shell. This site interpolated the caller's path
+        // into `md5 -q "\(expandedPath)"` for `zsh -c` with NO validation of any kind — not
+        // even an existence check — so a path containing a double quote closed it and ran the
+        // remainder as commands. `path` is a tool argument supplied by the model.
+        let executable: String
+        var argv: [String]
         switch algo {
-        case "md5": cmd = "md5 -q \"\(expandedPath)\""
-        case "sha256": cmd = "shasum -a 256 \"\(expandedPath)\" | awk '{print $1}'"
+        case "md5":    executable = "/sbin/md5";      argv = ["-q", expandedPath]
+        case "sha256": executable = "/usr/bin/shasum"; argv = ["-a", "256", expandedPath]
         default:
             return "Error: Unknown algorithm '\(algo)'. Use sha256 or md5."
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-c", cmd]
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
-
         do {
-            try process.run()
-            process.waitUntilExit()
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let hash = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let run = try ProcessRunner.run(executable: executable, arguments: argv)
+
+            guard run.succeeded else {
+                // `md5`/`shasum` report a missing or unreadable file on stderr. The shell form
+                // discarded that (`awk` saw an empty pipe) and returned an empty hash, which
+                // reads as success with a blank value.
+                let detail = run.standardError.isEmpty ? run.standardOutput : run.standardError
+                return "Error: could not hash '\(arguments.path)' (exit \(run.exitCode))\n"
+                    + detail.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+
+            // `shasum` prints "<hash>  <filename>"; the pipeline used `awk '{print $1}'` to cut
+            // it down. Taking the first whitespace-separated field here does the same without
+            // needing a shell to host the pipe. `md5 -q` already prints the digest alone.
+            let hash = run.standardOutput
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+                .first
+                .map(String.init) ?? ""
+
             return "\(algo.uppercased()): \(hash)\nFile: \(arguments.path)"
         } catch {
             return "Error: \(error.localizedDescription)"

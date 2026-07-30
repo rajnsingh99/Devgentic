@@ -48,48 +48,86 @@ final class CodeApplyChangesTests: XCTestCase {
         viewModel = nil
     }
 
-    // MARK: - #3: stale diff state is reset when new content opens
+    // MARK: - #3: a freshly opened block is never in diff mode (now per-tab)
+    //
+    // The old "stale global diff leaks onto new content" bug is structurally impossible now
+    // that diff state lives per tab: a newly opened tab starts in final-code mode, and one
+    // tab's diff can't bleed onto another.
 
-    func test_showCodeInViewer_resetsStaleDiffState() {
-        viewModel.isShowingDiff = true
-        viewModel.originalCodeForDiff = "old file contents"
-
-        viewModel.showCodeInViewer(language: "swift", code: "let y = 2")
-
-        XCTAssertFalse(viewModel.isShowingDiff, "Opening new code must clear the previous diff toggle")
-        XCTAssertNil(viewModel.originalCodeForDiff, "Opening new code must clear the previous diff baseline")
-    }
-
-    func test_openMessageInCodeViewer_resetsStaleDiffState() {
-        viewModel.isShowingDiff = true
-        viewModel.originalCodeForDiff = "old file contents"
-
-        let msg = ChatMessage(conversationId: conversationID, sender: .agent,
-                              content: .markdownText("```swift\nlet z = 3\n```"))
-        viewModel.currentChatMessages = [msg]
-        viewModel.openMessageInCodeViewer(message: msg)
-
-        XCTAssertNotNil(viewModel.codeViewerContent, "sanity: a snippet opened")
-        XCTAssertFalse(viewModel.isShowingDiff, "Opening a message must clear the previous diff toggle")
-        XCTAssertNil(viewModel.originalCodeForDiff, "Opening a message must clear the previous diff baseline")
-    }
-
-    // MARK: - #4: trailing-newline preservation (pure helper)
+    // MARK: - #4: edge-whitespace preservation (pure helper)
 
     func test_contentToApply_reAddsTrailingNewlineWhenBaselineHadOne() {
         // Snippet code is extraction-trimmed; the file ended in a newline → re-add it.
-        let out = ChatHistoryViewModel.contentToApply(snippetCode: "a\nb", preservingTrailingNewlineOf: "a\nb\n")
+        let out = ChatHistoryViewModel.contentToApply(snippetCode: "a\nb", preservingEdgeWhitespaceOf: "a\nb\n")
         XCTAssertEqual(out, "a\nb\n")
     }
 
     func test_contentToApply_leavesContentWhenBaselineHadNoTrailingNewline() {
-        let out = ChatHistoryViewModel.contentToApply(snippetCode: "a\nb", preservingTrailingNewlineOf: "a\nb")
+        let out = ChatHistoryViewModel.contentToApply(snippetCode: "a\nb", preservingEdgeWhitespaceOf: "a\nb")
         XCTAssertEqual(out, "a\nb")
     }
 
     func test_contentToApply_doesNotDoubleTheNewline() {
-        let out = ChatHistoryViewModel.contentToApply(snippetCode: "a\n", preservingTrailingNewlineOf: "a\n")
+        let out = ChatHistoryViewModel.contentToApply(snippetCode: "a\n", preservingEdgeWhitespaceOf: "a\n")
         XCTAssertEqual(out, "a\n")
+    }
+
+    // MARK: - Leading edge (2026-07-27 audit)
+    //
+    // `normalizedCode` trims BOTH edges on open but only the trailing side was restored, so a
+    // single ⌘S — even with no edits, since `saveTabToItsPath` has no unchanged-buffer guard —
+    // permanently deleted a file's leading blank line. The drift guard compares both sides
+    // trimmed, so it could never catch this.
+
+    func test_contentToApply_reAddsLeadingBlankLine() {
+        let out = ChatHistoryViewModel.contentToApply(
+            snippetCode: "// header\nlet a = 1",
+            preservingEdgeWhitespaceOf: "\n// header\nlet a = 1\n"
+        )
+        XCTAssertEqual(out, "\n// header\nlet a = 1\n", "both edges come back")
+    }
+
+    func test_contentToApply_reAddsLeadingIndentation() {
+        let out = ChatHistoryViewModel.contentToApply(
+            snippetCode: "let a = 1",
+            preservingEdgeWhitespaceOf: "    let a = 1"
+        )
+        XCTAssertEqual(out, "    let a = 1")
+    }
+
+    func test_contentToApply_doesNotDoubleTheLeadingWhitespace() {
+        let out = ChatHistoryViewModel.contentToApply(
+            snippetCode: "\n// header",
+            preservingEdgeWhitespaceOf: "\n// header"
+        )
+        XCTAssertEqual(out, "\n// header", "already present → left alone")
+    }
+
+    /// An already-trimmed baseline has nothing to restore. This is the degradation path when
+    /// `onDiskContent` is nil, and it must be a no-op rather than damage.
+    func test_contentToApply_trimmedBaselineIsANoOp() {
+        let out = ChatHistoryViewModel.contentToApply(
+            snippetCode: "let a = 1",
+            preservingEdgeWhitespaceOf: "let a = 1"
+        )
+        XCTAssertEqual(out, "let a = 1")
+    }
+
+    /// An all-whitespace baseline has no non-whitespace prefix boundary; prepending it would
+    /// splice the entire file in front of itself.
+    func test_contentToApply_allWhitespaceBaselineDoesNotSpliceItself() {
+        let out = ChatHistoryViewModel.contentToApply(
+            snippetCode: "new content",
+            preservingEdgeWhitespaceOf: "\n\n   \n"
+        )
+        XCTAssertEqual(out, "new content\n", "only the trailing newline applies")
+    }
+
+    func test_contentToApply_emptyBaselineIsANoOp() {
+        XCTAssertEqual(
+            ChatHistoryViewModel.contentToApply(snippetCode: "x", preservingEdgeWhitespaceOf: ""),
+            "x"
+        )
     }
 
     // MARK: - Apply integration (real temp file)
@@ -146,5 +184,69 @@ final class CodeApplyChangesTests: XCTestCase {
         await viewModel.performApplyChanges(for: snippet)
 
         XCTAssertNotNil(viewModel.codeApplyError, "A missing source file must surface, not vanish into the log")
+    }
+
+    // MARK: - Editable tabs: the save engine is draft-aware
+
+    /// Opens a tab for `snippet` the way the viewer does, returning its id.
+    private func openTab(for snippet: CodeSnippet) -> UUID {
+        viewModel.codeViewerTabs = [CodeViewerTab(snippet: snippet)]
+        viewModel.activeCodeViewerTabID = viewModel.codeViewerTabs[0].id
+        viewModel.isCodeViewerVisible = true
+        return viewModel.codeViewerTabs[0].id
+    }
+
+    func test_save_writesDraft_notThePristineSnippet() async throws {
+        let (url, snippet) = try makeLinkedSnippet(onDisk: "OLD\n", attachedContent: "OLD\n", newCode: "PROPOSAL")
+        let tabID = openTab(for: snippet)
+        viewModel.updateCodeViewerDraft(tabID: tabID, content: "USER EDITED DRAFT")
+
+        await viewModel.performApplyChanges(for: snippet)
+
+        let written = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertEqual(written, "USER EDITED DRAFT\n", "The BUFFER (draft) is what saves — not snippet.code")
+        XCTAssertNil(viewModel.codeApplyError)
+        XCTAssertFalse(viewModel.codeViewerTabs[0].isDirty, "A successful save cleans the tab")
+        XCTAssertEqual(viewModel.codeViewerTabs[0].snippet.code, "PROPOSAL",
+                       "Saving must not mutate the snippet (its id keys the editor rebuild)")
+    }
+
+    /// The drift-guard baseline must ADVANCE with our own writes. Comparing against
+    /// attach-time content forever refused every save after the first as "drift" —
+    /// this test pins the sequential-save fix (and the pre-existing double-apply bug).
+    func test_save_twice_succeeds_baselineAdvances() async throws {
+        let (url, snippet) = try makeLinkedSnippet(onDisk: "OLD\n", attachedContent: "OLD\n", newCode: "V1")
+        let tabID = openTab(for: snippet)
+
+        await viewModel.performApplyChanges(for: snippet)          // save 1: writes V1
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "V1\n")
+
+        viewModel.updateCodeViewerDraft(tabID: tabID, content: "V2")
+        await viewModel.performApplyChanges(for: snippet)          // save 2: must NOT be "drift"
+
+        XCTAssertNil(viewModel.codeApplyError, "The second save must not trip the drift guard on our own write")
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "V2\n")
+    }
+
+    // MARK: - Per-hunk apply / revert
+
+    // Per-hunk apply/revert removed with the panel's diff surface — a change is shown in
+    // the tool row that produced it, and the panel's only write path is now Save
+    // (`Docs/codeviewer-rescope-design.md` §4). The save-engine tests above still cover
+    // drift, trailing-newline handling and baseline advance, which all survive.
+
+    func test_save_noops_whenBufferUnchangedSinceLastSave() async throws {
+        let (url, snippet) = try makeLinkedSnippet(onDisk: "OLD\n", attachedContent: "OLD\n", newCode: "V1")
+        _ = openTab(for: snippet)
+
+        await viewModel.performApplyChanges(for: snippet)          // save 1
+
+        // An external edit that a real second WRITE would clobber (or drift-refuse).
+        try "EXTERNAL".write(to: url, atomically: true, encoding: .utf8)
+        await viewModel.performApplyChanges(for: snippet)          // clean → must not touch disk
+
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "EXTERNAL",
+                       "A no-op save must not write (or error) — nothing changed since our last save")
+        XCTAssertNil(viewModel.codeApplyError)
     }
 }

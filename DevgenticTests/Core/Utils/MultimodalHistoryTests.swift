@@ -466,26 +466,66 @@ final class ImageTokenHeuristicTests: XCTestCase {
         )
     }
 
-    func testHistoryImageTokens_ExcludesUnsupportedFormats() {
-        // The history splice DROPS HEIC/TIFF/BMP/GIF, so the gauge must not charge for
-        // them — otherwise a HEIC-heavy conversation posts an un-clearable overflow
-        // banner for cost that never ships.
-        func msg(_ ext: String) -> ChatMessage {
-            let m = ChatMessage(id: UUID(), conversationId: UUID(),
-                                timestamp: Date(timeIntervalSince1970: 1), sender: .user,
-                                content: .plainText("x"))
-            m.attachedImageFiles = [AttachedImageFile(name: "f.\(ext)", url: URL(fileURLWithPath: "/tmp/f.\(ext)"),
-                                                      fileExtension: ext, binaryData: Data([0x1]), size: 1)]
-            return m
-        }
-        let heicOnly = [msg("heic"), msg("heic")]
-        XCTAssertEqual(PromptFitCheck.estimatedHistoryImageTokens(in: heicOnly, provider: .anthropic), 0,
-                       "Unsupported-format history images must not be charged")
-        let mixed = [msg("png"), msg("heic"), msg("gif")]
+    private func imageMessage(_ ext: String) -> ChatMessage {
+        let m = ChatMessage(id: UUID(), conversationId: UUID(),
+                            timestamp: Date(timeIntervalSince1970: 1), sender: .user,
+                            content: .plainText("x"))
+        m.attachedImageFiles = [AttachedImageFile(name: "f.\(ext)", url: URL(fileURLWithPath: "/tmp/f.\(ext)"),
+                                                  fileExtension: ext, binaryData: Data([0x1]), size: 1)]
+        return m
+    }
+
+    /// HEIC and GIF ARE charged, and that is the correct behaviour rather than a leak.
+    ///
+    /// This test asserted the exact opposite until 2026-07-30, from a time when the history
+    /// splice omitted anything it could not send as-is. `ChatExecutor`'s prior-turn path now
+    /// calls `VisionImageFormat.resolveSendable`, which TRANSCODES HEIC/HEIF/TIFF/BMP/GIF to
+    /// JPEG — so that a prior-turn image keeps working across follow-ups instead of vanishing
+    /// the turn after the current-turn path displayed it. Those bytes reach the model, so the
+    /// gauge has to bill them.
+    ///
+    /// The direction is what makes this worth pinning. HEIC is the macOS default for photos
+    /// and screenshots. Charging zero for it would let a HEIC-heavy conversation sail past the
+    /// context window with no banner at all — silence, which is the one failure a fit gauge
+    /// exists to prevent. The older "don't over-warn" reasoning was right when the images were
+    /// dropped and inverted the moment they started shipping.
+    func testHistoryImageTokens_ChargesTranscodedFormatsBecauseTheyShip() {
+        let heicOnly = [imageMessage("heic"), imageMessage("heic")]
+        XCTAssertEqual(
+            PromptFitCheck.estimatedHistoryImageTokens(in: heicOnly, provider: .anthropic),
+            ImageTokenHeuristic.tokens(imageCount: 2, provider: .anthropic),
+            "a prior-turn HEIC is transcoded to JPEG and sent — it is not free"
+        )
+
+        let mixed = [imageMessage("png"), imageMessage("heic"), imageMessage("gif")]
         XCTAssertEqual(
             PromptFitCheck.estimatedHistoryImageTokens(in: mixed, provider: .anthropic),
+            ImageTokenHeuristic.tokens(imageCount: 3, provider: .anthropic),
+            "png ships as-is, heic and gif ship as JPEG — all three reach the model"
+        )
+    }
+
+    /// The counterpart, so the rule above is "count what ships" and not "count everything".
+    /// A format outside `visionEligibleExtensions` cannot be put in front of a vision model by
+    /// any route, transcode included, so it stays free.
+    ///
+    /// ⚠️ The estimate keys off the EXTENSION; the wire decision is `resolveSendable`'s
+    /// byte-truthful check. They can disagree in one direction: an undecodable file under an
+    /// eligible extension is counted here and omitted at send. That is a deliberate
+    /// approximation — it over-counts a corrupt file rather than under-counting a real one.
+    func testHistoryImageTokens_DoesNotChargeFormatsThatCannotShipAtAll() {
+        XCTAssertEqual(
+            PromptFitCheck.estimatedHistoryImageTokens(in: [imageMessage("svg")], provider: .anthropic), 0,
+            "SVG is not vision-eligible by any route — never charged"
+        )
+        XCTAssertEqual(
+            PromptFitCheck.estimatedHistoryImageTokens(in: [imageMessage("txt")], provider: .anthropic), 0
+        )
+        XCTAssertEqual(
+            PromptFitCheck.estimatedHistoryImageTokens(
+                in: [imageMessage("svg"), imageMessage("png")], provider: .anthropic),
             ImageTokenHeuristic.tokens(imageCount: 1, provider: .anthropic),
-            "Only the png ships; heic + gif are dropped by the allowlist and not counted"
+            "an ineligible neighbour must not suppress the one that does ship"
         )
     }
 
@@ -505,19 +545,39 @@ final class ImageTokenHeuristicTests: XCTestCase {
         XCTAssertEqual(ImageTokenHeuristic.budgetChars(imageCount: 0), 0)
     }
 
-    func testBudgetCharsUsesTheBudgetRatioNotTheGaugeRatio() {
-        // The char budgets this weight feeds (AgentConnect.charBudget,
-        // nativeContextBudgetChars) are denominated at 4 chars/token. Pricing at
-        // PromptFitCheck's 3.0 would under-reserve room for every image by 25%.
+    /// An image's char weight must share the denomination of the budgets it is SPENT against.
+    ///
+    /// It used to be hardcoded at 4.0 against a gauge that priced at 3.0, on the premise that
+    /// the budgets it feeds were built at 4.0. They no longer are: `AgentConnect` derives
+    /// `charBudget` from `PromptFitCheck.historyCharBudget` and `nativeContextBudgetChars`
+    /// from `PromptFitCheck.nativePayloadCharBudget`, both denominated at `charsPerToken`.
+    /// Against a 3.0-denominated budget, a 4.0 weight bills a 1,200-token image 4,800 chars —
+    /// room for 1,600 tokens — so every image in a conversation crowded out a third more
+    /// history than it costs. (The mirror-image of the original defect, which under-reserved
+    /// by 25% in the other direction.) `budgetCharsPerToken` now TRACKS `charsPerToken`, and
+    /// the mismatch is unrepresentable rather than merely commented.
+    ///
+    /// Priced end-to-end against the real budget function so it breaks if EITHER side is
+    /// re-hardcoded: the share of the history budget one image eats must equal the share of
+    /// the tokens that budget stands for.
+    func testImageBudgetWeightMatchesTheDenominationOfTheBudgetsItIsSpentAgainst() {
         XCTAssertEqual(
             ImageTokenHeuristic.budgetChars(imageCount: 1),
-            Int(Double(ImageTokenHeuristic.defaultTokensPerImage) * 4.0)
+            Int(Double(ImageTokenHeuristic.defaultTokensPerImage) * PromptFitCheck.charsPerToken),
+            "the weight must convert at the gauge's ratio, not at a literal kept in step by hand"
         )
-        XCTAssertNotEqual(
-            ImageTokenHeuristic.budgetCharsPerToken,
-            PromptFitCheck.charsPerToken,
-            "These two ratios convert in opposite directions and must not be conflated"
-        )
+
+        // Windows large enough to clear historyCharBudget's 4K floor, where the formula —
+        // not the floor — is what is being pinned.
+        for window in [32_768, 128_000, 200_000] {
+            let budgetChars = Double(PromptFitCheck.historyCharBudget(forContextWindow: window))
+            let charShare = Double(ImageTokenHeuristic.budgetChars(imageCount: 1)) / budgetChars
+            let tokenShare = Double(ImageTokenHeuristic.tokens(imageCount: 1)) / (Double(window) * 0.6)
+            XCTAssertEqual(
+                charShare, tokenShare, accuracy: 0.0001,
+                "window \(window): one image claims \(charShare * 100)% of the history budget but only \(tokenShare * 100)% of the tokens that budget represents"
+            )
+        }
     }
 
     func testEstimatedTokensAddsImageTermWithoutDisturbingCharArithmetic() {

@@ -26,6 +26,19 @@ protocol ChatPersistenceProtocol: Sendable {
     func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?)
     func updateProfileType(for conversationId: UUID, profileTypeRaw: String)
     func togglePinStatus(for conversationId: UUID)
+
+    // MARK: Code Viewer source-link fallbacks
+    // The viewer's diff/apply/linking resolve attachment sources against the LOADED page
+    // of messages; these let it fall back to the store when the source message has
+    // scrolled out of that window. Defaulted in an extension so lightweight conformers
+    // (test stubs) aren't forced to implement them.
+    func fetchMessage(withId id: UUID) async -> ChatMessage?
+    func fetchUserMessagesWithAttachedTextFiles(for conversationId: UUID) async -> [ChatMessage]
+}
+
+extension ChatPersistenceProtocol {
+    func fetchMessage(withId id: UUID) async -> ChatMessage? { nil }
+    func fetchUserMessagesWithAttachedTextFiles(for conversationId: UUID) async -> [ChatMessage] { [] }
 }
 
 // MARK: - SwiftData Chat Persistence Store
@@ -103,6 +116,52 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         descriptor.fetchLimit = 1
 
         return try? context.fetch(descriptor).first
+    }
+
+    /// Single-message fetch by id — the Code Viewer's fallback when a snippet's source
+    /// message has scrolled out of the loaded page window.
+    func fetchMessage(withId id: UUID) async -> ChatMessage? {
+        guard let context = mainContext else {
+            logger.error("[CodeViewer] fetchMessage(withId:) before container configured — returning nil.")
+            return nil
+        }
+        var descriptor = FetchDescriptor<ChatMessageSD>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        do {
+            let message = try context.fetch(descriptor).first?.toChatMessage()
+            logger.info("[CodeViewer] Source-message fallback fetch for \(id.uuidString.prefix(8)): \(message != nil ? "HIT" : "MISS — message no longer exists").")
+            return message
+        } catch {
+            logger.error("[CodeViewer] Source-message fallback fetch failed for \(id.uuidString.prefix(8)): \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// User messages of a conversation that carry attached text files, newest first —
+    /// the Code Viewer's fallback source for filename→attachment linking when the
+    /// attaching message has scrolled out of the loaded window. Capped at the newest 500
+    /// messages scanned; attachment-bearing user messages are sparse, so the cap is a
+    /// pathological-conversation guard, not a practical limit.
+    func fetchUserMessagesWithAttachedTextFiles(for conversationId: UUID) async -> [ChatMessage] {
+        guard let context = mainContext else {
+            logger.error("[CodeViewer] fetchUserMessagesWithAttachedTextFiles before container configured — returning [].")
+            return []
+        }
+        var descriptor = FetchDescriptor<ChatMessageSD>(
+            predicate: #Predicate { $0.conversationId == conversationId },
+            sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
+        )
+        descriptor.fetchLimit = 500
+        do {
+            let matches = try context.fetch(descriptor)
+                .map { $0.toChatMessage() }
+                .filter { $0.sender == .user && !($0.attachedTextFiles ?? []).isEmpty }
+            logger.info("[CodeViewer] Attachment-source fallback scan for \(conversationId.uuidString.prefix(8)): \(matches.count) user message(s) with text files.")
+            return matches
+        } catch {
+            logger.error("[CodeViewer] Attachment-source fallback scan failed: \(error.localizedDescription)")
+            return []
+        }
     }
 
     func fetchMessages(for conversationId: UUID, offset: Int, limit: Int) async -> [ChatMessage] {
@@ -299,9 +358,20 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
             logger.warning("Tried to delete conversation \(id.uuidString), but it was not found.")
             return
         }
+        // Counted BEFORE the delete: afterwards the relationships are gone and there is
+        // no way to state what the cascade actually removed. "Deleted conversation X" on
+        // its own can't distinguish a clean teardown from a cascade that silently did
+        // nothing, which is exactly the question a user asks after deleting.
+        let messageCount = conversation.messages.count
+        let attachmentCount = conversation.messages.reduce(0) {
+            $0 + $1.attachedTextFiles.count + $1.attachedImageFiles.count
+        }
+        let runCount = conversation.workflowRuns.count
+        let sessionCount = conversation.codeViewerSessions.count
+
         context.delete(conversation)
         saveContext()
-        logger.info("Deleted conversation \(id.uuidString).")
+        logger.info("[DELETE] Conversation \(id.uuidString.prefix(8)) removed — cascaded \(messageCount) message(s), \(attachmentCount) attachment(s), \(runCount) workflow run(s), \(sessionCount) code-viewer session(s).")
     }
 
     func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?) {

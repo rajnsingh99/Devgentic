@@ -46,6 +46,14 @@ final class CodeViewerPanelLoadTests: XCTestCase {
         )
     }
 
+    /// Opens `snippets` as tabs and marks the viewer visible — the state `openMessageInCodeViewer`
+    /// leaves behind, set directly so these lifecycle tests don't depend on extraction.
+    private func openTabs(_ vm: ChatHistoryViewModel, _ snippets: [CodeSnippet], active: Int = 0) {
+        vm.codeViewerTabs = snippets.map { CodeViewerTab(snippet: $0) }
+        vm.activeCodeViewerTabID = vm.codeViewerTabs.indices.contains(active) ? vm.codeViewerTabs[active].id : nil
+        vm.isCodeViewerVisible = true
+    }
+
     private func host(_ vm: ChatHistoryViewModel) -> (NSWindow, NSHostingView<AnyView>) {
         let root = AnyView(
             CodeViewerPanelView()
@@ -72,14 +80,11 @@ final class CodeViewerPanelLoadTests: XCTestCase {
     /// navigation — i.e. it must not sit on the "No Code Selected" placeholder.
     func testPanelLoadsFirstSnippetOnAppearWithoutNavigation() {
         let vm = makeViewModel()
-        vm.codeViewerContent = (
-            snippets: [
-                CodeSnippet(language: "java", code: "class A {}"),
-                CodeSnippet(language: "java", code: "class B {}"),
-                CodeSnippet(language: "java", code: "class C {}")
-            ],
-            currentIndex: 0
-        )
+        openTabs(vm, [
+            CodeSnippet(language: "java", code: "class A {}"),
+            CodeSnippet(language: "java", code: "class B {}"),
+            CodeSnippet(language: "java", code: "class C {}")
+        ])
 
         let (window, hosting) = host(vm)
         defer { window.orderOut(nil) }
@@ -93,16 +98,13 @@ final class CodeViewerPanelLoadTests: XCTestCase {
         )
     }
 
-    /// Selecting a different snippet must swap the rendered document.
-    func testNavigatingSnippetsReloadsDocument() {
+    /// Selecting a different tab must swap the rendered document.
+    func testNavigatingTabsReloadsDocument() {
         let vm = makeViewModel()
-        vm.codeViewerContent = (
-            snippets: [
-                CodeSnippet(language: "java", code: "class First {}"),
-                CodeSnippet(language: "java", code: "class Second {}")
-            ],
-            currentIndex: 0
-        )
+        openTabs(vm, [
+            CodeSnippet(language: "java", code: "class First {}"),
+            CodeSnippet(language: "java", code: "class Second {}")
+        ])
 
         let (window, hosting) = host(vm)
         defer { window.orderOut(nil) }
@@ -111,40 +113,41 @@ final class CodeViewerPanelLoadTests: XCTestCase {
         hosting.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
 
-        XCTAssertEqual(vm.codeViewerContent?.currentIndex, 1)
-        XCTAssertTrue(containsSourceEditor(hosting), "Editor should still be mounted after navigating")
+        XCTAssertEqual(vm.activeCodeViewerTabID, vm.codeViewerTabs[1].id)
+        XCTAssertTrue(containsSourceEditor(hosting), "Editor should still be mounted after switching tabs")
     }
 
-    /// Opening a DIFFERENT message whose index is also 0 is a real selection change.
-    /// An index-keyed observer misses it (0 → 0) and would keep showing the previous
-    /// message's code; keying on the snippet id catches it.
-    func testSwitchingMessagesAtSameIndexReloads() {
+    /// Replacing the active tab's snippet in place (what a successful Apply does — same tab
+    /// id, new snippet id) is a real content change. A tab-id-keyed observer misses it;
+    /// keying on the snippet id catches it and reloads the document.
+    func testReplacingActiveSnippetInPlaceReloads() {
         let vm = makeViewModel()
-        vm.codeViewerContent = (snippets: [CodeSnippet(language: "java", code: "class Old {}")], currentIndex: 0)
+        openTabs(vm, [CodeSnippet(language: "java", code: "class Old {}")])
 
         let (window, hosting) = host(vm)
         defer { window.orderOut(nil) }
 
-        // Same index (0), different snippet — must not leave the old document up.
-        let replacement = CodeSnippet(language: "swift", code: "struct New {}")
-        vm.codeViewerContent = (snippets: [replacement], currentIndex: 0)
+        // Same tab, different snippet content — must not leave the old document up.
+        vm.codeViewerTabs[0].snippet = CodeSnippet(language: "swift", code: "struct New {}")
         hosting.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
 
-        XCTAssertEqual(vm.codeViewerContent?.currentIndex, 0)
         XCTAssertTrue(containsSourceEditor(hosting), "Editor must be mounted for the replacement snippet")
     }
 
-    /// An out-of-range `currentIndex` must render the empty state, not trap on the
-    /// snippets subscript (we've had two index-out-of-range crashes in this area).
-    func testOutOfRangeIndexDoesNotCrash() {
+    /// A stale `activeCodeViewerTabID` (matches no open tab) must render the empty state,
+    /// not trap — the id-lookup replaces the old out-of-range `currentIndex` subscript that
+    /// caused two index-out-of-range crashes in this area.
+    func testStaleActiveTabIDDoesNotCrash() {
         let vm = makeViewModel()
-        vm.codeViewerContent = (snippets: [CodeSnippet(language: "java", code: "class A {}")], currentIndex: 7)
+        vm.codeViewerTabs = [CodeViewerTab(snippet: CodeSnippet(language: "java", code: "class A {}"))]
+        vm.activeCodeViewerTabID = UUID()   // matches no tab
+        vm.isCodeViewerVisible = true
 
         let (window, hosting) = host(vm)
         defer { window.orderOut(nil) }
 
-        XCTAssertFalse(containsSourceEditor(hosting), "Out-of-range selection should fall back to the empty state")
+        XCTAssertFalse(containsSourceEditor(hosting), "A stale active-tab id should fall back to the empty state")
     }
 
     // MARK: - Helpers

@@ -24,7 +24,7 @@ import XCTest
 @testable import devgentic
 
 /// `openMessageInCodeViewer` never touches persistence — it reads the message plus
-/// `currentChatMessages` and writes `codeViewerContent`. A no-op stub keeps this file
+/// `currentChatMessages` and opens Code Viewer tabs. A no-op stub keeps this file
 /// self-contained; ChatHistoryViewModelTests' richer mock is private to that file.
 @MainActor
 private final class NoopChatStore: ChatPersistenceProtocol {
@@ -132,11 +132,11 @@ final class OpenInCodeViewerTests: XCTestCase {
             selectedSnippet: clickSiteSnippet(markdown, language: "swift")
         )
 
-        guard let content = viewModel.codeViewerContent else { return XCTFail("Viewer never opened") }
-        XCTAssertEqual(content.snippets.count, 2, "Both 60-line blocks are large")
-        XCTAssertEqual(content.currentIndex, 1,
-                       "Clicked the swift card (index 1) — opening 0 means it showed BETA instead")
-        let opened = content.snippets[content.currentIndex]
+        XCTAssertEqual(viewModel.codeViewerTabs.count, 2, "Both 60-line blocks are large — one tab each")
+        let activeIndex = viewModel.codeViewerTabs.firstIndex { $0.id == viewModel.activeCodeViewerTabID }
+        XCTAssertEqual(activeIndex, 1,
+                       "Clicked the swift card (tab index 1) — focusing 0 means it showed BETA instead")
+        guard let opened = viewModel.activeCodeViewerTab?.snippet else { return XCTFail("Viewer never opened") }
         XCTAssertEqual(opened.language, "swift")
         XCTAssertTrue(opened.code.hasPrefix("print(\"ALPHA 1\")"), "Opened the wrong code")
     }
@@ -151,7 +151,7 @@ final class OpenInCodeViewerTests: XCTestCase {
 
         viewModel.openMessageInCodeViewer(message: message)
 
-        let swift = viewModel.codeViewerContent?.snippets.first { $0.language == "swift" }
+        let swift = viewModel.codeViewerTabs.first { $0.snippet.language == "swift" }?.snippet
         XCTAssertEqual(swift?.sourceMessageID, userMessage.id)
         XCTAssertEqual(swift?.sourceFileID, userMessage.attachedTextFiles?.first?.id,
                        "Without a sourceFileID the viewer shows no Show Changes button")
@@ -173,7 +173,7 @@ final class OpenInCodeViewerTests: XCTestCase {
 
         viewModel.openMessageInCodeViewer(message: message)
 
-        XCTAssertEqual(viewModel.codeViewerContent?.snippets.first?.sourceFileID,
+        XCTAssertEqual(viewModel.codeViewerTabs.first?.snippet.sourceFileID,
                        userMessage.attachedTextFiles?.first?.id)
     }
 
@@ -198,8 +198,8 @@ final class OpenInCodeViewerTests: XCTestCase {
 
         viewModel.openMessageInCodeViewer(message: message)
 
-        XCTAssertEqual(viewModel.codeViewerContent?.snippets.count, 1)
-        XCTAssertEqual(viewModel.codeViewerContent?.snippets.first?.language, "python",
+        XCTAssertEqual(viewModel.codeViewerTabs.count, 1)
+        XCTAssertEqual(viewModel.codeViewerTabs.first?.snippet.language, "python",
                        "Only the 60-line block is large; GAMMA (50) renders inline instead")
     }
 
@@ -220,8 +220,8 @@ final class OpenInCodeViewerTests: XCTestCase {
 
         viewModel.openMessageInCodeViewer(message: message)
 
-        XCTAssertEqual(viewModel.codeViewerContent?.snippets.map(\.language), ["c++", "objective-c"])
-        XCTAssertEqual(viewModel.codeViewerContent?.snippets.first?.code, "int x = 1;",
+        XCTAssertEqual(viewModel.codeViewerTabs.map { $0.snippet.language }, ["c++", "objective-c"])
+        XCTAssertEqual(viewModel.codeViewerTabs.first?.snippet.code, "int x = 1;",
                        "The c++ info string must not leak into the body the viewer shows")
     }
 }

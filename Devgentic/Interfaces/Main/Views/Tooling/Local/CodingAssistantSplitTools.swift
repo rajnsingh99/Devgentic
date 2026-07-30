@@ -524,10 +524,6 @@ private enum RipgrepRunner {
             : nil
 
         let process = Process()
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = errPipe
 
         if let rgPath = rgPath {
             var args: [String] = ["-n", "--no-heading", "--color=never"]
@@ -554,15 +550,15 @@ private enum RipgrepRunner {
             process.arguments = grepArgs
         }
 
+        // grep / ripgrep write one "Permission denied" line per unreadable directory to
+        // STDERR, and this site attached stderr to a pipe it never read — over a home
+        // directory that passes 64 KB easily and the search hangs forever.
+        let rawOutput: String
         do {
-            try process.run()
-            process.waitUntilExit()
+            rawOutput = try ProcessRunner.run(process).standardOutput
         } catch {
             return "Error running search: \(error.localizedDescription)"
         }
-
-        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let rawOutput = String(data: data, encoding: .utf8) ?? ""
 
         if rawOutput.isEmpty {
             return "No matches found for '\(pattern)'."

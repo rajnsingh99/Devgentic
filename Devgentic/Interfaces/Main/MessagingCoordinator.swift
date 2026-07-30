@@ -324,19 +324,33 @@ final class MessagingCoordinator {
     // MARK: - Response Regeneration
 
     func regenerateResponse(for agentMessage: ChatMessage) {
+        // Cheap guard first so an over-cap message never pays for a history fetch.
         guard let agentResponse = agentMessage.agentResponse,
               agentResponse.generationAttempts < ChatMessage.maxGenerationAttempts else {
             logger.warning("Max generation attempts reached for message \(agentMessage.id.uuidString).")
             return
         }
+        // The history resolve is async and store-authoritative (a retry must not replay
+        // less context than the original send did). Everything below stays exactly as it
+        // was and simply re-validates after the hop — these guards were going to run
+        // anyway, so re-running them is also the staleness check.
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let historyForRegeneration = await self.resolveBackendHistory(
+                before: agentMessage,
+                conversationID: agentMessage.conversationId
+            )
+            self.continueRegeneration(for: agentMessage, history: historyForRegeneration)
+        }
+    }
+
+    private func continueRegeneration(for agentMessage: ChatMessage, history historyForRegeneration: [ChatMessage]) {
         guard let vm = viewModel else { return }
 
         guard let agentMessageIndex = chatHistoryViewModel.currentChatMessages.firstIndex(of: agentMessage) else {
             logger.error("Could not find agent message in chat history to regenerate.")
             return
         }
-
-        let historyForRegeneration = Array(chatHistoryViewModel.currentChatMessages.dropFirst(agentMessageIndex + 1).reversed())
 
         guard let userQueryMessage = chatHistoryViewModel.currentChatMessages[safe: agentMessageIndex + 1],
               userQueryMessage.sender == .user else {
@@ -393,6 +407,21 @@ final class MessagingCoordinator {
     /// Scope: plain-ReAct native agent profiles only; guards refuse a capability-wrapped profile or a
     /// provider/dialect that drifted since the run started.
     func resumeRun(for agentMessage: ChatMessage) {
+        // Resolve the replay history up front (store-authoritative — a resume must not
+        // replay less context than the original run had), then run the ENTIRE original
+        // body synchronously and in order. Splitting it this way keeps every guard and
+        // mutation of this G1 path exactly where it was.
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let resolved = await self.resolveBackendHistory(
+                before: agentMessage,
+                conversationID: agentMessage.conversationId
+            )
+            self.continueResume(for: agentMessage, resolvedHistory: resolved)
+        }
+    }
+
+    private func continueResume(for agentMessage: ChatMessage, resolvedHistory: [ChatMessage]) {
         guard let vm = viewModel else { return }
 
         // Resume kind from the persisted lifecycle: parked (re-raise the dangling tool) vs streaming
@@ -492,8 +521,12 @@ final class MessagingCoordinator {
             return
         }
         // History strictly below this message + the originating user query (same slice regenerate uses).
-        let history = Array(chatHistoryViewModel.currentChatMessages.dropFirst(idx + 1).reversed())
-        let userQuery = chatHistoryViewModel.currentChatMessages[safe: idx + 1]?.content.textContent ?? ""
+        let history = resolvedHistory
+        // The user query is normally the adjacent resident message; fall back to the last
+        // user turn in the resolved history when the pair straddles the residency cap.
+        let userQuery = chatHistoryViewModel.currentChatMessages[safe: idx + 1]?.content.textContent
+            ?? resolvedHistory.last(where: { $0.sender == .user })?.content.textContent
+            ?? ""
 
         // Drop the stale dangling tool card (the parked tool, still marked isExecuting from before the
         // quit) so the re-raised tool renders fresh instead of duplicating. Completed cards stay.
@@ -690,57 +723,67 @@ final class MessagingCoordinator {
     /// trims to the model's real budget (`charBudget`, the `recentHistory` /
     /// `nativeHistoryTurns` limits), so this only bounds fetch+decode cost on a very long
     /// conversation — it is not the context policy.
-    private static let backendHistoryMessageLimit = 300
-
-    /// Merges stored and in-memory history into one oldest-first list, deduplicated by id.
-    ///
-    /// In-memory wins on conflict, and in-memory-only messages are ALWAYS kept — that is the
-    /// load-bearing property. The user's message is persisted in a detached task that races
-    /// this read, and streaming messages are never in the store while in flight, so a
-    /// store-authoritative merge would intermittently drop the user's own question from the
-    /// request that answers it.
-    ///
-    /// Pure + internal so that guarantee is unit-testable without building a coordinator.
-    static func mergeHistory(stored: [ChatMessage], inMemory: [ChatMessage]) -> [ChatMessage] {
-        var byID: [UUID: ChatMessage] = [:]
-        for message in stored { byID[message.id] = message }
-        for message in inMemory { byID[message.id] = message }
-        return byID.values.sorted { $0.timestamp < $1.timestamp }
-    }
+    /// Kept as the coordinator's own name for the shared limit so existing call sites and
+    /// log copy stay put; the value lives on `BackendHistoryResolver`.
+    private static let backendHistoryMessageLimit = BackendHistoryResolver.messageLimit
 
     /// Resolves the conversation history handed to the backend, oldest-first.
     ///
-    /// Deliberately NOT `currentChatMessages`. That array is the UI's *pagination window*
-    /// (20 messages on open, +10 per scroll upward), so using it made the model's memory
-    /// depend on how far the user happened to scroll, and gave a freshly reopened long
-    /// conversation only 20 messages regardless of the model's context window. What the
-    /// model sees is a context concern; what the list renders is a rendering concern.
+    /// STORE-AUTHORITATIVE, ALWAYS. `currentChatMessages` is the UI's *pagination window*
+    /// (20 messages on open, +10 per scroll upward, capped at `maxResidentMessages`), so
+    /// deriving history from it makes the model's memory depend on how far the user
+    /// happened to scroll. What the model sees is a context concern; what the list renders
+    /// is a rendering concern, and the two must not be the same value.
     ///
-    /// Two deliberate details:
-    ///  • The store is consulted ONLY when it can hold more than is already loaded
-    ///    (`canLoadMorePages`), so ordinary short conversations pay no extra fetch.
-    ///  • In-memory messages are merged OVER the stored ones, never replaced by them: the
-    ///    just-sent user message is persisted in a DETACHED task that may not have landed
-    ///    yet, and in-flight streaming messages exist only in memory. Dropping either would
-    ///    silently omit the user's own question from its own request.
+    /// This previously short-circuited to the in-memory window whenever
+    /// `canLoadMorePages == false` ("the whole conversation is loaded, so the window IS the
+    /// conversation"). That held only while nothing could shrink the window — it made
+    /// `canLoadMorePages` silently load-bearing for model memory, so any future eviction or
+    /// residency cap would have truncated the model's history with no visible symptom. The
+    /// fetch is bounded and conversation-scoped; correctness beats saving it.
+    ///
+    /// In-memory messages are merged OVER the stored ones, never replaced by them: the
+    /// just-sent user message is persisted in a DETACHED task that may not have landed yet,
+    /// and in-flight streaming messages are never in the store. Dropping either would
+    /// silently omit the user's own question from the request that answers it.
     private func resolveBackendHistory(conversationID: UUID) async -> [ChatMessage] {
-        let inMemory = chatHistoryViewModel.currentChatMessages.filter { $0.conversationId == conversationID }
-
-        guard chatHistoryViewModel.canLoadMorePages else {
-            // The whole conversation is already loaded — the window IS the conversation.
-            return inMemory.reversed()
-        }
-
-        let stored = await persistenceService.fetchMessages(
-            for: conversationID,
-            offset: 0,
-            limit: Self.backendHistoryMessageLimit
+        let inMemory = chatHistoryViewModel.currentChatMessages
+        let resolved = await BackendHistoryResolver.resolve(
+            conversationID: conversationID,
+            inMemory: inMemory,
+            persistence: persistenceService
         )
+        logger.info("[HISTORY] Resolved backend history — stored: \(resolved.storedCount), in-memory: \(inMemory.count), merged: \(resolved.history.count)\(resolved.capHit ? ", CAP HIT (\(BackendHistoryResolver.messageLimit)) → older turns are omitted from direct context and rely on RAG retrieval" : ""), conversationID: \(conversationID.uuidString.prefix(8))")
+        return resolved.history
+    }
 
-        let merged = Self.mergeHistory(stored: stored, inMemory: inMemory)
-        let capHit = stored.count >= Self.backendHistoryMessageLimit
-        logger.info("[HISTORY] Resolved backend history — stored: \(stored.count), in-memory: \(inMemory.count), merged: \(merged.count)\(capHit ? ", CAP HIT (\(Self.backendHistoryMessageLimit)) → older turns are omitted from direct context and rely on RAG retrieval" : ""), conversationID: \(conversationID.uuidString.prefix(8))")
-        return merged
+    /// History strictly OLDER than `message`, oldest-first — the slice a regeneration or a
+    /// resume must replay. Store-authoritative for the same reason as above: regenerating
+    /// the newest message of a freshly-opened long conversation previously replayed only
+    /// the ~19 messages that happened to be loaded, so a retry silently ran with less
+    /// context than the original send.
+    private func resolveBackendHistory(before message: ChatMessage, conversationID: UUID) async -> [ChatMessage] {
+        let full = await resolveBackendHistory(conversationID: conversationID)
+        let slice = Self.historySlice(before: message, in: full)
+        if !full.contains(where: { $0.id == message.id }) {
+            logger.info("[HISTORY] Target \(message.id.uuidString.prefix(8)) not in the resolved window — cut history by timestamp instead (\(slice.count) of \(full.count) messages).")
+        }
+        return slice
+    }
+
+    /// Everything strictly before `message` in an oldest-first history.
+    ///
+    /// Cuts by IDENTITY when the target is present — timestamps can tie (a message and its
+    /// reply persisted in the same instant), and an identity cut is exact. Falls back to a
+    /// timestamp cut only when the target isn't in the resolved window at all, which beats
+    /// replaying the entire conversation past it.
+    ///
+    /// Pure + internal so the slice contract is testable without building a coordinator.
+    static func historySlice(before message: ChatMessage, in full: [ChatMessage]) -> [ChatMessage] {
+        if let index = full.firstIndex(where: { $0.id == message.id }) {
+            return Array(full[..<index])
+        }
+        return full.filter { $0.timestamp < message.timestamp }
     }
 
     // MARK: - Message Factory

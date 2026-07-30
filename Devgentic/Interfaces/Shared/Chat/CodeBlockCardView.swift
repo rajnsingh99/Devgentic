@@ -29,19 +29,20 @@ struct CodeBlockCardView: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 16) {
+            HStack(spacing: 14) {
                 // Icon Container
                 ZStack {
                     Circle()
-                        .fill(LinearGradient(colors: [theme.streamingIndicator.opacity(0.2), theme.accentColor.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                        .frame(width: 44, height: 44)
+                        .fill(LinearGradient(colors: [theme.accentColor.opacity(0.25), theme.streamingIndicator.opacity(0.15)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 42, height: 42)
+                        .overlay(Circle().stroke(theme.accentColor.opacity(0.3), lineWidth: 0.5))
 
                     Image(systemName: "chevron.left.forwardslash.chevron.right")
-                        .font(.system(.body, weight: .bold))
+                        .font(.system(size: 14, weight: .bold))
                         .foregroundColor(theme.accentColor)
                 }
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(title)
                         .font(theme.fontBody.weight(.semibold))
                         .foregroundColor(theme.primaryText)
@@ -53,34 +54,36 @@ struct CodeBlockCardView: View {
 
                 Spacer()
 
-                // Language Badge
-                Text(language.uppercased())
-                    .font(.system(size: 10, weight: .bold, design: .monospaced)) // Fixed size: monospaced
-                    .foregroundColor(theme.secondaryText)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(theme.surfaceOverlayStrong)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(theme.surfaceOverlayStrong, lineWidth: 1))
+                // Right Cluster: Language Capsule + Open CTA Pill
+                HStack(spacing: 8) {
+                    if !language.isEmpty {
+                        Text(language.uppercased())
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundColor(theme.primaryText.opacity(0.8))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3.5)
+                            .background(Capsule().fill(theme.surfaceOverlayStrong))
+                            .overlay(Capsule().stroke(theme.secondaryText.opacity(0.2), lineWidth: 0.5))
+                    }
 
-                // Doubles as the copy confirmation — the copy itself comes from the context
-                // menu / accessibility action, so this is the only feedback that it landed.
-                Image(systemName: didCopy ? "checkmark" : "arrow.up.forward.app")
-                    .font(.caption)
-                    .foregroundColor(didCopy ? theme.successColor : theme.secondaryText.opacity(0.5))
-                    .accessibilityHidden(true)
+                    HStack(spacing: 4) {
+                        Image(systemName: didCopy ? "checkmark" : "arrow.up.forward.app")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(didCopy ? "Copied" : "Open")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundColor(didCopy ? theme.successColor : theme.accentColor)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4.5)
+                    .background(Capsule().fill(theme.accentColor.opacity(isHovering ? 0.2 : 0.12)))
+                    .overlay(Capsule().stroke(theme.accentColor.opacity(isHovering ? 0.4 : 0.2), lineWidth: 0.5))
+                }
             }
             .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
             // MARK: Liquid Glass
             .glassEffect(.regular, in: .rect(cornerRadius: 12))
-            // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
-            // .background(.ultraThinMaterial)
-            // .clipShape(RoundedRectangle(cornerRadius: 12))
-            // .overlay(
-            //     RoundedRectangle(cornerRadius: 12)
-            //         .stroke(isHovering ? theme.accentColor.opacity(0.5) : theme.surfaceOverlayStrong, lineWidth: 1)
-            // )
-            // .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2)
             .scaleEffect(isHovering ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)

@@ -318,10 +318,6 @@ struct ChatInputAreaView: View {
         )
     }
 
-    /// [Context gauge] Rebuilds the window-occupancy snapshot for the toolbar ring.
-    /// Resolves the active profile the same way `evaluatePreSendFit` does (in Code mode
-    /// the real profile isn't `selectedProfile` until send). Synchronous and cheap —
-    /// called on turn / model / attachment / mode changes, never per keystroke.
     /// [Context gauge] Size of Code mode's injected project context (`.devgentic/context.md`),
     /// 0 outside Code mode. Code adds it to the system prompt on every message — a real, fixed
     /// cost the generic history/attachment estimate can't see. A plain Int so `onChange(of:)`
@@ -330,6 +326,10 @@ struct ChatInputAreaView: View {
         guard mainViewModel.interfaceMode == .code else { return 0 }
         return codeSessionManager.projectMemoryContent?.count ?? 0
     }
+
+    /// In-flight gauge resolution, cancelled on each recompute so bursty triggers cannot
+    /// land out of order.
+    @State private var contextGaugeTask: Task<Void, Never>?
 
     /// [Context gauge] One combined key over every cheap recompute signal (turn count,
     /// streaming, mode, code project-context size), so a SINGLE `onChange` in the body
@@ -340,6 +340,22 @@ struct ChatInputAreaView: View {
         "\(chatHistoryViewModel.currentChatMessages.count)|\(inputViewModel.isStreaming)|\(mainViewModel.interfaceMode)|\(codeProjectContextChars)"
     }
 
+    /// [Context gauge] Resolves the history the NEXT request would carry and sizes THAT.
+    ///
+    /// Deliberately NOT `chatHistoryViewModel.currentChatMessages`: that is the render
+    /// window (20 on open, +10 per scroll-back), so sizing from it made the ring climb as
+    /// the user scrolled while the prompt was unchanged, and made a freshly-opened long
+    /// conversation under-read its own history by up to 15×.
+    ///
+    /// Resolves the active profile the same way `evaluatePreSendFit` does — in Code mode the
+    /// real profile is not `selectedProfile` until send, so reading that would size the ring
+    /// against whichever chat model happened to be selected instead.
+    ///
+    /// No longer the synchronous array read it once was: the resolution is store-authoritative,
+    /// so this spawns a Task and pays a persistence round-trip. Affordable only because it runs
+    /// on turn / model / attachment / conversation / mode changes and never per keystroke. The
+    /// in-flight task is cancelled first so a slow earlier resolve cannot land on top of a newer
+    /// one — the triggers fire in bursts (message added, streaming toggles, profile switched).
     private func recomputeContextGauge() {
         let profile: BackendProfileModel?
         if mainViewModel.interfaceMode == .code, let codeID = codeSessionManager.codeProfileID {
@@ -347,13 +363,31 @@ struct ChatInputAreaView: View {
         } else {
             profile = selectedProfile
         }
-        contextUsage = ContextWindowUsage.resolve(
-            profile: profile,
-            messages: chatHistoryViewModel.currentChatMessages,
-            attachedFiles: inputViewModel.attachedFiles,
-            conversationID: mainViewModel.selectedConversationID,
-            extraKnowledgeChars: codeProjectContextChars
-        )
+
+        let conversationID = mainViewModel.selectedConversationID
+        let attachedFiles = inputViewModel.attachedFiles
+        let knowledgeChars = codeProjectContextChars
+
+        contextGaugeTask?.cancel()
+        contextGaugeTask = Task { @MainActor in
+            // No conversation yet (fresh chat) — nothing is stored, so the resident window
+            // IS the history and a store round-trip would be pure cost.
+            let history: [ChatMessage]
+            if let conversationID {
+                history = await chatHistoryViewModel.resolveContextHistory(for: conversationID)
+            } else {
+                history = chatHistoryViewModel.currentChatMessages.sorted { $0.timestamp < $1.timestamp }
+            }
+            guard !Task.isCancelled else { return }
+
+            contextUsage = ContextWindowUsage.resolve(
+                profile: profile,
+                messages: history,
+                attachedFiles: attachedFiles,
+                conversationID: conversationID,
+                extraKnowledgeChars: knowledgeChars
+            )
+        }
     }
 
     // MARK: - Main Input Area

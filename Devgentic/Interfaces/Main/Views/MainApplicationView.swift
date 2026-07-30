@@ -22,7 +22,16 @@ struct MainApplicationView: View {
     
     @AppStorage("sidebar.isVisible") private var isSidebarVisible: Bool = true
     @AppStorage("sidebar.paneWidth") private var currentSidebarPaneWidth: Double = 320
+    /// Same key the Code Viewer panel persists its divider width to. Read here so split
+    /// mode can inset the chat by the panel's width. Updates on drag END (not per tick),
+    /// so the chat reflows ONCE per resize instead of re-laying-out every bubble at the
+    /// mouse's report rate — the panel overlaps the delta live, exactly like overlay mode.
+    @AppStorage("codeViewerPanelWidth") private var codeViewerPanelWidth: Double = 600
     @State private var showModePicker: Bool = true
+    /// Window content width, for clamping the split inset (measured, not derived — the
+    /// window is user-resizable). `.infinity` until the first geometry pass, which makes
+    /// the clamp a no-op rather than squeezing the chat to the floor at startup.
+    @State private var windowContentWidth: CGFloat = .infinity
     #if canImport(AppKit) && !targetEnvironment(macCatalyst)
     @State private var scrollDirectionMonitor: Any?
     #endif
@@ -31,6 +40,33 @@ struct MainApplicationView: View {
     private let sidebarGap: CGFloat = 12
     private var totalSidebarWidth: CGFloat {
         (isSidebarVisible ? CGFloat(currentSidebarPaneWidth) : 0) + activityBarWidth + (sidebarGap * 1.5)
+    }
+
+    /// Trailing inset the chat area yields to the Code Viewer in split mode (EXPERIMENTAL).
+    /// Zero in overlay/full (overlay covers; full replaces). The desired inset is the
+    /// panel's full FOOTPRINT — content width plus its divider — plus a breathing gutter,
+    /// so chat text doesn't sit flush against the divider edge. Capped so the chat never
+    /// drops below `splitModeMinChatWidth` — past that the panel overlaps the difference,
+    /// which is the historic overlay behaviour rather than an unreadable sliver of chat.
+    private var chatSplitInset: CGFloat {
+        guard chatHistoryViewModel.codeViewerPresentation == .split,
+              chatHistoryViewModel.isCodeViewerPanelPresented else { return 0 }
+        let desired = CGFloat(codeViewerPanelWidth)
+            + ChatUIConstants.codeViewerDividerWidth
+            + ChatUIConstants.splitModeChatGutter
+        // The floor accounts for BOTH gutters (leading one below + this trailing one) so
+        // the actual text column, not just the padded region, keeps its minimum width.
+        let maxInset = windowContentWidth - totalSidebarWidth - ChatUIConstants.splitModeChatGutter
+            - ChatUIConstants.splitModeMinChatWidth
+        return max(0, min(desired, maxInset))
+    }
+
+    /// Leading breathing room between the sidebar edge and the chat column in split mode
+    /// (mirrors `splitModeChatGutter` on the trailing side). Only in split: a squeezed
+    /// column runs edge-to-edge, so without this the text sits flush against the activity
+    /// bar. In overlay/full the chat is wide/covered and centers its own margins.
+    private var chatSplitLeadingGutter: CGFloat {
+        chatSplitInset > 0 ? ChatUIConstants.splitModeChatGutter : 0
     }
 
     /// Binding that bridges the `Double` stored in `@AppStorage` to the
@@ -81,7 +117,10 @@ struct MainApplicationView: View {
             }
             .edgesIgnoringSafeArea(.all)
             
-            ZStack {
+            // Leading-aligned on purpose: the sidebar is the only fixed-width child here,
+            // and under the default centre alignment it drifts — then slides off the window
+            // entirely once the other layers demand more width than the window has.
+            ZStack(alignment: .leading) {
                 // LAYER 1: Chat — always alive, visibility toggled via opacity
                 chatArea
                     .opacity(router.isShowingChat ? 1 : 0)
@@ -95,11 +134,16 @@ struct MainApplicationView: View {
 
                 // Floating mode switcher is an overlay on chatArea's input VStack
             }
-            .padding(.leading, totalSidebarWidth)
+            .padding(.leading, totalSidebarWidth + chatSplitLeadingGutter)
+            // EXPERIMENTAL split mode: the chat YIELDS layout space to the Code Viewer
+            // instead of being covered by it — a trailing inset, not a re-parent, so the
+            // panel keeps its view identity (and the editor its state) across mode flips.
+            .padding(.trailing, chatSplitInset)
             .frame(maxWidth: .infinity)
             .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
             .animation(.easeInOut(duration: 0.1), value: currentSidebarPaneWidth)
             .animation(.easeInOut(duration: 0.2), value: router.activeDestination)
+            .animation(.easeInOut(duration: 0.2), value: chatSplitInset)
             
             VSCodifiedSidebarContainerView(
                 isSidebarVisible: $isSidebarVisible,
@@ -108,10 +152,28 @@ struct MainApplicationView: View {
             .frame(width: totalSidebarWidth)
             .zIndex(1)
 
-            if chatHistoryViewModel.codeViewerContent != nil {
+            if chatHistoryViewModel.isCodeViewerPanelPresented {
                 CodeViewerPanelView()
                     .environment(chatHistoryViewModel)
+                    // Full AND split cover the CHAT, never the sidebar: inset by the same
+                    // leading width the chat area uses so navigation stays reachable. This
+                    // is also what bounds the panel — it measures its own frame for the
+                    // drag cap, so excluding the sidebar keeps a wide drag off it.
+                    // Overlay alone keeps the historic un-inset trailing overlay.
+                    .padding(.leading, chatHistoryViewModel.codeViewerPresentation == .overlay ? 0 : totalSidebarWidth)
                     .zIndex(2)
+            }
+
+            // Floating reopen pill — shown only when the viewer was minimized with tabs still
+            // open (mutually exclusive with the panel above, so they never overlap).
+            if chatHistoryViewModel.isCodeViewerMinimized {
+                CodeViewerFloatingButton()
+                    .environment(chatHistoryViewModel)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .padding(.top, 14)
+                    .padding(.trailing, 18)
+                    .zIndex(3)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
             Button(action: {
@@ -134,6 +196,11 @@ struct MainApplicationView: View {
                 .keyboardShortcut("n", modifiers: .command)
         }
         .frame(minWidth: 800, minHeight: 500)
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { newWidth in
+            windowContentWidth = newWidth
+        }
         .preferredColorScheme(theme.id == "one_light" ? .light : (theme.id == "dracula" ? .dark : nil))
         .onAppear {
              if viewModel.selectedConversationID != nil && router.isShowingChat {
@@ -158,6 +225,23 @@ struct MainApplicationView: View {
         .onChange(of: chatHistoryViewModel.isSending) { _, isNowSending in
             if !isNowSending && router.isShowingChat && viewModel.selectedConversationID != nil {
                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
+            }
+        }
+        .onChange(of: chatHistoryViewModel.codeViewerPresentation) { oldMode, newMode in
+            // Entering split: auto-collapse the sidebar PANE so the chat keeps a readable
+            // column — expanded sidebar + panel + chat is one region too many. One-shot on
+            // the TRANSITION only: re-expanding afterwards is the user's call and nothing
+            // fights them for it (leaving split deliberately does not auto-restore either).
+            // `isCodeViewerVisible` is load-bearing: restoring a conversation whose saved
+            // session was in split mode replays this transition with the panel still hidden,
+            // which collapsed the sidebar for a panel the user could not see (field-observed
+            // 2026-07-25 — they re-opened it by hand each switch).
+            if newMode == .split, oldMode != .split, isSidebarVisible,
+               chatHistoryViewModel.isCodeViewerVisible {
+                isSidebarVisible = false
+                logger.debug("[CodeViewer] Split enabled — sidebar pane auto-collapsed.")
+            } else if newMode == .split, oldMode != .split, isSidebarVisible {
+                logger.debug("[CodeViewer] Split restored while the panel is hidden — sidebar left expanded.")
             }
         }
         .onChange(of: viewModel.selectedConversationID) { _, newID in

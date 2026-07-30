@@ -112,7 +112,15 @@ class BackendOrchestrationService {
                         // .contextualRAG is deprecated and never returned by resolve() —
                         // the arm stays only for switch exhaustiveness until Phase 4
                         // deletes the case, and maps to directInjection behavior.
-                        let (fileContext, docFailures) = await self.assembleTextFileContent(for: files)
+                        // Write-capable profiles need the path, not just the name.
+                        let disclosePaths = config.profile.profileType == .agent
+                            || config.profile.profileType == .code
+                        let (fileContext, docFailures) = await self.assembleTextFileContent(
+                            for: files, includeAbsolutePaths: disclosePaths
+                        )
+                        if disclosePaths {
+                            logger.info("[ATTACH] Direct injection for \(config.profile.profileType.rawValue) discloses absolute paths so the model can write back to the right file.")
+                        }
                         if !fileContext.isEmpty {
                             attachmentContext = fileContext
                         }
@@ -120,9 +128,22 @@ class BackendOrchestrationService {
                         await self.reportFileFailures(docFailures, span: context, continuation: continuation)
 
                     case .stateless:
-                        // No extraction — note file paths for agent tool access
+                        // The manifest is a promise that `read_file` exists. If the profile
+                        // has it switched off, the paths point at nothing and the attachment
+                        // vanishes without a trace — so fall back to injecting the content
+                        // rather than silently dropping what the user attached.
                         let paths = files.map { $0.url.path }.joined(separator: "\n")
-                        attachmentContext = "The user has attached the following files. Use the read_file tool to access them when needed:\n\(paths)"
+                        if config.profile.enabledToolNames.contains("read_file") {
+                            attachmentContext = "The user has attached the following files. Use the read_file tool to access them when needed:\n\(paths)"
+                            logger.info("[ATTACH] Stateless: handed \(files.count) path(s) to the agent to read on demand.")
+                        } else {
+                            logger.warning("[ATTACH] Profile '\(config.profile.displayName)' uses the stateless file strategy but has NO read_file tool enabled — the path manifest would reference a tool it cannot call. Falling back to direct injection so the \(files.count) attachment(s) still reach the model; enable read_file to get on-demand reads.")
+                            let (fileContext, docFailures) = await self.assembleTextFileContent(
+                                for: files, includeAbsolutePaths: true
+                            )
+                            if !fileContext.isEmpty { attachmentContext = fileContext }
+                            await self.reportFileFailures(docFailures, span: context, continuation: continuation)
+                        }
                     }
                 }
 
@@ -140,13 +161,27 @@ class BackendOrchestrationService {
                 // policy the factory uses, so budget and request can never disagree.
                 // MLX: trained metadata (the app owns the prompt). Cloud: catalog
                 // windows; overflow errors loudly there anyway.
-                let primaryConfig = config.profile.primaryLLMConfig
+                // `resolvedLLMConfig`, NOT `primaryLLMConfig`: the latter returns nil for
+                // `.code`, so a Code session resolved the 128K cloud default as its window and
+                // priced every term against a number unrelated to its model. Only the fit
+                // check reads this variable, so widening it cannot affect the request path.
+                let primaryConfig = config.profile.resolvedLLMConfig
                 let trainedWindow = EffectiveContextWindow.trainedWindow(for: primaryConfig)
                 let contextWindowTokens = EffectiveContextWindow.resolve(for: primaryConfig)
 
                 var ragContextString: String? = nil
                 let profileUsesConversationRAG = config.profile.profileType == .bot
                     || config.profile.profileType == .agent
+
+                /// The fit check runs for every CHAT-SHAPED profile, matching the composer
+                /// gauge's own gate. It used to be nested inside `profileUsesConversationRAG`,
+                /// which excludes `.code` — so a Code session had a ring and a pre-send hint
+                /// with NO send-time authority behind them, and no self-heal clear of a stale
+                /// overflow banner. Retrieval and fit are separate questions; only retrieval
+                /// is bot/agent-only.
+                let profileHasSingleContextWindow = config.profile.profileType == .bot
+                    || config.profile.profileType == .agent
+                    || config.profile.profileType == .code
                 if profileUsesConversationRAG && !conversationHistory.isEmpty {
 
                     // --- UI Progress: RAG preparation ---
@@ -218,9 +253,13 @@ class BackendOrchestrationService {
                             await self.reportFileFailures(kbFailures, span: context, continuation: continuation)
 
                         case .stateless:
-                            // Manifest only — the agent reads sources on demand.
-                            let paths = localSources.map { $0.location }.joined(separator: "\n")
-                            knowledgeBaseContext = "The following profile reference documents are available. Read them with the read_file tool when needed:\n\(paths)"
+                            // Manifest only — the agent reads sources on demand. Built through
+                            // the shared owner so the fit gauges price the exact string that
+                            // ships, preamble included.
+                            knowledgeBaseContext = StatelessKnowledgeManifest.text(
+                                paths: localSources.map { $0.location },
+                                canReadFiles: StatelessKnowledgeManifest.canReadFiles(config.profile)
+                            )
                         }
                     }
                 }
@@ -232,7 +271,7 @@ class BackendOrchestrationService {
                 // fragments. This is AMBIENT state (profile + content size), not a turn
                 // event — it surfaces as an actionable advisory banner above the chat
                 // input (AdvisoryBannerView), never as per-turn transcript clutter.
-                if profileUsesConversationRAG {
+                if profileHasSingleContextWindow {
                     // Images cost real context but contribute ZERO chars: `attachmentChars`
                     // filters them out by extension and `historyChars` reads `textContent`,
                     // which is nil for media. Counted only when the model can actually see
@@ -259,12 +298,41 @@ class BackendOrchestrationService {
                         return current + prior
                     }()
 
+                    // Episodic memory is charged for real now. `historyChars` reads
+                    // `content.textContent`, which is nil for the tool params, outcomes and
+                    // `<effect>` diffs the blob is mostly made of — so an edit-heavy
+                    // conversation used to be billed ZERO for the biggest thing in its prompt
+                    // and overflowed with no banner at all.
+                    // Same fix as the ring: measure the native turns that actually ship
+                    // rather than summing every message, which over-charged the turn limit,
+                    // the char-budget trim, and non-native providers all at once.
+                    let historyProseChars = PromptFitCheck.estimatedHistoryProseChars(
+                        in: conversationHistory,
+                        carriesProse: config.profile.carriesHistoryProse,
+                        strategy: config.profile.resolvedHistoryStrategy,
+                        contextWindow: contextWindowTokens
+                    )
+                    let episodicChars = PromptFitCheck.estimatedEpisodicChars(
+                        in: conversationHistory,
+                        strategy: config.profile.resolvedHistoryStrategy,
+                        contextWindow: contextWindowTokens,
+                        toolsAvailable: config.profile.profileType != .bot,
+                        // The same flag `AgentConnect` hands the formatter when it builds the
+                        // blob for real. Omitting it took the `false` default, so the
+                        // `<attached_images>` lines a vision profile actually ships were
+                        // measured as zero — the gauge under-read the payload on exactly the
+                        // conversations whose images already crowd the window.
+                        includeImageNames: config.profile.supportsVisionInput
+                    )
+                    // Tool schemas ride EVERY request and scale with how many tools the user
+                    // enabled; the flat layer overhead charged an agent the same as a bot.
+                    let toolSchemaChars = PromptFitCheck.estimatedToolSchemaChars(for: config.profile)
                     let estimatedTokens = PromptFitCheck.estimatedTokens(
                         attachmentChars: attachmentContext?.count ?? 0,
-                        knowledgeChars: knowledgeBaseContext?.count ?? 0,
+                        knowledgeChars: (knowledgeBaseContext?.count ?? 0) + toolSchemaChars,
                         retrievalChars: ragContextString?.count ?? 0,
                         queryChars: queryForRequest.count,
-                        historyChars: conversationHistory.reduce(0) { $0 + ($1.content.textContent?.count ?? 0) },
+                        historyChars: historyProseChars + episodicChars,
                         imageTokens: imageTokens
                     )
                     if PromptFitCheck.exceeds(estimatedTokens: estimatedTokens, windowTokens: contextWindowTokens) {
@@ -288,7 +356,7 @@ class BackendOrchestrationService {
                             action: .openProfileSettings(profileID: config.profile.id),
                             dedupeKey: "\(conversationID.uuidString)|contextOverflow|\(config.profile.id.uuidString)|\(contextWindowTokens)"
                         ))
-                        logger.warning("Context-fit: ~\(estimatedTokens) tokens estimated vs \(contextWindowTokens)-token window — advisory posted. (Trace: \(context.traceID))")
+                        logger.warning("[FIT] Context-fit: ~\(estimatedTokens) tok vs \(contextWindowTokens)-token window — advisory posted, the model will see only part of this prompt. Breakdown: tools \(toolSchemaChars) chars, episodic \(episodicChars) chars (strategy=\(config.profile.resolvedHistoryStrategy?.rawValue ?? "recentHistory/non-agent default")), prose \(historyProseChars), attachments \(attachmentContext?.count ?? 0), knowledge \(knowledgeBaseContext?.count ?? 0), retrieval \(ragContextString?.count ?? 0), query \(queryForRequest.count), images \(imageTokens) tok. (Trace: \(context.traceID))")
                     } else {
                         // Condition resolved (files removed, model switched, window
                         // raised…) — the banner self-heals.
@@ -864,7 +932,13 @@ class BackendOrchestrationService {
     /// assembled content plus a typed list of files that couldn't be read (via the
     /// throwing `readFileContentOrThrow`, so the real cause is preserved). Images
     /// are skipped here — they flow through `buildImagePayload`.
-    private func assembleTextFileContent(for files: [FileSystemItem]) async -> (content: String, failures: [FileRetrievalError]) {
+    /// - Parameter includeAbsolutePaths: emit each file's resolved path alongside its
+    ///   name. Set for profiles that can WRITE (agent/code): the name alone is not enough
+    ///   to write back to — the model reproduces it verbatim as a relative path, which
+    ///   `FilePathResolver` anchors to HOME, silently creating a stray file instead of
+    ///   editing the user's. Bots stay name-only; they have no tools to act on a path and
+    ///   the extra characters would just cost context.
+    private func assembleTextFileContent(for files: [FileSystemItem], includeAbsolutePaths: Bool = false) async -> (content: String, failures: [FileRetrievalError]) {
         var assembledContent = ""
         var failures: [FileRetrievalError] = []
 
@@ -884,7 +958,8 @@ class BackendOrchestrationService {
 
             do {
                 let content = try await fileProcessorService.readFileContentOrThrow(for: file.url, maxSize: remainingBudget)
-                assembledContent += "\n\n--- Start of file: \(file.name) ---\n\(content)\n--- End of file: \(file.name) ---"
+                let label = includeAbsolutePaths ? "\(file.name) (\(file.url.path))" : file.name
+                assembledContent += "\n\n--- Start of file: \(label) ---\n\(content)\n--- End of file: \(file.name) ---"
                 // ATT-1 visibility: this is the authoritative "the model saw it"
                 // record — pair it against MessageAttachmentBuilder's persistence
                 // logs to trace any transcript/model-input divergence.
@@ -1089,6 +1164,53 @@ enum DirectInjectionBudget {
     static let total = 200_000
 }
 
+// MARK: - Stateless Knowledge Manifest
+
+/// The `.stateless` knowledge payload — ONE owner for the string the orchestrator ships and
+/// the gauges price.
+///
+/// These were built independently and disagreed twice over. The orchestrator emitted a
+/// preamble sentence plus the paths; the estimator counted only the joined paths, so it
+/// under-charged every stateless profile by a fixed 104 chars. It also gated the whole
+/// manifest on `read_file` being enabled, which the orchestrator never checked — so a
+/// stateless profile with `read_file` switched off was priced as a FULL content injection
+/// (up to 200 KB) for a prompt that in fact carried a few hundred characters of paths. That
+/// is the over-warning direction: a banner the user can only clear by removing knowledge
+/// sources that were costing them almost nothing.
+enum StatelessKnowledgeManifest {
+    /// Whether the profile can actually open the paths it is about to be handed.
+    ///
+    /// Owned here rather than restated at each call site: the emitter and the estimator must
+    /// never disagree about WHICH sentence ships, and a duplicated predicate is exactly how
+    /// they came to disagree about the manifest in the first place. Returns false for every
+    /// profile type with no tools at all (`enabledToolNames` is empty for bots and imageGen),
+    /// which is the correct answer for them.
+    static func canReadFiles(_ profile: BackendProfileModel) -> Bool {
+        profile.enabledToolNames.contains("read_file")
+    }
+
+    /// The manifest itself. Emitted whenever the strategy is `.stateless` and at least one
+    /// local source exists — the presence of `read_file` changes the WORDING, never whether
+    /// the manifest ships, because the paths are true either way.
+    ///
+    /// Why two sentences: a stateless profile with `read_file` disabled was still being told
+    /// "Read them with the read_file tool", naming an instrument it does not have. Listing
+    /// file paths under the word "available" while offering no way to open them is an
+    /// invitation to confabulate their contents, so the second variant says plainly that the
+    /// contents cannot be retrieved and must not be guessed at.
+    ///
+    /// The `canReadFiles == true` string is byte-for-byte what it has always been. Knowledge
+    /// context is a system-prompt layer chosen to be byte-stable per profile so the prefix
+    /// stays prompt-cache friendly; rewording the common case would invalidate that cache for
+    /// every existing profile to no benefit.
+    static func text(paths: [String], canReadFiles: Bool) -> String {
+        let preamble = canReadFiles
+            ? "The following profile reference documents are available. Read them with the read_file tool when needed:\n"
+            : "The following profile reference documents are configured, but no file-reading tool is available this turn, so their contents cannot be retrieved. Refer to them by path only — do not state or infer what they contain:\n"
+        return preamble + paths.joined(separator: "\n")
+    }
+}
+
 // MARK: - Prompt Fit Check
 
 /// Pre-flight estimate of whether the assembled prompt fits the model's
@@ -1096,9 +1218,191 @@ enum DirectInjectionBudget {
 /// code-dense content) with a fixed allowance for prompt-builder layers —
 /// ±15% accuracy is plenty for a warning that only gates a banner.
 enum PromptFitCheck {
-    /// Instructions, environment facts, episodic wrappers, tool schemas, etc.
+    /// Instructions and environment facts — the genuinely FIXED layers.
+    ///
+    /// It used to claim episodic memory and tool schemas too, both of which vary by orders of
+    /// magnitude: a 40 KB episodic blob and a 20-tool agent were each charged as part of this
+    /// flat 2 KB. Both are now measured for real (`estimatedEpisodicChars`,
+    /// `estimatedToolSchemaChars`). Do not fold anything variable back in here.
     static let layerOverheadChars = 2_000
-    /// Conservative chars→tokens ratio (code burns tokens fast).
+
+    /// The whole history-channel character allocation — 60% of the window, floor 4K — split
+    /// between `NativeHistoryConverter`'s turn pairs and the episodic XML, which ride the
+    /// same prompt.
+    ///
+    /// Lives here so `AgentConnect` (which spends it) and the fit gauges (which measure what
+    /// was spent) cannot drift apart on the formula — and denominated at `charsPerToken` so
+    /// spending the whole allowance prices back at 60% of the window, not 80%.
+    static func historyCharBudget(forContextWindow window: Int) -> Int {
+        max(4_000, Int(Double(window) * 0.6 * charsPerToken))
+    }
+
+    /// The native conversation payload's compaction ceiling — 75% of the window, floor 8K.
+    /// Hoisted out of `AgentConnect`, where it was inlined at two call sites, for the same
+    /// reason and denominated the same way.
+    static func nativePayloadCharBudget(forContextWindow window: Int) -> Int {
+        max(8_000, Int(Double(window) * 0.75 * charsPerToken))
+    }
+
+    /// Chars the profile's `<knowledge_base>` layer contributes.
+    ///
+    /// Walks the same loop `assembleKnowledgeSourceContent` walks. Two things that loop does
+    /// which the old estimate did not:
+    ///
+    /// 1. **The per-file ceiling SHRINKS.** It is `min(perFile, total - assembled.count)`, and
+    ///    `readFileContentOrThrow` throws `.tooLarge` rather than truncating — so a later file
+    ///    that no longer fits the room its predecessors left contributes NOTHING. Pricing every
+    ///    source against a flat 50K ceiling charged a third knowledge document in full for
+    ///    content the request silently drops.
+    /// 2. **Each included source carries its wrapper**, `\n\n--- Knowledge: <name> ---\n`. That
+    ///    width is now taken from the assembler's own literal rather than the magic 60 that sat
+    ///    here, so the two cannot drift if the banner text is ever reworded.
+    ///
+    /// This is an APPROXIMATION, not an exact mirror, because the estimator has stat'd BYTES
+    /// where the assembler has decoded CHARACTERS, and it errs in both directions:
+    ///  • UNDER-counts (fails to warn) whenever bytes overstate characters — multi-byte text,
+    ///    and any PDF/DOCX/XLSX the extraction registry turns into far less text than the file
+    ///    weighs on disk. Such a source is dropped here while the request happily ships it.
+    ///  • OVER-counts a source it does include, since UTF-8 characters ≤ bytes, and charges in
+    ///    full for sources the reader will fail on (permissions, bad encoding) and skip.
+    ///
+    /// A `.stateless` profile hands over a path manifest instead, so it is charged as one.
+    /// ⚠️ Known divergence, left as-is: this branch also requires `read_file` to be enabled,
+    /// which the orchestrator's `.stateless` knowledge arm does NOT check — it emits the
+    /// manifest either way. A stateless profile with `read_file` off is therefore charged full
+    /// injection here for a prompt that only ever carries paths.
+    @MainActor
+    static func estimatedKnowledgeSourceChars(for profile: BackendProfileModel) -> Int {
+        let sources = profile.knowledgeSourceFiles
+        guard !sources.isEmpty else { return 0 }
+
+        // `read_file` selects the WORDING, it does not gate the branch. This side used to
+        // require the tool before taking the manifest path at all, so a stateless profile with
+        // it disabled fell through to the full-injection arithmetic below — pricing a few
+        // hundred chars of paths as up to 200 KB of content.
+        if profile.resolvedFileContextStrategy == .stateless {
+            return StatelessKnowledgeManifest.text(
+                paths: sources.map(\.location),
+                canReadFiles: StatelessKnowledgeManifest.canReadFiles(profile)
+            ).count
+        }
+
+        var assembled = 0
+        for source in sources {
+            // `assembled` only grows, so once the total budget is gone every remaining source
+            // is a `.tooLarge` failure — the assembler keeps looping to record them, this stops.
+            guard assembled < DirectInjectionBudget.total else { break }
+            let remainingBudget = min(
+                DirectInjectionBudget.perFile,
+                DirectInjectionBudget.total - assembled
+            )
+            guard let bytes = (try? source.url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
+                  bytes <= remainingBudget else { continue }
+            // The assembler's own wrapper literal, so its width is derived rather than guessed.
+            // The wrapper lands on top of `remainingBudget`, exactly as it does there, which is
+            // why the running total can end a hair above `total`.
+            assembled += "\n\n--- Knowledge: \(source.fileName) ---\n".count + bytes
+        }
+        return assembled
+    }
+
+    /// Characters the tool schemas contribute to the prompt.
+    ///
+    /// Measures the real serializer over the real registry entries rather than guessing a
+    /// per-tool average — same discipline as the history and episodic terms.
+    ///
+    /// Caveat worth knowing: this renders the MARKDOWN form (`<available_tools>`, used by
+    /// non-native providers). Native providers send an equivalent JSON `tools:` array, which
+    /// differs by punctuation, not by content — the same names, descriptions and argument
+    /// schemas. Treat it as the right magnitude for both, exact for one.
+    static func estimatedToolSchemaChars(for profile: BackendProfileModel) -> Int {
+        ToolSchemaSizes.chars(for: profile.schemaBearingToolNames)
+    }
+
+    /// Characters of PROSE history the next request will actually carry.
+    ///
+    /// Measures the real native turns rather than summing every message's `textContent`,
+    /// which over-counted three ways at once: it ignored the per-strategy turn limit, ignored
+    /// the char budget's oldest-first trimming, and charged providers that receive no prose
+    /// at all. Same discipline as `estimatedEpisodicChars` — build what ships and count it.
+    ///
+    /// - Parameter carriesProse: `BackendProfileModel.carriesHistoryProse`. Passed as a Bool
+    ///   rather than a profile, matching `estimatedHistoryImageTokens(shipsHistoryImages:)`.
+    static func estimatedHistoryProseChars(
+        in history: [ChatMessage],
+        carriesProse: Bool,
+        strategy: HistoryStrategy?,
+        contextWindow: Int
+    ) -> Int {
+        guard carriesProse, !history.isEmpty else { return 0 }
+        return NativeHistoryConverter.build(
+            strategy: strategy ?? .recentHistory,
+            from: history,
+            charBudget: historyCharBudget(forContextWindow: contextWindow),
+            includeImages: false
+        ).reduce(0) { $0 + $1.text.count }
+    }
+
+    /// Characters the episodic memory blob will occupy in the next prompt.
+    ///
+    /// Previously invisible to every gauge: `historyChars` reads `content.textContent`, and
+    /// episodic payload — tool params, outcomes, and `<effect>` diffs — lives on timeline
+    /// `ToolExecutionData`, so a conversation full of file edits was charged ZERO for the
+    /// largest thing in its prompt.
+    ///
+    /// Renders the real blob rather than estimating it, which is affordable because the
+    /// gauge recomputes on turn boundaries, not keystrokes — and it guarantees the gauge and
+    /// the request agree by construction.
+    ///
+    /// - Parameter history: ASCENDING (oldest first), which is what `BackendHistoryResolver`
+    ///   returns — it sorts the merged stored + in-memory set by timestamp, and it is where
+    ///   both production callers get their history. Nothing reverses on the way in, and
+    ///   nothing should: `pairTurns` walks forward matching each user message to the agent
+    ///   reply that follows it, so a descending array pairs every reply with the wrong
+    ///   question. (The chat view's own `currentChatMessages` is descending AND a pagination
+    ///   window — the resolver exists so neither gauge has to touch it.)
+    /// - Parameter strategy: nil (bot / code profiles) resolves to `.recentHistory`, matching
+    ///   `AgentConnect`'s own fallback for non-agent profiles.
+    /// - Parameter includeImageNames: `BackendProfileModel.supportsVisionInput` — the exact
+    ///   value `AgentConnect` passes when it builds the blob for real. On a vision profile
+    ///   the formatter emits an `<attached_images>` line for every turn that carried images;
+    ///   taking the `false` default here made the gauge cheaper than the payload precisely on
+    ///   the profiles whose images already push them closest to the window. That is an
+    ///   UNDER-count, i.e. the direction that fails to raise a banner. Defaulted to `false`
+    ///   only so call sites not yet updated keep their current arithmetic.
+    static func estimatedEpisodicChars(
+        in history: [ChatMessage],
+        strategy: HistoryStrategy?,
+        contextWindow: Int,
+        toolsAvailable: Bool = true,
+        includeImageNames: Bool = false
+    ) -> Int {
+        guard !history.isEmpty else { return 0 }
+        let budget = ActionEffect.diffBudget(forHistoryCharBudget: historyCharBudget(forContextWindow: contextWindow))
+        return EpisodicHistoryFormatter.build(
+            strategy: strategy ?? .recentHistory,
+            from: history,
+            includeImageNames: includeImageNames,
+            effectBudget: budget,
+            toolsAvailable: toolsAvailable
+        ).count
+    }
+    /// The chars↔tokens ratio for FIT CHECKING and every char-denominated BUDGET, in both
+    /// directions. Conservative because code burns tokens fast — a 4.0 assumption under-counts
+    /// symbol-dense payloads, and under-counting is the dangerous direction when the question
+    /// is "will this fit".
+    ///
+    /// ⚠️ NOT the app's only chars-per-token constant, and deliberately so.
+    /// `TokenUsage.estimated` uses 4.0 because it answers a different question — how many
+    /// tokens a call ACTUALLY consumed, for cost and usage display, where accuracy beats
+    /// conservatism and over-reporting would inflate a spend figure. Two questions, two
+    /// constants; see that function for the other side of the split.
+    ///
+    /// It used to be one of two. Char-denominated BUDGETS were built at 4.0 while this gauge
+    /// priced their output at 3.0, so a history filled to exactly its 60%-of-window allowance
+    /// read back as 80% — above the 75% overflow threshold. That posted an advisory the user
+    /// could not clear, because the phantom cost came from history the composer cannot edit.
+    /// One ratio in both directions makes that arithmetic impossible.
     static let charsPerToken = 3.0
     /// Fraction of the window reserved for the model's own output.
     static let responseHeadroom = 0.25
@@ -1182,17 +1486,68 @@ enum PromptFitCheck {
         tokens >= 1_000 ? "\(Int((Double(tokens) / 1_000).rounded()))K" : "\(tokens)"
     }
 
-    /// COMPOSER-SIDE attachment estimate from stat'd file sizes (content not yet
-    /// read; bytes ≈ chars for text/code), clamped to the direct-injection budgets
-    /// the orchestrator will actually apply — a 5 MB file injects at most 50K
-    /// chars, so estimating its full size would wildly over-warn.
-    static func estimatedAttachmentChars(forFileSizes sizes: [Int]) -> Int {
+    /// Chars the attachments contribute once the reader has had its way with them.
+    ///
+    /// Two behaviours the old clamp got wrong, both now exact:
+    ///
+    /// 1. **A file over the per-file budget contributes ZERO, not the budget.**
+    ///    `readFileContentOrThrow` THROWS `.tooLarge` when `content.count > maxSize` — it
+    ///    does not truncate — and `assembleTextFileContent` records the failure and moves on.
+    ///    Clamping to 50,000 charged the full budget for a file the model never sees.
+    /// 2. **Each included file carries wrapper text.** `--- Start of file: <label> ---` …
+    ///    `--- End of file: <name> ---`, where the label gains the absolute path on
+    ///    write-capable profiles. Small per file, real across many.
+    ///
+    /// Sizes are STAT'd bytes while the reader's limit is decoded CHARS. For UTF-8 text
+    /// chars ≤ bytes, so a file under the budget in bytes is certainly under it in chars;
+    /// above the budget it is dropped in the common single-byte case. That is the direction
+    /// this errs, and it errs toward the truth far more often than the old clamp did.
+    static func attachmentInjectionChars(forFileSizes sizes: [Int], wrapperCharsPerFile: Int) -> Int {
         var total = 0
         for size in sizes {
             guard total < DirectInjectionBudget.total else { break }
-            total += min(max(size, 0), DirectInjectionBudget.perFile)
+            let bytes = max(size, 0)
+            guard bytes <= DirectInjectionBudget.perFile else { continue }  // dropped, not clipped
+            total += bytes + wrapperCharsPerFile
         }
         return min(total, DirectInjectionBudget.total)
+    }
+
+    /// Chars the attachments contribute for THIS profile, honouring its file strategy.
+    ///
+    /// `.stateless` sends a short path manifest and lets the agent `read_file` on demand, so
+    /// charging the full file sizes over-warned enormously — a 5 MB attachment on a stateless
+    /// profile costs a single line of text. The fallback matters too: with `read_file`
+    /// disabled the manifest would point at a tool the profile cannot call, so the orchestrator
+    /// falls back to direct injection, and so must this.
+    @MainActor
+    static func estimatedAttachmentChars(
+        for files: [FileSystemItem],
+        profile: BackendProfileModel
+    ) -> Int {
+        guard !files.isEmpty else { return 0 }
+
+        let injectable = PreSendFitHint.estimatableSizes(of: files)
+        let disclosesPaths = profile.profileType == .agent || profile.profileType == .code
+
+        if profile.resolvedFileContextStrategy == .stateless,
+           profile.enabledToolNames.contains("read_file") {
+            // Mirrors the manifest the orchestrator builds: one preamble line plus one
+            // absolute path per file. Measured, not guessed.
+            let preamble = "The user has attached the following files. Use the read_file tool to access them when needed:\n"
+            return preamble.count + files.map { $0.url.path }.joined(separator: "\n").count
+        }
+
+        // `--- Start of file: <name> (<path>) ---\n` + `\n--- End of file: <name> ---` plus
+        // the leading blank line. Path only on write-capable profiles, matching
+        // `assembleTextFileContent(includeAbsolutePaths:)`.
+        let wrapper = files.reduce(0) { running, file in
+            let label = disclosesPaths ? "\(file.name) (\(file.url.path))" : file.name
+            return running + 55 + label.count + file.name.count
+        }
+        let averageWrapper = files.isEmpty ? 0 : wrapper / files.count
+
+        return attachmentInjectionChars(forFileSizes: injectable, wrapperCharsPerFile: averageWrapper)
     }
 }
 
@@ -1264,6 +1619,62 @@ extension BackendProfileModel {
             }
         case .workflow, .imageGen, .code:
             return false
+        }
+    }
+
+    /// Static reference material this profile injects as `<knowledge_base>` on EVERY request.
+    ///
+    /// Mirrors `BackendOrchestrationService.resolveKnowledgeSources` (bot and agent only) plus
+    /// its `isLocalFile && exists` filter. Invisible to the composer until now, so a profile
+    /// carrying a large reference document read as costing nothing right up until the
+    /// send-time banner appeared.
+    var knowledgeSourceFiles: [KnowledgeSource] {
+        switch details {
+        case .bot(let config):   return (config.knowledgeSources ?? []).filter { $0.isLocalFile && $0.exists }
+        case .agent(let config): return (config.knowledgeSources ?? []).filter { $0.isLocalFile && $0.exists }
+        default:                 return []
+        }
+    }
+
+    /// Names of the tools this profile sends SCHEMAS for.
+    ///
+    /// Empty for bots — `AgentConnect` sets `rawTools = []` on the bot flow and `ChatExecutor`
+    /// passes `tools: nil` to the provider, so a bot carries no tool payload at all. That is
+    /// the single largest fixed difference between a bot and an agent on the same model, and
+    /// the flat `layerOverheadChars` charged them identically.
+    ///
+    /// Known under-count: `AgentConnect` also appends `ask_user`, the long-term-memory
+    /// capabilities, `final_answer` (non-bot) and — when the history has pointers —
+    /// `get_conversation_history`. Those are request-time additions this can't see.
+    var schemaBearingToolNames: [String] {
+        switch details {
+        case .agent(let config), .code(let config):
+            return config.tools.filter(\.isEnabled).map(\.name)
+        case .bot, .workflow, .imageGen:
+            return []
+        }
+    }
+
+    /// Whether PRIOR-TURN PROSE actually reaches the model on this profile.
+    ///
+    /// Only native providers receive `nativeHistoryTurns`. On MLX — and Ollama at the `.none`
+    /// capability tier — prior turns reach the model ONLY through the episodic XML's 80-char
+    /// `goal` and 200-char `<outcome>`, both of which `estimatedEpisodicChars` already counts.
+    ///
+    /// Charging the full transcript on top of that was ~90% phantom on a long MLX
+    /// conversation: 248% of an 8K window displayed where the truth was 24% — and unclearable,
+    /// because the phantom cost is history the composer cannot edit. Exactly the failure mode
+    /// `carriesHistoryImages` exists to prevent for images; the text term simply never got the
+    /// same gate.
+    ///
+    /// Mirrors `AgentConnect.isNativeProvider`, which gates every `nativeHistoryTurns` build.
+    /// Applies to bots too — `ChatExecutor` infers `isNativeFlow` from whether that array
+    /// exists. Reads `resolvedLLMConfig` (not `primaryLLMConfig`, which is nil for `.code`).
+    var carriesHistoryProse: Bool {
+        switch resolvedLLMConfig?.apiProvider {
+        case .anthropic, .openAI, .google, .openRouter, .openAICompatible: return true
+        case .ollama: return resolvedLLMConfig?.cognitiveCapability != ModelCognitiveCapability.none
+        case .mlx, .none: return false
         }
     }
 

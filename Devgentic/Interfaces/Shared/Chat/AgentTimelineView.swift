@@ -4,6 +4,9 @@
 //
 
 import SwiftUI
+import os
+
+private let timelineLogger = DGLogger(category: "AgentTimelineView")
 
 struct AgentTimelineView: View {
     /// The timeline events to render. Can come from a ChatMessage or directly from
@@ -80,6 +83,20 @@ struct AgentTimelineView: View {
         self.compactReasoning = chatFidelity
     }
 
+    @State private var isTimelineExpanded: Bool = false
+    @State private var userToggled: Bool = false
+
+    /// Which tool rows the user has expanded, keyed by the tool event's stable id.
+    ///
+    /// Deliberately held HERE rather than as `@State` on each row. A row's view identity is
+    /// not stable: when a second tool arrives, `buildGroupedNodes` promotes `.action(A)` into
+    /// `.actionGroup([A, B])`, which moves `ActionDetailView` to the other branch of the body
+    /// switch and hands it fresh structural identity — silently resetting per-row `@State`.
+    /// The whole subtree is also torn down when the run ends and `isStreaming` flips. Either
+    /// one collapsed a row the user had just opened, which reads as "expanding does nothing".
+    /// `data.id` survives both (`ActiveStreamManager` mutates the row in place on completion).
+    @State private var expandedRowIDs: Set<UUID> = []
+
     var body: some View {
         // Grouping is O(n) over up to `ChatMessage.maxTimelineEvents` (500) events —
         // NOT the "< 30" this comment used to assume — and body re-ran on every parent
@@ -93,16 +110,97 @@ struct AgentTimelineView: View {
         )
         let showFooter = streamingContext?.shouldDisplay ?? false
         if !nodes.isEmpty || showFooter {
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(nodes) { node in
-                    TimelineNodeGroupView(node: node, compactReasoning: compactReasoning, isStreaming: isStreaming)
+            VStack(alignment: .leading, spacing: 6) {
+                // Summary Header (collapsible toggle)
+                Button {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.75)) {
+                        isTimelineExpanded.toggle()
+                        userToggled = true
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: isStreaming ? "sparkles" : "checkmark.circle.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(isStreaming ? theme.accentColor : theme.successColor)
+
+                        Text(summaryTitle(nodesCount: nodes.count))
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(theme.secondaryText)
+
+                        Spacer(minLength: 0)
+
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(theme.secondaryText.opacity(0.6))
+                            .rotationEffect(.degrees(isTimelineExpanded ? 90 : 0))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(theme.surfaceOverlay.opacity(0.5))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
+                    )
                 }
-                if let ctx = streamingContext, ctx.shouldDisplay {
-                    StreamingTimelineFooter(context: ctx)
-                        .transition(.opacity)
+                .buttonStyle(.plain)
+                .help(isTimelineExpanded ? String(localized: "Collapse execution log") : String(localized: "Expand execution log"))
+                .accessibilityLabel(isTimelineExpanded ? String(localized: "Collapse execution log") : String(localized: "Expand execution log"))
+
+                // Expanded Nodes Content
+                if isTimelineExpanded || isStreaming {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(nodes) { node in
+                            TimelineNodeGroupView(
+                                node: node,
+                                compactReasoning: compactReasoning,
+                                isStreaming: isStreaming,
+                                expandedRowIDs: $expandedRowIDs
+                            )
+                        }
+                        if let ctx = streamingContext, ctx.shouldDisplay {
+                            StreamingTimelineFooter(context: ctx)
+                                .transition(.opacity)
+                        }
+                    }
+                    .padding(.top, 2)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
-            .padding(.vertical, 8)
+            .padding(.vertical, 4)
+            .onAppear {
+                if !userToggled {
+                    isTimelineExpanded = isStreaming
+                }
+            }
+            .onChange(of: isStreaming) { _, streaming in
+                if !userToggled {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                        isTimelineExpanded = streaming
+                    }
+                }
+            }
+        }
+    }
+
+    private func summaryTitle(nodesCount: Int) -> String {
+        if isStreaming {
+            return String(localized: "Agent is thinking & executing… (\(nodesCount) step\(nodesCount == 1 ? "" : "s"))")
+        } else {
+            let toolCount = events.filter { event in
+                switch event {
+                case .toolExecution: return true
+                default: return false
+                }
+            }.count
+
+            if toolCount > 0 {
+                return String(localized: "Executed \(nodesCount) step\(nodesCount == 1 ? "" : "s") (\(toolCount) tool\(toolCount == 1 ? "" : "s"))")
+            } else {
+                return String(localized: "Thought for \(nodesCount) step\(nodesCount == 1 ? "" : "s")")
+            }
         }
     }
 
@@ -302,6 +400,9 @@ struct TimelineNodeGroupView: View {
     /// Threaded to capability cards so their live indicators (ticking elapsed,
     /// auto-expanded running step) only run while the message is streaming.
     var isStreaming: Bool = false
+    /// Owned by `AgentTimelineView` — see the declaration there for why a row's
+    /// disclosure cannot live in the row.
+    @Binding var expandedRowIDs: Set<UUID>
 
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -343,7 +444,7 @@ struct TimelineNodeGroupView: View {
             ReflectionAttemptsCard(data: data, isStreaming: isStreaming)
 
         case .action(let event):
-            ActionDetailView(event: event)
+            ActionDetailView(event: event, expandedRowIDs: $expandedRowIDs)
                 .padding(.horizontal, 4)
 
         case .actionGroup(let actions):
@@ -401,7 +502,7 @@ struct TimelineNodeGroupView: View {
                 if isExpanded {
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(actions) { action in
-                            ActionDetailView(event: action)
+                            ActionDetailView(event: action, expandedRowIDs: $expandedRowIDs)
                         }
                     }
                     .padding(.leading, 28)
@@ -477,19 +578,486 @@ struct TimelineNodeGroupView: View {
 
 // MARK: - Action Detail Row
 
+/// What a file-touching tool row can open in the Code Viewer. File-scope (not view-nested)
+/// so the resolution semantics — especially append mode — are unit-testable.
+struct TimelineFileViewerAction: Equatable {
+    let fileName: String
+    /// Absolute path of the file this row touched. Identity for tab reuse (a bare basename
+    /// collides across directories) and the read source for `.fromDisk` rows.
+    let filePath: String
+    /// Where the viewer gets the content.
+    ///
+    /// `.inline` — the params already carry the exact bytes (the write tools). Params are
+    /// not size-capped, so this is faithful.
+    /// `.fromDisk` — read the file at click time. Required for `read_file`, whose content
+    /// would otherwise come from `ToolExecutionData.output`, which IS capped
+    /// (`maxPersistedOutputLength`) and additionally carries a decorative header — so a
+    /// large file would open truncated, with the marker embedded in the code.
+    enum ContentSource: Equatable {
+        case inline(String)
+        case fromDisk
+    }
+    let source: ContentSource
+    let preWriteContent: String?
+    let isWrite: Bool
+
+    /// The content when it is already known; nil when a disk read is required.
+    var inlineContent: String? {
+        if case .inline(let text) = source { return text }
+        return nil
+    }
+
+    /// Successful `write_file` / `overwrite_file` / `create_new_file` rows open the
+    /// POST-WRITE file (with a pre-write diff when the snapshot was captured); successful
+    /// `read_file` rows open what the agent read.
+    ///
+    /// APPEND MODE is the trap this exists to handle: `write_file` with the append flag
+    /// carries only the appended FRAGMENT in `content` — treating it as the file produced
+    /// a diff claiming the entire file was deleted and one line added. The post-write file
+    /// is snapshot + fragment; without the snapshot it can't be represented faithfully,
+    /// so the row gets NO affordance rather than a lying one.
+    /// Tools that SHOULD produce a chip. Anything else legitimately has none, so its nil
+    /// return stays silent — logging every `execute_shell` row would drown the signal.
+    private static let chipEligibleTools: Set<String> = [
+        "write_file", "overwrite_file", "create_new_file",
+        "edit_code_single", "edit_code_batch", "read_file"
+    ]
+
+    /// What to do with an append whose pre-write snapshot is missing — the one case where
+    /// the timeline chip and episodic memory need OPPOSITE defaults.
+    enum MissingBaselinePolicy {
+        /// No affordance. The post-write file is snapshot + fragment; without the snapshot,
+        /// opening the fragment as though it were the file is a lying affordance.
+        case skipAction
+        /// Record the fragment with no baseline. Memory's failure mode is the reverse of the
+        /// viewer's: an unrecorded write reads as "nothing happened", which is precisely the
+        /// amnesia `<effect>` exists to fix. `ActionEffect.from` renders it `baseline="none"`.
+        case recordFragment
+    }
+
+    static func resolve(data: ToolExecutionData,
+                        missingBaseline: MissingBaselinePolicy = .skipAction) -> TimelineFileViewerAction? {
+        // Not a file tool — no chip expected, nothing to explain.
+        guard chipEligibleTools.contains(data.name) else { return nil }
+
+        // Past this point every nil is a FILE tool that failed to get a chip, which is
+        // exactly the "why is the button missing?" question on-device. Each exit says why.
+        func skip(_ reason: String) -> TimelineFileViewerAction? {
+            timelineLogger.info("[CodeViewer] No viewer chip for '\(data.name)' [\(data.id.uuidString.prefix(8))] — \(reason).")
+            return nil
+        }
+
+        // In-flight or failed rows have no chip by design; the row's own status shows why.
+        guard data.isSuccess == true, !data.isExecuting else { return nil }
+
+        guard let params = parsedParams(data.params) else {
+            return skip("tool params are not decodable JSON, so the target file is unknown")
+        }
+        // Both spellings exist: native tools take `path`, split tools `file_path`.
+        guard let rawPath = (params["path"] as? String) ?? (params["file_path"] as? String),
+              !rawPath.isEmpty else {
+            return skip("no 'path'/'file_path' argument — nothing to open")
+        }
+        let filePath = (rawPath as NSString).expandingTildeInPath
+        let fileName = (filePath as NSString).lastPathComponent
+
+        switch data.name {
+        case "write_file", "overwrite_file", "create_new_file":
+            guard let content = params["content"] as? String, !content.isEmpty else {
+                return skip("write to '\(fileName)' carried no 'content' argument")
+            }
+            if data.name == "write_file", isAppendMode(params) {
+                guard let pre = data.preWriteContent else {
+                    guard missingBaseline == .recordFragment else {
+                        return skip("append to '\(fileName)' has no pre-write snapshot, so the post-write file can't be reconstructed (file was unreadable or over the snapshot cap at capture time)")
+                    }
+                    // The fragment IS what was added, so `linesAdded` downstream is exact and
+                    // `removed: 0` is genuinely true rather than a placeholder — an append
+                    // removes nothing. It still renders `baseline="none"` because the XML has
+                    // no append marker, so the model cannot tell this apart from an overwrite
+                    // and would read a placeholder zero as measured. Under-claiming is the
+                    // safe direction; the alternative recorded nothing at all.
+                    return TimelineFileViewerAction(
+                        fileName: fileName,
+                        filePath: filePath,
+                        source: .inline(content),
+                        preWriteContent: nil,
+                        isWrite: true
+                    )
+                }
+                return TimelineFileViewerAction(
+                    fileName: fileName,
+                    filePath: filePath,
+                    source: .inline(pre + content),
+                    preWriteContent: pre,
+                    isWrite: true
+                )
+            }
+            return TimelineFileViewerAction(
+                fileName: fileName,
+                filePath: filePath,
+                source: .inline(content),
+                preWriteContent: data.preWriteContent,
+                isWrite: true
+            )
+        case "edit_code_single", "edit_code_batch":
+            // Edit params carry only find/replace strings — the post-state comes from the
+            // executor's read-back. Without it the change can't be represented: no chip.
+            guard let post = data.postWriteContent, !post.isEmpty else {
+                return skip("edit of '\(fileName)' has no post-write read-back, so its result can't be shown (file unreadable or over the snapshot cap after the edit)")
+            }
+            return TimelineFileViewerAction(
+                fileName: fileName,
+                filePath: filePath,
+                source: .inline(post),
+                preWriteContent: data.preWriteContent,
+                isWrite: true
+            )
+        case "read_file":
+            // Deliberately NOT `data.output`: that is capped and header-decorated. Read the
+            // file itself at click time instead.
+            guard data.output?.isEmpty == false else {
+                return skip("read of '\(fileName)' produced no output — treating it as nothing to open")
+            }
+            return TimelineFileViewerAction(
+                fileName: fileName,
+                filePath: filePath,
+                source: .fromDisk,
+                preWriteContent: nil,
+                isWrite: false
+            )
+        default:
+            return nil
+        }
+    }
+
+    /// Mirrors `WriteFileTool`'s own append decoding: any of its alias keys, as a Bool
+    /// or a Bool-coercible string. (JSONSerialization bridges JSON booleans — and 0/1
+    /// numbers — to `Bool` via NSNumber, which `as? Bool` handles.)
+    private static func isAppendMode(_ params: [String: Any]) -> Bool {
+        for key in ["append", "isAppend", "shouldAppend", "appending"] {
+            if let flag = params[key] as? Bool { return flag }
+            if let string = params[key] as? String, let flag = Bool(string.lowercased()) { return flag }
+        }
+        return false
+    }
+
+    private static func parsedParams(_ params: String) -> [String: Any]? {
+        guard let data = params.data(using: .utf8) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+}
+
+/// `.task(id:)` key for chip resolution — the row must re-resolve when the tool finishes,
+/// not just when a different event takes its place.
+private struct TimelineChipKey: Equatable {
+    let id: UUID
+    let isExecuting: Bool
+    let isSuccess: Bool?
+}
+
 struct ActionDetailView: View {
     let event: TimelineEvent
     @Environment(\.appTheme) private var theme
-    @State private var isOutputExpanded: Bool = false
+    /// Optional lookup: contexts that render timelines without a chat VM in the
+    /// environment simply show no Code Viewer chip instead of crashing.
+    @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel: ChatHistoryViewModel?
+    /// Disclosure lives in `AgentTimelineView`, keyed by `data.id` — per-row `@State` was
+    /// being reset out from under the user by view-identity churn.
+    @Binding var expandedRowIDs: Set<UUID>
     @State private var isHovering: Bool = false
+    /// "+N −M" for successful writes with a pre-write snapshot; computed off-main once.
+    @State private var writeDiffStat: (added: Int, deleted: Int)? = nil
+
+    /// Resolution is NOT done in `body`: it JSON-parses the tool params, and a body-side
+    /// call re-parsed once per row per render pass across the whole timeline. Resolved once
+    /// per row in `.task(id:)` and cached here instead.
+    @State private var resolvedAction: TimelineFileViewerAction?
+    /// True while a `.fromDisk` row is being read after a click.
+    @State private var isOpeningFromDisk = false
+
+    private func rowDetail(_ data: ToolExecutionData) -> TimelineRowDetail? {
+        TimelineRowDetail.resolve(data)
+    }
+
+    private func isOutputExpanded(_ data: ToolExecutionData) -> Bool {
+        expandedRowIDs.contains(data.id)
+    }
+
+    /// Always-visible pills for a file-touching row: the change stat, an inline diff, and
+    /// the affordances that open content in the Code Viewer.
+    ///
+    /// Deliberately split into TWO sources. `data.effect` is PERSISTED and self-sufficient
+    /// (path, counts, diff), so the stat and the diff render from it alone. Everything that
+    /// needs actual file CONTENT — "Previous version", "Open in viewer" — needs
+    /// `resolvedAction`, which reads the SESSION-SCOPED snapshots and is nil after a reload.
+    /// Gating the whole block on `resolvedAction` made the persisted diff unreachable for
+    /// `edit_code_*` and append rows on any reloaded conversation, defeating the point of
+    /// persisting it (found by the 2026-07-26 re-scope audit).
+    @ViewBuilder
+    private func fileViewerChip(data: ToolExecutionData) -> some View {
+        let effect = data.effect
+        let isNoOpWrite: Bool = {
+            if let effect { return effect.linesAdded == 0 && effect.linesRemoved == 0 }
+            return writeDiffStat.map { $0.added == 0 && $0.deleted == 0 } ?? false
+        }()
+        let stat: (added: Int, deleted: Int)? = effect.map { ($0.linesAdded, $0.linesRemoved) } ?? writeDiffStat
+        // A persisted effect with `diff == nil` came from `ActionEffectBuilder`'s no-baseline
+        // branch: the file was over `preWriteSnapshotByteLimit` (512 KB) or wasn't readable as
+        // UTF-8 when the snapshot was taken. Its `linesRemoved: 0` is a PLACEHOLDER, not a
+        // measurement — printing "+N −0" made a destructive overwrite of an 800 KB file look
+        // exactly like creating a new one. `writeDiffStat` is always measured against a real
+        // pre-image, so it stays trusted.
+        let hasBaseline: Bool = effect.map { $0.diff != nil } ?? true
+
+        if effect != nil || resolvedAction != nil {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 5) {
+                    if let stat {
+                        if isNoOpWrite {
+                            Text(String(localized: "No changes"))
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(theme.tertiaryText)
+                        } else if !hasBaseline {
+                            Text(String(localized: "Wrote \(stat.added) lines — no baseline"))
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(theme.tertiaryText)
+                                .help(String(localized: "The file couldn't be captured before the write (too large, or not readable as text), so what this replaced can't be shown."))
+                                .accessibilityLabel(String(localized: "Wrote \(stat.added) lines; no baseline, so the replaced content is unknown"))
+                        } else {
+                            HStack(spacing: 3) {
+                                Text("+\(stat.added)").foregroundColor(theme.successColor)
+                                Text("−\(stat.deleted)").foregroundColor(theme.errorColor)
+                            }
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        }
+                    }
+
+                    // No "Show diff" toggle: the diff IS the row's output, so the row's own
+                    // chevron discloses it — the same one control a read row uses.
+
+                    // Recovery path — a pure viewer use. Needs the session-scoped snapshot,
+                    // so it is simply absent after a reload rather than misleading.
+                    if let viewModel = chatHistoryViewModel, let action = resolvedAction,
+                       !isNoOpWrite, let pre = action.preWriteContent {
+                        Button {
+                            viewModel.openTimelineFileInCodeViewer(
+                                fileName: action.fileName,
+                                filePath: nil,
+                                content: pre
+                            )
+                        } label: {
+                            Text(String(localized: "Previous version"))
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(theme.secondaryText)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(Capsule().fill(theme.surfaceOverlay.opacity(0.6)))
+                        }
+                        .buttonStyle(.plain)
+                        .help(String(localized: "Open this file as it was before the change"))
+                        .accessibilityLabel(String(localized: "Open previous version in code viewer"))
+                    }
+
+                    // Reads open in the viewer — that is what it is for.
+                    if let viewModel = chatHistoryViewModel, let action = resolvedAction,
+                       !action.isWrite {
+                        Button {
+                            openInViewer(action, viewModel: viewModel, preWriteContent: nil)
+                        } label: {
+                            HStack(spacing: 3) {
+                                if isOpeningFromDisk {
+                                    ProgressView().controlSize(.mini).scaleEffect(0.6)
+                                } else {
+                                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                                        .font(.system(size: 9, weight: .semibold))
+                                }
+                                Text(String(localized: "Open in viewer"))
+                                    .font(.system(size: 10, weight: .medium))
+                            }
+                            .foregroundColor(theme.accentColor)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(theme.accentColor.opacity(0.12)))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isOpeningFromDisk)
+                        .help(String(localized: "Open the file the agent read"))
+                        .accessibilityLabel(String(localized: "Open in code viewer"))
+                    }
+                }
+
+            }
+        }
+    }
+
+    /// The change this row made, rendered where the change happened.
+    ///
+    /// Reads `ToolExecutionData.effect`, which is derived ONCE at tool completion and
+    /// persisted — so this survives a relaunch, and it is the SAME value the agent has in
+    /// episodic memory. The row and the model can therefore never describe a write
+    /// differently, which they could if this recomputed its own diff.
+    @ViewBuilder
+    private func inlineDiff(_ effect: ActionEffect) -> some View {
+        if let diff = effect.diff {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(diff.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
+                    diffLine(line)
+                }
+                if effect.isTruncated {
+                    // Never let a partial change read as the whole one.
+                    Text(String(localized: "Diff truncated — open the previous version to see everything."))
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(theme.tertiaryText)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                }
+            }
+            .padding(.vertical, 4)
+            .background(RoundedRectangle(cornerRadius: 6).fill(theme.surfaceOverlay.opacity(0.5)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(theme.secondaryText.opacity(0.12), lineWidth: 1)
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func diffLine(_ line: String) -> some View {
+        let kind: (color: Color, background: Color) = {
+            if line.hasPrefix("+") { return (theme.successColor, theme.successColor.opacity(0.1)) }
+            if line.hasPrefix("-") { return (theme.errorColor, theme.errorColor.opacity(0.1)) }
+            return (theme.secondaryText, .clear)
+        }()
+        Text(line.isEmpty ? " " : line)
+            .font(.system(size: 10, design: .monospaced))
+            .foregroundColor(kind.color)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 1)
+            .background(kind.background)
+            .textSelection(.enabled)
+    }
+
+    /// Opens the row's file, reading from disk first when the row has no inline content
+    /// (`read_file`). The read is off-main and the failure path is explicit — a file the
+    /// agent read may since have been moved or deleted.
+    private func openInViewer(_ action: TimelineFileViewerAction,
+                              viewModel: ChatHistoryViewModel,
+                              preWriteContent: String?) {
+        if let inline = action.inlineContent {
+            viewModel.openTimelineFileInCodeViewer(
+                fileName: action.fileName,
+                filePath: action.filePath,
+                content: inline
+            )
+            return
+        }
+
+        guard !isOpeningFromDisk else { return }
+        isOpeningFromDisk = true
+        let path = action.filePath
+        Task {
+            let content = await Task.detached(priority: .userInitiated) {
+                try? String(contentsOfFile: path, encoding: .utf8)
+            }.value
+            isOpeningFromDisk = false
+            guard let content, !content.isEmpty else {
+                timelineLogger.warning("[CodeViewer] Timeline open of '\(path)' failed — unreadable or gone since the agent read it; nothing opened.")
+                return
+            }
+            viewModel.openTimelineFileInCodeViewer(
+                fileName: action.fileName,
+                filePath: path,
+                content: content
+            )
+        }
+    }
+
+    /// One resolution + one stat computation per row, keyed by the event id — off the
+    /// render path entirely.
+    private func resolveChip(for data: ToolExecutionData) async {
+        let action = TimelineFileViewerAction.resolve(data: data)
+        resolvedAction = action
+
+        guard let action, action.isWrite,
+              let pre = action.preWriteContent,
+              let content = action.inlineContent else { return }
+        // Byte-identical no-op: skip the detached diff — equality is O(n) and the answer
+        // is already known.
+        if pre == content {
+            writeDiffStat = (0, 0)
+            return
+        }
+        writeDiffStat = await Task.detached(priority: .utility) {
+            DiffUtility.changeCounts(original: pre, modified: content)
+        }.value
+    }
 
     var body: some View {
         if case .toolExecution(let data) = event {
             VStack(alignment: .leading, spacing: 3) {
-                Button {
-                    if let out = data.output, !out.isEmpty {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            isOutputExpanded.toggle()
+                HStack(spacing: 6) {
+                    actionRowButton(data: data)
+                    fileViewerChip(data: data)
+                }
+
+                // Disclosed by the row's own chevron, exactly like a read's content —
+                // collapsed by default, one tap to reveal.
+                if isOutputExpanded(data), let detail = rowDetail(data) {
+                    switch detail {
+                    case .diff(let effect, let note):
+                        inlineDiff(effect)
+                        // Only present when the output says something the diff cannot —
+                        // see `TimelineRowDetail.resolve`.
+                        if let note { expandedOutput(note) }
+                    case .output(let out):
+                        expandedOutput(out)
+                    }
+                }
+            }
+            // Keyed on the completion state too: a row resolves to no chip while the tool
+            // is still executing, and must re-resolve once it finishes.
+            .task(id: TimelineChipKey(id: data.id, isExecuting: data.isExecuting, isSuccess: data.isSuccess)) {
+                await resolveChip(for: data)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func expandedOutput(_ out: String) -> some View {
+        Text(out)
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundColor(theme.primaryText.opacity(0.72))
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(theme.surfaceOverlay.opacity(0.3))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
+                    )
+            )
+            .padding(.leading, 6)
+            .transition(.opacity)
+    }
+
+    private func actionRowButton(data: ToolExecutionData) -> some View {
+                // ONE predicate for the chevron, the hit target and the hover affordance.
+                // A row is not disclosable while it executes (no output yet, no effect yet),
+                // and letting it highlight + scale under the pointer advertised a tap that
+                // silently did nothing for the whole duration of every tool call.
+                let isDisclosable = rowDetail(data) != nil && !data.isExecuting
+                let isExpanded = isOutputExpanded(data)
+                return Button {
+                    guard isDisclosable else { return }
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        if expandedRowIDs.contains(data.id) {
+                            expandedRowIDs.remove(data.id)
+                        } else {
+                            expandedRowIDs.insert(data.id)
                         }
                     }
                 } label: {
@@ -520,49 +1088,50 @@ struct ActionDetailView: View {
 
                         statusIcon(data: data)
 
-                        if let out = data.output, !out.isEmpty, !data.isExecuting {
+                        if isDisclosable {
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundColor(theme.tertiaryText)
-                                .rotationEffect(.degrees(isOutputExpanded ? 90 : 0))
+                                .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                                // Decorative: its rotation is the sighted cue for the state
+                                // that `.accessibilityValue` announces below.
+                                .accessibilityHidden(true)
                         }
                     }
                     .padding(.horizontal, 6)
                     .padding(.vertical, 4)
                     .background(
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(isHovering ? theme.surfaceOverlay.opacity(0.7) : Color.clear)
+                            .fill(isHovering && isDisclosable ? theme.surfaceOverlay.opacity(0.7) : Color.clear)
                     )
                     .contentShape(Rectangle())
-                    .scaleEffect(isHovering ? 1.01 : 1.0)
+                    .scaleEffect(isHovering && isDisclosable ? 1.01 : 1.0)
                 }
                 .buttonStyle(.plain)
+                // `.allowsHitTesting` rather than `.disabled`: on macOS a `.plain` button
+                // renders its label dimmed when disabled, which would grey out the verb,
+                // path and spinner of every row for as long as it runs.
+                .allowsHitTesting(isDisclosable)
+                // SwiftUI has no "expanded" trait for a hand-rolled disclosure, and the
+                // label text is identical in both states — without this VoiceOver cannot
+                // tell them apart at all.
+                .accessibilityValue(
+                    isDisclosable
+                        ? Text(isExpanded ? String(localized: "Expanded") : String(localized: "Collapsed"))
+                        : Text("")
+                )
+                .accessibilityHint(
+                    isDisclosable
+                        ? Text(isExpanded
+                               ? String(localized: "Hides this step's details")
+                               : String(localized: "Shows this step's details"))
+                        : Text("")
+                )
                 .onHover { hovering in
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                         isHovering = hovering
                     }
                 }
-
-                if isOutputExpanded, let out = data.output, !out.isEmpty {
-                    Text(out)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(theme.primaryText.opacity(0.72))
-                        .multilineTextAlignment(.leading)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(theme.surfaceOverlay.opacity(0.3))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
-                                )
-                        )
-                        .padding(.leading, 6)
-                        .transition(.opacity)
-                }
-            }
-        }
     }
 
     @ViewBuilder
@@ -657,43 +1226,35 @@ struct WarningRow: View {
     @Environment(\.appTheme) private var theme
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .center, spacing: 6) {
             Image(systemName: category.icon)
-                .font(.system(.caption, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.orange)
-                .frame(width: 18, alignment: .center)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(category.displayName.uppercased())
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(.orange.opacity(0.95))
-                    .tracking(0.5)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(Color.orange.opacity(0.15)))
+            Text(category.displayName.uppercased())
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundColor(.orange.opacity(0.95))
+                .tracking(0.4)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1.5)
+                .background(Capsule().fill(Color.orange.opacity(0.18)))
 
-                Text(text)
-                    .font(.system(.caption, weight: .medium))
-                    .foregroundColor(theme.primaryText.opacity(0.85))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 2)
-            }
+            Text(text)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(theme.primaryText.opacity(0.85))
+                .lineLimit(2)
+
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [Color.orange.opacity(0.15), Color.orange.opacity(0.05)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.orange.opacity(0.08))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.orange.opacity(0.25), lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(Color.orange.opacity(0.2), lineWidth: 0.5)
         )
     }
 }

@@ -13,7 +13,10 @@ import SwiftUI
 // MARK: - Parsed file operation
 
 enum FileChange: Equatable {
-    case write(path: String, content: String)
+    /// `append` = write_file's append mode, where `content` is the appended FRAGMENT,
+    /// not the full file — the preview must reconstruct existing + fragment or it shows
+    /// the whole file as deleted.
+    case write(path: String, content: String, append: Bool)
     case delete(path: String)
     case move(source: String, destination: String)
     case copy(source: String, destination: String)
@@ -36,10 +39,26 @@ enum FileChange: Equatable {
         let srcKeys = ["source", "src", "from", "current_path", "source_path", "original", "sourcePath", "filePath"]
         let dstKeys = ["destination", "dest", "to", "target", "new_path", "target_path", "destinationPath", "newPath", "targetPath", "copy_path"]
 
+        // Append flag, mirroring WriteFileTool's own decoder: alias keys, Bool or
+        // Bool-coercible string, plus 0/1 numbers (models emit all three).
+        func flag(_ keys: [String]) -> Bool {
+            for key in keys {
+                switch dict[key] {
+                case .bool(let b)?: return b
+                case .string(let s)?: if let b = Bool(s.lowercased()) { return b }
+                case .number(let n)?: return n != 0
+                default: continue
+                }
+            }
+            return false
+        }
+
         switch toolName {
         case "write_file":
             guard let p = value(writeKeys), !p.isEmpty else { return nil }
-            return .write(path: p, content: value(contentKeys) ?? "")
+            return .write(path: p,
+                          content: value(contentKeys) ?? "",
+                          append: flag(["append", "isAppend", "shouldAppend", "appending"]))
         case "delete_file":
             guard let p = value(deleteKeys), !p.isEmpty else { return nil }
             return .delete(path: p)
@@ -58,9 +77,33 @@ enum FileChange: Equatable {
     }
 }
 
-/// Abbreviates an absolute path with `~` for display.
+/// The path the tool will ACTUALLY act on, abbreviated with `~` for display.
+///
+/// Resolving first is load-bearing, not cosmetic. A model that emits a bare relative path
+/// (`January2026.java`) has that path anchored to HOME by `FilePathResolver`, but the raw
+/// string renders as a lone filename — so an approval banner built from it looked exactly
+/// like an edit to the file the user had attached, while the write landed in the home
+/// folder (field-observed 2026-07-25). Resolved, the same call reads `~/January2026.java`
+/// and the wrong target is obvious before the user approves it.
+/// A diff row as attributed text, with the intra-line changed runs emphasized.
+///
+/// `DiffUtility.generateDiff` populates `segments` for modified line pairs; when it
+/// didn't (pure add/delete, or refinement declined the pair) the whole line renders
+/// plainly, which is the correct fallback.
+private func diffLineText(_ result: DiffResult, emphasisBackground: Color) -> Text {
+    guard let segments = result.segments, segments.count > 1 else {
+        return Text(result.line)
+    }
+    return segments.reduce(Text("")) { partial, segment in
+        let piece = segment.isEmphasized
+            ? Text(segment.text).bold()
+            : Text(segment.text)
+        return partial + piece
+    }
+}
+
 private func displayPath(_ path: String) -> String {
-    (path as NSString).abbreviatingWithTildeInPath
+    (FilePathResolver.resolve(path) as NSString).abbreviatingWithTildeInPath
 }
 
 // MARK: - Preview
@@ -71,8 +114,8 @@ struct FileChangePreviewView: View {
 
     var body: some View {
         switch change {
-        case .write(let path, let content):
-            WriteFilePreview(path: path, newContent: content)
+        case .write(let path, let content, let append):
+            WriteFilePreview(path: path, newContent: content, append: append)
         case .delete(let path):
             FileOpSummary(icon: "trash", tint: theme.errorColor, verb: "Delete", path: path)
         case .move(let s, let d):
@@ -90,6 +133,9 @@ struct FileChangePreviewView: View {
 private struct WriteFilePreview: View {
     let path: String
     let newContent: String
+    /// write_file append mode: `newContent` is the FRAGMENT; the previewed post-state is
+    /// existing + fragment.
+    let append: Bool
     @Environment(\.appTheme) private var theme
 
     /// Above this size we skip the line-by-line diff (memory) and show a byte summary instead.
@@ -107,12 +153,15 @@ private struct WriteFilePreview: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Image(systemName: fileExisted ? "pencil.line" : "doc.badge.plus")
+                // Append to an existing file is additive (success tint), overwrite is
+                // destructive (warning tint), create is new (success tint).
+                let isAppendToExisting = append && fileExisted
+                Image(systemName: isAppendToExisting ? "text.append" : (fileExisted ? "pencil.line" : "doc.badge.plus"))
                     .font(.system(.caption2, weight: .semibold))
-                    .foregroundColor(fileExisted ? theme.warningColor : theme.successColor)
-                Text(fileExisted ? "Overwrite" : "Create")
+                    .foregroundColor(fileExisted && !isAppendToExisting ? theme.warningColor : theme.successColor)
+                Text(isAppendToExisting ? "Append to" : (fileExisted ? "Overwrite" : "Create"))
                     .font(.system(.caption2, weight: .semibold))
-                    .foregroundColor(fileExisted ? theme.warningColor : theme.successColor)
+                    .foregroundColor(fileExisted && !isAppendToExisting ? theme.warningColor : theme.successColor)
                 Text(displayPath(path))
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundColor(theme.secondaryText)
@@ -167,7 +216,12 @@ private struct WriteFilePreview: View {
         }()
         HStack(spacing: 4) {
             Text(sign).font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundColor(fg).frame(width: 8)
-            Text(result.line.isEmpty ? " " : result.line)
+            // Intra-line refinement: modified pairs highlight just the changed characters
+            // instead of tinting the whole line. Lived in `CodeDiffView` until the panel
+            // stopped diffing; this banner is now its only consumer, so it lives here.
+            (result.line.isEmpty
+                ? Text(" ")
+                : diffLineText(result, emphasisBackground: fg.opacity(0.24)))
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(result.type == .unchanged ? theme.secondaryText : fg)
                 .lineLimit(1)
@@ -181,8 +235,9 @@ private struct WriteFilePreview: View {
 
     private func computeDiff() async {
         loading = true
-        let resolved = (path as NSString).expandingTildeInPath
+        let resolved = FilePathResolver.resolve(path)
         let content = newContent
+        let isAppend = append
         let limit = Self.diffByteLimit
         // Read + diff off the main actor (files can be large; DiffUtility caps at 5k lines).
         let result = await Task.detached(priority: .userInitiated) {
@@ -198,7 +253,11 @@ private struct WriteFilePreview: View {
             }
             let existing = try? String(contentsOfFile: resolved, encoding: .utf8)
             let readable = !exists || existing != nil
-            return (exists, readable, false, DiffUtility.generateDiff(original: existing ?? "", modified: content))
+            // Append mode: `content` is the fragment; the post-state being approved is
+            // existing + fragment. Diffing the fragment alone rendered the entire file
+            // as deleted — the inverse of what the user was approving.
+            let effectiveNew = (isAppend && exists) ? ((existing ?? "") + content) : content
+            return (exists, readable, false, DiffUtility.generateDiff(original: existing ?? "", modified: effectiveNew))
         }.value
         fileExisted = result.exists
         existingReadable = result.readable
@@ -235,7 +294,7 @@ private struct FileOpSummary: View {
             }
         }
         .task(id: path) {
-            let resolved = (path as NSString).expandingTildeInPath
+            let resolved = FilePathResolver.resolve(path)
             exists = await Task.detached { FileManager.default.fileExists(atPath: resolved) }.value
         }
     }

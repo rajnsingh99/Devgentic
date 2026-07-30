@@ -155,7 +155,6 @@ struct WorkflowMarkdownView: View {
     }
 
     private func createStyledString(from text: String, font: Font, weight: Font.Weight) -> AttributedString {
-        let inlineCodeBg = theme.inlineCodeBackground
         let inlineCodeHighlight = theme.inlineCodeHighlight
         let textColor = theme.primaryText
 
@@ -165,9 +164,10 @@ struct WorkflowMarkdownView: View {
             for run in attributedString.runs {
                 let intent = run.inlinePresentationIntent ?? []
                 if intent.contains(.code) {
-                    attributedString[run.range].backgroundColor = inlineCodeBg
+                    // Colour + monospace only, matching `ContentBlockView` — the chat and
+                    // the workflow timeline must render the same markdown identically.
                     attributedString[run.range].foregroundColor = inlineCodeHighlight
-                    attributedString[run.range].font = .system(.body, design: .monospaced)
+                    attributedString[run.range].font = font.weight(weight).monospaced()
                 } else if intent.contains(.stronglyEmphasized) {
                     attributedString[run.range].font = font.weight(.semibold)
                     attributedString[run.range].foregroundColor = textColor

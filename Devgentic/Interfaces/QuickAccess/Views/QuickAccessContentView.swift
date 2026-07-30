@@ -288,13 +288,32 @@ struct QuickAccessContentView: View {
     /// panel's state. The panel is chat-only (no Code mode), so the profile is simply
     /// `session.selectedProfile`. Synchronous and cheap — called on turn / model / attachment
     /// changes, never per keystroke.
+    @State private var contextGaugeTask: Task<Void, Never>?
+
     private func recomputeContextGauge() {
-        contextUsage = ContextWindowUsage.resolve(
-            profile: session.selectedProfile,
-            messages: session.chatHistoryViewModel.currentChatMessages,
-            attachedFiles: attachedFiles,
-            conversationID: session.conversationID
-        )
+        let profile = session.selectedProfile
+        let files = attachedFiles
+        let conversationID = session.conversationID
+
+        contextGaugeTask?.cancel()
+        contextGaugeTask = Task { @MainActor in
+            // Same contract as the main composer: size the REQUEST's history, not the
+            // render window. See `ChatHistoryViewModel.resolveContextHistory(for:)`.
+            let history: [ChatMessage]
+            if let conversationID {
+                history = await session.chatHistoryViewModel.resolveContextHistory(for: conversationID)
+            } else {
+                history = session.chatHistoryViewModel.currentChatMessages.sorted { $0.timestamp < $1.timestamp }
+            }
+            guard !Task.isCancelled else { return }
+
+            contextUsage = ContextWindowUsage.resolve(
+                profile: profile,
+                messages: history,
+                attachedFiles: files,
+                conversationID: conversationID
+            )
+        }
     }
 
     func submitQuery() {

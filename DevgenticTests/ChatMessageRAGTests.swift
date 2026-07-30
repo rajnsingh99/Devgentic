@@ -47,10 +47,16 @@ final class ChatMessageRAGTests: XCTestCase {
         XCTAssertEqual(msg.tokenCountEstimate, max(1, text.count / 4))
     }
 
+    /// Code is denser than prose — braces, operators and short identifiers each cost a
+    /// token — so it is estimated at ~3 chars/token, not the ~4 used for English. This test
+    /// asserted the old uniform /4 and had been red since the split landed. The same ~3
+    /// figure is reached independently by `SemanticChunker` for WordPiece.
     func testTokenCountEstimate_CodeBlock() {
         let code = "let x = 1\nlet y = 2"
         let msg = makeMessage(content: .codeBlock(language: "swift", code: code))
-        XCTAssertEqual(msg.tokenCountEstimate, max(1, code.count / 4))
+        XCTAssertEqual(msg.tokenCountEstimate, max(1, code.count / 3))
+        XCTAssertGreaterThan(msg.tokenCountEstimate, code.count / 4,
+                             "code must be priced denser than prose, not the same")
     }
 
     func testTokenCountEstimate_Error() {

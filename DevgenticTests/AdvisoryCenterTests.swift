@@ -134,29 +134,57 @@ final class PromptFitCheckTests: XCTestCase {
 
     // MARK: - Composer-side attachment estimate (pre-send hint)
 
-    func testEstimatedAttachmentChars_MirrorsInjectionClamps() {
-        // A 5 MB file injects at most 50K chars — the estimate must clamp the
-        // same way or it would wildly over-warn.
+    /// The estimate DROPS an oversized file rather than clamping it, because
+    /// `readFileContentOrThrow` THROWS `.tooLarge` past the per-file budget instead of
+    /// truncating — `assembleTextFileContent` records the failure and moves on, so the model
+    /// never sees one character of it. The old clamp charged the full 50,000 regardless, and
+    /// that phantom cost posted an overflow advisory the user could only clear by detaching a
+    /// file that was costing nothing.
+    ///
+    /// The mechanics of the rule are `AttachmentSizingTests`' job. What is pinned here is the
+    /// arithmetic the ADVISORY is computed from, including the case that suite does not cover:
+    /// a batch of individually-oversized files, where the old clamp did not merely over-charge
+    /// but saturated the total budget.
+    func testEstimatedAttachmentChars_DoesNotBillFilesTheReaderRefuses() {
         XCTAssertEqual(
-            PromptFitCheck.estimatedAttachmentChars(forFileSizes: [5_000_000]),
-            DirectInjectionBudget.perFile
+            PromptFitCheck.attachmentInjectionChars(forFileSizes: [5_000_000], wrapperCharsPerFile: 0), 0,
+            "a 5 MB file is refused whole — charging it the budget over-warns by 50K phantom chars"
         )
-        // Small files pass through at size.
+        // Files under the budget still pass through at size; the advisory must keep firing on
+        // the attachments that genuinely do reach the prompt.
         XCTAssertEqual(
-            PromptFitCheck.estimatedAttachmentChars(forFileSizes: [18_379, 32_549]),
+            PromptFitCheck.attachmentInjectionChars(forFileSizes: [18_379, 32_549], wrapperCharsPerFile: 0),
             18_379 + 32_549
         )
-        // Many big files clamp at the total budget.
+        // Ten 60K files are ten separate refusals, not a filled 200K budget. Under the clamp
+        // this read as the entire total budget — the worst version of the defect, since not
+        // one of those files contributes anything to the request.
         XCTAssertEqual(
-            PromptFitCheck.estimatedAttachmentChars(forFileSizes: Array(repeating: 60_000, count: 10)),
-            DirectInjectionBudget.total
+            PromptFitCheck.attachmentInjectionChars(
+                forFileSizes: Array(repeating: 60_000, count: 10), wrapperCharsPerFile: 0),
+            0
         )
-        XCTAssertEqual(PromptFitCheck.estimatedAttachmentChars(forFileSizes: []), 0)
+        XCTAssertEqual(PromptFitCheck.attachmentInjectionChars(forFileSizes: [], wrapperCharsPerFile: 0), 0)
+    }
+
+    /// The consequence one layer up, which is this file's actual subject: an attachment set
+    /// that ships nothing must not trip the banner. Under the clamp the same 600 KB priced at
+    /// the full 200K budget — ~67K tokens against an 8K window — and fired an advisory whose
+    /// stated cause did not exist.
+    func testRefusedAttachmentsDoNotTripTheOverflowAdvisory() {
+        let chars = PromptFitCheck.attachmentInjectionChars(
+            forFileSizes: Array(repeating: 60_000, count: 10), wrapperCharsPerFile: 0)
+        let tokens = PromptFitCheck.estimatedTokens(
+            attachmentChars: chars, knowledgeChars: 0, retrievalChars: 0,
+            queryChars: 7, historyChars: 0
+        )
+        XCTAssertFalse(PromptFitCheck.exceeds(estimatedTokens: tokens, windowTokens: 8_192),
+                       "every one of these files is refused by the reader — the prompt is a bare query")
     }
 
     func testPreSendEstimate_ObservedTwoFileCase_TripsAdvisory() {
         // Run-3 turn 1 at ATTACH time: stat'd sizes ≈ char counts for code files.
-        let chars = PromptFitCheck.estimatedAttachmentChars(forFileSizes: [18_379, 32_549])
+        let chars = PromptFitCheck.attachmentInjectionChars(forFileSizes: [18_379, 32_549], wrapperCharsPerFile: 0)
         let tokens = PromptFitCheck.estimatedTokens(
             attachmentChars: chars, knowledgeChars: 0, retrievalChars: 0,
             queryChars: 7, historyChars: 0

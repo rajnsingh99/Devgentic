@@ -38,11 +38,18 @@ struct DevgenticApp: App {
                 // Workflow persistence (migrated from UserDefaults)
                 WorkflowLayoutSD.self,
                 WorkflowRunRecordSD.self,
+                // Code Viewer per-conversation tab sessions
+                CodeViewerSessionSD.self,
             ])
             let appSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             let storeURL = appSupportURL.appendingPathComponent("DevgenticSD.store")
             let config = ModelConfiguration("DevgenticSD", schema: schema, url: storeURL)
             let container = try ModelContainer(for: schema, configurations: [config])
+            // Success counterpart to the fatal path below — the first launch after a schema
+            // change is exactly when someone needs to see that the store opened cleanly.
+            DGLogger(category: "DevgenticApp").info(
+                "[STARTUP] SwiftData container opened — \(schema.entities.count) entities, store: \(storeURL.path)"
+            )
             // Inject into singleton stores so non-SwiftUI code can access the container.
             BackendProfileStore.shared.configureContainer(container)
             MCPToolStore.shared.configureContainer(container)
@@ -50,6 +57,7 @@ struct DevgenticApp: App {
             ChatPersistenceStore.shared.configureContainer(container)
             WorkflowLayoutStore.shared.configureContainer(container)
             WorkflowRunHistoryStore.shared.configureContainer(container)
+            CodeViewerSessionStore.shared.configureContainer(container)
             // Download-history store is configured on the main actor; do it
             // eagerly via Task so reconcileOrphans runs as soon as possible.
             Task { @MainActor in
@@ -60,10 +68,48 @@ struct DevgenticApp: App {
                 // .cancelled with "Interrupted" so the history list doesn't
                 // show a phantom spinning record forever.
                 WorkflowRunHistoryStore.shared.reconcileOrphans()
+                // Retired Code Viewer session rows — tabs are in-memory only now.
+                CodeViewerSessionStore.shared.purgePersistedSessions()
             }
             return container
         } catch {
-            fatalError("Failed to create SwiftData ModelContainer: \(error)")
+            // A store that won't open is almost always a migration failure after an update.
+            // The old behaviour — a bare fatalError — gave the user a crash dialog with no
+            // cause, no location, and no path forward, and gave support nothing to act on.
+            //
+            // Deliberately NOT recovering by deleting or moving the store: the file holds
+            // every conversation the user has, and silently starting fresh would look
+            // exactly like "the app ate my data". Tell them where it is and stop.
+            let storeURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+                .first?.appendingPathComponent("DevgenticSD.store")
+            let path = storeURL?.path ?? "Application Support/DevgenticSD.store"
+            DGLogger(category: "DevgenticApp").error(
+                "[STARTUP] FATAL: SwiftData ModelContainer could not be opened at \(path) — \(error). "
+                + "Most likely a schema migration failure after an update. The store was left untouched; "
+                + "the app cannot continue without it."
+            )
+            #if canImport(AppKit)
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = String(localized: "Devgentic can't open its database")
+            alert.informativeText = String(localized: """
+                This usually means the data store couldn't be upgraded after an update.
+
+                Your data has NOT been modified. It's at:
+                \(path)
+
+                Please report this with the details below.
+
+                \(error.localizedDescription)
+                """)
+            alert.addButton(withTitle: String(localized: "Copy Details & Quit"))
+            alert.addButton(withTitle: String(localized: "Quit"))
+            if alert.runModal() == .alertFirstButtonReturn {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString("Store: \(path)\nError: \(error)", forType: .string)
+            }
+            #endif
+            exit(EXIT_FAILURE)
         }
     }()
 
@@ -95,9 +141,12 @@ struct DevgenticApp: App {
             fileProcessorService: fileProcessor
         )
 
+        // The main window owns the Code Viewer: live agent tabs + session persistence.
+        // QuickAccess's view model deliberately does not (it mounts no viewer UI).
         let chatHistoryVM = ChatHistoryViewModel(
             persistenceService: persistence,
-            activeStreamManager: streamManager
+            activeStreamManager: streamManager,
+            ownsCodeViewer: true
         )
 
         let mainVM = MainApplicationViewModel(

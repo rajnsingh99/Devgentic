@@ -90,6 +90,38 @@ extension CodeSnippet {
     static func isLarge(codeBlockContent content: String) -> Bool {
         lineCount(codeBlockContent: content) > ChatUIConstants.codeBlockLineLimit
     }
+
+    /// Best-effort language id for a filename's extension — used when a tab opens from a
+    /// FILE (timeline tool rows) rather than a fenced block, so the editor picks the right
+    /// grammar and the tab the right icon. Nil for unknown extensions (plain-text grammar).
+    static func languageHint(forFileName fileName: String) -> String? {
+        let ext = (fileName as NSString).pathExtension.lowercased()
+        switch ext {
+        case "swift": return "swift"
+        case "java": return "java"
+        case "py": return "python"
+        case "js", "mjs", "cjs": return "javascript"
+        case "ts", "tsx": return "typescript"
+        case "rb": return "ruby"
+        case "go": return "go"
+        case "rs": return "rust"
+        case "c", "h": return "c"
+        case "cpp", "cc", "hpp": return "cpp"
+        case "cs": return "cs"
+        case "kt", "kts": return "kotlin"
+        case "html", "htm": return "html"
+        case "css": return "css"
+        case "json": return "json"
+        case "yaml", "yml": return "yaml"
+        case "toml": return "toml"
+        case "md", "markdown": return "markdown"
+        case "sh", "bash", "zsh": return "bash"
+        case "sql": return "sql"
+        case "xml", "svg", "plist": return "xml"
+        case "": return nil
+        default: return ext.isEmpty ? nil : ext
+        }
+    }
 }
 
 struct CodeSnippetExtractor {

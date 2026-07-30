@@ -154,16 +154,13 @@ struct TextToSpeechTool: DevgenticTool {
             process.arguments = [arguments.text]
         }
 
-        let errPipe = Pipe()
-        process.standardError = errPipe
-
         do {
-            try process.run()
-            process.waitUntilExit()
-            if process.terminationStatus != 0 {
-                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                let errStr = String(data: errData, encoding: .utf8) ?? ""
-                return "TTS error: \(errStr)"
+            // stderr was drained only on the FAILURE branch, so a successful `say` left it
+            // buffered and undrained — harmless at `say`'s volume, but the same shape that
+            // hangs a chattier command. ProcessRunner always drains both.
+            let run = try ProcessRunner.run(process)
+            guard run.succeeded else {
+                return "TTS error: \(run.standardError)"
             }
             return "Speech completed."
         } catch {
