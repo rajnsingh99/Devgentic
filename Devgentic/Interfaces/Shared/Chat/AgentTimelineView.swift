@@ -1509,6 +1509,11 @@ enum ToolArgFormatter {
             if let t = firstString(dict, keys: ["task", "goal", "prompt"]) {
                 return truncate(t, 50)
             }
+        // `recall_conversation_history` no longer exists — the tool was dropped from dispatch as
+        // redundant with the RAG pipeline, and its struct deleted 2026-07-31. This case and its
+        // label/icon entries are kept deliberately: stored conversations from before the removal
+        // still contain calls to it, and this view renders history. Deleting these would make
+        // those old turns fall back to a generic label for no gain.
         case "recall_conversation_history":
             if let q = firstString(dict, keys: ["query", "topic"]) {
                 return truncate(q, 50)

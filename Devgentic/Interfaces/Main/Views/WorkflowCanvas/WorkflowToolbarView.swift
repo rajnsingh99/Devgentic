@@ -27,18 +27,10 @@ struct WorkflowToolbarView: View {
             // Top Action Area
             HStack(alignment: .top) {
                 // Top Left: Add Profile & Status
-                VStack(alignment: .leading, spacing: 12) {
-                    Button { showNodePalette = true } label: {
-                        Label("Add Node", systemImage: "plus")
-                            .font(theme.fontSubheadline.weight(.semibold))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 6)
+                VStack(alignment: .leading, spacing: 10) {
+                    ToolbarPillButton(title: "Add Node", icon: "plus", isPrimary: true) {
+                        showNodePalette = true
                     }
-                    .buttonStyle(.plain)
-                    .foregroundColor(.white)
-                    .background(theme.accentColor)
-                    .clipShape(Capsule())
-                    .shadow(color: theme.accentColor.opacity(0.3), radius: 6, x: 0, y: 3)
                     .popover(isPresented: $showNodePalette, arrowEdge: .bottom) {
                         nodePaletteContent
                     }
@@ -47,45 +39,38 @@ struct WorkflowToolbarView: View {
 
                     // Validation errors indicator
                     if !canvasState.validationErrors.isEmpty {
-                        Button {
+                        ToolbarPillButton(
+                            title: "\(canvasState.validationErrors.count) error\(canvasState.validationErrors.count == 1 ? "" : "s")",
+                            icon: "exclamationmark.triangle.fill",
+                            color: .red
+                        ) {
                             canvasState.showValidationPanel.toggle()
-                        } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .font(.system(size: 10))
-                                Text("\(canvasState.validationErrors.count) error\(canvasState.validationErrors.count == 1 ? "" : "s")")
-                                    .font(.system(size: 11, weight: .medium))
-                            }
-                            .foregroundColor(.red)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            // MARK: Liquid Glass
-                            .glassEffect(.regular, in: .capsule)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
 
                 Spacer()
 
                 // Top Right: Contextual Actions
-                HStack(spacing: 12) {
+                HStack(spacing: 8) {
                     if canvasState.selectedNodeID != nil || canvasState.selectedEdgeID != nil || canvasState.selectedAnnotationID != nil {
-                        floatingActionButton(
+                        ToolbarPillButton(
                             title: "Delete",
                             icon: "trash",
-                            color: .red,
-                            action: { canvasState.deleteSelected() }
-                        )
+                            color: .red
+                        ) {
+                            canvasState.deleteSelected()
+                        }
                     }
 
                     if !canvasState.nodes.isEmpty {
-                        floatingActionButton(
+                        ToolbarPillButton(
                             title: "Clear",
                             icon: "arrow.uturn.backward.square",
-                            color: theme.secondaryText,
-                            action: onClearCanvas
-                        )
+                            color: theme.secondaryText
+                        ) {
+                            onClearCanvas()
+                        }
                     }
                 }
             }
@@ -103,19 +88,25 @@ struct WorkflowToolbarView: View {
                 if canvasState.hasUnsavedChanges {
                     saveRevertGroup
                 } else if !canvasState.nodes.isEmpty {
-                    Text("All changes saved")
-                        .font(.system(.caption, weight: .medium))
-                        .foregroundColor(theme.secondaryText)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        // MARK: Liquid Glass
-                        .glassEffect(.regular, in: .capsule)
-                        // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
-                        // .background(.ultraThinMaterial)
-                        // .overlay(Capsule().stroke(theme.surfaceOverlayStrong, lineWidth: 1))
-                        // .clipShape(Capsule())
-                        // .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2)
-                        .transition(.opacity.combined(with: .scale))
+                    HStack(spacing: 5) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(theme.accentColor)
+                        Text("All changes saved")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(theme.primaryText)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(theme.surfaceOverlay)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(theme.secondaryText.opacity(0.18), lineWidth: 1)
+                    )
+                    .transition(.opacity.combined(with: .scale))
                 }
             }
         }
@@ -160,117 +151,82 @@ struct WorkflowToolbarView: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        // MARK: Liquid Glass
-        .glassEffect(.regular, in: .capsule)
-        // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
-        // .background(.ultraThinMaterial)
-        // .overlay(Capsule().stroke(theme.surfaceOverlayStrong, lineWidth: 1))
-        // .clipShape(Capsule())
-        // .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(theme.surfaceOverlay)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(theme.secondaryText.opacity(0.18), lineWidth: 1)
+        )
     }
 
     private func statusBadge(icon: String, count: Int) -> some View {
         HStack(spacing: 6) {
             Image(systemName: icon)
-                .font(.system(.caption2))
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(theme.accentColor)
             Text("\(count)")
-                .font(.system(size: 11, weight: .bold, design: .monospaced)) // Fixed size: monospaced
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
         }
-        .foregroundColor(theme.secondaryText)
+        .foregroundColor(theme.primaryText)
     }
 
     private var zoomGroup: some View {
         HStack(spacing: 4) {
-            Button(action: { canvasState.zoomOut() }) {
-                Image(systemName: "minus")
-                    .font(.system(.caption, weight: .bold))
-                    .frame(width: 28, height: 28)
+            ToolbarIconButton(icon: "minus", help: "Zoom out") {
+                canvasState.zoomOut()
             }
-            .buttonStyle(.plain)
-            .foregroundColor(theme.primaryText)
-            .accessibilityLabel("Zoom out")
 
             Text("\(Int(canvasState.canvasScale * 100))%")
-                .font(.system(size: 11, weight: .bold, design: .monospaced)) // Fixed size: monospaced
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
                 .foregroundColor(theme.primaryText)
                 .frame(width: 44, alignment: .center)
 
-            Button(action: { canvasState.zoomIn() }) {
-                Image(systemName: "plus")
-                    .font(.system(.caption, weight: .bold))
-                    .frame(width: 28, height: 28)
+            ToolbarIconButton(icon: "plus", help: "Zoom in") {
+                canvasState.zoomIn()
             }
-            .buttonStyle(.plain)
-            .foregroundColor(theme.primaryText)
-            .accessibilityLabel("Zoom in")
 
             Divider()
-                .frame(height: 16)
-                .padding(.horizontal, 4)
+                .frame(height: 14)
+                .padding(.horizontal, 2)
 
-            Button(action: { canvasState.resetZoom() }) {
-                Image(systemName: "arrow.counterclockwise")
-                    .font(.system(.caption, weight: .bold))
-                    .frame(width: 28, height: 28)
+            ToolbarIconButton(icon: "arrow.counterclockwise", help: "Reset zoom") {
+                canvasState.resetZoom()
             }
-            .buttonStyle(.plain)
-            .foregroundColor(theme.primaryText)
-            .accessibilityLabel("Reset zoom")
 
             Divider()
-                .frame(height: 16)
-                .padding(.horizontal, 4)
+                .frame(height: 14)
+                .padding(.horizontal, 2)
 
-            Button(action: onOpenSettings) {
-                Image(systemName: "gearshape")
-                    .font(.system(.caption, weight: .bold))
-                    .frame(width: 28, height: 28)
+            ToolbarIconButton(icon: "gearshape", help: "Workflow settings") {
+                onOpenSettings()
             }
-            .buttonStyle(.plain)
-            .foregroundColor(theme.primaryText)
-            .accessibilityLabel("Workflow settings")
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        // MARK: Liquid Glass
-        .glassEffect(.regular, in: .capsule)
-        // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
-        // .background(.ultraThinMaterial)
-        // .overlay(Capsule().stroke(theme.surfaceOverlayStrong, lineWidth: 1))
-        // .clipShape(Capsule())
-        // .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(theme.surfaceOverlay)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(theme.secondaryText.opacity(0.18), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.08), radius: 3, x: 0, y: 1)
     }
 
     private var saveRevertGroup: some View {
         HStack(spacing: 8) {
-            Button(action: onRevert) {
-                Text("Revert")
-                    .font(theme.fontSubheadline.weight(.medium))
-                    .foregroundColor(theme.secondaryText)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
+            ToolbarPillButton(title: "Revert", icon: "arrow.counterclockwise") {
+                onRevert()
             }
-            .buttonStyle(.plain)
-            // MARK: Liquid Glass
-            .glassEffect(.regular, in: .capsule)
-            // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
-            // .background(.ultraThinMaterial)
-            // .overlay(Capsule().stroke(theme.surfaceOverlayStrong, lineWidth: 1))
-            // .clipShape(Capsule())
 
-            Button(action: onSave) {
-                Text("Save Changes")
-                    .font(theme.fontSubheadline.weight(.semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
+            ToolbarPillButton(title: "Save Changes", icon: "checkmark", isPrimary: true) {
+                onSave()
             }
-            .buttonStyle(.plain)
-            .background(theme.accentColor)
-            .clipShape(Capsule())
-            .shadow(color: theme.accentColor.opacity(0.3), radius: 6, x: 0, y: 3)
         }
         .transition(.move(edge: .bottom).combined(with: .opacity))
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: canvasState.hasUnsavedChanges)
@@ -417,5 +373,104 @@ struct WorkflowToolbarView: View {
             RoundedRectangle(cornerRadius: 6)
                 .fill(theme.controlBackground)
         )
+    }
+}
+
+// MARK: - Toolbar Pill Button (8pt continuous rounded rectangle with hover)
+
+struct ToolbarPillButton: View {
+    let title: String
+    let icon: String?
+    var isPrimary: Bool = false
+    var color: Color? = nil
+    let action: () -> Void
+
+    @State private var isHovered = false
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(isPrimary ? .white : (color ?? theme.accentColor))
+                }
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(isPrimary ? .white : (color ?? theme.primaryText))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isPrimary
+                        ? (isHovered ? theme.accentColor.opacity(0.9) : theme.accentColor)
+                        : (isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(
+                        isPrimary
+                        ? (isHovered ? Color.white.opacity(0.35) : theme.accentColor.opacity(0.5))
+                        : (isHovered ? (color ?? theme.accentColor).opacity(0.45) : theme.secondaryText.opacity(0.18)),
+                        lineWidth: 1
+                    )
+            )
+            .shadow(
+                color: isPrimary
+                ? (isHovered ? theme.accentColor.opacity(0.45) : theme.accentColor.opacity(0.25))
+                : (isHovered ? Color.black.opacity(0.15) : Color.black.opacity(0.08)),
+                radius: isHovered ? 4 : 2,
+                x: 0,
+                y: 1
+            )
+            .scaleEffect(isHovered ? 1.03 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+// MARK: - Toolbar Icon Button (with hover scaling)
+
+struct ToolbarIconButton: View {
+    let icon: String
+    let help: String
+    let action: () -> Void
+
+    @State private var isHovered = false
+    @Environment(\.appTheme) private var theme
+
+    init(icon: String, help: String = "", action: @escaping () -> Void) {
+        self.icon = icon
+        self.help = help
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(isHovered ? theme.accentColor : theme.primaryText)
+                .frame(width: 26, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(isHovered ? theme.surfaceOverlayStrong : Color.clear)
+                )
+                .scaleEffect(isHovered ? 1.08 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .onHover { hovering in
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+                isHovered = hovering
+            }
+        }
     }
 }

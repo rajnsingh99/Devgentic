@@ -435,14 +435,26 @@ enum HITLRiskTier: String, Sendable, Codable, Equatable, CaseIterable {
     /// Best-effort classification by tool name. Native tools are mapped explicitly; unknown / MCP
     /// tools default to `.moderate`. (MCP annotation-driven refinement — `readOnlyHint` /
     /// `destructiveHint` from `ToolAnnotations` — is a follow-on.)
+    ///
+    /// The arbitrary-code tools are asked, not listed. This case used to name `execute_shell`
+    /// and `run_applescript` but not `batch_command` — the same `/bin/zsh -c` under another
+    /// name — so identical acts were badged "Destructive" and "Modifies" depending on which
+    /// tool the model happened to pick. `ToolCapability` is the one answer, and a source test
+    /// keeps it honest.
     static func classify(toolName: String) -> HITLRiskTier {
+        if ToolCapability.executesArbitraryCode(toolName) { return .destructive }
+
         switch toolName {
-        case "delete_file", "execute_shell", "run_applescript", "fs_organize_batch":
+        case "delete_file", "fs_organize_batch",
+             // Split out of read/write multiplexers 2026-07-31 precisely so they could be
+             // labelled and gated as what they are. Each removes something with no undo:
+             // an event, a reminder, a process (SIGKILL), or every tag on a file.
+             "delete_calendar_event", "delete_reminder", "kill_process", "replace_finder_tags":
             return .destructive
         case "write_file", "move_file", "copy_file", "create_folder", "fs_watch_folder":
             return .moderate
         case "read_file", "list_directory", "fs_smart_search", "fs_read_metadata",
-             "get_system_stats", "read_session_history", "web_search":
+             "get_system_stats", "web_search":
             return .safe
         default:
             return .moderate

@@ -97,12 +97,21 @@ extension WorkflowStreamProvider {
 extension AgentConnect: WorkflowStreamProvider {
     func resolveWorkflowTool(_ tool: Tool, conversationID: UUID) async -> AgentTool? {
         // Native first (fixed-source built-in tools), then MCP (server-backed).
-        // `requiresConfirmation: false` — workflow actions are pre-approved at
-        // design time; gate genuinely risky ones behind a Gate node instead.
+        //
+        // `requiresConfirmation` is forwarded from the node's own tool configuration, but note
+        // it is INERT on this path: the flag is read by `ToolExecutionMediator`, and Action
+        // nodes bypass the mediator entirely. The Action branch of `WorkflowExecutor` performs
+        // its own confirmation check against this same flag before running the tool.
+        //
+        // It was hardcoded `false` here until 2026-07-31, with the rationale "workflow actions
+        // are pre-approved at design time; gate genuinely risky ones behind a Gate node". That
+        // holds for the SHAPE of the call — the author chose the tool and wrote the argument
+        // templates — but not for the values, which resolve from upstream (and therefore from
+        // model output) at run time. A tool the user configured to ask now asks here too.
         if let native = resolveNativeTool(
             toolName: tool.name,
             conversationID: conversationID,
-            requiresConfirmation: false,
+            requiresConfirmation: tool.requiresConfirmation,
             timeout: tool.timeout,
             timeoutMessage: tool.timeoutMessage
         ) {

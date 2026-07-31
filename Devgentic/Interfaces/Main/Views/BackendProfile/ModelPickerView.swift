@@ -424,10 +424,9 @@ struct OllamaModelPickerView: View {
     var body: some View {
         VStack(alignment: .trailing, spacing: 4) {
             HStack {
-                Button("Manage Models") {
+                GlassActionButton(title: "Manage Models", icon: "slider.horizontal.3") {
                     router.navigateToModelStore(backend: .ollama, profileID: profileID)
                 }
-                .fixedSize()
 
                 Spacer()
 

@@ -735,6 +735,7 @@ actor WorkflowExecutor: Executor {
             upstreamInput: upstreamInput,
             isFirstNode: isFirstNode,
             nodeName: displayName,
+            nodeID: nodeID,
             upstreamArtifacts: upstreamArtifacts,
             upstreamArtifactText: upstreamArtifactText
         )
@@ -1399,6 +1400,44 @@ actor WorkflowExecutor: Executor {
                         case .executionFinished(let outcome, let reason):
                             bodyOutcome = outcome
                             if let reason { bodyFailureReason = reason }
+
+                        // ⚠️ HITL requests MUST be forwarded, not suppressed. Each carries an
+                        // `operationID` that the inner execution is already suspended on, waiting
+                        // for `ExecutionSuspensionService` to resume it. Swallowing the event
+                        // means no banner is ever shown, so nobody can answer, so the suspension
+                        // never resolves — the whole workflow hangs, with no error and no
+                        // timeout. Before 2026-07-31 `default: break` caught all three, so a Gate
+                        // node inside a loop body hung the run silently. Action nodes began
+                        // requesting confirmation the same day, which made the reachable surface
+                        // much larger.
+                        //
+                        // `sourceNodeID` keeps the INNER node's id when it has one: it is the
+                        // node actually asking, it is what the approval scope is keyed on, and
+                        // collapsing it to the loop's id would pool approvals across every node
+                        // in the body. Falls back to the loop node so the banner is always
+                        // attributable to something on the canvas.
+                        case .requestConfirmation(let toolName, let params, let operationID, let innerNode):
+                            // Logged because a FORWARDED request and a SWALLOWED one look
+                            // identical from outside — both leave the run sitting still. This
+                            // line is what distinguishes "waiting for the user" from "hung".
+                            logger.notice("[WF_HITL] loop '\(displayName)' iter \(iteration) forwarding confirmation for '\(toolName)' [op \(operationID) node \(innerNode?.uuidString ?? nodeID.uuidString)] — run is now WAITING on the user")
+                            continuation.yield(.requestConfirmation(
+                                toolName: toolName, params: params,
+                                operationID: operationID, sourceNodeID: innerNode ?? nodeID))
+
+                        case .requestGate(let prompt, let options, let operationID, let deadline, let innerNode):
+                            logger.notice("[WF_HITL] loop '\(displayName)' iter \(iteration) forwarding GATE [op \(operationID)] — run is now WAITING on the user")
+                            continuation.yield(.requestGate(
+                                prompt: prompt, options: options, operationID: operationID,
+                                deadline: deadline, sourceNodeID: innerNode ?? nodeID))
+
+                        case .requestClarification(let question, let operationID, let innerNode, let options, let multiline):
+                            logger.notice("[WF_HITL] loop '\(displayName)' iter \(iteration) forwarding clarification [op \(operationID)] — run is now WAITING on the user")
+                            continuation.yield(.requestClarification(
+                                question: "[\(displayName) iter \(iteration)] \(question)",
+                                operationID: operationID, sourceNodeID: innerNode ?? nodeID,
+                                options: options, multiline: multiline))
+
                         default:
                             break // Suppress inner workflow orchestration events
                         }
@@ -1635,13 +1674,66 @@ actor WorkflowExecutor: Executor {
             // Computed once — stable across retries.
             let upstreamText = upstreamResults.map(\.output).joined(separator: "\n")
             let upstreamJSON = upstreamResults.compactMap(\.structuredOutput).first
-            let argsData = WorkflowActionArgs.build(
+            var argsData = WorkflowActionArgs.build(
                 bindings: config.argumentBindings,
                 schema: toolRef.parameters,
                 input: upstreamText,
                 inputJSON: upstreamJSON,
                 variables: state.variables
             )
+
+            // (#5) Confirmation. Action nodes bypass `ToolExecutionMediator`, which is what
+            // raises HITL for the agent path — so until 2026-07-31 a tool the user had
+            // configured to ASK ran silently here, and the `requiresConfirmation: false` in
+            // `resolveWorkflowTool` was not even the reason: nothing on this path ever read the
+            // flag. The node's own tool configuration is the authority, exactly as in chat.
+            //
+            // Resolved arguments (not the argument NAMES the timeline shows) are what the user
+            // is asked to approve — approving "args: [command]" without seeing the command is
+            // not consent. This matches the agent path, which has always surfaced real arguments
+            // in the banner; the trace event above stays names-only because it is exportable.
+            if toolRef.requiresConfirmation {
+                // Scoped to THIS node: a grant given in another node of the same run is not an
+                // answer here, because nodes configure their tools independently.
+                let alreadyAllowed = await SessionToolApprovals.shared.isAllowed(
+                    toolName: toolRef.name, conversationID: conversationID, nodeID: nodeID
+                )
+                if alreadyAllowed {
+                    logger.info("Action node '\(displayName)': '\(toolRef.name)' auto-approved via this node's allowlist — no banner.")
+                } else {
+                    let confirmParams = String(data: argsData, encoding: .utf8) ?? toolParams
+                    let operationID = UUID()
+                    continuation.yield(.requestConfirmation(
+                        toolName: toolRef.name, params: confirmParams,
+                        operationID: operationID, sourceNodeID: nodeID
+                    ))
+                    logger.info("Action node '\(displayName)': awaiting user confirmation for '\(toolRef.name)' [op \(operationID)]")
+
+                    let approved = await ExecutionSuspensionService.shared.suspend(
+                        for: operationID, conversationID: conversationID
+                    )
+
+                    // Honour argument edits made in the banner. Offering an editor and then
+                    // running the ORIGINAL arguments would be worse than offering none.
+                    if approved,
+                       let edited = await ExecutionSuspensionService.shared.consumeEditedArguments(for: operationID),
+                       let reEncoded = try? JSONEncoder().encode(edited) {
+                        argsData = reEncoded
+                        logger.info("Action node '\(displayName)': running '\(toolRef.name)' with user-edited arguments.")
+                    }
+
+                    if !approved {
+                        output = "User denied '\(toolRef.name)'."
+                        status = .failed(.modelError(provider: "tool", error: "User denied tool '\(toolRef.name)' in node '\(displayName)'"))
+                        continuation.yield(.toolFailed(
+                            ToolOutput(toolName: toolRef.name, params: toolParams, output: output, isSuccess: false),
+                            category: .userDenied, sourceNodeID: nodeID
+                        ))
+                        logger.notice("Action node '\(displayName)': '\(toolRef.name)' DENIED by user — routing through the node's error port.")
+                        break
+                    }
+                }
+            }
 
             // (#1) Per-node timeout — a hung tool can't block the workflow forever.
             // (#2) Retry — transient failures (network/MCP/timeout) retry up to

@@ -52,6 +52,12 @@ struct ConversationHistoryTool: DevgenticTool {
 
     var name: String { "get_conversation_history" }
 
+    /// Never surfaced in the Tool Library — injected by `AgentConnect` with the run's own chat
+    /// history, so it cannot be constructed from a registry. Required by `DevgenticTool` since
+    /// 2026-07-31, which is how this tool was found at all: its `var name: String { … }` is
+    /// computed, so every `let name = "…"` grep over the tool tree had silently skipped it.
+    var category: String { "Internal" }
+
     var description: String {
         "Retrieves a specific conversation turn by index. Use when the history skeleton says 'Call get_conversation_history(N) for details.', when an <effect> is marked diff=\"on_demand\" and you need the actual change, or when you need more of an earlier answer than the 200-character <outcome> in your history shows. Returns the user query, your COMPLETE earlier response, every tool execution with its arguments and status, and the diff of each file that was modified — call this before offering to undo or revise an earlier edit you cannot see. Tool RESULTS are not stored; re-run the tool with the arguments shown if you need its output again."
     }

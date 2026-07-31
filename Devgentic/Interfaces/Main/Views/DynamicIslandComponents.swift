@@ -178,13 +178,24 @@ struct IslandPillButton: View {
             .foregroundColor(foregroundColor)
             .padding(.horizontal, horizontalPadding)
             .padding(.vertical, 6)
-            .background(Capsule().fill(backgroundColor))
-            .overlay(
-                Capsule()
-                    .strokeBorder(theme.accentColor, lineWidth: isFocused ? 2 : 0)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(backgroundColor)
             )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: strokeColors,
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: isFocused ? 1.5 : 0.5
+                    )
+            )
+            .shadow(color: theme.shadowColor.opacity(isHovered ? 0.3 : 0.15), radius: 6, y: 2)
             .opacity(isEnabled ? 1.0 : 0.4)
-            .scaleEffect(shouldScale ? 1.04 : 1.0)
+            .scaleEffect(shouldScale ? 1.03 : 1.0)
         }
         .buttonStyle(.plain)
         .focused($isFocused)
@@ -234,6 +245,19 @@ struct IslandPillButton: View {
         }
     }
 
+    private var strokeColors: [Color] {
+        switch style {
+        case .primary:
+            return [Color.white.opacity(isHovered ? 0.4 : 0.25), theme.accentColor.opacity(0.4)]
+        case .success:
+            return [Color.white.opacity(isHovered ? 0.4 : 0.25), theme.successColor.opacity(0.4)]
+        case .secondary:
+            return [isHovered ? theme.accentColor.opacity(0.3) : theme.surfaceOverlayStrong, theme.surfaceOverlay]
+        case .subtle:
+            return [theme.accentColor.opacity(0.4), theme.accentColor.opacity(0.15)]
+        }
+    }
+
     private var backgroundColor: Color {
         switch style {
         case .primary:
@@ -243,7 +267,7 @@ struct IslandPillButton: View {
         case .secondary:
             return isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay
         case .subtle:
-            return theme.accentColor.opacity(isHovered ? 0.20 : 0.12)
+            return theme.accentColor.opacity(isHovered ? 0.22 : 0.12)
         }
     }
 }
@@ -390,8 +414,6 @@ private struct ConditionalHelpModifier: ViewModifier {
     }
 }
 
-// MARK: - Conditional keyboard shortcut modifier
-
 private struct ConditionalKeyboardShortcutModifier: ViewModifier {
     let shortcut: KeyboardShortcut?
 
@@ -400,6 +422,60 @@ private struct ConditionalKeyboardShortcutModifier: ViewModifier {
             content.keyboardShortcut(shortcut)
         } else {
             content
+        }
+    }
+}
+
+// MARK: - GlassActionButton
+
+/// A sleek, elevated glass action pill button for detail card headers and section controls.
+struct GlassActionButton: View {
+    let title: String
+    var icon: String? = nil
+    var isAccent: Bool = true
+    let action: () -> Void
+
+    @State private var isHovered = false
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(theme.accentColor)
+                }
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(theme.primaryText)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(
+                        isHovered ? theme.accentColor.opacity(0.45) : theme.secondaryText.opacity(0.18),
+                        lineWidth: 1
+                    )
+            )
+            .shadow(
+                color: isHovered ? theme.accentColor.opacity(0.15) : Color.black.opacity(0.08),
+                radius: isHovered ? 4 : 2,
+                x: 0,
+                y: 1
+            )
+            .scaleEffect(isHovered ? 1.03 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+                isHovered = hovering
+            }
         }
     }
 }

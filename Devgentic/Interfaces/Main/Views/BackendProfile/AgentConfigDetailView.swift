@@ -286,13 +286,21 @@ struct AgentConfigDetailView: View {
             ScrollView {
                 VStack(spacing: 32) {
 
-                        // 1. Identity Header
+                    // 1. Identity Header
                     HStack(alignment: .center, spacing: 16) {
-                        Image(systemName: ProfileType.agent.iconNameFilled)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: 48, height: 48)
-                            .foregroundColor(.accentColor)
+                        ZStack {
+                            Circle()
+                                .fill(LinearGradient(colors: [theme.accentColor.opacity(0.22), theme.accentColor.opacity(0.06)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                .frame(width: 52, height: 52)
+                                .overlay(Circle().stroke(theme.accentColor.opacity(0.35), lineWidth: 0.5))
+                                .shadow(color: theme.accentColor.opacity(0.2), radius: 8)
+
+                            Image(systemName: ProfileType.agent.iconNameFilled)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(width: 26, height: 26)
+                                .foregroundColor(theme.accentColor)
+                        }
 
                         VStack(alignment: .leading) {
                             TextField("Agent Name", text: profile.displayName)
@@ -396,11 +404,9 @@ struct AgentConfigDetailView: View {
 
                                 Spacer(minLength: 16)
 
-                                Button("Manage Library...") {
+                                GlassActionButton(title: "Manage Library...", icon: "arrow.up.forward.app") {
                                     router.navigate(to: .toolLibrary(profileID: editBuffer.draft.id))
                                 }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
                             }
 
                             if !toolsBinding.wrappedValue.filter({ $0.isEnabled }).isEmpty {
@@ -441,29 +447,21 @@ struct AgentConfigDetailView: View {
                     VStack(alignment: .leading, spacing: 16) {
                         // Instructions Editor
                         VStack(alignment: .leading, spacing: 8) {
-                            HStack {
+                            HStack(spacing: 8) {
                                 Spacer()
 
-                                Button {
+                                GlassActionButton(title: "Expand", icon: "arrow.up.left.and.arrow.down.right", isAccent: false) {
                                     promptWindowManager.showEditor(
                                         text: instructionsBinding,
                                         agentName: editBuffer.draft.displayName,
                                         configuredTools: toolsBinding,
                                         themeManager: themeManager
                                     )
-                                } label: {
-                                    Label("Expand", systemImage: "arrow.up.left.and.arrow.down.right")
                                 }
-                                .font(theme.fontCaption)
-                                .buttonStyle(.link)
 
-                                Text("|").foregroundColor(theme.secondaryText).font(theme.fontCaption)
-
-                                Button("Use Default Persona") {
+                                GlassActionButton(title: "Default Persona", icon: "sparkles", isAccent: true) {
                                     instructionsBinding.wrappedValue = defaultSystemPersona
                                 }
-                                .font(theme.fontCaption)
-                                .buttonStyle(.link)
                             }
 
                             ZStack(alignment: .topLeading) {
@@ -553,13 +551,9 @@ struct AgentConfigDetailView: View {
 
                             Spacer(minLength: 16)
 
-                            Button {
+                            GlassActionButton(title: "Add File", icon: "plus") {
                                 showingKnowledgeImporter = true
-                            } label: {
-                                Label("Add File", systemImage: "plus")
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
                             .fileImporter(
                                 isPresented: $showingKnowledgeImporter,
                                 allowedContentTypes: [.item],
@@ -994,39 +988,50 @@ struct SkillActionButton: View {
     @State private var isHovered = false
     @FocusState private var isFocused: Bool
 
-    private var isHighlighted: Bool { isHovered || isFocused }
-
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 4) {
+            HStack(spacing: 5) {
                 Image(systemName: icon)
-                    .font(theme.fontCaption2)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(isDestructive ? (isHovered ? .white : theme.errorColor) : theme.accentColor)
                 Text(label)
-                    .font(theme.fontCaption2.weight(.medium))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(isDestructive ? (isHovered ? .white : theme.errorColor) : theme.primaryText)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .foregroundColor(isHighlighted
-                ? (isDestructive ? .white : .accentColor)
-                : (isDestructive ? theme.errorColor : theme.secondaryText)
-            )
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
             .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(isHighlighted
-                        ? (isDestructive ? theme.errorColor : Color.accentColor.opacity(0.1))
-                        : Color.clear
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isHovered
+                        ? (isDestructive ? theme.errorColor : theme.surfaceOverlayStrong)
+                        : (isDestructive ? theme.errorColor.opacity(0.12) : theme.surfaceOverlay)
                     )
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(isFocused ? Color.accentColor : Color.clear, lineWidth: 1.5)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(
+                        isHovered
+                        ? (isDestructive ? theme.errorColor : theme.accentColor.opacity(0.45))
+                        : (isDestructive ? theme.errorColor.opacity(0.3) : theme.secondaryText.opacity(0.18)),
+                        lineWidth: 1
+                    )
             )
+            .shadow(
+                color: isHovered ? (isDestructive ? theme.errorColor.opacity(0.2) : theme.accentColor.opacity(0.15)) : Color.black.opacity(0.08),
+                radius: isHovered ? 4 : 2,
+                x: 0,
+                y: 1
+            )
+            .scaleEffect(isHovered ? 1.03 : 1.0)
         }
         .buttonStyle(.plain)
         .focusable()
         .focused($isFocused)
-        .onHover { isHovered = $0 }
-        .animation(.easeInOut(duration: 0.15), value: isHighlighted)
+        .onHover { hovering in
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+                isHovered = hovering
+            }
+        }
         .accessibilityLabel(label)
     }
 }

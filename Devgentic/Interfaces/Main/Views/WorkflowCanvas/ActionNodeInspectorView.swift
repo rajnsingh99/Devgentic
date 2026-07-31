@@ -92,17 +92,8 @@ struct ActionNodeInspectorView: View {
                     .font(theme.fontBody)
                     .foregroundColor(theme.secondaryText)
             }
-            .buttonStyle(.plain)
-            .help("How action nodes work")
-            Button("Cancel") { closeInspector() }
-                .font(theme.fontCaption)
-                .buttonStyle(.plain)
-                .foregroundColor(theme.secondaryText)
-            Button("Save") { saveAndDismiss() }
-                .font(theme.fontCaption.weight(.semibold))
-                .buttonStyle(.plain)
-                .foregroundColor(theme.accentColor)
-                .keyboardShortcut(.defaultAction)
+            GlassActionButton(title: "Cancel", icon: "xmark", isAccent: false) { closeInspector() }
+            GlassActionButton(title: "Save", icon: "checkmark", isAccent: true) { saveAndDismiss() }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -166,10 +157,7 @@ struct ActionNodeInspectorView: View {
                                 .lineLimit(2)
                         }
                         Spacer()
-                        Button("Change") { showToolPicker = true }
-                            .font(.system(size: 11))
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
+                        GlassActionButton(title: "Change", icon: "arrow.triangle.2.circlepath", isAccent: false) { showToolPicker = true }
                     }
                 } else {
                     HStack {
@@ -180,10 +168,7 @@ struct ActionNodeInspectorView: View {
                             .font(.system(size: 11))
                             .foregroundColor(theme.warningColor)
                         Spacer()
-                        Button("Select Tool") { showToolPicker = true }
-                            .font(.system(size: 11))
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
+                        GlassActionButton(title: "Select Tool", icon: "wrench.and.screwdriver", isAccent: true) { showToolPicker = true }
                     }
                 }
             }
@@ -378,15 +363,13 @@ struct ActionNodeInspectorView: View {
                         HStack(spacing: 8) {
                             Stepper("\(Int(t))s", value: Binding(get: { t }, set: { hardTimeout = $0 }), in: 5...3600, step: 5)
                                 .fixedSize()
-                            Button("Reset") { hardTimeout = nil }
-                                .font(.system(size: 10)).buttonStyle(.bordered).controlSize(.small)
+                            GlassActionButton(title: "Reset", icon: "arrow.counterclockwise", isAccent: false) { hardTimeout = nil }
                         }
                     } else {
                         HStack(spacing: 8) {
                             Text("Default")
                                 .font(.system(size: 11)).foregroundColor(theme.tertiaryText)
-                            Button("Set") { hardTimeout = 120 }
-                                .font(.system(size: 10)).buttonStyle(.bordered).controlSize(.small)
+                            GlassActionButton(title: "Set", icon: "clock", isAccent: true) { hardTimeout = 120 }
                         }
                     }
                 }
@@ -554,7 +537,18 @@ struct ActionNodeInspectorView: View {
             name: def.name,
             description: def.description,
             isEnabled: true,
-            requiresConfirmation: false,
+            // Inherit the tool's own default rather than hardcoding `false`.
+            //
+            // This was `false` unconditionally, which made the Action-node confirmation gate in
+            // `WorkflowExecutor` (added 2026-07-31) unreachable: it tests
+            // `toolRef.requiresConfirmation`, and nothing could ever set it true. The gate was
+            // written, reviewed and documented while being dead code — the value was never
+            // traced back to the site that produces it.
+            //
+            // `def.requiresConfirmation` is the tool's own answer (for native tools, everything
+            // outside `NativeToolWrapper`'s read-only allowlist), so a destructive tool in an
+            // Action node now asks, and a read-only one does not.
+            requiresConfirmation: def.requiresConfirmation,
             sourceId: source.id,
             parameters: def.parameters
         )

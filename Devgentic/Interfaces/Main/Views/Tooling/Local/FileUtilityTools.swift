@@ -79,7 +79,10 @@ struct GrepFilesTool: DevgenticTool {
         if let ext = arguments.file_extension {
             grepArgs = ["-rn", "--include=*.\(ext)"]
         }
-        grepArgs += [arguments.pattern, expandedPath]
+        // `--` ends option parsing: without it a model-supplied `pattern` beginning with `-`
+        // is read by grep as a flag, and `-f <path>` makes grep take its pattern list from an
+        // arbitrary FILE. Argv stops the shell, not the callee's own option parser.
+        grepArgs += ["--", arguments.pattern, expandedPath]
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")

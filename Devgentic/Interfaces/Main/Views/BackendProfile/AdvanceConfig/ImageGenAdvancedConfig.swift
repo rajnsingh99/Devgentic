@@ -113,14 +113,9 @@ struct ImageGenSettingsView: View {
                 // Reset
                 HStack {
                     Spacer()
-                    Button {
+                    GlassActionButton(title: "Reset to Defaults", icon: "arrow.counterclockwise", isAccent: false) {
                         config = .mlxDefault()
-                    } label: {
-                        Label("Reset to Defaults", systemImage: "arrow.counterclockwise")
-                            .font(.caption)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
                 }
             }
         }

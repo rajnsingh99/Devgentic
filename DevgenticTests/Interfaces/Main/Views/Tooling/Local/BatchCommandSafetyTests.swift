@@ -117,4 +117,59 @@ final class BatchCommandSafetyTests: XCTestCase {
 
         XCTAssertEqual(result, output)
     }
+
+    // MARK: - Parity with execute_shell
+    //
+    // `batch_command` and `execute_shell` are the same capability — `/bin/zsh -c` with the
+    // caller's command — but the interactive/REPL/sudo refusals lived inside
+    // `ShellSessionManager` and so applied to `execute_shell` only. A guard attached to one
+    // tool is a guard on a NAME, not on a capability; both now consult `ShellCommandGuard`.
+
+    func testInteractiveProgramsAreRefused() {
+        for command in ["less /etc/hosts", "vim", "top", "nano file.txt", "htop", "more x"] {
+            XCTAssertNotNil(ShellCommandGuard.refusalReason(for: command),
+                            "\(command) must be refused — it hangs without a TTY")
+        }
+    }
+
+    /// Blocked only in REPL form. `python3 script.py` is an ordinary non-interactive command
+    /// and refusing it would break the tool for its main use.
+    func testBareREPLsAreRefusedButScriptInvocationsAreNot() {
+        XCTAssertNotNil(ShellCommandGuard.refusalReason(for: "python3"))
+        XCTAssertNotNil(ShellCommandGuard.refusalReason(for: "node"))
+        XCTAssertNil(ShellCommandGuard.refusalReason(for: "python3 script.py"))
+        XCTAssertNil(ShellCommandGuard.refusalReason(for: #"python3 -c "print(1)""#))
+        XCTAssertNil(ShellCommandGuard.refusalReason(for: "node index.js"))
+    }
+
+    func testInteractiveSudoIsRefused() {
+        XCTAssertNotNil(ShellCommandGuard.refusalReason(for: "sudo -s"))
+        XCTAssertNotNil(ShellCommandGuard.refusalReason(for: "sudo su"))
+        XCTAssertNotNil(ShellCommandGuard.refusalReason(for: "sudo -i"))
+    }
+
+    /// Token matching, not substring: `topology` must not trip the `top` rule. This is why the
+    /// guard splits into tokens rather than calling `contains`.
+    func testTokenMatchingDoesNotFireOnSubstrings() {
+        XCTAssertNil(ShellCommandGuard.refusalReason(for: "topology --version"))
+        XCTAssertNil(ShellCommandGuard.refusalReason(for: "swiftlint lint"))
+        XCTAssertNil(ShellCommandGuard.refusalReason(for: "./configure && make"))
+    }
+
+    /// Leading whitespace must not smuggle a refused command past the token split.
+    func testLeadingWhitespaceDoesNotBypassTheGuard() {
+        XCTAssertNotNil(ShellCommandGuard.refusalReason(for: "   less /etc/hosts"))
+        XCTAssertNotNil(ShellCommandGuard.refusalReason(for: "\tvim"))
+    }
+
+    /// The honest limit, pinned so nobody later mistakes this list for a security boundary:
+    /// the argument to `zsh -c` is a full language, and these all still run. They are refused
+    /// only when the profile does not grant a shell tool at all.
+    func testTheDenylistIsNotASecurityBoundary() {
+        for bypass in ["rm  -rf /", "find / -delete", #"python3 -c 'import os;os.system("id")'"#] {
+            XCTAssertFalse(BatchCommandTool.isDestructiveCommand(bypass),
+                           "if this ever starts returning true, update the comment — the list "
+                           + "still cannot bound a shell, and pretending otherwise is the risk")
+        }
+    }
 }

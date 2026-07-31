@@ -21,6 +21,10 @@ struct FinalAnswerTool: DevgenticTool {
     // MARK: - Properties
 
     let name = "final_answer"
+    /// Never surfaced in the Tool Library — this tool is injected by `AgentConnect` for the
+    /// run itself, not chosen by a user. The category is required by `DevgenticTool` and
+    /// exists so no tool can silently fall into a default bucket.
+    let category = "Internal"
     let description = """
     Call this tool when you have fully answered the user's request. This is the ONLY \
     way to end a task. Your `answer` is delivered verbatim to the user as markdown. \

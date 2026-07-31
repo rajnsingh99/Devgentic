@@ -11,6 +11,7 @@ import XCTest
 // MARK: - Mock DevgenticTool for Testing
 
 private struct MockTool: DevgenticTool {
+    let category = "Test"
     let name = "mock_tool"
     let description = "A mock tool for testing"
 
@@ -28,6 +29,7 @@ private struct MockTool: DevgenticTool {
 }
 
 private struct ThrowingTool: DevgenticTool {
+    let category = "Test"
     let name = "throwing_tool"
     let description = "A tool that always throws"
 

@@ -442,7 +442,7 @@ struct OllamaSettingsView: View {
             // before; we now have reliable metadata for every model.
             HStack {
                 Spacer()
-                Button {
+                GlassActionButton(title: "Reset to Defaults", icon: "arrow.counterclockwise", isAccent: false) {
                     withAnimation {
                         if let metadata = modelMetadata {
                             config = OllamaAdvancedConfig.recommended(for: metadata, profile: defaultProfile)
@@ -454,15 +454,7 @@ struct OllamaSettingsView: View {
                                 : .botPreset(for: .smallMedium)
                         }
                     }
-                } label: {
-                    Label("Reset to Defaults", systemImage: "arrow.counterclockwise")
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(theme.accentColor.opacity(0.1))
-                        .foregroundColor(theme.accentColor)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
-                .buttonStyle(.plain)
             }
             .padding(.top, 8)
         }

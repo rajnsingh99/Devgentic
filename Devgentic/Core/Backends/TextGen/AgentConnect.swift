@@ -143,18 +143,12 @@ class AgentConnect: @unchecked Sendable {
                     // turns no longer carry a hollow "No static context provided." block.
                     let staticGrounding = ragContext ?? ""
 
-                    // Instantiate the correct Long-Term Memory Strategy
-                    let longTermMemory: any LongTermMemoryStrategy
-                    if modelTier == .tiny || modelTier == .small {
-                        longTermMemory = StaticGroundingMemory(ragContext: staticGrounding)
-                    } else {
-                        longTermMemory = ToolAugmentedMemory(
-                            ragContext: staticGrounding,
-                            memoryTools: [
-                                wrapTool(ReadSessionHistoryTool(conversationID: conversationID), requiresConfirmation: false)
-                            ]
-                        )
-                    }
+                    // Long-term grounding is pre-fetched RAG, injected into the prompt. There is
+                    // no tier branch: the "deep memory tools" axis and its `ToolAugmentedMemory`
+                    // strategy were removed 2026-07-31 with the only tool that populated them
+                    // (`read_session_history`) — see `LongTermMemoryStrategy` for why.
+                    let longTermMemory: any LongTermMemoryStrategy =
+                        StaticGroundingMemory(ragContext: staticGrounding)
 
                     // --- UI Progress: Model initialization ---
                     switch llmConfig.apiProvider {
@@ -197,7 +191,8 @@ class AgentConnect: @unchecked Sendable {
                         rateLimitCategory: rateLimitCategory,
                         parentProvider: llmConfig.apiProvider,
                         skillManifests: skillManifests,
-                        modelTier: modelTier
+                        modelTier: modelTier,
+                        profileID: profile.id
                     )
 
                     // 5.5 Inject `final_answer` terminator for all tool-supporting flows.
@@ -679,7 +674,8 @@ class AgentConnect: @unchecked Sendable {
                         rateLimitCategory: rateLimitCategory,
                         parentProvider: llmConfig.apiProvider,
                         skillManifests: skillManifests,
-                        modelTier: llmConfig.modelMetadata?.tier ?? .medium
+                        modelTier: llmConfig.modelMetadata?.tier ?? .medium,
+                        profileID: profile.id
                     )
 
                     // 6.5 Inject `final_answer` terminator for workflow nodes that run on
@@ -1155,7 +1151,10 @@ class AgentConnect: @unchecked Sendable {
         rateLimitCategory: RateLimitCategory? = nil,
         parentProvider: ApiProvider? = nil,
         skillManifests: [SkillManifest]? = nil,
-        modelTier: ModelTier = .medium
+        modelTier: ModelTier = .medium,
+        /// Correlation only — carried so an unresolved-tool error names the profile that asked
+        /// for it. Without it a "capability silently missing" log cannot be traced to a profile.
+        profileID: UUID? = nil
     ) async -> [AgentTool] {
 
         var activeTools: [AgentTool] = []
@@ -1175,11 +1174,6 @@ class AgentConnect: @unchecked Sendable {
         activeTools.append(wrapTool(AskUserTool(richFields: askUserRichFields), requiresConfirmation: false))
 
         // -----------------------------------------------------------------
-        // 2. Deep Episodic Memory (Delegated to Strategy)
-        // -----------------------------------------------------------------
-        activeTools.append(contentsOf: longTermMemory.memoryCapabilities)
-
-        // -----------------------------------------------------------------
         // 2.5. Skill Loading Tool (conditional — only when skills are configured)
         // -----------------------------------------------------------------
         if let manifests = skillManifests, !manifests.isEmpty {
@@ -1193,16 +1187,36 @@ class AgentConnect: @unchecked Sendable {
         // -----------------------------------------------------------------
         let allToolSources = await UnifiedToolStore.shared.sources
 
+        var unresolved: [String] = []
         for toolConfig in profileTools where toolConfig.isEnabled {
             if let agentTool = self.resolveNativeTool(toolName: toolConfig.name, conversationID: conversationID, requiresConfirmation: toolConfig.requiresConfirmation, timeout: toolConfig.timeout, timeoutMessage: toolConfig.timeoutMessage) {
                 activeTools.append(agentTool)
-                logger.debug("Enabled Native Tool: \(toolConfig.name)")
+                logger.debug("[TOOLRESOLVE] native '\(toolConfig.name)' enabled (confirm: \(toolConfig.requiresConfirmation)) [conv \(conversationID)]")
             } else if let agentTool = self.resolveMCPTool(toolConfig: toolConfig, availableSources: allToolSources) {
                 activeTools.append(agentTool)
-                logger.debug("Enabled MCP Tool: \(toolConfig.name)")
+                logger.debug("[TOOLRESOLVE] MCP '\(toolConfig.name)' enabled from source \(toolConfig.sourceId) [conv \(conversationID)]")
             } else {
-                logger.warning("Failed to resolve tool: \(toolConfig.name)")
+                // A SILENT CAPABILITY DROP — the loudest thing in this function.
+                //
+                // The profile asked for this tool and the agent will run without it. Nothing
+                // surfaces in the UI, and the stale entry stays in the profile forever (the Tool
+                // Library renders from `UnifiedToolStore`, so a name with no matching source has
+                // no row to un-tick). Before 2026-07-31 this was one `warning` with the bare name:
+                // no profile, no conversation, no statement of the consequence — unusable for
+                // working out why an agent "forgot" how to do something.
+                unresolved.append(toolConfig.name)
+                logger.error("""
+                    [TOOLRESOLVE] ⚠️ '\(toolConfig.name)' NOT RESOLVED — the agent will run WITHOUT \
+                    this capability. Neither `NativeToolCatalog` nor MCP source \(toolConfig.sourceId) \
+                    knows the name. Usual cause: a tool deleted or renamed since this profile was \
+                    saved. [profile \(profileID?.uuidString ?? "unknown") conv \(conversationID)]
+                    """)
             }
+        }
+        if !unresolved.isEmpty {
+            // Summary line so one grep answers "did this run lose anything?" without reading
+            // every per-tool line.
+            logger.error("[TOOLRESOLVE] \(unresolved.count) of \(profileTools.filter(\.isEnabled).count) enabled tool(s) unresolved: \(unresolved.sorted().joined(separator: ", ")) [conv \(conversationID)]")
         }
 
         // -----------------------------------------------------------------
@@ -1234,157 +1248,36 @@ class AgentConnect: @unchecked Sendable {
     // MARK: - Tool Wrapping
     
     /// Wraps a concrete DevgenticTool into an AgentTool with type-erased execution closure.
+    /// Thin alias for `AgentToolFactory.wrap`, kept because the injected control-plane tools
+    /// (`ask_user`, `final_answer`, `get_conversation_history`, `load_skill`,
+    /// `update_project_context`) are built here with run-scoped data and read better unqualified.
     private func wrapTool<T: DevgenticTool>(_ tool: T, requiresConfirmation: Bool, timeout: TimeInterval? = nil, timeoutMessage: String? = nil) -> AgentTool {
-        let toolName = tool.name
-        let requiredKeys = tool.parameterSchema.required
-
-        return AgentTool(
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.parameterSchema,
-            requiresConfirmation: requiresConfirmation,
-            timeout: timeout,
-            timeoutMessage: timeoutMessage,
-            contentMayLookLikeError: tool.outputMayContainErrorText
-        ) { dataArgs in
-            let args: T.Arguments
-            do {
-                args = try JSONDecoder().decode(T.Arguments.self, from: dataArgs)
-            } catch let decodingError as DecodingError {
-                let paramHint = requiredKeys.isEmpty ? "" : " Required parameters: [\(requiredKeys.joined(separator: ", "))]."
-                let rawJSON = String(data: dataArgs, encoding: .utf8) ?? "{}"
-
-                logToolExecution.error("❌ Tool Argument Decoding Failed. Tool: \(toolName). Expected Keys: \(requiredKeys). Raw Payload: \(rawJSON). Error: \(decodingError.localizedDescription)")
-
-                throw ToolArgumentError(
-                    toolName: toolName,
-                    detail: "Argument decoding failed for '\(toolName)'.\(paramHint) Received: \(rawJSON). Underlying: \(decodingError.localizedDescription)"
-                )
-            }
-            return try await tool.execute(arguments: args)
-        }
+        AgentToolFactory.wrap(tool, requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
     }
-    
-    /// OVERLOAD: Wraps an already-constructed `AgentTool` (like MCP tools).
-    /// Resolves the Swift compiler's generic type inference failures for external tool protocols.
+
+    /// Wraps an already-erased `AgentTool` (the MCP path) with this profile's settings.
     private func wrapTool(_ tool: AgentTool, requiresConfirmation: Bool, timeout: TimeInterval? = nil, timeoutMessage: String? = nil) -> AgentTool {
-        return AgentTool(
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.parameters,
-            requiresConfirmation: requiresConfirmation,
-            timeout: timeout,
-            timeoutMessage: timeoutMessage,
-            contentMayLookLikeError: tool.contentMayLookLikeError,
-            run: tool.run
-        )
+        AgentToolFactory.rewrap(tool, requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
     }
-    
+
     // MARK: - Native Tool Resolution
     
+    /// Resolves a native tool by name.
+    ///
+    /// A lookup, not a switch. This was a ~100-line `switch` that was the second of two
+    /// hand-maintained tool lists — see `NativeToolCatalog` for what that cost. The catalogue is
+    /// now the only place a native tool is declared; this decides nothing except which
+    /// per-profile settings to hand it.
     func resolveNativeTool(toolName: String, conversationID: UUID, requiresConfirmation: Bool, timeout: TimeInterval? = nil, timeoutMessage: String? = nil) -> AgentTool? {
-        switch toolName {
-        case "list_directory": return wrapTool(ListDirectoryTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "read_file": return wrapTool(ReadFileTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "write_file": return wrapTool(WriteFileTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "delete_file": return wrapTool(DeleteFileTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "move_file": return wrapTool(MoveFileTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "copy_file": return wrapTool(CopyFileTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "create_folder": return wrapTool(CreateFolderTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "execute_shell": return wrapTool(TerminalTool(conversationID: conversationID), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "open_application": return wrapTool(OpenApplicationTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "run_applescript": return wrapTool(RunAppleScriptTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "get_system_stats": return wrapTool(GetSystemStatsTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "fs_watch_folder": return wrapTool(WatchFolderTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "fs_smart_search": return wrapTool(SmartSearchTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "fs_read_metadata": return wrapTool(ReadMetadataTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "fs_organize_batch": return wrapTool(OrganizeBatchTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "read_session_history": return wrapTool(ReadSessionHistoryTool(conversationID: conversationID), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-            
-        // MACOS SYSTEM COMMANDING TOOLS
-        case "read_screen_state": return wrapTool(ReadScreenStateTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "click_ui_element": return wrapTool(ClickUIElementTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "manage_windows": return wrapTool(ManageWindowsTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "manage_calendar": return wrapTool(ManageCalendarTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "manage_reminders": return wrapTool(ManageRemindersTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "read_contacts": return wrapTool(ManageContactsTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "manage_contacts": return wrapTool(ManageContactsTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "run_mac_shortcut": return wrapTool(RunMacShortcutTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "manage_clipboard": return wrapTool(ManageClipboardTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "push_local_notification": return wrapTool(PushLocalNotificationTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "get_focus_context": return wrapTool(GetFocusContextTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "get_power_state": return wrapTool(GetPowerStateTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "manage_processes": return wrapTool(ManageProcessesTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "manage_safari_tabs": return wrapTool(ManageSafariTabsTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "read_safari_bookmarks": return wrapTool(ReadSafariBookmarksTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "extract_safari_reader_view": return wrapTool(ExtractSafariReaderViewTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-
-        // VISION INPUT TOOLS
-        case "type_text": return wrapTool(TypeTextTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "press_key_combo": return wrapTool(PressKeyComboTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "scroll_ui": return wrapTool(ScrollUITool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "read_ui_element_tree": return wrapTool(ReadUIElementTreeTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-
-        // NETWORK TOOLS
-        case "check_network_status": return wrapTool(CheckNetworkStatusTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "http_request": return wrapTool(HTTPRequestTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "dns_lookup": return wrapTool(DNSLookupTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-
-        // AUDIO & MEDIA TOOLS
-        case "manage_audio": return wrapTool(ManageAudioTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "media_control": return wrapTool(MediaControlTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "text_to_speech": return wrapTool(TextToSpeechTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-
-        // SYSTEM TOGGLE TOOLS
-        case "toggle_dark_mode": return wrapTool(ToggleDarkModeTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "toggle_do_not_disturb": return wrapTool(ToggleDoNotDisturbTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "get_wifi_info": return wrapTool(GetWiFiInfoTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "manage_bluetooth": return wrapTool(ManageBluetoothTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-
-        // FILE UTILITY TOOLS
-        case "grep_files": return wrapTool(GrepFilesTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "diff_files": return wrapTool(DiffFilesTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "preview_file": return wrapTool(PreviewFileTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "get_file_hash": return wrapTool(GetFileHashTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-
-        // GIT INTEGRATION
-        case "git_tool": return wrapTool(GitTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-
-        // CODING ASSISTANT TOOLS
-        case "edit_code": return wrapTool(EditCodeTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "code_search": return wrapTool(CodeSearchTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "glob_files": return wrapTool(GlobFilesTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "find_definition": return wrapTool(FindDefinitionTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "batch_command": return wrapTool(BatchCommandTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "create_file": return wrapTool(CreateFileTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "file_overview": return wrapTool(FileOverviewTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "codebase_map": return wrapTool(CodebaseMapTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-
-        // CODE-INTERFACE-ONLY SPLITS (not registered in LocalToolManager — hidden from Tool Library)
-        case "edit_code_single": return wrapTool(EditCodeSingleTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "edit_code_batch": return wrapTool(EditCodeBatchTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "code_search_text": return wrapTool(CodeSearchTextTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "code_search_symbol": return wrapTool(CodeSearchSymbolTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "code_search_files": return wrapTool(CodeSearchFilesTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "create_new_file": return wrapTool(CreateNewFileTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "overwrite_file": return wrapTool(OverwriteFileTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-
-        // MACOS UTILITY TOOLS
-        case "screen_capture": return wrapTool(ScreenCaptureTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "finder_tags": return wrapTool(FinderTagsTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "disk_usage": return wrapTool(DiskUsageTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "display_management": return wrapTool(DisplayManagementTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "open_system_settings": return wrapTool(OpenSystemSettingsTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "login_items": return wrapTool(LoginItemsTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "external_devices": return wrapTool(ExternalDevicesTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-        case "apple_notes": return wrapTool(AppleNotesTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
-
-        default: return nil
-        }
+        guard let entry = NativeToolCatalog.entry(named: toolName) else { return nil }
+        return entry.agentTool(
+            conversationID: conversationID,
+            requiresConfirmation: requiresConfirmation,
+            timeout: timeout,
+            timeoutMessage: timeoutMessage
+        )
     }
-    
-    // MARK: - MCP Tool Resolution
-    
+
     func resolveMCPTool(toolConfig: Tool, availableSources: [ToolSource]) -> AgentTool? {
         guard let source = availableSources.first(where: { $0.id == toolConfig.sourceId }),
               let definition = source.tools.first(where: { $0.name == toolConfig.name }) else {

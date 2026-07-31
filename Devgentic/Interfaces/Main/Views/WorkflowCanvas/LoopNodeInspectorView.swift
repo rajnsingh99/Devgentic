@@ -88,17 +88,8 @@ struct LoopNodeInspectorView: View {
                     .font(theme.fontBody)
                     .foregroundColor(theme.secondaryText)
             }
-            .buttonStyle(.plain)
-            .help("How loop nodes work")
-            Button("Cancel") { closeInspector() }
-                .font(theme.fontCaption)
-                .buttonStyle(.plain)
-                .foregroundColor(theme.secondaryText)
-            Button("Save") { saveAndDismiss() }
-                .font(theme.fontCaption.weight(.semibold))
-                .buttonStyle(.plain)
-                .foregroundColor(theme.accentColor)
-                .keyboardShortcut(.defaultAction)
+            GlassActionButton(title: "Cancel", icon: "xmark", isAccent: false) { closeInspector() }
+            GlassActionButton(title: "Save", icon: "checkmark", isAccent: true) { saveAndDismiss() }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)

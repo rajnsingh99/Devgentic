@@ -32,10 +32,9 @@ struct MLXModelPickerView: View {
     var body: some View {
         VStack(alignment: .trailing, spacing: 4) {
             HStack {
-                Button("Manage Models") {
+                GlassActionButton(title: "Manage Models", icon: "slider.horizontal.3") {
                     router.navigateToModelStore(backend: .mlx, profileID: profileID, filterForTools: filterForTools)
                 }
-                .fixedSize()
                 Spacer()
                 if service.installedModels.isEmpty {
                     Text("No models found.")

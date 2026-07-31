@@ -16,6 +16,10 @@ struct UpdateProjectContextTool: DevgenticTool {
     // MARK: - Properties
 
     let name = "update_project_context"
+    /// Never surfaced in the Tool Library — this tool is injected by `AgentConnect` for the
+    /// run itself, not chosen by a user. The category is required by `DevgenticTool` and
+    /// exists so no tool can silently fall into a default bucket.
+    let category = "Internal"
     let description = "Writes or updates the project-level context file (.devgentic/context.md). Use this to persist architecture patterns, naming conventions, build commands, and key file locations you discover. The content is injected into your system prompt on every subsequent message."
     let projectPath: String
 

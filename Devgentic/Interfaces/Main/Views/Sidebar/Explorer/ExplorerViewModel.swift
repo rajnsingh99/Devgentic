@@ -177,10 +177,23 @@ final class ExplorerViewModel {
             path = item.url.deletingLastPathComponent().path
         }
         
+        // TWO interpreters nest here, and the path has to survive both.
+        //
+        // `do script` hands its string to a SHELL, and that string is itself an AppleScript
+        // literal. Previously the path went in raw inside escaped double quotes: a folder named
+        // `a"; rm -rf ~; #` closed the AppleScript literal AND the shell quoting. The path comes
+        // from disk, so a crafted filename in any downloaded archive or cloned repo was enough —
+        // no model involvement needed.
+        //
+        // Inner layer: POSIX single-quote the path, which makes every character literal to the
+        // shell (`'` itself is closed, escaped and reopened). Outer layer: escape the resulting
+        // string for the AppleScript literal.
+        let shellQuotedPath = "'" + path.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
+        let escapedCommand = AppleScriptEscaping.escapeStringLiteral("cd \(shellQuotedPath)")
         let scriptSource = """
         tell application "Terminal"
             activate
-            do script "cd \\"\(path)\\""
+            do script "\(escapedCommand)"
         end tell
         """
         

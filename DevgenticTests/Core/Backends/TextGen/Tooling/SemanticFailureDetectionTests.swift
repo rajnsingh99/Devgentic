@@ -149,17 +149,29 @@ final class SemanticFailureDetectionTests: XCTestCase {
 
     // MARK: - #19 (review fix #1): opted-out tool must THROW its operational failures
 
-    func testXcodeOrchestrator_MissingScheme_ThrowsNotReturns() async throws {
-        // XcodeOrchestratorTool opts out of content-sniffing (its build output legitimately
-        // contains "error:"), so its OWN argument/operational failures must THROW — otherwise
-        // the opt-out would silently mark them as success and the breaker would never count them.
+    /// A tool that sets `outputMayContainErrorText` switches OFF the mediator's output sniffing,
+    /// so for that tool a returned string can never be classified as a failure whatever it says.
+    /// Throwing is the only channel its operational failures have left — return an "Error:" string
+    /// instead and the failure is silently recorded as a success, and the circuit breaker never
+    /// counts it.
+    ///
+    /// This was originally pinned on `xcode_orchestrator`, which was deleted 2026-07-31 as
+    /// unreachable. It is re-pinned rather than removed because the invariant belongs to the
+    /// OPT-OUT, not to that tool: `execute_shell` is now the only tool setting the flag, so it is
+    /// where the property has to hold. A refused command is used because it exercises the throw
+    /// path without running anything.
+    func testOptedOutTool_OperationalFailure_ThrowsRatherThanReturning() async throws {
+        let optedOut = TerminalTool()
+        XCTAssertTrue(optedOut.outputMayContainErrorText,
+                      "if this tool stops opting out, re-point this test at whichever tool does")
+
         let args = try JSONDecoder().decode(
-            XcodeOrchestratorTool.Arguments.self,
-            from: Data(#"{"action":"build"}"#.utf8)
+            TerminalTool.Arguments.self,
+            from: Data(#"{"command":"vim"}"#.utf8)   // refused by ShellCommandGuard; nothing runs
         )
         do {
-            _ = try await XcodeOrchestratorTool().call(arguments: args)
-            XCTFail("build without a scheme must throw, not return an 'Error:' string")
+            let output = try await optedOut.call(arguments: args)
+            XCTFail("a refused command must throw, not return an 'Error:' string: \(output)")
         } catch {
             // expected — a thrown error becomes .systemError at the mediator (a counted failure)
         }

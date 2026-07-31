@@ -46,6 +46,14 @@ struct WorkflowExecutionContext: Sendable {
     /// Node display name for logging and tracing.
     let nodeName: String
 
+    /// Identity of the node this run belongs to.
+    ///
+    /// Carried for the HITL approval SCOPE: every node of a run shares one conversationID, so
+    /// without this an "Allow for this chat" granted in one node would silently auto-approve the
+    /// same tool in every other node. Nodes configure their tools independently, so an approval
+    /// given to one is not an answer for another. See `SessionToolApprovals.Scope`.
+    let nodeID: UUID
+
     /// Media/file artifacts produced by completed upstream nodes (images, audio,
     /// video, documents). Surfaced to the node as a text *manifest* (kind, label,
     /// mime, resolvable path) by `userMessagePrefix`, so an agent with file/HTTP

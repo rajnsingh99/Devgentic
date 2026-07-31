@@ -25,6 +25,10 @@ struct LoadSkillTool: DevgenticTool {
     // MARK: - Properties
 
     let name = "load_skill"
+    /// Never surfaced in the Tool Library — this tool is injected by `AgentConnect` for the
+    /// run itself, not chosen by a user. The category is required by `DevgenticTool` and
+    /// exists so no tool can silently fall into a default bucket.
+    let category = "Internal"
     let description = """
         Load the full instructions for a specialized skill by name. \
         Use this when a user's request matches one of the available skills listed in your context. \

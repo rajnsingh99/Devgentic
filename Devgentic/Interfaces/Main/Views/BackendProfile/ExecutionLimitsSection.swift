@@ -64,12 +64,9 @@ struct ExecutionLimitsSection: View {
                         )
                         .fixedSize()
 
-                        Button("Remove") {
+                        GlassActionButton(title: "Remove", icon: "xmark", isAccent: false) {
                             executionTimeout = nil
                         }
-                        .font(theme.fontCaption)
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
                     }
                 } else {
                     HStack(spacing: 8) {
@@ -77,12 +74,9 @@ struct ExecutionLimitsSection: View {
                             .font(theme.fontCallout)
                             .foregroundColor(theme.secondaryText)
 
-                        Button("Set") {
+                        GlassActionButton(title: "Set", icon: "clock") {
                             executionTimeout = 120
                         }
-                        .font(theme.fontCaption)
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
                     }
                 }
             }
@@ -207,14 +201,11 @@ struct ErrorRecoverySection: View {
                             .foregroundColor(theme.secondaryText)
                         Spacer()
                         if effectiveRecovery.fallbackMessage != nil {
-                            Button("Reset to Default") {
+                            GlassActionButton(title: "Reset to Default", icon: "arrow.counterclockwise", isAccent: false) {
                                 var recovery = effectiveRecovery
                                 recovery.fallbackMessage = nil
                                 errorRecovery = recovery
                             }
-                            .font(theme.fontCaption)
-                            .buttonStyle(.plain)
-                            .foregroundColor(theme.accentColor)
                         }
                     }
 

@@ -89,17 +89,8 @@ struct ConditionNodeInspectorView: View {
                     .font(theme.fontBody)
                     .foregroundColor(theme.secondaryText)
             }
-            .buttonStyle(.plain)
-            .help("How condition routing works")
-            Button("Cancel") { closeInspector() }
-                .font(theme.fontCaption)
-                .buttonStyle(.plain)
-                .foregroundColor(theme.secondaryText)
-            Button("Save") { saveAndDismiss() }
-                .font(theme.fontCaption.weight(.semibold))
-                .buttonStyle(.plain)
-                .foregroundColor(theme.accentColor)
-                .keyboardShortcut(.defaultAction)
+            GlassActionButton(title: "Cancel", icon: "xmark", isAccent: false) { closeInspector() }
+            GlassActionButton(title: "Save", icon: "checkmark", isAccent: true) { saveAndDismiss() }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -255,21 +246,12 @@ struct ConditionNodeInspectorView: View {
 
                 // Add Rule button
                 if rules.count < ConditionNodeConfig.maxRules {
-                    Button {
+                    GlassActionButton(title: "Add Rule", icon: "plus", isAccent: true) {
                         withAnimation(.easeOut(duration: 0.2)) {
                             rules.append(ConditionRule(label: nextAvailableLabel(), field: .upstreamOutput, op: .contains, value: ""))
                             syncFallbackLabel()
                         }
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "plus.circle.fill")
-                                .font(.system(size: 12))
-                            Text("Add Rule")
-                                .font(theme.fontCaption.weight(.medium))
-                        }
-                        .foregroundColor(theme.accentColor)
                     }
-                    .buttonStyle(.plain)
                 }
             }
             .padding(.horizontal, 16)

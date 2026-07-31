@@ -77,4 +77,100 @@ final class SessionToolApprovalsTests: XCTestCase {
         let stillInB = await store.isAllowed(toolName: "move_file", conversationID: convB)
         XCTAssertTrue(stillInB, "clearing one conversation must not affect another")
     }
+
+    // MARK: - Workflow node scoping
+    //
+    // Every node of a workflow run shares ONE conversationID, so a conversation-wide grant meant
+    // approving a tool in one node silently auto-approved it in every other node — including
+    // nodes the user had deliberately configured to ask. Nodes configure their tools
+    // independently, so an approval given to one is not an answer for another.
+
+    /// The requirement, stated directly: same conversation, same tool, different node → ask again.
+    func testApprovalInOneNodeDoesNotLeakToAnotherNode() async {
+        let defaults = makeDefaults()
+        let conversation = UUID()
+        let nodeA = UUID()
+        let nodeB = UUID()
+        let store = SessionToolApprovals(defaults: defaults)
+
+        await store.allow(toolName: "write_file", conversationID: conversation, nodeID: nodeA)
+
+        let inA = await store.isAllowed(toolName: "write_file", conversationID: conversation, nodeID: nodeA)
+        let inB = await store.isAllowed(toolName: "write_file", conversationID: conversation, nodeID: nodeB)
+        XCTAssertTrue(inA, "the granting node must not be re-prompted")
+        XCTAssertFalse(inB, "a different node of the SAME run must still ask")
+    }
+
+    /// No fall-back in either direction. A node grant must not satisfy a conversation-scoped
+    /// check (that would leak into ordinary chat), and a conversation grant must not silently
+    /// cover every node (that is the leak this scope exists to close).
+    func testNodeAndConversationScopesDoNotFallBackToEachOther() async {
+        let defaults = makeDefaults()
+        let conversation = UUID()
+        let node = UUID()
+        let store = SessionToolApprovals(defaults: defaults)
+
+        await store.allow(toolName: "read_file", conversationID: conversation, nodeID: node)
+        let asConversation = await store.isAllowed(toolName: "read_file", conversationID: conversation)
+        XCTAssertFalse(asConversation, "a node grant must not answer a conversation-scoped check")
+
+        await store.allow(toolName: "grep_files", conversationID: conversation)
+        let asNode = await store.isAllowed(toolName: "grep_files", conversationID: conversation, nodeID: node)
+        XCTAssertFalse(asNode, "a conversation grant must not blanket-approve every node")
+    }
+
+    /// Deleting a conversation drops the whole run, nodes included — otherwise node grants would
+    /// outlive the thing they were scoped to and never be reachable to clear.
+    func testClearRemovesEveryNodeScopeInTheConversation() async {
+        let defaults = makeDefaults()
+        let conversation = UUID()
+        let nodeA = UUID()
+        let nodeB = UUID()
+        let other = UUID()
+        let store = SessionToolApprovals(defaults: defaults)
+
+        await store.allow(toolName: "write_file", conversationID: conversation, nodeID: nodeA)
+        await store.allow(toolName: "write_file", conversationID: conversation, nodeID: nodeB)
+        await store.allow(toolName: "write_file", conversationID: conversation)
+        await store.allow(toolName: "write_file", conversationID: other, nodeID: nodeA)
+
+        await store.clear(conversationID: conversation)
+
+        let a = await store.isAllowed(toolName: "write_file", conversationID: conversation, nodeID: nodeA)
+        let b = await store.isAllowed(toolName: "write_file", conversationID: conversation, nodeID: nodeB)
+        let conv = await store.isAllowed(toolName: "write_file", conversationID: conversation)
+        let untouched = await store.isAllowed(toolName: "write_file", conversationID: other, nodeID: nodeA)
+        XCTAssertFalse(a); XCTAssertFalse(b); XCTAssertFalse(conv)
+        XCTAssertTrue(untouched, "a different conversation's node grant must survive")
+    }
+
+    func testNodeScopedGrantSurvivesRestart() async {
+        let defaults = makeDefaults()
+        let conversation = UUID()
+        let node = UUID()
+
+        let original = SessionToolApprovals(defaults: defaults)
+        await original.allow(toolName: "batch_command", conversationID: conversation, nodeID: node)
+
+        let reloaded = SessionToolApprovals(defaults: defaults)
+        let sameNode = await reloaded.isAllowed(toolName: "batch_command", conversationID: conversation, nodeID: node)
+        let otherNode = await reloaded.isAllowed(toolName: "batch_command", conversationID: conversation, nodeID: UUID())
+        XCTAssertTrue(sameNode, "a node grant must survive an app restart")
+        XCTAssertFalse(otherNode, "and must still not leak to another node after restart")
+    }
+
+    /// Grants written before node scoping existed are stored under a bare conversation UUID.
+    /// They must hydrate as conversation-scoped rather than being discarded — the store key was
+    /// deliberately NOT version-bumped so users keep the approvals they already gave.
+    func testLegacyConversationOnlyKeysStillHydrate() async {
+        let defaults = makeDefaults()
+        let conversation = UUID()
+        // Exactly the v1 on-disk shape: [conversationUUID: [toolName]], no node component.
+        defaults.set([conversation.uuidString: ["execute_shell"]],
+                     forKey: "hitl.perConversationToolApprovals.v1")
+
+        let store = SessionToolApprovals(defaults: defaults)
+        let allowed = await store.isAllowed(toolName: "execute_shell", conversationID: conversation)
+        XCTAssertTrue(allowed, "a pre-existing conversation grant must not be dropped by the upgrade")
+    }
 }

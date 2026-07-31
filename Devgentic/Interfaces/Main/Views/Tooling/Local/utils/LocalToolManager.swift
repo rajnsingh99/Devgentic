@@ -32,16 +32,13 @@ struct NativeToolWrapper<T: DevgenticTool>: ExecutableTool {
         return nativeTool.description
     }
     
-    // Bridge the category (Assuming you add 'var category: String { get }' to DevgenticTool)
-    // Alternatively, you can default to "System Automation" if not defined.
+    // "Step 3" — completed 2026-07-31. `category` is now a `DevgenticTool` requirement, so this
+    // reads it directly instead of digging it out with `Mirror`. The reflection was a migration
+    // shim that outlived its migration: it could not fail, so a tool that omitted the property
+    // silently became "System Automation" and nothing said so. Verified before removal that no
+    // registered tool relied on that fallback.
     var category: String {
-        // Using Reflection guarantees this compiles right now as a drop-in replacement,
-        // even before the DevgenticTool protocol and tools are updated in Step 3.
-        let mirror = Mirror(reflecting: nativeTool)
-        if let cat = mirror.children.first(where: { $0.label == "category" })?.value as? String {
-            return cat
-        }
-        return "System Automation"
+        return nativeTool.category
     }
     
     /// Natively bridges the parameter schema without JSON hacks!
@@ -57,8 +54,7 @@ struct NativeToolWrapper<T: DevgenticTool>: ExecutableTool {
             "get_system_stats",
             "fs_watch_folder",
             "fs_smart_search",
-            "fs_read_metadata",
-            "read_session_history"
+            "fs_read_metadata"
         ]
         // If the tool is NOT in the safe list, it requires confirmation.
         return !safeTools.contains(nativeTool.name)
@@ -95,96 +91,38 @@ final class LocalToolManager {
     private var toolRegistry: [String: ExecutableTool] = [:]
     
     private init() {
-        // Register Native File System Tools
-        registerNative(ListDirectoryTool())
-        registerNative(ReadFileTool())
-        registerNative(WriteFileTool())
-        registerNative(DeleteFileTool())
-        
-        // Register File Manipulation Primitives
-        registerNative(MoveFileTool())
-        registerNative(CopyFileTool())
-        registerNative(CreateFolderTool())
-        
-        // Register Native System Tools
-        registerNative(TerminalTool())
-        registerNative(OpenApplicationTool())
-        registerNative(RunAppleScriptTool())
-        registerNative(GetSystemStatsTool())
-        
-        // Register Advanced File System Tools
-        registerNative(WatchFolderTool())
-        registerNative(SmartSearchTool())
-        registerNative(ReadMetadataTool())
-        registerNative(OrganizeBatchTool())
-        
-        // Register Vision & Workspace Tools
-        registerNative(ReadScreenStateTool())
-        registerNative(ClickUIElementTool())
-        registerNative(ManageWindowsTool())
-        registerNative(ManageClipboardTool())
-        registerNative(PushLocalNotificationTool())
-        
-        // Register Action & Automations
-        registerNative(RunMacShortcutTool())
-        
-        // Register Native PIM Tools
-        registerNative(ManageCalendarTool())
-        registerNative(ManageRemindersTool())
-        registerNative(ManageContactsTool())
-
-        // Register Coding Assistant Tools
-        registerNative(EditCodeTool())
-        registerNative(CodeSearchTool())
-        registerNative(GlobFilesTool())
-        registerNative(FindDefinitionTool())
-        registerNative(BatchCommandTool())
-        registerNative(CreateFileTool())
-        registerNative(FileOverviewTool())
-        registerNative(CodebaseMapTool())
-
-        // Register macOS Utility Tools
-        registerNative(ScreenCaptureTool())
-        registerNative(FinderTagsTool())
-        registerNative(DiskUsageTool())
-        registerNative(DisplayManagementTool())
-        registerNative(OpenSystemSettingsTool())
-        registerNative(LoginItemsTool())
-        registerNative(ExternalDevicesTool())
-        registerNative(AppleNotesTool())
-
-        logger.info("LocalToolManager initialized with \(self.toolRegistry.count) native tools.")
+        // Built from `NativeToolCatalog`, which is also what `AgentConnect.resolveNativeTool`
+        // reads. Before 2026-07-31 this was ~90 lines of `registerNative(…)` — a second
+        // hand-maintained copy of the tool list, and the source of every tool bug the audit
+        // found. Registration is now a PROJECTION: a tool appears here because its catalogue
+        // entry says `.library`, not because someone remembered to add a line.
+        for entry in NativeToolCatalog.libraryTools {
+            let tool = entry.executable()
+            toolRegistry[tool.name] = tool
+        }
+        // Tagged + broken down so one startup line proves WHICH projection ran, not just that
+        // one did. A bare count cannot distinguish "the catalogue shrank" from "the projection
+        // filtered wrongly" — the exact ambiguity that let 25 tools sit invisible for months.
+        let lib = NativeToolCatalog.entries.filter { $0.visibility == .library }.count
+        let exceptCode = NativeToolCatalog.hiddenFromCodeLibrary.count
+        let codeOnly = NativeToolCatalog.codeOnlyTools.count
+        logger.info("""
+            [TOOLCATALOG] Library registered \(self.toolRegistry.count) of \(NativeToolCatalog.entries.count) \
+            catalogue entries — \(lib) library + \(exceptCode) library-except-code; \
+            \(codeOnly) code-only withheld (Code profiles get them from CodeToolPreset).
+            """)
+        if self.toolRegistry.count != lib + exceptCode {
+            logger.error("[TOOLCATALOG] ⚠️ Registered \(self.toolRegistry.count) but expected \(lib + exceptCode) — a duplicate tool NAME collapsed an entry, so a tool the catalogue declares is NOT offered.")
+        }
     }
-    
-    /// Helper to wrap and register a native tool.
-    private func registerNative<T: DevgenticTool>(_ tool: T) {
-        let wrapper = NativeToolWrapper(nativeTool: tool)
-        toolRegistry[wrapper.name] = wrapper
-    }
-    
+
     func availableTools() -> [ExecutableTool] {
         return Array(toolRegistry.values)
     }
-    
-    func execute(name: String, arguments: sending [String: Any]) async -> String {
-        logger.info("--- executing local tool (native) ---")
-        logger.info("Tool: '\(name)'")
-        logger.info("Arguments: \(String(describing: arguments))")
-        
-        guard let tool = toolRegistry[name] else {
-            let errorMsg = "Error: Tool '\(name)' not found in the client-side registry."
-            logger.error("\(errorMsg)")
-            return errorMsg
-        }
-        
-        do {
-            let result = try await tool.execute(arguments: arguments)
-            logger.info("-> Local tool '\(name)' executed successfully.")
-            return result
-        } catch {
-            let errorMsg = "Error executing local tool '\(name)': \(error.localizedDescription)"
-            logger.error("\(errorMsg)")
-            return errorMsg
-        }
-    }
+
+    // `execute(name:arguments:)` was removed 2026-07-31: it was called by nothing. Every real
+    // tool call goes through `AgentTool.run` at `ToolExecutionMediator`, resolved by
+    // `AgentConnect.resolveNativeTool`. Its presence made this type read as a second execution
+    // engine competing with that one, when it is a CATALOGUE — it answers "what tools exist and
+    // how should they be displayed", not "run this".
 }

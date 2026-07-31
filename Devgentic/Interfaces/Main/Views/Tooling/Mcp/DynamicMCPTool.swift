@@ -15,7 +15,13 @@ struct DynamicMCPTool: DevgenticTool {
     
     let name: String
     let description: String
-    
+
+    /// Carried through from the server's own tool definition rather than invented here — an MCP
+    /// tool's group is whatever its server said it was. Required by `DevgenticTool` since
+    /// 2026-07-31; this type never reaches the Tool Library (the UI reads `ToolDefinition`
+    /// directly from `UnifiedToolStore`), so the value is for completeness and logging.
+    var category: String { toolDefinition.category }
+
     /// The source configuration (connection details) for the MCP server.
     private let source: ToolSource
     

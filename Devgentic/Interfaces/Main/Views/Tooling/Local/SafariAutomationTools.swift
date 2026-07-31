@@ -34,9 +34,15 @@ struct ManageSafariTabsTool: DevgenticTool {
             switch arguments.action {
             case "open":
                 guard let url = arguments.url else { return "Error: url missing." }
+                // `url` is a model-supplied String going into an AppleScript string literal.
+                // Raw, a `"` in it closed the literal AND the surrounding `tell` block, so the
+                // rest of the value was parsed as script — including `do shell script "…"`,
+                // which is arbitrary command execution from a tool that presents as "open a URL
+                // in Safari". Every other action in this tool is either a constant script or
+                // interpolates a typed Int, which is why this was the only site.
                 script = """
                 tell application "Safari"
-                    open location "\(url)"
+                    open location "\(AppleScriptEscaping.escapeStringLiteral(url))"
                     activate
                 end tell
                 """
@@ -211,6 +217,18 @@ struct ExtractSafariReaderViewTool: DevgenticTool {
             let startOffset = arguments.offset ?? 0
             let maxLen = arguments.limit ?? 5000
             let totalLen = output.count
+
+            // ⚠️ Both are model-supplied Ints and both reach `String.index(_:offsetBy:)`, which
+            // TRAPS — a hard crash, not a thrown error — on a negative distance. The existing
+            // `startOffset < totalLen` guard passes happily for -1. Rejected rather than clamped
+            // so a model that miscalculated an offset is told, instead of silently receiving a
+            // different chunk than it asked for and paginating from the wrong place.
+            guard startOffset >= 0 else {
+                return "Error: 'offset' must be 0 or greater (got \(startOffset))."
+            }
+            guard maxLen > 0 else {
+                return "Error: 'limit' must be greater than 0 (got \(maxLen))."
+            }
 
             guard startOffset < totalLen else {
                 return "Offset \(startOffset) exceeds content length \(totalLen)."

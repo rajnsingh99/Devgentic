@@ -59,28 +59,14 @@ actor ShellSessionManager {
         // 2. Safety & Timeout Setup
         // Phase 10: Token-aware blocking to prevent false positives on non-interactive invocations
         // (e.g. `python3 script.py`, `node index.js`, `topology` containing "top").
-        let trimmedCmd = command.trimmingCharacters(in: .whitespaces)
-        let firstToken = trimmedCmd.components(separatedBy: .whitespaces).first ?? ""
-        let hasArgs = trimmedCmd.components(separatedBy: .whitespaces).count > 1
-
-        // Always-interactive: block regardless of arguments
-        let alwaysInteractive: Set<String> = ["nano", "vim", "vi", "emacs", "top", "htop", "less", "more"]
-        if alwaysInteractive.contains(firstToken) {
-            throw ShellSessionError.blocked(reason: "Error: Interactive command '\(firstToken)' is blocked. Use non-interactive alternatives (e.g., 'cat' instead of 'less').")
+        //
+        // Moved to `ShellCommandGuard` 2026-07-31: these rules were enforced here and nowhere
+        // else, so `batch_command` — an equally complete `zsh -c` runner — bypassed all of them
+        // by being a different tool. A guard on one tool is a guard on a NAME, not a capability.
+        if let refusal = ShellCommandGuard.refusalReason(for: command) {
+            throw ShellSessionError.blocked(reason: refusal)
         }
 
-        // REPL commands: only block when invoked without arguments (interactive REPL mode)
-        let replCommands: Set<String> = ["python", "python3", "node", "irb", "ruby", "swift"]
-        if replCommands.contains(firstToken) && !hasArgs {
-            throw ShellSessionError.blocked(reason: "Error: Running '\(firstToken)' in REPL mode is blocked. Pass a script file or use the -c flag (e.g., 'python3 -c \"print(1)\"').")
-        }
-
-        // Exact pattern blocks for interactive sudo sessions
-        let blockedPatterns = ["sudo -s", "sudo su", "sudo -i"]
-        if blockedPatterns.contains(where: { trimmedCmd.hasPrefix($0) }) {
-            throw ShellSessionError.blocked(reason: "Error: Interactive sudo sessions are blocked.")
-        }
-        
         // 3. Construct "Stateful" Command
         //
         // This is the ONE place a shell command string is still built by interpolation, and it

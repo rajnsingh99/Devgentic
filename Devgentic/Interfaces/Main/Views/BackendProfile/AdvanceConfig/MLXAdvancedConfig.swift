@@ -305,7 +305,7 @@ struct MLXSettingsView: View {
 
             HStack {
                 Spacer()
-                Button {
+                GlassActionButton(title: "Reset to Defaults", icon: "arrow.counterclockwise", isAccent: false) {
                     withAnimation {
                         // Prefer the model-aware recommendation when metadata is
                         // available (e.g. tier-tuned repPenalty for Q4); fall back
@@ -316,15 +316,7 @@ struct MLXSettingsView: View {
                             config = .default()
                         }
                     }
-                } label: {
-                    Label("Reset to Defaults", systemImage: "arrow.counterclockwise")
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(theme.accentColor.opacity(0.1))
-                        .foregroundColor(theme.accentColor)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
-                .buttonStyle(.plain)
             }
             .padding(.top, 8)
         }

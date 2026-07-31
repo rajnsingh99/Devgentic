@@ -26,6 +26,10 @@ struct AskUserTool: DevgenticTool {
     // MARK: - Properties
 
     let name = "ask_user"
+    /// Never surfaced in the Tool Library — this tool is injected by `AgentConnect` for the
+    /// run itself, not chosen by a user. The category is required by `DevgenticTool` and
+    /// exists so no tool can silently fall into a default bucket.
+    let category = "Internal"
     let description = "Asks the user a clarifying question and waits for their response."
 
     /// Whether to advertise the optional `options`/`multiline` fields in the schema. Disabled for

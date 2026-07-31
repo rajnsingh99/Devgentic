@@ -578,20 +578,27 @@ private struct PermissionInteractionBanner: View {
         .glassEffect(.regular, in: .rect(cornerRadius: 16))
     }
 
-    /// A4: trust this tool for the rest of THIS conversation — persisted per-conversation (survives
-    /// restart) and scoped strictly to this chat, so it never leaks to other conversations or the
-    /// shared profile. Then approve the current request.
+    /// A4: trust this tool for the rest of THIS conversation — persisted (survives restart) and
+    /// scoped strictly to this chat, so it never leaks to other conversations or the shared
+    /// profile. Then approve the current request.
+    ///
+    /// Inside a workflow the grant is narrowed further, to the NODE that raised it: nodes share
+    /// one conversationID but configure their tools independently, so approving here must not
+    /// answer for a different node that was set to ask. `origin.nodeID` is nil outside workflows,
+    /// which keeps ordinary chat conversation-wide exactly as before.
     private func allowForThisConversation() {
         guard !isProcessing else { return }
         let tool = confirmation.toolName
         let conversationID = pending.origin.conversationID
+        let nodeID = pending.origin.nodeID
         let edited = buildEditedArguments()   // capture @State on MainActor before hopping off it
-        bannerLogger.info("[HITL/UI] '\(tool)' ALLOW-FOR-CHAT by user — persisted to this conversation's allowlist [conv \(conversationID)]")
+        let scope = nodeID.map { "node \($0)" } ?? "conversation"
+        bannerLogger.info("[HITL/UI] '\(tool)' ALLOW-FOR-CHAT by user — persisted to the \(scope)-scoped allowlist [conv \(conversationID)]")
         withAnimation { isProcessing = true }
-        // Register the per-conversation grant BEFORE the approval resume so the tool's next call in this
-        // run already observes it — ordered by construction, not by Task timing.
+        // Register the grant BEFORE the approval resume so the tool's next call in this run
+        // already observes it — ordered by construction, not by Task timing.
         Task { @MainActor in
-            await SessionToolApprovals.shared.allow(toolName: tool, conversationID: conversationID)
+            await SessionToolApprovals.shared.allow(toolName: tool, conversationID: conversationID, nodeID: nodeID)
             vm.submitToolApproval(operationID: pending.id, approved: true, editedArguments: edited)
         }
     }

@@ -77,17 +77,8 @@ struct GateNodeInspectorView: View {
                     .font(theme.fontBody)
                     .foregroundColor(theme.secondaryText)
             }
-            .buttonStyle(.plain)
-            .help("How gate nodes work")
-            Button("Cancel") { closeInspector() }
-                .font(theme.fontCaption)
-                .buttonStyle(.plain)
-                .foregroundColor(theme.secondaryText)
-            Button("Save") { saveAndDismiss() }
-                .font(theme.fontCaption.weight(.semibold))
-                .buttonStyle(.plain)
-                .foregroundColor(theme.accentColor)
-                .keyboardShortcut(.defaultAction)
+            GlassActionButton(title: "Cancel", icon: "xmark", isAccent: false) { closeInspector() }
+            GlassActionButton(title: "Save", icon: "checkmark", isAccent: true) { saveAndDismiss() }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -254,18 +245,9 @@ struct GateNodeInspectorView: View {
                 }
 
                 if options.count < 4 {
-                    Button {
+                    GlassActionButton(title: "Add Option", icon: "plus", isAccent: true) {
                         options.append("Option \(options.count + 1)")
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "plus.circle.fill")
-                                .font(.system(size: 12))
-                            Text("Add Option")
-                                .font(theme.fontCaption.weight(.medium))
-                        }
-                        .foregroundColor(theme.accentColor)
                     }
-                    .buttonStyle(.plain)
                 }
 
                 Text("First option is treated as approval, others as rejection.")

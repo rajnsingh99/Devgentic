@@ -241,6 +241,13 @@ struct CodeSearchTool: DevgenticTool {
             args += ["--glob", glob]
         }
 
+        // `--` ends option parsing. Without it a `pattern` beginning with `-` is read by the
+        // SEARCH PROGRAM as one of its own flags, which argv does nothing to prevent — argv
+        // stops the shell, not the callee's parser. Confirmed against /usr/bin/grep: a pattern
+        // of `-f <path>` made grep read that file as its pattern LIST, and ripgrep's `--pre`
+        // names a preprocessor COMMAND it executes, so on any machine with ripgrep installed
+        // the same hole is arbitrary code execution rather than an arbitrary read.
+        args.append("--")
         args.append(arguments.pattern)
         args.append(resolvedPath)
 
@@ -263,6 +270,7 @@ struct CodeSearchTool: DevgenticTool {
             if let glob = arguments.glob {
                 grepArgs += ["--include", glob]
             }
+            grepArgs.append("--")            // as above — the fallback needs it just as much
             grepArgs.append(arguments.pattern)
             grepArgs.append(resolvedPath)
             process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
@@ -550,7 +558,10 @@ struct FindDefinitionTool: DevgenticTool {
                 if glob != "*" {
                     args += ["--glob", glob]
                 }
-                args += [pattern, basePath]
+                // `--` ends option parsing — the pattern is built from a model-supplied
+                // `symbol`, and without it a leading `-` reaches ripgrep's own parser (`--pre`
+                // names a command it runs). See the note in `code_search`.
+                args += ["--", pattern, basePath]
                 process.arguments = args
             } else {
                 process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
@@ -558,7 +569,7 @@ struct FindDefinitionTool: DevgenticTool {
                 if glob != "*" {
                     args += ["--include", glob]
                 }
-                args += ["-E", pattern, basePath]
+                args += ["-E", "--", pattern, basePath]
                 process.arguments = args
             }
 
@@ -661,6 +672,19 @@ struct BatchCommandTool: DevgenticTool {
         return result
     }
 
+    /// A speed-bump against the best-known ways to destroy a machine by accident. **Not a
+    /// security boundary, and it cannot become one.**
+    ///
+    /// `batch_command` runs `/bin/zsh -c <command>`; the argument is a complete programming
+    /// language, so any command here can be respelled past the list — `rm  -rf /` with two
+    /// spaces, `find / -delete`, `python3 -c 'import os;os.system(…)'`, or a variable
+    /// assembled at runtime. Those were confirmed to slip through, and no addition to this
+    /// list changes the shape of the problem.
+    ///
+    /// It is kept because catching the literal `rm -rf /` a model actually typed has value,
+    /// and removed nothing else. What it must not do is read as the reason this tool is safe:
+    /// `batch_command` IS a shell, and the only real boundary is whether a profile grants it.
+    /// See `ShellCommandGuard`.
     static let destructivePatterns = [
         "rm -rf /", "rm -rf /*", "mkfs", ":(){", "dd if=/dev/",
         "chmod -r 777 /", "wget.*\\|.*sh", "curl.*\\|.*sh"
@@ -679,7 +703,16 @@ struct BatchCommandTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        // Safety: block destructive commands
+        // The refusals `execute_shell` has always enforced. This tool is the same capability —
+        // `/bin/zsh -c` with the caller's command — and enforced none of them until 2026-07-31,
+        // so `less`, a bare `python3` REPL and `sudo -s` all hung or stalled here while being
+        // refused there. Shared list, so the two shells cannot drift.
+        if let refusal = ShellCommandGuard.refusalReason(for: arguments.command) {
+            return refusal
+        }
+
+        // Safety: block destructive commands. A speed-bump, not a boundary — see the comment
+        // on `destructivePatterns`.
         if Self.isDestructiveCommand(arguments.command) {
             return "Error: Command blocked by safety filter. Destructive system commands are not permitted."
         }

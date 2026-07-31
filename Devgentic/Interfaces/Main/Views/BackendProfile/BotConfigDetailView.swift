@@ -149,11 +149,19 @@ struct BotConfigDetailView: View {
 
                     // 1. Identity Header
                     HStack(alignment: .center, spacing: 16) {
-                        Image(systemName: ProfileType.bot.iconNameFilled)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: 48, height: 48)
-                            .foregroundColor(.blue) // Bot specific color
+                        ZStack {
+                            Circle()
+                                .fill(LinearGradient(colors: [Color.blue.opacity(0.22), Color.blue.opacity(0.06)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                .frame(width: 52, height: 52)
+                                .overlay(Circle().stroke(Color.blue.opacity(0.35), lineWidth: 0.5))
+                                .shadow(color: Color.blue.opacity(0.2), radius: 8)
+
+                            Image(systemName: ProfileType.bot.iconNameFilled)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(width: 26, height: 26)
+                                .foregroundColor(.blue)
+                        }
 
                         VStack(alignment: .leading) {
                             TextField("Bot Name", text: profile.displayName)
@@ -198,17 +206,13 @@ struct BotConfigDetailView: View {
 
                             Spacer()
 
-                            Button {
+                            GlassActionButton(title: "Expand", icon: "arrow.up.left.and.arrow.down.right", isAccent: false) {
                                 promptWindowManager.showEditor(
                                     text: instructionsBinding,
                                     botName: editBuffer.draft.displayName,
                                     themeManager: themeManager
                                 )
-                            } label: {
-                                Label("Expand", systemImage: "arrow.up.left.and.arrow.down.right")
                             }
-                            .font(theme.fontCaption)
-                            .buttonStyle(.link)
                         }
 
                         ZStack(alignment: .topLeading) {
@@ -409,13 +413,9 @@ struct BotConfigDetailView: View {
 
                     Spacer(minLength: 16)
 
-                    Button {
+                    GlassActionButton(title: "Add File", icon: "plus") {
                         showingKnowledgeImporter = true
-                    } label: {
-                        Label("Add File", systemImage: "plus")
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
                     .fileImporter(
                         isPresented: $showingKnowledgeImporter,
                         allowedContentTypes: [.item],

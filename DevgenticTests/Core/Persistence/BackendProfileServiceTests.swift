@@ -27,7 +27,10 @@ private final class MockProfileStore: BackendProfileStoreProtocol {
         return profiles.first { $0.id == id }
     }
 
-    func saveProfile(_ snapshot: BackendProfileSnapshot) throws {
+    /// Carries the caller-attribution parameters the protocol requires (the store logs them so a
+    /// burst of saves names its trigger). The mock ignores them — it only counts calls.
+    func saveProfile(_ snapshot: BackendProfileSnapshot,
+                     callerFile: String, callerFunction: String, callerLine: Int) throws {
         saveCallCount += 1
         if shouldThrowOnSave {
             throw ProfileStoreError.saveFailed(underlying: NSError(domain: "test", code: 1))

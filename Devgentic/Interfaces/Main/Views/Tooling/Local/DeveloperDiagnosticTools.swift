@@ -4,47 +4,47 @@
 //
 
 import Foundation
+import os
+
+private let logger = DGLogger(category: "DeveloperDiagnostics")
 
 struct ManageProcessesTool: DevgenticTool {
     let name = "manage_processes"
     let category = "Developer & Diagnostics"
-    let description = "Lists top processes or kills a specific process by name/PID."
-    
+    let description = "Lists the top processes by CPU and memory. Killing a process is a separate tool."
+
     struct Arguments: Decodable, Sendable {
-        let action: String
+        let action: String?
         let target: String?
     }
-    
+
     var parameterSchema: ToolParameters {
         return SchemaBuilder.object(
             properties: [
-                ("action", "string", "Action ('list_top', 'kill')"),
-                ("target", "string", "Process ID or Name to kill (required for 'kill')")
+                ("action", "string", "Action ('list_top'). Optional — listing is the only action."),
+                ("target", "string", "Unused here; killing a process is the `kill_process` tool.")
             ],
-            required: ["action"]
+            required: []
         )
     }
-    
-    func call(arguments: Arguments) async throws -> String {
-        let process = Process()
 
-        if arguments.action == "list_top" {
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            process.arguments = ["-c", "ps -eo pid,pcpu,pmem,comm | sort -k 2 -nr | head -n 10"]
-        } else if arguments.action == "kill" {
-            guard let target = arguments.target else {
-                return "Error: target required for kill."
-            }
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-            if let pid = Int(target) {
-                process.executableURL = URL(fileURLWithPath: "/bin/kill")
-                process.arguments = ["-9", String(pid)]
-            } else {
-                process.arguments = ["-9", target]
-            }
-        } else {
-            return "Error: Unknown action."
+    func call(arguments: Arguments) async throws -> String {
+        // `kill` was an action here until 2026-07-31. Listing processes is something an agent does
+        // constantly while diagnosing; `kill -9` is irreversible and cannot be caught by the
+        // target, so unsaved work is simply gone. One `requiresConfirmation` could not cover both
+        // — prompting on every listing is what teaches a user to approve without reading.
+        if let action = arguments.action, action == "kill" {
+            return "Error: 'kill' has moved to the `kill_process` tool, so it can carry its own "
+                + "confirmation setting. Call that tool with the pid or process name."
         }
+        guard arguments.action == nil || arguments.action == "list_top" else {
+            return "Error: Unknown action '\(arguments.action ?? "")'. This tool only lists processes."
+        }
+
+        let process = Process()
+        // A constant command — no model input reaches this string (§3.5).
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-c", "ps -eo pid,pcpu,pmem,comm | sort -k 2 -nr | head -n 10"]
 
         do {
             // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe
@@ -57,187 +57,67 @@ struct ManageProcessesTool: DevgenticTool {
     }
 }
 
-struct XcodeOrchestratorTool: DevgenticTool {
-    let name = "xcode_orchestrator"
+/// Terminating a process, as its own tool — split from `manage_processes` on 2026-07-31.
+///
+/// `SIGKILL` cannot be caught, blocked or ignored by the target, so there is no cleanup and no
+/// save. That is not the same kind of act as listing processes, and it should not inherit the same
+/// confirmation setting. Classified `.destructive` in `HITLRiskTier`.
+struct KillProcessTool: DevgenticTool {
+    let name = "kill_process"
     let category = "Developer & Diagnostics"
-    let description = "Performs Xcode tasks: clear DerivedData, build project, run tests, list schemes, open file in Xcode, or read build errors."
-    // #19: build/test/read_build_errors return raw compiler output that routinely begins with
-    // "error:" — surfacing those IS the tool's job, not a failure. Opt out of content-sniffing.
-    let outputMayContainErrorText = true
+    let description = "Force-terminates a process by PID or name (SIGKILL). Irreversible — unsaved work in that process is lost."
 
     struct Arguments: Decodable, Sendable {
-        let action: String
-        let scheme: String?
-        let project: String?
-        let file_path: String?
-        let line: Int?
-
-        private struct DynamicKey: CodingKey {
-            var stringValue: String
-            init?(stringValue: String) { self.stringValue = stringValue }
-            var intValue: Int? { return nil }
-            init?(intValue: Int) { return nil }
-        }
-
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: DynamicKey.self)
-            self.action = try container.decode(String.self, forKey: DynamicKey(stringValue: "action")!)
-            self.scheme = (try? container.decodeIfPresent(String.self, forKey: DynamicKey(stringValue: "scheme")!))
-            self.project = (try? container.decodeIfPresent(String.self, forKey: DynamicKey(stringValue: "project")!))
-            self.file_path = (try? container.decodeIfPresent(String.self, forKey: DynamicKey(stringValue: "file_path")!))
-            self.line = (try? container.decodeIfPresent(Int.self, forKey: DynamicKey(stringValue: "line")!))
-        }
+        let target: String
     }
 
     var parameterSchema: ToolParameters {
         return SchemaBuilder.object(
             properties: [
-                ("action", "string", "Action: 'clear_derived_data', 'build', 'test', 'list_schemes', 'open_file', 'read_build_errors'"),
-                ("scheme", "string", "Xcode scheme name (for build/test)"),
-                ("project", "string", "Path to .xcodeproj (for build/test/list_schemes)"),
-                ("file_path", "string", "File path to open in Xcode (for open_file)"),
-                ("line", "integer", "Line number to jump to (for open_file)")
+                ("target", "string", "Process ID (numeric) or process name to terminate.")
             ],
-            required: ["action"]
+            required: ["target"]
         )
     }
 
     func call(arguments: Arguments) async throws -> String {
-        // #19: this tool opts out of content-sniffing (`outputMayContainErrorText`) because its
-        // build/test/read_build_errors OUTPUT legitimately contains "error:". So its OWN
-        // operational / argument failures must THROW (not return an "Error:" string) — otherwise
-        // they'd be misread as success and never counted by the circuit breaker.
-        switch arguments.action {
-        case "clear_derived_data":
-            let path = NSHomeDirectory() + "/Library/Developer/Xcode/DerivedData"
-            do {
-                try FileManager.default.removeItem(atPath: path)
-                return "Cleared DerivedData successfully at \(path)."
-            } catch {
-                if (error as NSError).code == NSFileNoSuchFileError {
-                    return "DerivedData already clean/empty."
-                }
-                throw NSError(domain: "XcodeOrchestratorTool", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to clear DerivedData: \(error.localizedDescription)"])
-            }
+        let target = arguments.target.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return "Error: 'target' must not be empty." }
 
-        // `scheme`, `project` and `file_path` are model-supplied and used to be interpolated
-        // into a `zsh -c` string inside double quotes. A scheme name containing a double quote
-        // closed it and the rest ran as shell syntax. `scheme` is the worst of the three: it is
-        // a NAME, not a path, so no existence check could ever have blocked it — the `guard let`
-        // above is a nil check and nothing more. They are argv elements now; see `xcodeRun`.
-        case "build":
-            guard let scheme = arguments.scheme else {
-                throw NSError(domain: "XcodeOrchestratorTool", code: 2, userInfo: [NSLocalizedDescriptionKey: "'scheme' is required for the 'build' action."])
-            }
-            return try await xcodeRun(Self.xcodebuild,
-                                      Self.projectArgs(arguments.project) + ["-scheme", scheme, "build"],
-                                      tailLines: 30)
-
-        case "test":
-            guard let scheme = arguments.scheme else {
-                throw NSError(domain: "XcodeOrchestratorTool", code: 3, userInfo: [NSLocalizedDescriptionKey: "'scheme' is required for the 'test' action."])
-            }
-            return try await xcodeRun(Self.xcodebuild,
-                                      Self.projectArgs(arguments.project) + ["-scheme", scheme, "test"],
-                                      tailLines: 50)
-
-        case "list_schemes":
-            return try await xcodeRun(Self.xcodebuild, Self.projectArgs(arguments.project) + ["-list"])
-
-        case "open_file":
-            guard let filePath = arguments.file_path else {
-                throw NSError(domain: "XcodeOrchestratorTool", code: 4, userInfo: [NSLocalizedDescriptionKey: "'file_path' is required for the 'open_file' action."])
-            }
-            let expandedPath = (filePath as NSString).expandingTildeInPath
-            let lineArgs = arguments.line.map { ["--line", String($0)] } ?? []
-            return try await xcodeRun(Self.xed, lineArgs + [expandedPath])
-
-        case "read_build_errors":
-            let cmd = """
-            find ~/Library/Developer/Xcode/DerivedData -name "*.xcactivitylog" -maxdepth 5 -type f -print0 | xargs -0 ls -t 2>/dev/null | head -1 | xargs -I{} gunzip -c {} 2>/dev/null | strings | grep -E "(error:|warning:)" | head -30
-            """
-            return try await xcodeShell(cmd)
-
-        default:
-            throw NSError(domain: "XcodeOrchestratorTool", code: 5, userInfo: [NSLocalizedDescriptionKey: "Unknown action '\(arguments.action)'. Valid actions: clear_derived_data, build, test, list_schemes, open_file, read_build_errors."])
-        }
-    }
-
-    private static let xcodebuild = "/usr/bin/xcodebuild"
-    private static let xed = "/usr/bin/xed"
-
-    private static func projectArgs(_ project: String?) -> [String] {
-        guard let project, !project.isEmpty else { return [] }
-        return ["-project", project]
-    }
-
-    /// Runs a developer tool DIRECTLY, never through a shell — the argv form of what
-    /// `xcodeShell` used to build by interpolation.
-    ///
-    /// `tailLines` replaces the `| tail -30` the pipeline used to do. Applied to the COMBINED
-    /// output, which favours stderr when there is any, and that is the right bias here:
-    /// `xcodebuild` writes progress to stdout and diagnostics to stderr, so the last N lines of
-    /// the combination are the errors when a build fails and the summary when it does not.
-    private func xcodeRun(_ executable: String, _ argv: [String], tailLines: Int? = nil) async throws -> String {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = argv
+        if let pid = Int(target) {
+            // ⚠️ A pid must be POSITIVE. In POSIX `kill`, a non-positive pid is not a process:
+            //   -1  → every process the user has permission to signal (the whole login session)
+            //    0  → every process in the caller's process group (this app)
+            //   -N  → every process in process group N
+            // and `--` — added here so a process NAME beginning with `-` reaches the argv as a
+            // target rather than a flag (invariant 12) — is exactly what makes `-1` unambiguously
+            // a *target* instead of a malformed signal. The separator that fixes option injection
+            // is what arms this, so the two belong together: keep `--`, and reject the pids that
+            // are not one process. `target: "-1"` was a session-wide SIGKILL. (2026-07-31)
+            guard pid > 0 else {
+                logger.error("[KILLPROC] ⚠️ refused non-positive pid '\(target)' — this would have signalled a process GROUP (0 = this app's own group, -1 = every process the user owns), not one process. No signal sent.")
+                return "Error: '\(target)' is not a process id. A pid must be positive — "
+                    + "0 and negative values signal whole process groups (or every process you "
+                    + "own), which this tool will not do. Pass a specific pid, or a process name."
+            }
+            process.executableURL = URL(fileURLWithPath: "/bin/kill")
+            process.arguments = ["-9", "--", String(pid)]
+        } else {
+            // A name, not a number. `--` keeps a leading `-` from being read as a killall flag.
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+            process.arguments = ["-9", "--", target]
+        }
 
         do {
             let run = try ProcessRunner.run(process)
-            var text = run.combinedOutput
-
-            if let tailLines {
-                let lines = text.components(separatedBy: "\n")
-                if lines.count > tailLines {
-                    text = lines.suffix(tailLines).joined(separator: "\n")
-                }
+            guard run.succeeded else {
+                let detail = run.standardError.isEmpty ? run.standardOutput : run.standardError
+                return "Error: could not terminate '\(target)' (exit \(run.exitCode))\n\(detail)"
             }
-
-            let maxOutput = 6000
-            return text.count > maxOutput ? String(text.prefix(maxOutput)) + "\n...[Truncated]" : text
+            return "Terminated '\(target)'."
         } catch {
-            // Process couldn't launch — a genuine operational failure (throw, don't return,
-            // so the opted-out tool's real failures are still counted; #19).
-            throw error
-        }
-    }
-
-    /// Shell form, kept for `read_build_errors` ALONE.
-    ///
-    /// That action is a fixed `find | xargs | gunzip | strings | grep` pipeline with no
-    /// interpolation of any kind, so there is nothing for a caller to inject into. Every other
-    /// action moved to `xcodeRun`. Do not route a new action through here without checking that
-    /// its command is a constant.
-    private func xcodeShell(_ cmd: String) async throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-c", cmd]
-
-        do {
-            // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe
-            // only after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
-            //
-            // Before the migration this site pointed BOTH streams at one pipe, so the single
-            // read it did returned stdout and stderr together. `xcodebuild` writes compiler
-            // diagnostics to stderr — reading only
-            // stdout hands the agent a build result with the errors stripped out, which is
-            // worse than the hang: it reports a clean build that did not happen.
-            //
-            // stderr is appended AFTER stdout is truncated, not before. A verbose build
-            // easily exceeds 6000 chars of stdout, and folding the streams first would push
-            // the diagnostics — the only part worth reading — past the cap.
-            let run = try ProcessRunner.run(process)
-            let maxOutput = 6000
-            let head = run.standardOutput.count > maxOutput
-                ? String(run.standardOutput.prefix(maxOutput)) + "\n...[Truncated]"
-                : run.standardOutput
-            let result = run.standardError.isEmpty ? head : head + "\n[stderr]\n" + run.standardError
-            return result
-        } catch {
-            // Process couldn't launch — a genuine operational failure (throw, don't return,
-            // so the opted-out tool's real failures are still counted; #19).
-            throw error
+            return "Error executing process command: \(error)"
         }
     }
 }

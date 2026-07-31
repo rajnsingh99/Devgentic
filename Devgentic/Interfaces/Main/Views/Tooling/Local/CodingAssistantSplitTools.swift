@@ -532,6 +532,11 @@ private enum RipgrepRunner {
             if wholeWord { args.append("-w") }
             if filesOnly { args.append("-l") }
             if let glob = glob { args += ["--glob", glob] }
+            // `--` ends option parsing. `pattern` is model-supplied, and argv does not protect
+            // the callee's own parser: a leading `-` reaches ripgrep, whose `--pre` names a
+            // preprocessor COMMAND it executes. This runner backs the three `code_search_*`
+            // tools, which are the ones a Code profile actually gets.
+            args.append("--")
             args.append(pattern)
             args.append(resolvedPath)
 
@@ -543,6 +548,7 @@ private enum RipgrepRunner {
             if wholeWord { grepArgs.append("-w") }
             if filesOnly { grepArgs.append("-l") }
             if let glob = glob { grepArgs += ["--include", glob] }
+            grepArgs.append("--")            // as above; grep's `-f` reads a file as its pattern list
             grepArgs.append(pattern)
             grepArgs.append(resolvedPath)
 

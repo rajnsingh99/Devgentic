@@ -424,11 +424,9 @@ struct ProviderConfigSection: View {
                         .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
                         .overlay(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium).stroke(theme.dividerColor, lineWidth: 1))
 
-                    Button("Edit") {
+                    GlassActionButton(title: "Edit", icon: "pencil") {
                         isEditingBaseURL = true
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
                 }
             }
             .frame(maxWidth: 350)

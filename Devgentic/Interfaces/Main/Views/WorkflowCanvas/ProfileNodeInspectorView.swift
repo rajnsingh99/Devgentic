@@ -151,10 +151,9 @@ struct ProfileNodeInspectorView: View {
                 .textFieldStyle(.plain)
                 .foregroundColor(theme.primaryText)
             Spacer()
-            Button("Done") { saveAndDismiss() }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+            GlassActionButton(title: "Done", icon: "checkmark", isAccent: true) { saveAndDismiss() }
                 .disabled(!isValid)
+                .opacity(isValid ? 1.0 : 0.4)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
@@ -323,24 +322,18 @@ struct ProfileNodeInspectorView: View {
                 )
                 .fixedSize()
 
-                Button("Reset") {
+                GlassActionButton(title: "Reset", icon: "arrow.counterclockwise", isAccent: false) {
                     hardTimeoutBinding.wrappedValue = nil
                 }
-                .font(.system(size: 10))
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
         } else {
             HStack(spacing: 8) {
                 Text("Default")
                     .font(.system(size: 11))
                     .foregroundColor(theme.tertiaryText)
-                Button("Set") {
+                GlassActionButton(title: "Set", icon: "clock", isAccent: true) {
                     hardTimeoutBinding.wrappedValue = 120
                 }
-                .font(.system(size: 10))
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
         }
     }
@@ -401,14 +394,9 @@ struct ProfileNodeInspectorView: View {
                             )
                     }
 
-                    Button {
+                    GlassActionButton(title: "Edit Profile", icon: "pencil", isAccent: true) {
                         showProfileEditor = true
-                    } label: {
-                        Label("Edit Profile", systemImage: "pencil.circle")
-                            .font(.system(size: 11))
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
                 } else {
                     Text("Profile not found")
                         .font(.system(size: 11))

@@ -412,6 +412,7 @@ actor ReActAgentExecutor: Executor {
                                     toolMediator: toolMediator,
                                     interactionMemory: interactionMemory,
                                     continuation: continuation,
+                                    approvalNodeID: input.workflowContext?.nodeID,
                                     onTraceUpdate: onTraceUpdate
                                 )
                                 if let nativeAdapter {
@@ -843,6 +844,7 @@ actor ReActAgentExecutor: Executor {
                             toolMediator: toolMediator,
                             interactionMemory: interactionMemory,
                             continuation: continuation,
+                            approvalNodeID: input.workflowContext?.nodeID,
                             onTraceUpdate: onTraceUpdate
                         )
 

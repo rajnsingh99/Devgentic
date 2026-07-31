@@ -258,12 +258,33 @@ protocol AgentToolProtocol: Sendable {
     /// The JSON schema describing the `Arguments` structure to the LLM.
     var parameterSchema: ToolParameters { get }
 
+    /// The logical group this tool belongs to, used to organise the Tool Library.
+    ///
+    /// Declared on the protocol as of 2026-07-31, completing a migration that had been left at
+    /// "Step 3": `NativeToolWrapper` was reading this by `Mirror` REFLECTION, because the
+    /// protocol did not require it. Reflection meant a tool that simply omitted the property
+    /// silently landed in a default bucket, and the compiler could not say so.
+    ///
+    /// Deliberately required rather than defaulted. A default is what made the omission
+    /// invisible in the first place, and every tool has a group it belongs in — including the
+    /// internal ones, which use `"Internal"` and are never surfaced in the Library at all.
+    var category: String { get }
+
     /// True when this tool's SUCCESSFUL output may legitimately begin with or contain
     /// "error"-shaped text — e.g. a shell tool surfacing stderr, or a build-error reader
     /// whose whole purpose is to return compiler errors. Such tools opt out of
     /// `ToolExecutionMediator`'s content-sniffing semantic-failure check: a non-throwing
     /// return is treated as success (#19). Default: false.
     var outputMayContainErrorText: Bool { get }
+
+    /// True when this tool's ARGUMENT is executed as code — a shell command, or an AppleScript
+    /// body. Such a tool cannot be bounded by validating its arguments, because the argument IS
+    /// a program; the only real control is whether the profile grants it at all.
+    ///
+    /// Derived from `ToolCapability.arbitraryCodeExecution` by default, so the answer is the
+    /// same one every other part of the app gets and there is nothing to keep in sync. Default:
+    /// false, for the ~40 tools that do a bounded, named thing.
+    var executesArbitraryCode: Bool { get }
 
     /// The execution block.
     func call(arguments: Arguments) async throws -> String
@@ -277,6 +298,11 @@ extension AgentToolProtocol {
     /// Default: tools do NOT surface error-shaped text on success (so the semantic-failure
     /// heuristic applies). Error-surfacing tools (shell, build diagnostics) override to true.
     var outputMayContainErrorText: Bool { false }
+
+    /// Answered from the one shared set rather than per-tool, so a tool and the permission
+    /// banner can never disagree about what the tool is. A tool may still override, but the
+    /// set is what `ToolCapabilityTests` checks against the actual source.
+    var executesArbitraryCode: Bool { ToolCapability.executesArbitraryCode(name) }
 
     func execute(arguments: Arguments) async throws -> (output: String, artifacts: [MediaArtifact]) {
         let text = try await call(arguments: arguments)
