@@ -15,6 +15,9 @@
 //
 
 import Foundation
+import os
+
+private let logger = DGLogger(category: "AdvancedFileSystemTools")
 
 // MARK: - Hybrid Search Service (Two-Phase Prefiltered)
 
@@ -444,7 +447,7 @@ struct SmartSearchTool: DevgenticTool {
             return "\(output)"
 
         } catch {
-            return "Search failed: \(error.localizedDescription)"
+            return "Error: search failed — \(error.localizedDescription)"
         }
     }
 }
@@ -495,7 +498,18 @@ struct ReadMetadataTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        let url = URL(fileURLWithPath: arguments.path)
+        // Resolved through `FilePathResolver`, like every other File System tool.
+        //
+        // This site handed the raw argument to `URL(fileURLWithPath:)`, which resolves a
+        // RELATIVE path against the process working directory — `/` for a Finder- or
+        // Xcode-launched app. So a bare `report.pdf` meant `<home>/report.pdf` to `read_file`
+        // and `/report.pdf` here: the same string addressing two different files depending on
+        // which tool received it, with no way for a model to know which rule applies.
+        //
+        // Tildes were never the gap — Foundation expands `~` and `~/sub` on its own — which is
+        // why this went unnoticed. It is relative paths that diverged.
+        let resolvedPath = FilePathResolver.resolve(arguments.path)
+        let url = URL(fileURLWithPath: resolvedPath)
         do {
             let resourceKeys: Set<URLResourceKey> = [.tagNamesKey, .contentModificationDateKey, .creationDateKey, .typeIdentifierKey, .fileSizeKey]
             let values = try url.resourceValues(forKeys: resourceKeys)
@@ -584,11 +598,33 @@ struct OrganizeBatchTool: DevgenticTool {
             }
             self.destinationFolder = validDest
             
-            if let codingKey = DynamicKey(stringValue: "dryRun") {
-                self.dryRun = try? container.decodeIfPresent(Bool.self, forKey: codingKey)
-            } else {
-                self.dryRun = false
+            // `dryRun` was decoded by that ONE exact spelling, while `sourcePaths` and
+            // `destinationFolder` above each accept a dozen synonyms including snake_case. So a
+            // model emitting a consistently snake_case payload got its paths understood and its
+            // `dry_run` silently dropped — and a dry run that fails to decode does not become a
+            // no-op, it performs the REAL, irreversible move.
+            //
+            // That is the asymmetry worth stating: of the three arguments, the one whose entire
+            // purpose is to PREVENT the destructive operation was the only one that could fail
+            // to arrive, and it failed silently. Every other argument here was already forgiving.
+            //
+            // Strings are accepted too — `"true"` — matching `write_file`'s `append`, because
+            // small models emit stringified booleans.
+            var dryRunValue: Bool? = nil
+            let dryRunKeys = ["dryRun", "dry_run", "dryrun", "is_dry_run", "isDryRun", "simulate", "preview"]
+            for key in dryRunKeys {
+                guard let codingKey = DynamicKey(stringValue: key) else { continue }
+                if let boolVal = try? container.decode(Bool.self, forKey: codingKey) {
+                    dryRunValue = boolVal
+                    break
+                }
+                if let strVal = try? container.decode(String.self, forKey: codingKey),
+                   let boolVal = Bool(strVal.lowercased()) {
+                    dryRunValue = boolVal
+                    break
+                }
             }
+            self.dryRun = dryRunValue
         }
     }
     
@@ -605,11 +641,21 @@ struct OrganizeBatchTool: DevgenticTool {
     
     func call(arguments: Arguments) async throws -> String {
         let isDryRun = arguments.dryRun ?? false
-        var operationsLog: [[String: String]] = []
+        /// Where each file went. Accumulated and then never read until 2026-08-01 — it is now the
+        /// body of the `[FSBATCH]` log line, which is the only place the mapping can survive: a
+        /// batch move is irreversible, the sources are gone, and the returned string reports
+        /// COUNTS only. "Which file went where" is precisely the question asked afterwards.
+        var operationsLog: [(from: String, to: String)] = []
         var movedCount = 0
         var errors: [String] = []
-        
-        let destURL = URL(fileURLWithPath: arguments.destinationFolder)
+
+        // Resolved through `FilePathResolver`, like the other File System tools. Previously the
+        // raw strings went straight to `URL(fileURLWithPath:)`, which anchors a relative path to
+        // the process working directory — `/` in the shipped app. For a tool that MOVES files
+        // that is worse than a failed read: a relative `destinationFolder` pointed at the
+        // read-only volume root, so a batch move failed wholesale with a permissions error that
+        // named a path the caller never asked for.
+        let destURL = URL(fileURLWithPath: FilePathResolver.resolve(arguments.destinationFolder))
         if !isDryRun {
             do {
                 if !fileManager.fileExists(atPath: destURL.path) {
@@ -620,53 +666,98 @@ struct OrganizeBatchTool: DevgenticTool {
             }
         }
         
-        for sourcePath in arguments.sourcePaths {
+        for rawSourcePath in arguments.sourcePaths {
+            let sourcePath = FilePathResolver.resolve(rawSourcePath)
             let sourceURL = URL(fileURLWithPath: sourcePath)
             let fileName = sourceURL.lastPathComponent
             let destFileURL = destURL.appendingPathComponent(fileName)
-            
+
             if !fileManager.fileExists(atPath: sourcePath) {
                 errors.append("Skipped (Not Found): \(fileName)")
                 continue
             }
-            
+
             if isDryRun {
                 movedCount += 1
-                operationsLog.append(["original": sourcePath, "new": destFileURL.path, "status": "DRY_RUN"])
+                operationsLog.append((from: sourcePath, to: destFileURL.path))
                 continue
             }
-            
+
             do {
                 if fileManager.fileExists(atPath: destFileURL.path) {
                     errors.append("Skipped (Exists): \(fileName)")
                 } else {
                     try fileManager.moveItem(at: sourceURL, to: destFileURL)
                     movedCount += 1
-                    operationsLog.append(["original": sourcePath, "new": destFileURL.path, "status": "MOVED"])
+                    operationsLog.append((from: sourcePath, to: destFileURL.path))
                 }
             } catch {
                 errors.append("Error moving \(fileName): \(error.localizedDescription)")
             }
         }
-        
+
         var resultMessage = isDryRun ? "[DRY RUN] " : ""
         resultMessage += "Processed \(arguments.sourcePaths.count) files. Moved: \(movedCount). Errors: \(errors.count)."
         if !errors.isEmpty { resultMessage += "\nDetails: \(errors.joined(separator: ", "))" }
-        
+
+        // A batch MOVE leaves no trace once it has happened — the sources are gone and the
+        // returned string lives only in one turn's observation. Logged with the mode stated,
+        // because "did the agent actually move these, or simulate it?" is the first question
+        // asked afterwards, and until now nothing on disk could answer it.
+        // The mapping, capped. This is the only surviving record of WHERE each file went: the
+        // sources no longer exist, and the string returned to the model carries counts alone.
+        // Capped because a batch of several hundred would otherwise produce one unreadable line.
+        let mappingCap = 20
+        let mapping = operationsLog.prefix(mappingCap)
+            .map { "\($0.from) -> \($0.to)" }
+            .joined(separator: "; ")
+        let overflow = operationsLog.count > mappingCap
+            ? " (+\(operationsLog.count - mappingCap) more not listed)"
+            : ""
+
+        logger.info("""
+            [FSBATCH] \(isDryRun ? "SIMULATED" : "MOVED") \(movedCount) of \
+            \(arguments.sourcePaths.count) file(s) into '\(destURL.path)'; \(errors.count) skipped \
+            or failed\(errors.isEmpty ? "" : " — \(errors.joined(separator: "; "))"). \
+            \(isDryRun ? "No file was touched." : "Sources no longer exist at their old paths.")\
+            \(mapping.isEmpty ? "" : " Mapping: \(mapping)\(overflow)")
+            """)
+
         return resultMessage
     }
 }
 
 // MARK: - FS Watch Folder
 
-class WatcherService: @unchecked Sendable {
+/// Tracks the folder monitors `fs_watch_folder` has started.
+///
+/// ⚠️ This type is `@unchecked Sendable` — a promise to the compiler that it is safe to touch from
+/// several threads at once — and until 2026-08-01 that promise was FALSE: `activeMonitors` was a
+/// plain `Dictionary` read and written by all three methods with no synchronisation at all.
+///
+/// It is reachable concurrently. `WatchFolderTool.call` is an ordinary `async` method on a
+/// `Sendable` struct with no actor isolation, so two conversations — or one workflow fanning out
+/// across parallel nodes — call straight into this singleton simultaneously. Under real thread
+/// contention that **crashed the process with SIGSEGV** (60 concurrent `startWatching` calls,
+/// reproduced 2026-08-01); the milder outcome is a silently dropped entry, which is worse than it
+/// sounds: `startWatching` has already `open()`ed a descriptor and armed a dispatch source, and
+/// the map entry is the only handle to it. Lose the entry and the monitor can never be stopped,
+/// its cancel handler never runs, and the descriptor leaks for the life of the app.
+///
+/// A lock rather than an actor because the three methods are synchronous and called from
+/// synchronous tool code; making them `async` would ripple through `WatchFolderTool` for no gain.
+final class WatcherService: @unchecked Sendable {
     static let shared = WatcherService()
+
+    /// Guards `activeMonitors` on EVERY path. Never held across a call out to dispatch — see
+    /// `stopWatching`, which cancels its source after releasing.
+    private let lock = NSLock()
     private var activeMonitors: [UUID: (source: DispatchSourceFileSystemObject, path: String)] = [:]
 
     func startWatching(path: String) -> String {
         let url = URL(fileURLWithPath: path)
         let descriptor = open(url.path, O_EVTONLY)
-        guard descriptor != -1 else { return "Failed to open descriptor for path." }
+        guard descriptor != -1 else { return "Error: could not open a file descriptor for that path — it may not exist or may not be readable." }
 
         let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: [.write, .delete, .rename, .extend], queue: DispatchQueue.global())
         let id = UUID()
@@ -678,20 +769,40 @@ class WatcherService: @unchecked Sendable {
 
         source.setCancelHandler { close(descriptor) }
         source.resume()
+
+        // Only the map mutation is guarded. Opening the descriptor and arming the source touch
+        // no shared state, and holding a lock across them would serialise unrelated work.
+        lock.lock()
         activeMonitors[id] = (source: source, path: path)
+        lock.unlock()
+
         return "Started watching \(path). Monitor ID: \(id.uuidString)."
     }
 
     func stopWatching(monitorID: String) -> String {
-        guard let uuid = UUID(uuidString: monitorID), let entry = activeMonitors[uuid] else {
+        guard let uuid = UUID(uuidString: monitorID) else {
             return "Error: No active monitor with ID '\(monitorID)'."
         }
+
+        // Look up and remove ATOMICALLY. The previous read-then-remove let two concurrent stops
+        // both find the entry, so both cancelled the same source and reported success.
+        lock.lock()
+        let entry = activeMonitors.removeValue(forKey: uuid)
+        lock.unlock()
+
+        guard let entry else {
+            return "Error: No active monitor with ID '\(monitorID)'."
+        }
+
+        // Cancelled after releasing the lock: `cancel()` schedules the cancel handler, and
+        // calling out to dispatch while holding a lock is how deadlocks are grown.
         entry.source.cancel()
-        activeMonitors.removeValue(forKey: uuid)
         return "Stopped monitoring '\(entry.path)' (ID: \(monitorID))."
     }
 
     func listActive() -> [(id: String, path: String)] {
+        lock.lock()
+        defer { lock.unlock() }
         return activeMonitors.map { (id: $0.key.uuidString, path: $0.value.path) }
     }
 }

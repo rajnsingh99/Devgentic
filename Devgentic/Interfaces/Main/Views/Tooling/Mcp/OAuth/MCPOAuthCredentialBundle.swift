@@ -54,6 +54,14 @@ struct MCPOAuthCredentialBundle: Codable, Hashable, Sendable {
     let registrationAccessToken: String?
     let registrationClientUri: URL?
 
+    /// OPTIONAL (RFC 8707). The MCP server URL these tokens were bound to.
+    ///
+    /// Stored so REFRESH can repeat the same `resource` value — omitting it there would
+    /// let a refreshed token silently widen back to a general-purpose audience, undoing
+    /// the binding established at authorization time. Optional so bundles persisted
+    /// before 2026-08-01 keep decoding (they simply carry no audience binding).
+    var resource: URL? = nil
+
     /// True when the access token is past expiry (or within a 30-second
     /// safety margin to absorb clock skew + network round-trip).
     func isAccessTokenExpired(now: Date = Date(), safetyMargin: TimeInterval = 30) -> Bool {

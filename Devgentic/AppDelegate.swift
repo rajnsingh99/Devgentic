@@ -190,6 +190,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 await group.next()
                 group.cancelAll()
             }
+
+            // Whatever the watchdog cut short, no MCP child may outlive us. ShellProcess's
+            // SIGTERM→SIGKILL escalation is a 2s `asyncAfter` that cannot fire this late,
+            // so a server ignoring SIGTERM would be re-parented to launchd as an orphan.
+            MCPClientService.shared.killAllChildProcessesNow()
+
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater

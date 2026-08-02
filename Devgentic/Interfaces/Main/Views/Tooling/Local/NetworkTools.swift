@@ -37,28 +37,51 @@ struct CheckNetworkStatusTool: DevgenticTool {
         }
         info += "Internet Reachable: \(reachable ? "Yes" : "No")\n"
 
-        // Wi-Fi SSID via airport command
-        let ssidProcess = Process()
-        ssidProcess.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        ssidProcess.arguments = ["-c", "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I | awk '/ SSID/ {print substr($0, index($0, $2))}'"]
-        // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe only
-        // after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
-        //
-        // `try?`, matching the original: this tool reports SEVERAL facts and degrades one at a
-        // time. `airport` was removed in recent macOS, so a launch failure here is expected —
-        // it must cost the SSID line, not the whole network report.
-        let ssid = (try? ProcessRunner.run(ssidProcess).standardOutput)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "Unknown"
-        info += "Wi-Fi SSID: \(ssid.isEmpty ? "Not connected" : ssid)\n"
-
-        // IP address
+        // IP address first: it is the evidence the SSID line needs to interpret itself.
+        // Invoked directly rather than through `zsh -c "… || echo 'No IP'"` — a shell hosting one
+        // fallback is a shell we do not need.
         let ipProcess = Process()
-        ipProcess.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        ipProcess.arguments = ["-c", "ipconfig getifaddr en0 2>/dev/null || echo 'No IP'"]
-        // Same graceful-degradation contract as the SSID probe above.
-        let ip = (try? ProcessRunner.run(ipProcess).standardOutput)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "Unknown"
-        info += "Local IP: \(ip)\n"
+        ipProcess.executableURL = URL(fileURLWithPath: "/usr/sbin/ipconfig")
+        ipProcess.arguments = ["getifaddr", "en0"]
+        let ipRun = try? ProcessRunner.run(ipProcess)
+        let ip = (ipRun?.succeeded == true)
+            ? ipRun!.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+            : ""
+
+        // Wi-Fi SSID.
+        //
+        // The previous probe piped `Apple80211.framework/.../airport -I` through awk — and macOS
+        // NO LONGER SHIPS THAT BINARY. The pipeline produced nothing on stdout, the empty result
+        // was read as "no SSID", and the tool printed **"Wi-Fi SSID: Not connected"**. On a
+        // machine sitting on Wi-Fi, the agent was told flatly that it was not — a positive claim
+        // about the network derived from a probe that does not exist. "Cannot tell" and "not
+        // connected" are different answers and must read differently.
+        //
+        // `networksetup` still ships. It reports one of two sentences, and on Sonoma and later it
+        // withholds the SSID unless Location Services is granted — so its "not associated" reply
+        // is NOT by itself proof of disconnection. Cross-referencing the IP is what makes the
+        // difference legible: an interface holding an address is on a network whatever
+        // `networksetup` is willing to name.
+        let ssidProcess = Process()
+        ssidProcess.executableURL = URL(fileURLWithPath: "/usr/sbin/networksetup")
+        ssidProcess.arguments = ["-getairportnetwork", "en0"]
+        let ssidRun = try? ProcessRunner.run(ssidProcess)
+        let ssidOutput = (ssidRun?.combinedOutput ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let ssidLine: String
+        if let range = ssidOutput.range(of: "Current Wi-Fi Network: ") {
+            ssidLine = String(ssidOutput[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if ssidRun == nil || ssidOutput.isEmpty {
+            ssidLine = "Unavailable (the Wi-Fi probe could not be run on this system)"
+        } else if !ip.isEmpty {
+            ssidLine = "Unavailable (en0 holds an IP address, so a network IS connected; "
+                + "macOS withholds the network name without Location Services permission)"
+        } else {
+            ssidLine = "Not connected"
+        }
+        info += "Wi-Fi SSID: \(ssidLine)\n"
+
+        info += "Local IP: \(ip.isEmpty ? "No IP on en0" : ip)\n"
 
         return info
     }
@@ -101,7 +124,27 @@ struct HTTPRequestTool: DevgenticTool {
             self.url = val
             self.method = (try? container.decodeIfPresent(String.self, forKey: DynamicKey(stringValue: "method")!))
             self.body = (try? container.decodeIfPresent(String.self, forKey: DynamicKey(stringValue: "body")!))
-            self.headers = (try? container.decodeIfPresent([String: String].self, forKey: DynamicKey(stringValue: "headers")!))
+
+            // Accepts headers as an OBJECT or as a JSON STRING containing one.
+            //
+            // The schema used to advertise `headers` as a "string" ("JSON object of custom
+            // headers") while this decoded `[String: String]` — so a model that followed the
+            // schema it was given sent `"{\"Authorization\":\"Bearer …\"}"`, the decode threw,
+            // `try?` turned it into nil, and the request went out with NO HEADERS AT ALL. The
+            // server answered 401 and nothing anywhere said the credentials had been dropped on
+            // the way out. The schema now says "object", and the string form is still honoured
+            // because models will keep emitting it.
+            var foundHeaders: [String: String]? = nil
+            if let key = DynamicKey(stringValue: "headers") {
+                if let dictionary = try? container.decodeIfPresent([String: String].self, forKey: key) {
+                    foundHeaders = dictionary
+                } else if let raw = try? container.decodeIfPresent(String.self, forKey: key),
+                          let data = raw.data(using: .utf8),
+                          let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
+                    foundHeaders = decoded
+                }
+            }
+            self.headers = foundHeaders
         }
     }
 
@@ -111,15 +154,27 @@ struct HTTPRequestTool: DevgenticTool {
                 ("url", "string", "The URL to request."),
                 ("method", "string", "HTTP method: 'GET' or 'POST' (default 'GET')"),
                 ("body", "string", "Request body for POST requests"),
-                ("headers", "string", "JSON object of custom headers")
+                // "object", not "string": whatever this declares is what a model will send, so it
+                // has to name a type the decoder accepts. It said "string" while the decoder took
+                // only an object, and the mismatch dropped headers silently.
+                ("headers", "object", "Custom request headers as name/value pairs, e.g. {\"Authorization\": \"Bearer …\"}")
             ],
             required: ["url"]
         )
     }
 
     func call(arguments: Arguments) async throws -> String {
-        guard let url = URL(string: arguments.url) else {
-            return "Error: Invalid URL '\(arguments.url)'."
+        // The SCHEME is what actually has to be checked, not merely that `URL(string:)` returns
+        // something. Modern Foundation parses almost anything — `URL(string: "not a url at all")`
+        // succeeds by percent-encoding the spaces — so the old nil-check was nearly dead code,
+        // and the most common real mistake (a bare `example.com`, which models emit constantly)
+        // sailed past it to fail inside URLSession as "unsupported URL": late, after a round
+        // trip, and giving the model nothing it could act on.
+        guard let url = URL(string: arguments.url),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            return "Error: '\(arguments.url)' is not a usable HTTP URL. "
+                + "Include the scheme, e.g. https://example.com."
         }
 
         var request = URLRequest(url: url, timeoutInterval: 30)
@@ -148,7 +203,7 @@ struct HTTPRequestTool: DevgenticTool {
 
             return "HTTP \(statusCode)\nHeaders: \(httpResponse.allHeaderFields.count) fields\nBody:\n\(truncatedBody)"
         } catch {
-            return "Request failed: \(error.localizedDescription)"
+            return "Error: HTTP request failed — \(error.localizedDescription)"
         }
     }
 }
@@ -189,7 +244,7 @@ struct DNSLookupTool: DevgenticTool {
             let output = try ProcessRunner.run(process).combinedOutput
             return "DNS Lookup for '\(arguments.hostname)':\n\(output)"
         } catch {
-            return "DNS lookup failed: \(error.localizedDescription)"
+            return "Error: DNS lookup failed — \(error.localizedDescription)"
         }
     }
 }

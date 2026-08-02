@@ -10,25 +10,53 @@
 
 import SwiftUI
 
+private let logger = DGLogger(category: "ToolLibraryContainer")
+
 struct ToolLibraryContainerView: View {
 
-    let profileID: UUID
+    /// Profile supplied by the route, if any. Nil when opened from the Tools rail tab.
+    let routeProfileID: UUID?
 
     @Environment(BackendProfileService.self) private var profileService
     @Environment(MainViewRouter.self) private var router
+    @Environment(\.appTheme) private var theme
 
     @State private var searchText = ""
-    @State private var selectedSidebar: SidebarSelection? = .all
     @State private var isSelectionMode = false
     @State private var selectedToolIDs: Set<String> = []
 
+    /// Profile chosen inside the library, persisted so the Tools tab reopens where you left
+    /// off. An explicit route profile always wins over it — arriving from a profile's own
+    /// config must configure THAT profile, not whatever was last picked here.
+    @AppStorage("toolLibrary.lastProfileID") private var rememberedProfileIDRaw: String = ""
+
+    /// The profile currently being configured. Precedence: route > remembered > none.
+    private var profileID: UUID? {
+        if let routeProfileID { return routeProfileID }
+        guard let remembered = UUID(uuidString: rememberedProfileIDRaw),
+              profileService.profiles.contains(where: { $0.id == remembered }) else { return nil }
+        return remembered
+    }
+
+    /// True when there is a profile to write tool enablement into. Everything that mutates —
+    /// per-row toggles, selection mode, bulk actions — is hidden when false, because a
+    /// control that appears functional with nowhere to write is worse than an absent one.
+    private var canConfigureTools: Bool { profileID != nil }
+
+    private var selectedSidebar: SidebarSelection? { ToolLibraryNavigationState.shared.selectedSidebar }
+
     var body: some View {
-        if profileService.profiles.contains(where: { $0.id == profileID }) {
+        if profileID == nil || profileService.profiles.contains(where: { $0.id == profileID! }) {
             VStack(spacing: 0) {
                 DynamicIslandBar {
                     IslandSearchField(
-                        text: $searchText,
-                        placeholder: "Search tools...",
+                        text: Binding(get: { ToolLibraryNavigationState.shared.searchText },
+                                     set: { ToolLibraryNavigationState.shared.searchText = $0 }),
+                        // One search field for the whole library; what it searches depends on
+                        // where you are, so the placeholder has to say which.
+                        placeholder: ToolLibraryNavigationState.shared.selectedSidebar == .marketplace
+                            ? "Search the MCP registry..."
+                            : "Search tools...",
                         autoFocus: true,
                         accessibilityIdentifier: "tool.library.search"
                     )
@@ -44,15 +72,29 @@ struct ToolLibraryContainerView: View {
                 ToolLibraryView(
                     configuredTools: toolsBinding,
                     instructions: currentInstructions,
-                    searchText: $searchText,
-                    selectedSidebar: $selectedSidebar,
                     isSelectionMode: $isSelectionMode,
                     selectedToolIDs: $selectedToolIDs,
-                    hiddenToolNames: hiddenToolNames
+                    hiddenToolNames: hiddenToolNames,
+                    canConfigureTools: canConfigureTools,
+                    profileSelector: { AnyView(profileSelector) }
                 )
                 .frame(maxWidth: .infinity)
             }
-            .id(profileID)
+            .id(profileID ?? ToolSource.builtInSourceID)
+            .onAppear {
+                // Deep-link from the Tools sidebar: select the server the user clicked.
+                // One-shot — it clears itself so a later plain navigation does not inherit
+                // a stale selection.
+                if let pending = MCPToolLibrarySelection.shared.consume() {
+                    ToolLibraryNavigationState.shared.selectedSidebar = .mcp(pending)
+                    logger.info("[TOOLLIB] Opened preselected on MCP source \(pending) from the Tools sidebar.")
+                }
+                logger.info("""
+                    [TOOLLIB] Opened \(routeProfileID != nil ? "pinned to a route profile" : "unpinned"); \
+                    configuring '\(currentProfile?.displayName ?? "no profile")' — tool enablement \
+                    controls \(canConfigureTools ? "shown" : "HIDDEN, nothing to write to").
+                    """)
+            }
         } else {
             ContentNotFoundView(
                 icon: "exclamationmark.triangle",
@@ -66,6 +108,10 @@ struct ToolLibraryContainerView: View {
 
     private var actionIcons: some View {
         HStack(spacing: 6) {
+            // Selection mode and Select All write tool enablement into a profile. With none
+            // targeted they would be controls with nowhere to write, so they are hidden
+            // rather than shown disabled — the profile selector below is the way back.
+            if canConfigureTools {
             IslandIconButton(
                 symbol: isSelectionMode ? "checklist.checked" : "checklist",
                 isActive: isSelectionMode,
@@ -83,6 +129,7 @@ struct ToolLibraryContainerView: View {
                 accessibilityLabel: allToolsSelected ? "Deselect all tools" : "Select all tools"
             ) {
                 toggleSelectAll()
+            }
             }
 
             IslandIconButton(
@@ -105,6 +152,92 @@ struct ToolLibraryContainerView: View {
                 keyboardShortcut: .defaultAction
             ) {
                 router.goBack()
+            }
+        }
+    }
+
+    // MARK: - Profile Selector
+
+    /// Always present, never conditional.
+    ///
+    /// A selector that only appeared when nothing was chosen would be a dead control the
+    /// instant you chose something. Kept permanent, it doubles as the way to SWITCH profiles
+    /// without leaving — which is the common case when pointing several agents at one new
+    /// MCP server.
+    ///
+    /// Disabled (not hidden) when the route pinned a profile: arriving from a profile's own
+    /// config is an explicit statement about what you are configuring, and silently letting
+    /// it be changed there would write to a profile the user did not open.
+    @ViewBuilder
+    private var profileSelector: some View {
+        let pinned = routeProfileID != nil
+
+        Menu {
+            if !pinned {
+                Button("No profile — browse only") {
+                    rememberedProfileIDRaw = ""
+                    logger.info("[TOOLLIB] Profile target cleared; tool enablement controls hidden.")
+                }
+                Divider()
+            }
+            // Only agent and code profiles carry a tools list — `writeTools` returns the
+            // details unchanged for anything else, so offering those here would produce a
+            // selection that silently saves nothing.
+            ForEach(toolCapableProfiles, id: \.id) { profile in
+                Button {
+                    rememberedProfileIDRaw = profile.id.uuidString
+                    logger.info("[TOOLLIB] Now configuring tools for '\(profile.displayName)' (\(profile.id)).")
+                } label: {
+                    if profile.id == profileID {
+                        Label(profile.displayName, systemImage: "checkmark")
+                    } else {
+                        Text(profile.displayName)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: canConfigureTools ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark")
+                    .font(.system(size: 11))
+                    .foregroundColor(canConfigureTools ? theme.accentColor : theme.secondaryText)
+                Text(currentProfile?.displayName ?? "No profile selected")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(canConfigureTools ? theme.primaryText : theme.secondaryText)
+                    .lineLimit(1)
+                if !pinned {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundColor(theme.tertiaryText)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(canConfigureTools ? theme.accentColor.opacity(0.10) : theme.surfaceOverlay)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(canConfigureTools ? theme.accentColor.opacity(0.28) : theme.secondaryText.opacity(0.18), lineWidth: 0.5)
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(pinned)
+        .help(pinned
+              ? "Configuring \(currentProfile?.displayName ?? "this profile"). Open the Tools tab to switch."
+              : (canConfigureTools
+                 ? "Tools you enable apply to this profile. Click to switch."
+                 : "Choose a profile to enable tools for it."))
+    }
+
+    /// Profiles that actually have a tools list to write into.
+    private var toolCapableProfiles: [BackendProfileModel] {
+        profileService.profiles.filter { profile in
+            switch profile.details {
+            case .agent, .code: return true
+            default:            return false
             }
         }
     }
@@ -192,18 +325,24 @@ struct ToolLibraryContainerView: View {
                 tools.removeAll { $0.name == row.definition.name && $0.sourceId == row.source.id }
             }
         } else {
-            // Select all in current view (default to Ask mode)
+            // Select all in current view — always Ask mode.
+            //
+            // This used to read the tool's `readOnlyHint` annotation and, when true,
+            // enable the tool with `requiresConfirmation: false`. That annotation is
+            // supplied BY THE MCP SERVER, so a third party was choosing this app's
+            // security posture — and choosing the permissive side. A server declaring
+            // `readOnlyHint: true` on a destructive tool got silent auto-run.
+            //
+            // Annotations describe, they never enforce: they render as badges in the
+            // Tool Library (ToolLibraryView) and nothing more. `requiresConfirmation`
+            // is the user's setting alone.
             for row in rows {
                 if !tools.contains(where: { $0.name == row.definition.name && $0.sourceId == row.source.id }) {
-                    var confirmation = true
-                    if let annotations = row.definition.annotations, annotations.readOnlyHint == true {
-                        confirmation = false
-                    }
                     tools.append(Tool(
                         name: row.definition.name,
                         description: row.definition.description,
                         isEnabled: true,
-                        requiresConfirmation: confirmation,
+                        requiresConfirmation: true,
                         sourceId: row.source.id,
                         parameters: row.definition.parameters
                     ))
@@ -231,11 +370,16 @@ struct ToolLibraryContainerView: View {
 
         switch selectedSidebar {
         case .all:
-            for source in toolStore.sources {
+            // Built-in only: this row sits under the Build-In section, so counting MCP tools
+            // here would promise rows the click does not deliver.
+            for source in toolStore.sources where source.type == .local {
                 for tool in source.tools where matchesSearch(tool) && !hidden.contains(tool.name) {
                     rows.append(ToolTableRow(source: source, definition: tool))
                 }
             }
+        case .marketplace, .none:
+            // The registry browser renders its own grid; there are no installed rows to list.
+            break
         case .favorites:
             let tools = currentTools
             let favoriteKeys = Set(tools.filter(\.isFavorite).map { "\($0.sourceId)-\($0.name)" })

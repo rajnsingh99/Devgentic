@@ -10,6 +10,9 @@
 import Foundation
 import AppKit
 import CoreGraphics
+import os
+
+private let logger = DGLogger(category: "MacOSUtilityTools")
 
 // MARK: - Screen Capture Tool
 
@@ -68,7 +71,7 @@ struct ScreenCaptureTool: DevgenticTool {
         let mode = arguments.mode ?? "fullscreen"
         let timestamp = Int(Date().timeIntervalSince1970)
         let defaultPath = (NSHomeDirectory() as NSString).appendingPathComponent("Desktop/screenshot_\(timestamp).png")
-        let outputPath = (arguments.output_path as NSString?)?.expandingTildeInPath ?? defaultPath
+        let outputPath = arguments.output_path.map(FilePathResolver.resolve) ?? defaultPath
 
         var cmdArgs: [String] = []
 
@@ -109,15 +112,27 @@ struct ScreenCaptureTool: DevgenticTool {
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
         process.arguments = cmdArgs
 
+        // The last hand-rolled subprocess in the tool tree. It was safe from the pipe deadlock
+        // only because it attached no pipes at all — and that is exactly why it could not say why
+        // a capture failed: `screencapture` reports a denied Screen Recording permission, a bad
+        // region and an unwritable path on STDERR, all of which went to the app's own stderr
+        // where the model could never see them. "The capture may have been cancelled" was the
+        // tool's guess, offered for every one of those causes.
+        let run: ProcessRunner.Result
         do {
-            try process.run()
-            process.waitUntilExit()
+            run = try ProcessRunner.run(process)
         } catch {
             return "Error capturing screen: \(error.localizedDescription)"
         }
 
         guard FileManager.default.fileExists(atPath: outputPath) else {
-            return "Error: Screenshot was not saved. The capture may have been cancelled."
+            let reason = run.standardError.trimmingCharacters(in: .whitespacesAndNewlines)
+            logger.error("[SCREENCAP] screencapture exited \(run.exitCode) and wrote no file to '\(outputPath)' — mode '\(mode)'. Reason: \(reason.isEmpty ? "(silent)" : reason). Most often this is a missing Screen Recording permission, which the model cannot infer from a generic message.")
+            return reason.isEmpty
+                ? "Error: no screenshot was saved (screencapture exited \(run.exitCode)). "
+                    + "The capture may have been cancelled, or Screen Recording permission may not be granted "
+                    + "(System Settings ▸ Privacy & Security ▸ Screen Recording)."
+                : "Error: no screenshot was saved (screencapture exited \(run.exitCode)) — \(reason)"
         }
 
         let attrs = try? FileManager.default.attributesOfItem(atPath: outputPath)
@@ -157,7 +172,7 @@ struct ReplaceFinderTagsTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let expandedPath = (arguments.path as NSString).expandingTildeInPath
+        let expandedPath = FilePathResolver.resolve(arguments.path)
         guard FileManager.default.fileExists(atPath: expandedPath) else {
             return "Error: File not found at '\(expandedPath)'."
         }
@@ -219,7 +234,7 @@ struct FinderTagsTool: DevgenticTool {
             guard let path = arguments.path else {
                 return "Error: 'path' required for read."
             }
-            let expandedPath = (path as NSString).expandingTildeInPath
+            let expandedPath = FilePathResolver.resolve(path)
             let url = URL(fileURLWithPath: expandedPath)
 
             guard FileManager.default.fileExists(atPath: expandedPath) else {
@@ -238,7 +253,14 @@ struct FinderTagsTool: DevgenticTool {
             guard let path = arguments.path, let newTags = arguments.tags, !newTags.isEmpty else {
                 return "Error: 'path' and 'tags' required for add."
             }
-            let expandedPath = (path as NSString).expandingTildeInPath
+            let expandedPath = FilePathResolver.resolve(path)
+            // Checked, like `read` and `replace_finder_tags` already do. Without it the missing
+            // file reached `setResourceValue` and the tool THREW Foundation's raw error, so one
+            // tool answered "that file isn't there" two different ways depending on which action
+            // the model picked — a returned message for `read`, an exception for `add`.
+            guard FileManager.default.fileExists(atPath: expandedPath) else {
+                return "Error: File not found at '\(expandedPath)'."
+            }
             let url = URL(fileURLWithPath: expandedPath) as NSURL
 
             let existingValues = try? (url as URL).resourceValues(forKeys: [.tagNamesKey])
@@ -254,7 +276,11 @@ struct FinderTagsTool: DevgenticTool {
             guard let path = arguments.path, let removeTags = arguments.tags, !removeTags.isEmpty else {
                 return "Error: 'path' and 'tags' required for remove."
             }
-            let expandedPath = (path as NSString).expandingTildeInPath
+            let expandedPath = FilePathResolver.resolve(path)
+            // See `add`: checked so a missing file is reported, not thrown.
+            guard FileManager.default.fileExists(atPath: expandedPath) else {
+                return "Error: File not found at '\(expandedPath)'."
+            }
             let url = URL(fileURLWithPath: expandedPath) as NSURL
 
             let existingValues = try? (url as URL).resourceValues(forKeys: [.tagNamesKey])
@@ -277,7 +303,7 @@ struct FinderTagsTool: DevgenticTool {
             guard let searchTag = arguments.search_tag else {
                 return "Error: 'search_tag' required for search."
             }
-            let searchPath = (arguments.path as NSString?)?.expandingTildeInPath ?? NSHomeDirectory()
+            let searchPath = arguments.path.map(FilePathResolver.resolve) ?? NSHomeDirectory()
 
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
@@ -358,7 +384,7 @@ struct DiskUsageTool: DevgenticTool {
     func call(arguments: Arguments) async throws -> String {
         switch arguments.action {
         case "volume":
-            let path = (arguments.path as NSString?)?.expandingTildeInPath ?? "/"
+            let path = arguments.path.map(FilePathResolver.resolve) ?? "/"
             let url = URL(fileURLWithPath: path)
 
             do {
@@ -393,7 +419,7 @@ struct DiskUsageTool: DevgenticTool {
             guard let path = arguments.path else {
                 return "Error: 'path' required for folder_size."
             }
-            let expandedPath = (path as NSString).expandingTildeInPath
+            let expandedPath = FilePathResolver.resolve(path)
 
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/du")
@@ -411,7 +437,7 @@ struct DiskUsageTool: DevgenticTool {
             }
 
         case "largest_files":
-            let searchPath = (arguments.path as NSString?)?.expandingTildeInPath ?? NSHomeDirectory()
+            let searchPath = arguments.path.map(FilePathResolver.resolve) ?? NSHomeDirectory()
             // Clamped: `top_n` only bounds a Swift `prefix` now, but an unbounded value would
             // let one call return the entire tree.
             let topN = max(1, min(arguments.top_n ?? 10, 200))
@@ -451,19 +477,23 @@ struct DiskUsageTool: DevgenticTool {
                 // shell redirection.
                 let output = try ProcessRunner.run(process).standardOutput
 
-                // `du -k` emits "<kilobytes>\t<path>" per line.
-                let entries: [(kb: Int, path: String)] = output
-                    .split(separator: "\n")
-                    .compactMap { line in
-                        let parts = line.split(separator: "\t", maxSplits: 1)
-                        guard parts.count == 2, let kb = Int(parts[0].trimmingCharacters(in: .whitespaces)) else {
-                            return nil
-                        }
-                        return (kb, String(parts[1]))
-                    }
-                    .sorted { $0.kb > $1.kb }
-                    .prefix(topN)
-                    .map { $0 }
+                // `du -k` emits "<kilobytes>\t<path>" per RECORD — but a record is not the same
+                // thing as a line, because a filename may legally contain a newline. Splitting on
+                // "\n" and discarding whatever fails to parse meant such a file was dropped from
+                // the results ENTIRELY and silently: the caller asked which files are largest and
+                // got an answer that omitted one, with nothing to say so. Newline-bearing names
+                // are not exotic — anything named from pasted text acquires one.
+                //
+                // A record therefore starts at a line that BOTH begins with `<digits>\t` AND
+                // whose path begins with the search root, which is what `find` prints. Anything
+                // else is the remainder of the previous record's filename, and the newline that
+                // split it is restored.
+                let entries: [(kb: Int, path: String)] = Self.parseDiskUsageRecords(
+                    output, rootedAt: searchPath
+                )
+                .sorted { $0.kb > $1.kb }
+                .prefix(topN)
+                .map { $0 }
 
                 if entries.isEmpty {
                     return "No files found in '\(searchPath)'."
@@ -482,6 +512,62 @@ struct DiskUsageTool: DevgenticTool {
         default:
             return "Error: Unknown action '\(arguments.action)'. Use volume/folder_size/largest_files."
         }
+    }
+
+    /// Parses `du -k` output into records, tolerating filenames that contain newlines.
+    ///
+    /// Extracted and made `static` so the ambiguity it resolves can be tested directly — it is
+    /// the kind of parsing whose failure mode is a MISSING ROW rather than an error, which is
+    /// unobservable from the tool's output.
+    ///
+    /// Two known limitations, both inherent to a newline-delimited format rather than to this
+    /// parser, and both pinned by `DiskUsageParserProperties`:
+    ///
+    /// 1. A filename whose embedded newline is followed by text that itself looks like
+    ///    `<digits>\t<searchRoot>…` starts a spurious record. Requiring the root prefix makes
+    ///    that vanishingly unlikely; `find -print0` would not help, since it is `du` that formats
+    ///    these lines.
+    /// 2. An EMPTY line-segment in a name — a `\n\n` run, or a trailing `\n` — is unrecoverable:
+    ///    `<kb>\t<path>\n` where the path ends in a newline is byte-identical to that path
+    ///    followed by the record separator. The empty-segment guard below is kept deliberately;
+    ///    dropping the blank piece mangles a pathological name, whereas removing the guard would
+    ///    append a spurious newline to EVERY ordinary path, since du's output ends with one. The
+    ///    file, and its size, are still reported either way.
+    static func parseDiskUsageRecords(_ output: String, rootedAt root: String) -> [(kb: Int, path: String)] {
+        var records: [(kb: Int, path: String)] = []
+
+        // Split on SCALARS, not Characters.
+        //
+        // `String.split(separator: "\n")` and `components(separatedBy:)` are grapheme-aware, and
+        // `\r\n` is a single grapheme cluster — so when a filename ends in a carriage return, the
+        // record separator that follows MERGES with it and the split never happens there. The two
+        // records then arrive as one line, the second is absorbed into the first's path, and it
+        // disappears from the results entirely. That is the same silent dropped-row failure as
+        // the embedded-newline case above, reached through Swift's string segmentation rather
+        // than through the format.
+        //
+        // Scalars do not merge, so `\r` and `\n` are seen separately; a genuine `\r\n` inside a
+        // name is split here and rejoined by the continuation logic below, arriving intact.
+        let lines = output.unicodeScalars
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { String(String.UnicodeScalarView($0)) }
+
+        for line in lines {
+            if let tabIndex = line.firstIndex(of: "\t"),
+               let kb = Int(line[line.startIndex..<tabIndex].trimmingCharacters(in: .whitespaces)) {
+                let path = String(line[line.index(after: tabIndex)...])
+                if path.hasPrefix(root) {
+                    records.append((kb, path))
+                    continue
+                }
+            }
+            // Not a record start: this is the rest of a filename that contained a newline.
+            if !records.isEmpty && !line.isEmpty {
+                records[records.count - 1].path += "\n" + String(line)
+            }
+        }
+
+        return records
     }
 }
 
@@ -566,7 +652,7 @@ struct DisplayManagementTool: DevgenticTool {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
 
                 if output.isEmpty {
-                    return "Could not read brightness. External displays may not support programmatic brightness control."
+                    return "Error: could not read brightness. External displays may not support programmatic brightness control."
                 }
                 return "Brightness info: \(output)"
             } catch {
@@ -578,40 +664,45 @@ struct DisplayManagementTool: DevgenticTool {
                 return "Error: 'brightness' must be between 0.0 and 1.0."
             }
 
-            // Use AppleScript to set brightness via System Events
-            let script = """
-            tell application "System Events"
-                tell appearance preferences
-                    -- Brightness is controlled at the display level
-                end tell
-            end tell
-            do shell script "brightness \(brightness)"
-            """
+            // Three things were wrong with this branch until 2026-08-01, all cleaned up here:
+            //
+            // 1. It built an AppleScript into a `let script` that was NEVER USED — dead from the
+            //    moment it was written; the work was done by the shell below.
+            // 2. When the `brightness` CLI was missing it ran
+            //    `osascript -e 'tell application "System Preferences" to quit'`, quitting an app
+            //    the user may have had open, for no stated reason and with no bearing on setting
+            //    brightness.
+            // 3. That path then returned "Brightness CLI not found…", which does not begin with
+            //    "Error" — so `ToolExecutionMediator` recorded a brightness change that never
+            //    happened as a SUCCESSFUL call.
+            //
+            // The `command -v` test was the only real work the shell was doing, and Swift can ask
+            // that question directly — so the shell goes too.
+            let brightnessCLI = ["/opt/homebrew/bin/brightness", "/usr/local/bin/brightness"]
+                .first { FileManager.default.fileExists(atPath: $0) }
 
-            // Fallback: use CoreDisplay private API via shell
+            guard let brightnessCLI else {
+                logger.notice("[DISPLAY] set_brightness requested but the `brightness` CLI is not installed — the display was NOT changed.")
+                return "Error: setting brightness needs the `brightness` command-line tool, which "
+                    + "is not installed. Install it with `brew install brightness`. The display "
+                    + "was not changed."
+            }
+
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            // Try the brightness CLI if available, otherwise use osascript
-            process.arguments = ["-c", """
-            if command -v brightness &>/dev/null; then
-                brightness \(brightness)
-            else
-                osascript -e 'tell application "System Preferences" to quit' 2>/dev/null
-                echo "Brightness CLI not found. Install via: brew install brightness"
-            fi
-            """]
+            process.executableURL = URL(fileURLWithPath: brightnessCLI)
+            process.arguments = [String(brightness)]
 
             do {
-                // ProcessRunner drains stdout AND stderr concurrently. This site piped
-                // stderr to a `Pipe()` nobody ever read — not a discard, a 64 KB buffer
-                // that hangs the child once full.
-                let output = try ProcessRunner.run(process).standardOutput
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-
-                if output.contains("not found") {
-                    return "\(output)"
+                let run = try ProcessRunner.run(process)
+                guard run.succeeded else {
+                    let detail = (run.standardError.isEmpty ? run.standardOutput : run.standardError)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    logger.error("[DISPLAY] brightness exited \(run.exitCode) — the display was NOT changed. \(detail.prefix(200))")
+                    return "Error: could not set brightness (exit \(run.exitCode))"
+                        + (detail.isEmpty ? "." : " — \(detail)")
                 }
-                return "Brightness set to \(brightness). \(output)"
+                let output = run.combinedOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+                return "Brightness set to \(brightness).\(output.isEmpty ? "" : " \(output)")"
             } catch {
                 return "Error: \(error.localizedDescription)"
             }
@@ -642,48 +733,64 @@ struct OpenSystemSettingsTool: DevgenticTool {
         )
     }
 
-    func call(arguments: Arguments) async throws -> String {
-        // macOS 13+ uses x-apple.systempreferences URL scheme
-        let paneURL: String
-
-        switch arguments.pane.lowercased() {
-        case "general": paneURL = "x-apple.systempreferences:com.apple.settings.General"
-        case "appearance": paneURL = "x-apple.systempreferences:com.apple.Appearance-Settings.extension"
-        case "accessibility": paneURL = "x-apple.systempreferences:com.apple.Accessibility-Settings.extension"
-        case "privacy", "security": paneURL = "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension"
-        case "network": paneURL = "x-apple.systempreferences:com.apple.Network-Settings.extension"
-        case "wifi": paneURL = "x-apple.systempreferences:com.apple.wifi-settings-extension"
-        case "bluetooth": paneURL = "x-apple.systempreferences:com.apple.BluetoothSettings"
-        case "sound": paneURL = "x-apple.systempreferences:com.apple.Sound-Settings.extension"
-        case "displays": paneURL = "x-apple.systempreferences:com.apple.Displays-Settings.extension"
-        case "keyboard": paneURL = "x-apple.systempreferences:com.apple.Keyboard-Settings.extension"
-        case "trackpad": paneURL = "x-apple.systempreferences:com.apple.Trackpad-Settings.extension"
-        case "mouse": paneURL = "x-apple.systempreferences:com.apple.Mouse-Settings.extension"
-        case "printers": paneURL = "x-apple.systempreferences:com.apple.Print-Scan-Settings.extension"
-        case "battery": paneURL = "x-apple.systempreferences:com.apple.settings.Battery"
-        case "date_time": paneURL = "x-apple.systempreferences:com.apple.Date-Time-Settings.extension"
-        case "notifications": paneURL = "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
-        case "focus": paneURL = "x-apple.systempreferences:com.apple.Focus-Settings.extension"
-        case "users": paneURL = "x-apple.systempreferences:com.apple.Users-Groups-Settings.extension"
-        case "passwords": paneURL = "x-apple.systempreferences:com.apple.Passwords-Settings.extension"
-        case "software_update": paneURL = "x-apple.systempreferences:com.apple.Software-Update-Settings.extension"
-        case "storage": paneURL = "x-apple.systempreferences:com.apple.settings.Storage"
-        case "desktop", "dock": paneURL = "x-apple.systempreferences:com.apple.Desktop-Settings.extension"
-        case "wallpaper": paneURL = "x-apple.systempreferences:com.apple.Wallpaper-Settings.extension"
-        case "login_items": paneURL = "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
-        case "siri": paneURL = "x-apple.systempreferences:com.apple.Siri-Settings.extension"
-        case "spotlight": paneURL = "x-apple.systempreferences:com.apple.Siri-Settings.extension"
+    /// Maps a pane name to its `x-apple.systempreferences:` URL.
+    ///
+    /// Extracted from `call` so it can be tested: the mapping is 28 entries of pure data, and
+    /// the only way to exercise it in place was to actually open System Settings on the user's
+    /// machine — which is why it never was. `nil` means "no specific pane", and the caller opens
+    /// Settings at its default location rather than failing.
+    static func paneURL(for pane: String) -> String? {
+        // macOS 13+ uses the x-apple.systempreferences URL scheme.
+        switch pane.lowercased() {
+        case "general": return "x-apple.systempreferences:com.apple.settings.General"
+        case "appearance": return "x-apple.systempreferences:com.apple.Appearance-Settings.extension"
+        case "accessibility": return "x-apple.systempreferences:com.apple.Accessibility-Settings.extension"
+        case "privacy", "security": return "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension"
+        case "network": return "x-apple.systempreferences:com.apple.Network-Settings.extension"
+        case "wifi": return "x-apple.systempreferences:com.apple.wifi-settings-extension"
+        case "bluetooth": return "x-apple.systempreferences:com.apple.BluetoothSettings"
+        case "sound": return "x-apple.systempreferences:com.apple.Sound-Settings.extension"
+        case "displays": return "x-apple.systempreferences:com.apple.Displays-Settings.extension"
+        case "keyboard": return "x-apple.systempreferences:com.apple.Keyboard-Settings.extension"
+        case "trackpad": return "x-apple.systempreferences:com.apple.Trackpad-Settings.extension"
+        case "mouse": return "x-apple.systempreferences:com.apple.Mouse-Settings.extension"
+        case "printers": return "x-apple.systempreferences:com.apple.Print-Scan-Settings.extension"
+        case "battery": return "x-apple.systempreferences:com.apple.settings.Battery"
+        case "date_time": return "x-apple.systempreferences:com.apple.Date-Time-Settings.extension"
+        case "notifications": return "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+        case "focus": return "x-apple.systempreferences:com.apple.Focus-Settings.extension"
+        case "users": return "x-apple.systempreferences:com.apple.Users-Groups-Settings.extension"
+        case "passwords": return "x-apple.systempreferences:com.apple.Passwords-Settings.extension"
+        case "software_update": return "x-apple.systempreferences:com.apple.Software-Update-Settings.extension"
+        case "storage": return "x-apple.systempreferences:com.apple.settings.Storage"
+        case "desktop", "dock": return "x-apple.systempreferences:com.apple.Desktop-Settings.extension"
+        case "wallpaper": return "x-apple.systempreferences:com.apple.Wallpaper-Settings.extension"
+        case "login_items": return "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
+        case "siri": return "x-apple.systempreferences:com.apple.Siri-Settings.extension"
+        case "spotlight": return "x-apple.systempreferences:com.apple.Siri-Settings.extension"
         default:
-            // Fallback: just open System Settings
-            paneURL = "x-apple.systempreferences:"
+            // An unrecognised name is NOT an error: Settings opens at its default location, so a
+            // model guessing a plausible pane still lands the user somewhere useful. `nil` lets
+            // the caller say which of the two happened.
+            return nil
         }
+    }
+
+    func call(arguments: Arguments) async throws -> String {
+        let resolved = Self.paneURL(for: arguments.pane)
+        let target = resolved ?? "x-apple.systempreferences:"
 
         return await MainActor.run {
-            if let url = URL(string: paneURL) {
-                NSWorkspace.shared.open(url)
-                return "Opened System Settings: \(arguments.pane)."
+            guard let url = URL(string: target) else {
+                return "Error: could not construct a URL for pane '\(arguments.pane)'."
             }
-            return "Error: Could not construct URL for pane '\(arguments.pane)'."
+            NSWorkspace.shared.open(url)
+            // The two outcomes are reported distinctly. Previously an unknown pane opened
+            // Settings and reported "Opened System Settings: <pane>", so a model that guessed a
+            // pane name that does not exist was told it had landed on it.
+            return resolved == nil
+                ? "Opened System Settings. '\(arguments.pane)' is not a pane this tool recognises, so it opened at the default location."
+                : "Opened System Settings: \(arguments.pane)."
         }
     }
 }

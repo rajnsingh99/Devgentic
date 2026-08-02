@@ -12,6 +12,8 @@
 
 import SwiftUI
 
+private let logger = DGLogger(category: "AddMCPServerView")
+
 // MARK: - Local UI Models
 
 private enum ConnectionType: String, CaseIterable, Identifiable {
@@ -56,6 +58,8 @@ private struct ServerConfigFormData: Hashable {
     // Remote
     var url: String = ""
     var authScheme: AuthFormScheme = .none
+    /// Remote transport. Ignored for local-process servers, which are always stdio.
+    var transport: MCPTransportMode = .streamableHTTP
     var authSecret: String = ""              // bearer token or API key value
     var apiKeyHeaderName: String = "X-API-Key"
 
@@ -111,6 +115,8 @@ struct AddMCPServerView: View {
     @State private var connectTask: Task<Void, Never>? = nil
 
     @State private var isShowingDuplicateAlert = false
+    /// Confirms saving an existing server whose configuration has not been test-connected.
+    @State private var isShowingUnverifiedSaveAlert = false
     @State private var isJSONValid = true
 
     // OAuth state (form-session only; bundle is committed to Keychain at save).
@@ -125,6 +131,28 @@ struct AddMCPServerView: View {
     /// Drives whether the trailing Save pill is enabled and whether the floating
     /// FAB shows a play icon vs. its post-success affordance.
     private var hasVerifiedConnection: Bool { discoveredTools != nil && verifiedConfig != nil }
+
+    /// An EXISTING server may be saved without a live connection, provided the form is
+    /// structurally complete. See the Save button for why.
+    private var canSaveUnverified: Bool {
+        guard isEditing else { return false }
+        guard !formData.serverName.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        switch formData.connectionType {
+        case .localProcess:
+            return !formData.command.trimmingCharacters(in: .whitespaces).isEmpty
+        case .remoteURL:
+            let url = formData.url.trimmingCharacters(in: .whitespaces)
+            return !url.isEmpty && URL(string: url)?.scheme != nil
+        }
+    }
+
+    /// True when the name collides with a different server. Adding always checked this;
+    /// renaming did not, so an edit could produce two servers sharing a name — and that
+    /// name is the user's only handle on a server in the sidebar, in tool categories, and
+    /// in every log line.
+    private var isNameConflicting: Bool {
+        UnifiedToolStore.shared.isServerNameTaken(formData.serverName, excluding: existingSource?.id)
+    }
 
     // MARK: - Body
 
@@ -185,6 +213,12 @@ struct AddMCPServerView: View {
             Button("OK") { }
         } message: {
             Text("A tool with this server name already exists in your library.")
+        }
+        .alert("Save without testing?", isPresented: $isShowingUnverifiedSaveAlert) {
+            Button("Save Anyway") { saveAndDismiss() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This configuration hasn't been verified. Devgentic will keep the \(existingSource?.tools.count ?? 0) tool(s) it already knows about and try to connect on next use.\n\nUse this to fix a server that is currently unreachable or misconfigured.")
         }
         .task { setupView() }
         .onDisappear {
@@ -373,6 +407,33 @@ struct AddMCPServerView: View {
                 Text("HTTPS is enforced when an auth scheme is set. `localhost` is allowed for development.")
                     .font(.caption2)
                     .foregroundColor(theme.tertiaryText)
+            }
+
+            // Transport picker.
+            //
+            // Remote servers were always constructed with SSE streaming on. That is correct
+            // for the Streamable HTTP standard, but a server that only implements POST just
+            // failed to connect with nothing the user could do about it.
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Transport")
+                    .font(theme.fontCaption.weight(.medium))
+                    .foregroundColor(theme.secondaryText)
+                Picker("", selection: $formData.transport) {
+                    ForEach(MCPTransportMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+                .labelsHidden()
+                .onChange(of: formData.transport) { _, _ in
+                    // The transport determines how we connect, so a prior successful test
+                    // says nothing about the new one.
+                    invalidateVerifiedState()
+                }
+                Text(formData.transport.explanation)
+                    .font(.caption2)
+                    .foregroundColor(theme.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             // Auth scheme picker
@@ -565,7 +626,11 @@ struct AddMCPServerView: View {
                 let bundle = try await MCPOAuthCoordinator.performInitialAuthorizationWithLoopback(
                     issuer: issuer,
                     scopes: scopes,
-                    clientName: "Devgentic — \(formData.serverName.isEmpty ? "MCP" : formData.serverName)"
+                    clientName: "Devgentic — \(formData.serverName.isEmpty ? "MCP" : formData.serverName)",
+                    // RFC 8707: the MCP server itself is the resource these tokens are for.
+                    // Binding the audience here is what stops a token minted for this server
+                    // being replayed against another resource on the same issuer.
+                    resource: URL(string: formData.url.trimmingCharacters(in: .whitespaces))
                 )
                 try Task.checkCancellation()
                 self.oauthBundle = bundle
@@ -779,9 +844,22 @@ struct AddMCPServerView: View {
                 accessibilityLabel: isEditing ? "Save changes" : "Add server to library",
                 keyboardShortcut: hasVerifiedConnection ? .defaultAction : nil
             ) {
-                saveAndDismiss()
+                if hasVerifiedConnection {
+                    saveAndDismiss()
+                } else {
+                    isShowingUnverifiedSaveAlert = true
+                }
             }
-            .disabled(!hasVerifiedConnection)
+            // Editing an EXISTING server no longer requires a live connection.
+            //
+            // Save used to be gated on a successful Test Connection, which is backwards for
+            // the case that matters most: a server is failing BECAUSE its config is wrong,
+            // and the user cannot save the fix without first making the broken config work.
+            // A server that is simply down (laptop offline, endpoint restarting) had the
+            // same problem. Adding a NEW server still requires verification — there is no
+            // prior good state to preserve there, and saving something never seen to work
+            // would just produce a broken entry.
+            .disabled(!hasVerifiedConnection && !canSaveUnverified)
         }
     }
 
@@ -843,7 +921,10 @@ struct AddMCPServerView: View {
             if let cmd = def.command {
                 formData.connectionType = .localProcess
                 formData.command = cmd
-                formData.arguments = def.args?.joined(separator: " ") ?? ""
+                // Quote-aware: a plain join here meant opening an existing server for edit
+                // and pressing Save re-split any space-bearing argument into two, silently
+                // corrupting a config the user never touched.
+                formData.arguments = MCPArgumentTokenizer.join(def.args ?? [])
                 // Materialize env values from Keychain so the form shows what
                 // the user previously entered. Missing values come back as
                 // empty strings — the user can retype if they want.
@@ -858,6 +939,7 @@ struct AddMCPServerView: View {
             } else if let url = def.url {
                 formData.connectionType = .remoteURL
                 formData.url = url
+                formData.transport = def.transport
                 switch def.auth {
                 case .none:
                     formData.authScheme = .none
@@ -935,7 +1017,39 @@ struct AddMCPServerView: View {
     }
 
     private func saveAndDismiss() {
-        guard let config = verifiedConfig, let tools = discoveredTools else { return }
+        // Renaming used to bypass the duplicate check that adding always performed, so an
+        // edit could leave two servers sharing a name.
+        guard !isNameConflicting else {
+            logger.warning("""
+                [MCP-CONFIG] Refused to save '\(formData.serverName)': another server already uses \
+                that name. Nothing was written; the user is shown the duplicate alert.
+                """)
+            isShowingDuplicateAlert = true
+            return
+        }
+
+        // Unverified save (existing servers only). Keep whatever tools we already know
+        // about rather than blanking the server: the config may be being fixed precisely
+        // BECAUSE the server is unreachable, and wiping its tools would break every profile
+        // referencing them for no reason.
+        let config: ServerDefinition
+        let tools: [ToolDefinition]
+        if let verified = verifiedConfig, let discovered = discoveredTools {
+            config = verified
+            tools = discovered
+        } else if canSaveUnverified, let existing = existingSource, let built = buildServerDefinition() {
+            config = built
+            tools = existing.tools
+            logger.info("""
+                [MCP-CONFIG] Saving '\(formData.serverName)' (\(existing.id)) WITHOUT a verified \
+                connection, at the user's confirmation. Retaining its \(tools.count) previously \
+                known tool(s); the next connect attempt will reconcile them.
+                """)
+        } else {
+            logger.error("[MCP-CONFIG] saveAndDismiss reached with no verified config and no unverified fallback — nothing saved.")
+            return
+        }
+
         let secrets = buildRuntimeSecrets()
 
         if let existing = existingSource, let onToolUpdated = onToolUpdated {
@@ -960,7 +1074,8 @@ struct AddMCPServerView: View {
     /// Build the persisted shape (no secrets inside) from form state.
     private func buildServerDefinition() -> ServerDefinition? {
         if formData.connectionType == .localProcess {
-            let args = formData.arguments.split(whereSeparator: \.isWhitespace).map(String.init)
+            // Quote-aware: a naive whitespace split broke every path containing a space.
+            let args = MCPArgumentTokenizer.tokenize(formData.arguments)
             let envKeys = formData.environmentVariables
                 .map { $0.key.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
@@ -991,7 +1106,7 @@ struct AddMCPServerView: View {
                     return .none
                 }
             }()
-            return ServerDefinition(url: formData.url, auth: auth)
+            return ServerDefinition(url: formData.url, auth: auth, transport: formData.transport)
         }
     }
 
@@ -1062,17 +1177,30 @@ struct AddMCPServerView: View {
         do {
             let config = try JSONDecoder().decode(MCPConfiguration.self, from: data)
             guard let (name, def) = config.mcpServers.first else { return }
+
+            // `ServerDefinition` deliberately carries no secrets, so it models env as
+            // `envKeys` (names only). Every MCP server README in the wild, however, ships
+            // `"env": { "API_KEY": "sk-..." }` — a key→VALUE map. Codable ignored that
+            // unknown key, so pasting a working config produced a server with its
+            // credentials silently stripped, which then failed to authenticate with no
+            // hint as to why. Re-read the raw JSON for the values the typed shape drops.
+            let sidecar = Self.parseSidecarFields(rawJSON: data, serverName: name)
+
             var newForm = ServerConfigFormData()
             newForm.serverName = name
             if let cmd = def.command {
                 newForm.connectionType = .localProcess
                 newForm.command = cmd
-                newForm.arguments = def.args?.joined(separator: " ") ?? ""
-                // The JSON shape only carries env *keys* — values stay in
-                // Keychain, never round-tripped through the JSON pane. Pre-fill
-                // the form with empty values for each known key; the user fills
-                // them in or relies on existing Keychain values.
-                if let keys = def.envKeys, !keys.isEmpty {
+                // Quote-aware join so an arg containing a space survives the round-trip.
+                newForm.arguments = MCPArgumentTokenizer.join(def.args ?? [])
+
+                // Prefer pasted env values; fall back to the key list with blank values
+                // (the user fills them in, or existing Keychain values are reused).
+                if !sidecar.env.isEmpty {
+                    newForm.environmentVariables = sidecar.env
+                        .sorted { $0.key < $1.key }
+                        .map { KeyValueItem(key: $0.key, value: $0.value) }
+                } else if let keys = def.envKeys, !keys.isEmpty {
                     newForm.environmentVariables = keys.map { KeyValueItem(key: $0, value: "") }
                 } else {
                     newForm.environmentVariables = [KeyValueItem()]
@@ -1080,6 +1208,7 @@ struct AddMCPServerView: View {
             } else if let url = def.url {
                 newForm.connectionType = .remoteURL
                 newForm.url = url
+                newForm.transport = def.transport
                 switch def.auth {
                 case .none:
                     newForm.authScheme = .none
@@ -1091,11 +1220,49 @@ struct AddMCPServerView: View {
                 case .oauth:
                     newForm.authScheme = .oauth
                 }
+
+                // A pasted `headers` map carrying an Authorization bearer is the other
+                // common README shape. Map what we can represent; anything else is
+                // reported rather than dropped in silence.
+                if let auth = sidecar.headers.first(where: { $0.key.lowercased() == "authorization" }),
+                   auth.value.lowercased().hasPrefix("bearer "),
+                   case .none = def.auth {
+                    newForm.authScheme = .bearer
+                    newForm.authSecret = String(auth.value.dropFirst("bearer ".count))
+                }
             }
+
+            let unmapped = sidecar.headers.keys.filter { $0.lowercased() != "authorization" }
+            if !unmapped.isEmpty {
+                logger.warning("""
+                    [MCP-CONFIG] Pasted config for '\(name)' carries \(unmapped.count) header(s) \
+                    Devgentic cannot represent (\(unmapped.sorted().joined(separator: ", "))) — \
+                    they will NOT be sent. Only Authorization/bearer and a single API-key header \
+                    are supported.
+                    """)
+            }
+
             self.formData = newForm
             isJSONValid = true
         } catch {
             isJSONValid = false
         }
+    }
+
+    /// Fields the standard `mcpServers` block carries that `ServerDefinition` deliberately
+    /// does not model (it holds no secrets). Read straight off the raw JSON so a pasted
+    /// config keeps its credentials instead of losing them to Codable's unknown-key handling.
+    private static func parseSidecarFields(
+        rawJSON: Data,
+        serverName: String
+    ) -> (env: [String: String], headers: [String: String]) {
+        guard let root = try? JSONSerialization.jsonObject(with: rawJSON) as? [String: Any],
+              let servers = root["mcpServers"] as? [String: Any],
+              let server = servers[serverName] as? [String: Any] else {
+            return ([:], [:])
+        }
+        let env = (server["env"] as? [String: Any])?.compactMapValues { $0 as? String } ?? [:]
+        let headers = (server["headers"] as? [String: Any])?.compactMapValues { $0 as? String } ?? [:]
+        return (env, headers)
     }
 }

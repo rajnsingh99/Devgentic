@@ -38,62 +38,8 @@ struct ExtendedAttributeHelper {
     }
 }
 
-// MARK: - Async Spotlight Search Wrapper
-
-/// Wraps NSMetadataQuery in a MainActor class to ensure RunLoop compatibility and async/await usage.
-@MainActor
-final class SpotlightSearcher: NSObject, NSMetadataQueryDelegate {
-    
-    private var continuation: CheckedContinuation<[String], Error>?
-    private let query = NSMetadataQuery()
-    
-    func search(queryStr: String, scope: [String]? = nil) async throws -> [String] {
-        if query.isGathering { query.stop() }
-        
-        return try await withCheckedThrowingContinuation { continuation in
-            self.continuation = continuation
-            
-            let searchRoots: [Any] = scope?.map { URL(fileURLWithPath: $0) } ?? [NSMetadataQueryUserHomeScope]
-            query.searchScopes = searchRoots
-            
-            // IMPROVEMENT: Search both Filename AND Content
-            // kMDItemFSName = Filename
-            // kMDItemTextContent = File Content
-            // FIX: Cast kMDItemTextContent to String/CVarArg because it's a CFString
-            query.predicate = NSPredicate(format: "(%K LIKE[cd] %@) OR (%K LIKE[cd] %@)",
-                                          NSMetadataItemFSNameKey, "*\(queryStr)*",
-                                          kMDItemTextContent as String, "*\(queryStr)*")
-            
-            query.notificationBatchingInterval = 1.0
-            
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(queryDidFinishGathering(_:)),
-                name: .NSMetadataQueryDidFinishGathering,
-                object: query
-            )
-            
-            query.start()
-        }
-    }
-    
-    @objc private func queryDidFinishGathering(_ notification: Notification) {
-        query.stop()
-        
-        var results: [String] = []
-        query.disableUpdates()
-        
-        for item in query.results {
-            if let metadataItem = item as? NSMetadataItem,
-               let path = metadataItem.value(forAttribute: NSMetadataItemPathKey) as? String {
-                results.append(path)
-            }
-        }
-        
-        query.enableUpdates()
-        NotificationCenter.default.removeObserver(self)
-        
-        continuation?.resume(returning: results)
-        continuation = nil
-    }
-}
+// `SpotlightSearcher` was removed on 2026-08-01: an @MainActor NSMetadataQuery wrapper with a
+// continuation-based `search(queryStr:scope:)`, referenced by nothing. `fs_smart_search` uses
+// `HybridSearchService`, which supersedes it — two-phase name-then-content querying, permission
+// scoping, and a filesystem fallback for unindexed locations, none of which this had. Kept out
+// rather than left as a second, worse search path for someone to find and wire up.

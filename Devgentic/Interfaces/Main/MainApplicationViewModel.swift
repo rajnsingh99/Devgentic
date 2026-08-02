@@ -236,6 +236,12 @@ final class MainApplicationViewModel {
         // ASM begins enqueueing in P2). The VM owns it; ASM holds the back-reference.
         activeStreamManager.interactionCenter = interactionCenter
 
+        // Claim presentation for out-of-band HITL. MCP sampling / elicitation requests
+        // arrive from a server at a moment of its choosing, with no stream in scope, so they
+        // cannot go through ActiveStreamManager's injected reference. The main window owns
+        // this; QuickAccess deliberately does not claim it.
+        HITLPresenter.claim(interactionCenter)
+
         logger.info("MainApplicationViewModel initialized.")
 
         // Settings load is first so other coordinators see the correct persisted

@@ -25,29 +25,16 @@ struct DOCXExtractor: DocumentExtractor {
     // MARK: - DIY Fallback: DOCX = ZIP of XML
 
     private func extractWithUnzipFallback(from url: URL, maxSize: Int) throws -> ExtractionResult {
-        // DOCX is a ZIP archive containing word/document.xml
-        let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-
-        // Unzip using Process (macOS has /usr/bin/unzip built in)
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        process.arguments = ["-o", url.path, "-d", tempDir.path]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-
-        guard process.terminationStatus == 0 else {
-            logger.error("Unzip failed with exit code \(process.terminationStatus) for: \(url.lastPathComponent)")
-            throw DocumentExtractionError.corruptedFile(url.path)
-        }
-        logger.debug("Unzip successful for: \(url.lastPathComponent)")
+        // DOCX is a ZIP archive containing word/document.xml.
+        //
+        // Staged rather than handed to unzip directly: unzip glob-matches the ARCHIVE NAME, so a
+        // file called `a*.docx` made it open other archives and return their text under this
+        // path. See `ZipArchiveStaging`.
+        let staged = try ZipArchiveStaging.expandZip(at: url, format: "docx")
+        defer { try? FileManager.default.removeItem(at: staged.workDirectory) }
 
         // Parse word/document.xml
-        let documentXML = tempDir.appendingPathComponent("word/document.xml")
+        let documentXML = staged.contentRoot.appendingPathComponent("word/document.xml")
         guard FileManager.default.fileExists(atPath: documentXML.path) else {
             logger.error("word/document.xml not found in DOCX archive: \(url.lastPathComponent)")
             throw DocumentExtractionError.corruptedFile(url.path)

@@ -107,14 +107,40 @@ final class MCPSecretStore {
     /// about (bearer, api-key, oauth) and any env keys the caller hands us.
     /// We can't enumerate Keychain by prefix without an additional attribute,
     /// so callers must pass the env-key set they remember.
-    func purgeAll(sourceID: UUID, knownEnvKeys: Set<String> = []) {
-        delete(scope: .bearerToken, sourceID: sourceID)
-        delete(scope: .apiKeyHeaderValue, sourceID: sourceID)
-        delete(scope: .oauthBundle, sourceID: sourceID)
-        for envKey in knownEnvKeys {
-            delete(scope: .envValue(key: envKey), sourceID: sourceID)
+    @discardableResult
+    func purgeAll(sourceID: UUID, knownEnvKeys: Set<String> = []) -> Bool {
+        var failed: [String] = []
+
+        func purge(_ scope: MCPSecretScope) {
+            if !delete(scope: scope, sourceID: sourceID) {
+                failed.append(scope.rawScope)
+            }
         }
-        logger.info("Purged secrets for source \(sourceID.uuidString) (\(knownEnvKeys.count) env keys)")
+
+        purge(.bearerToken)
+        purge(.apiKeyHeaderValue)
+        purge(.oauthBundle)
+        for envKey in knownEnvKeys {
+            purge(.envValue(key: envKey))
+        }
+
+        // Every `delete` result used to be discarded and this logged unconditional
+        // success. A Keychain failure therefore left the secret on disk for a server the
+        // user had deleted, while the log said it was purged — the one place that must
+        // not lie, since it is the record that a credential was destroyed.
+        guard failed.isEmpty else {
+            logger.error("""
+                [MCP-SECRETS] ⚠️ Purge INCOMPLETE for source \(sourceID.uuidString): \
+                \(failed.count) item(s) could not be deleted from Keychain \
+                (\(failed.sorted().joined(separator: ", "))). Those credentials REMAIN on this \
+                machine for a server the user has removed, and nothing will retry — they must \
+                be deleted manually from Keychain Access.
+                """)
+            return false
+        }
+
+        logger.info("[MCP-SECRETS] Purged all secrets for source \(sourceID.uuidString) (\(knownEnvKeys.count) env key(s)).")
+        return true
     }
 
     // MARK: - Private

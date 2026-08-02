@@ -46,13 +46,24 @@ struct NativeToolWrapper<T: DevgenticTool>: ExecutableTool {
         return nativeTool.parameterSchema
     }
     
+    /// The DEFAULT confirmation setting a tool carries when it first appears in the Tool Library.
+    ///
+    /// A default, not a gate: `Tool.requiresConfirmation` on the profile is what the executor
+    /// reads, and the user's choice always wins. This only decides where a freshly-offered tool
+    /// starts.
     var requiresConfirmation: Bool {
-        // A whitelist of strictly read-only tools that do not alter state or execute arbitrary code.
+        // Strictly read-only tools: they alter no state and execute no caller-supplied code.
+        //
+        // `fs_watch_folder` was in this list until 2026-08-01 and does not belong: its `start`
+        // action opens a file descriptor and arms a dispatch source that lives until something
+        // stops it, which is state by any reading. `HITLRiskTier.classify` has always called it
+        // `.moderate`, alongside `write_file` and `move_file`, so the app was describing the same
+        // tool two different ways depending on which code path you asked. Only `list` is
+        // read-only, and the list is per-TOOL, not per-action.
         let safeTools: Set<String> = [
             "list_directory",
             "read_file",
             "get_system_stats",
-            "fs_watch_folder",
             "fs_smart_search",
             "fs_read_metadata"
         ]

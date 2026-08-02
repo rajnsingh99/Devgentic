@@ -192,5 +192,18 @@ class ShellProcess {
     
     deinit {
         stdErrPipe.fileHandleForReading.readabilityHandler = nil
+
+        // Clearing the handler alone used to leave the child running: any ShellProcess
+        // dropped without an explicit `terminate()` — an orphan from a failed or
+        // superseded connect — survived as a stray npx/uvx process for the rest of the
+        // login session. Kill it directly rather than calling `terminate()`, whose
+        // SIGKILL escalation schedules work on a deallocated object's behalf.
+        guard process.isRunning else { return }
+        logger.warning("""
+            [SHELL] ShellProcess for '\(commandLine)' deallocated while its child (pid \
+            \(process.processIdentifier)) was still running — terminating it here to avoid \
+            an orphaned server process.
+            """)
+        process.terminate()
     }
 }

@@ -33,13 +33,34 @@ enum ToolSchemaSizes {
     /// send, so the send-time check finds a warm cache in practice.
     @MainActor
     static func refreshFromRegistry() {
-        let measured = LocalToolManager.shared.availableTools().reduce(into: [String: Int]()) { acc, tool in
+        var measured = LocalToolManager.shared.availableTools().reduce(into: [String: Int]()) { acc, tool in
             acc[tool.name] = AgentTool.markdownDefinition(
                 name: tool.name,
                 description: tool.description,
                 parameters: tool.parameters
             ).count
         }
+
+        // MCP tools are priced too. They used to fall through to the unknown-name branch
+        // and cost 0, which is the WORST case for this gauge: a single server can add
+        // dozens of tools with long descriptions and deep argument schemas — easily more
+        // than the entire built-in catalogue — and the fit check would report the request
+        // as comfortably within budget right up until the provider rejected it.
+        //
+        // Built-ins are not overwritten on a name clash, matching `AgentConnect`, where the
+        // first registration wins and later duplicates are dropped.
+        var mcpToolCount = 0
+        for source in UnifiedToolStore.shared.sources where source.type == .mcp {
+            for definition in source.tools where measured[definition.name] == nil {
+                measured[definition.name] = AgentTool.markdownDefinition(
+                    name: definition.name,
+                    description: definition.description,
+                    parameters: definition.parameters
+                ).count
+                mcpToolCount += 1
+            }
+        }
+
         guard !measured.isEmpty else { return }
 
         lock.lock()
@@ -49,14 +70,15 @@ enum ToolSchemaSizes {
 
         if isFirst {
             let total = measured.values.reduce(0, +)
-            logger.debug("[TOOLSCHEMA] Snapshotted \(measured.count) tool schema(s), \(total) chars if all were enabled at once.")
+            logger.debug("[TOOLSCHEMA] Snapshotted \(measured.count) tool schema(s) (\(mcpToolCount) from MCP), \(total) chars if all were enabled at once.")
         }
     }
 
     /// Chars the given tools contribute to the prompt.
     ///
-    /// Unknown names contribute 0 and are logged: MCP tools are registered per-session rather
-    /// than in the local registry, so they are a KNOWN under-count rather than a silent one.
+    /// Unknown names contribute 0 and are logged. Since 2026-08-01 the snapshot covers MCP
+    /// tools as well as built-ins, so an unknown name now means a tool registered after the
+    /// last snapshot (a server connected mid-session) rather than "every MCP tool".
     /// An empty cache also yields 0 — under-reading, which is the safe direction for an
     /// advisory the user cannot act on.
     static func chars(for toolNames: [String]) -> Int {
@@ -77,7 +99,7 @@ enum ToolSchemaSizes {
             if let size = snapshot[name] { total += size } else { unknown.append(name) }
         }
         if !unknown.isEmpty {
-            logger.debug("[TOOLSCHEMA] \(unknown.count) tool(s) not in the local registry, priced at 0 (likely MCP, registered per-session): \(unknown.joined(separator: ", ")).")
+            logger.debug("[TOOLSCHEMA] \(unknown.count) tool(s) absent from the snapshot, priced at 0 — the fit gauge under-reads by their schema size until the next refresh (usual cause: an MCP server connected after the last snapshot): \(unknown.joined(separator: ", ")).")
         }
         return total
     }

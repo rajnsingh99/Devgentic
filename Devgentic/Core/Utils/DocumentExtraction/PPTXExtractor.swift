@@ -20,28 +20,14 @@ struct PPTXExtractor: DocumentExtractor {
     func extract(from url: URL, maxSize: Int) async throws -> ExtractionResult {
         logger.info("Starting PPTX extraction: \(url.lastPathComponent)")
 
-        let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-
-        // Unzip PPTX
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        process.arguments = ["-o", url.path, "-d", tempDir.path]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-
-        guard process.terminationStatus == 0 else {
-            logger.error("Unzip failed with exit code \(process.terminationStatus) for: \(url.lastPathComponent)")
-            throw DocumentExtractionError.corruptedFile(url.path)
-        }
-        logger.debug("Unzip successful for: \(url.lastPathComponent)")
+        // Staged rather than handed to unzip directly: unzip glob-matches the ARCHIVE NAME, so a
+        // deck called `a*.pptx` made it open other archives and return their slides under this
+        // path. See `ZipArchiveStaging`.
+        let staged = try ZipArchiveStaging.expandZip(at: url, format: "pptx")
+        defer { try? FileManager.default.removeItem(at: staged.workDirectory) }
 
         // Find slide XML files: ppt/slides/slide1.xml, slide2.xml, ...
-        let slidesDir = tempDir.appendingPathComponent("ppt/slides")
+        let slidesDir = staged.contentRoot.appendingPathComponent("ppt/slides")
         guard let slideFiles = try? FileManager.default.contentsOfDirectory(
             at: slidesDir, includingPropertiesForKeys: nil
         ).filter({ $0.pathExtension == "xml" && $0.lastPathComponent.hasPrefix("slide") })

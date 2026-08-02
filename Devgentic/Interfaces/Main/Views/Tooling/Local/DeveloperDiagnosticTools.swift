@@ -41,17 +41,53 @@ struct ManageProcessesTool: DevgenticTool {
             return "Error: Unknown action '\(arguments.action ?? "")'. This tool only lists processes."
         }
 
+        // `ps` invoked DIRECTLY, with the sort and the limit applied in Swift.
+        //
+        // The previous form was `zsh -c "ps -eo … | sort -k 2 -nr | head -n 10"`, which SILENTLY
+        // DISCARDED THE COLUMN HEADER: `sort` has no notion of a header row, so `PID %CPU %MEM
+        // COMM` was ordered along with the data, sorted to the bottom (field 2 reads as 0), and
+        // then cut by `head -n 10`. What reached the model was four unlabelled columns —
+        // `31363 48.7 0.1 /usr/…` — with nothing to say which number is CPU and which is memory.
+        // The tool's own description promises "by CPU and memory", so the model has to guess,
+        // and guessing wrong inverts the diagnosis.
+        //
+        // Sorting here rather than in a pipeline keeps the header, and drops a shell that was
+        // only ever hosting two pipes.
         let process = Process()
-        // A constant command — no model input reaches this string (§3.5).
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-c", "ps -eo pid,pcpu,pmem,comm | sort -k 2 -nr | head -n 10"]
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-eo", "pid,pcpu,pmem,comm"]
 
         do {
-            // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe
-            // only after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
-            let output = try ProcessRunner.run(process).standardOutput
-            return "Result:\n\(output)"
+            let run = try ProcessRunner.run(process)
+            guard run.succeeded else {
+                let detail = run.standardError.isEmpty ? run.standardOutput : run.standardError
+                logger.error("[PROCLIST] ps exited \(run.exitCode) — the model gets no process listing this turn. Detail: \(detail.trimmingCharacters(in: .whitespacesAndNewlines))")
+                return "Error: could not list processes (ps exited \(run.exitCode))\n\(detail)"
+            }
+
+            var lines = run.standardOutput
+                .components(separatedBy: "\n")
+                .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            guard !lines.isEmpty else {
+                return "Error: ps produced no output."
+            }
+
+            // `ps` always emits the header first; everything after it is data.
+            let header = lines.removeFirst()
+
+            // %CPU is the second whitespace-separated field. A row that will not parse sorts
+            // last rather than being dropped — losing a process from a diagnostic listing is
+            // worse than showing it out of order.
+            let ranked = lines.sorted { lhs, rhs in
+                let l = Double(lhs.split(separator: " ", omittingEmptySubsequences: true).dropFirst().first ?? "") ?? -1
+                let r = Double(rhs.split(separator: " ", omittingEmptySubsequences: true).dropFirst().first ?? "") ?? -1
+                return l > r
+            }
+
+            let top = ranked.prefix(10)
+            return "Top \(top.count) processes by CPU:\n\(header)\n\(top.joined(separator: "\n"))"
         } catch {
+            logger.error("[PROCLIST] ps failed to launch: \(error.localizedDescription) — the model gets no process listing this turn.")
             return "Error executing process command: \(error)"
         }
     }

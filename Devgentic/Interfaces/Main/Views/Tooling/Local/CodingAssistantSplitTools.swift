@@ -123,13 +123,23 @@ struct EditCodeBatchTool: DevgenticTool {
     }
 
     var parameterSchema: ToolParameters {
-        return SchemaBuilder.object(
+        // `edits` is built by hand rather than through `SchemaBuilder.object`, which hardcodes
+        // `items: ["type": "string"]` for every array. That is right for `tags` and `sourcePaths`
+        // and WRONG here: this is an array of objects, and the machine-readable item type is what
+        // a provider validates a tool call against — the prose in the description is not. A model
+        // reading the schema literally would send an array of strings, which cannot decode.
+        var properties = SchemaBuilder.object(
             properties: [
-                ("file_path", "string", "Absolute or relative path to the file to edit."),
-                ("edits", "array", "Array of `{old_string, new_string}` objects. Applied in order against the working copy. Each `old_string` must appear exactly once at the time it is applied.")
+                ("file_path", "string", "Absolute or relative path to the file to edit.")
             ],
-            required: ["file_path", "edits"]
+            required: []
+        ).properties
+        properties["edits"] = ToolParameterProperty(
+            type: "array",
+            description: "Array of `{old_string, new_string}` objects. Applied in order against the working copy. Each `old_string` must appear exactly once at the time it is applied.",
+            items: ["type": "object"]
         )
+        return ToolParameters(type: "object", properties: properties, required: ["file_path", "edits"])
     }
 
     func call(arguments: Arguments) async throws -> String {
@@ -373,7 +383,7 @@ struct OverwriteFileTool: DevgenticTool {
 private enum CodeEditApplier {
 
     static func applySingle(filePath: String, oldString: String, newString: String) -> String {
-        let expandedPath = (filePath as NSString).expandingTildeInPath
+        let expandedPath = FilePathResolver.resolve(filePath)
         let fileURL = URL(fileURLWithPath: expandedPath)
 
         guard FileManager.default.fileExists(atPath: expandedPath) else {
@@ -404,7 +414,7 @@ private enum CodeEditApplier {
     }
 
     static func applyBatch(filePath: String, edits: [(old: String, new: String)]) -> String {
-        let expandedPath = (filePath as NSString).expandingTildeInPath
+        let expandedPath = FilePathResolver.resolve(filePath)
         let fileURL = URL(fileURLWithPath: expandedPath)
 
         guard FileManager.default.fileExists(atPath: expandedPath) else {
@@ -454,7 +464,7 @@ private enum CodeEditApplier {
 private enum FileCreator {
 
     static func writeStrictNew(path: String, content: String) -> String {
-        let expandedPath = (path as NSString).expandingTildeInPath
+        let expandedPath = FilePathResolver.resolve(path)
         let fileURL = URL(fileURLWithPath: expandedPath)
         let fm = FileManager.default
 
@@ -466,7 +476,7 @@ private enum FileCreator {
     }
 
     static func writeOverwrite(path: String, content: String) -> String {
-        let expandedPath = (path as NSString).expandingTildeInPath
+        let expandedPath = FilePathResolver.resolve(path)
         let fileURL = URL(fileURLWithPath: expandedPath)
         let existed = FileManager.default.fileExists(atPath: expandedPath)
         let verb = existed ? "Overwrote" : "Created"
@@ -514,14 +524,12 @@ private enum RipgrepRunner {
         guard !path.isEmpty else {
             return "Error: 'path' is required. Pass the project root or a specific subpath."
         }
-        let resolvedPath = (path as NSString).expandingTildeInPath
+        let resolvedPath = FilePathResolver.resolve(path)
         guard FileManager.default.fileExists(atPath: resolvedPath) else {
             return "Error: path '\(resolvedPath)' does not exist."
         }
 
-        let rgPath = FileManager.default.fileExists(atPath: "/opt/homebrew/bin/rg") ? "/opt/homebrew/bin/rg"
-            : FileManager.default.fileExists(atPath: "/usr/local/bin/rg") ? "/usr/local/bin/rg"
-            : nil
+        let rgPath = SearchBinary.ripgrepPath
 
         let process = Process()
 
@@ -543,7 +551,10 @@ private enum RipgrepRunner {
             process.executableURL = URL(fileURLWithPath: rgPath)
             process.arguments = args
         } else {
-            var grepArgs = ["-rn", "--color=never"]
+            // `-E` — EXTENDED regex, so this fallback means the same thing ripgrep does. See the
+            // note in `code_search`: grep's default BASIC dialect turns `+ ? | ( )` into
+            // literals, so whether a pattern matches depended on whether ripgrep was installed.
+            var grepArgs = ["-rnE", "--color=never"]
             if !caseSensitive { grepArgs.append("-i") }
             if wholeWord { grepArgs.append("-w") }
             if filesOnly { grepArgs.append("-l") }
@@ -570,28 +581,44 @@ private enum RipgrepRunner {
             return "No matches found for '\(pattern)'."
         }
 
-        // Truncate to max_results matches (lines for content, files for files-only).
+        // `maxResults` bounds PRINTED LINES, not matches — with context on, one match prints up
+        // to 2N+1 of them. The two were conflated here exactly as in `code_search`; see
+        // `SearchMatchCounter` for why the display output cannot be counted directly.
         let lines = rawOutput.components(separatedBy: "\n")
-        var matchCount = 0
+        var shownLines = 0
         var truncatedLines: [String] = []
         var truncated = false
 
         for line in lines {
-            if filesOnly {
-                if !line.isEmpty { matchCount += 1 }
-            } else if !line.isEmpty && !line.hasPrefix("--") {
-                matchCount += 1
-            }
-            if matchCount > maxResults {
+            if !line.isEmpty && !line.hasPrefix("--") { shownLines += 1 }
+            if shownLines > maxResults {
                 truncated = true
                 break
             }
             truncatedLines.append(line)
         }
 
+        // `code_search_text` is the only one of the three splits that requests context, so it is
+        // the only one paying for a counting run. `code_search_symbol` and `code_search_files`
+        // pass `contextLines: 0` / `filesOnly`, where printed lines already equal the answer.
+        let exactMatches: Int? = (!filesOnly && contextLines > 0)
+            ? SearchMatchCounter.exactMatchCount(
+                executable: rgPath ?? "/usr/bin/grep",
+                arguments: SearchMatchCounter.countingArguments(
+                    useRipgrep: rgPath != nil,
+                    pattern: pattern,
+                    path: resolvedPath,
+                    glob: glob,
+                    caseSensitive: caseSensitive,
+                    wholeWord: wholeWord))
+            : nil
+        let reportedCount = exactMatches ?? shownLines
+
         var result = truncatedLines.joined(separator: "\n")
         if truncated {
-            result += "\n\n[Truncated: >\(maxResults) matches. Refine your pattern or glob to narrow results.]"
+            result += "\n\n[Truncated: output exceeded \(maxResults) lines"
+            if let exactMatches { result += " (\(exactMatches) match\(exactMatches == 1 ? "" : "es") total)" }
+            result += ". Refine your pattern or glob to narrow results.]"
         }
 
         let maxOutput = 8000
@@ -599,7 +626,9 @@ private enum RipgrepRunner {
             result = String(result.prefix(maxOutput)) + "\n...[Output truncated at \(maxOutput) chars]"
         }
 
+        // `noun + "es"` produced "filees" on the files-only path — the one `code_search_files`
+        // always takes. Shared pluraliser now, so the two search tools cannot disagree.
         let noun = filesOnly ? "file" : "match"
-        return "\(result)\n(\(matchCount) \(noun)\(matchCount == 1 ? "" : "es"))"
+        return "\(result)\n(\(reportedCount) \(CodeSearchTool.pluralise(noun, count: reportedCount)))"
     }
 }

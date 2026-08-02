@@ -57,7 +57,22 @@ struct ProfileSidebarListView: View {
         return nil
     }
 
+    /// While the Tool Library is the active destination, this pane hosts the library's
+    /// navigation instead of the profile list.
+    ///
+    /// DERIVED from the router, deliberately not stored: "save or back returns to the
+    /// profile list" then falls out of the destination changing, rather than being state
+    /// someone has to remember to reset — which is exactly how such a toggle desyncs when
+    /// the user navigates away mid-configuration.
+    private var isShowingToolLibrary: Bool {
+        if case .toolLibrary = router.activeDestination { return true }
+        return false
+    }
+
     var body: some View {
+        if isShowingToolLibrary {
+            ToolNavigationPane(host: .profilesTab)
+        } else {
         VStack(alignment: .leading, spacing: 0) {
             // Header
             SidebarHeaderView(
@@ -191,6 +206,7 @@ struct ProfileSidebarListView: View {
             }
         } message: {
             Text("You have unsaved changes. Discard them?")
+        }
         }
     }
 }

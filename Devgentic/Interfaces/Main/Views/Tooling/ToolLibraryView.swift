@@ -11,6 +11,8 @@
 
 import SwiftUI
 
+private let logger = DGLogger(category: "ToolLibraryView")
+
 // MARK: - Navigation State
 
 enum SidebarSelection: Hashable {
@@ -18,6 +20,9 @@ enum SidebarSelection: Hashable {
     case favorites
     case localCategory(String)
     case mcp(UUID)
+    /// The MCP registry browser. A selection rather than a mode so the pane's rows and the
+    /// content column stay driven by one value.
+    case marketplace
 }
 
 // MARK: - Built-in Tool Category Mapping
@@ -28,14 +33,24 @@ struct BuiltInToolCategory: Identifiable {
     let icon: String
     let rawCategories: Set<String>
 
+    /// Sidebar groups, and the tool `category` values each one gathers.
+    ///
+    /// Four names were removed on 2026-08-01 — "Advanced Finder & File Management",
+    /// "Device & Peripheral Control", "Deep Context Awareness" and "Communication & Mail" — left
+    /// behind by tool files deleted in the 2026-07-31 catalogue cleanup. They were inert (a group
+    /// with no tools is dropped by `compactMap`) but they described a shape the app no longer has,
+    /// which is the kind of thing a reader trusts. `ToolCategoryGroupingTests` now pins BOTH
+    /// directions: every name here gathers at least one real tool, and every tool's category is
+    /// gathered by some group — the second being the one that matters, since a tool whose category
+    /// belongs to no group gets no sidebar row.
     static let allGroups: [BuiltInToolCategory] = [
-        .init(name: "File System", icon: "folder.fill", rawCategories: ["File System", "Advanced Finder & File Management"]),
-        .init(name: "System & Shell", icon: "terminal.fill", rawCategories: ["System & Shell", "System Toggles", "System State", "System Automation", "Device & Peripheral Control"]),
+        .init(name: "File System", icon: "folder.fill", rawCategories: ["File System"]),
+        .init(name: "System & Shell", icon: "terminal.fill", rawCategories: ["System & Shell", "System Toggles", "System State", "System Automation"]),
         .init(name: "Coding & Dev Tools", icon: "chevron.left.forwardslash.chevron.right", rawCategories: ["Coding Assistant", "Developer & Diagnostics"]),
-        .init(name: "Vision & UI", icon: "eye.fill", rawCategories: ["Vision & UI", "Workspace Management", "Deep Context Awareness"]),
+        .init(name: "Vision & UI", icon: "eye.fill", rawCategories: ["Vision & UI", "Workspace Management"]),
         .init(name: "macOS Utilities", icon: "gearshape.fill", rawCategories: ["macOS Utilities"]),
         .init(name: "Network & Web", icon: "globe", rawCategories: ["Network & Connectivity", "Native Browser Automation"]),
-        .init(name: "Communication & PIM", icon: "person.crop.rectangle.stack.fill", rawCategories: ["Personal Information", "Communication & Mail"]),
+        .init(name: "Communication & PIM", icon: "person.crop.rectangle.stack.fill", rawCategories: ["Personal Information"]),
         .init(name: "Audio & Media", icon: "speaker.wave.2.fill", rawCategories: ["Audio & Media"]),
     ]
 
@@ -55,8 +70,10 @@ struct ToolTableRow: Identifiable {
 struct ToolLibraryView: View {
     @Binding var configuredTools: [Tool]
     let instructions: String
-    @Binding var searchText: String
-    @Binding var selectedSidebar: SidebarSelection?
+    /// Shared with the pane — see `ToolLibraryNavigationState`.
+    private var nav: ToolLibraryNavigationState { .shared }
+    private var searchText: String { nav.searchText }
+    private var selectedSidebar: SidebarSelection? { nav.selectedSidebar }
     @Binding var isSelectionMode: Bool
     @Binding var selectedToolIDs: Set<String>
 
@@ -64,6 +81,15 @@ struct ToolLibraryView: View {
     /// CodeToolPreset — the user never sees those rows, so they can't disable or
     /// toggle them. Empty for other profile types.
     var hiddenToolNames: Set<String> = []
+
+    /// False when no profile is targeted. Everything that writes tool enablement — per-row
+    /// toggles, the selection circles, bulk actions — is hidden rather than disabled: a
+    /// control that looks live with nowhere to write is worse than an absent one.
+    var canConfigureTools: Bool = true
+
+    /// Supplied by the container so the profile picker can live in this view's header
+    /// without this view knowing anything about profiles.
+    var profileSelector: (() -> AnyView)? = nil
 
     @Environment(MainViewRouter.self) private var router
     private var toolStore: UnifiedToolStore { UnifiedToolStore.shared }
@@ -73,219 +99,106 @@ struct ToolLibraryView: View {
     /// report sheet's `.sheet(item:)` binding.
     @State private var bugReportSource: ToolSource? = nil
 
+    /// Source awaiting delete confirmation. Removing a server purges its Keychain secrets
+    /// and revokes its OAuth grant, so it is confirmed rather than done on one click.
+    @State private var pendingDeletion: ToolSource? = nil
+
+
     var body: some View {
-        HStack(spacing: 0) {
-            // LEFT: Category sidebar
-            toolSidebar
-                .frame(width: 220)
-
-            // Separator
-            Rectangle()
-                .fill(theme.dividerColor.opacity(0.3))
-                .frame(width: 1)
-
-            // RIGHT: Tool list
-            toolDetailView
+        // Navigation (categories, MCP servers, Installed/Discover, Discover facets) lives in
+        // the SIDEBAR PANE now — see `ToolNavigationPane`. This view is purely the content
+        // column. Previously both were on screen at once, each listing MCP servers.
+        Group {
+            // Driven by the SELECTION, not a separate mode: Marketplace is a row in the pane
+            // like any other, so one value decides what both halves show.
+            if nav.selectedSidebar == .marketplace {
+                MCPDiscoverView { plan, values in
+                    addFromRegistry(plan: plan, values: values)
+                }
+            } else {
+                toolDetailView
+            }
         }
-        .frame(maxWidth: 1100)
         .frame(maxWidth: .infinity)
-        .padding(.horizontal, 20)
         .sheet(item: $bugReportSource) { source in
             MCPBugReportSheet(source: source)
         }
-    }    // MARK: - Sidebar
-
-    @ViewBuilder
-    private var toolSidebar: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    // LIBRARY Section
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Library")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(theme.secondaryText.opacity(0.7))
-                            .textCase(.uppercase)
-                            .tracking(0.8)
-                            .padding(.leading, 8)
-                        
-                        sidebarRow(
-                            label: "All Tools",
-                            icon: "archivebox.fill",
-                            count: totalToolCount,
-                            tag: .all
-                        )
-                    }
-                    
-                    // PINNED Section
-                    if favoriteCount > 0 {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Pinned")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundColor(theme.secondaryText.opacity(0.7))
-                                .textCase(.uppercase)
-                                .tracking(0.8)
-                                .padding(.leading, 8)
-                            
-                            sidebarRow(
-                                label: "Favorites",
-                                icon: "star.fill",
-                                count: favoriteCount,
-                                tag: .favorites
-                            )
-                        }
-                    }
-                    
-                    // BUILT-IN TOOLS Section
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Built-in Tools")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(theme.secondaryText.opacity(0.7))
-                            .textCase(.uppercase)
-                            .tracking(0.8)
-                            .padding(.leading, 8)
-                        
-                        ForEach(builtInGroups, id: \.name) { group in
-                            sidebarRow(
-                                label: group.name,
-                                icon: group.icon,
-                                count: group.count,
-                                tag: .localCategory(group.name)
-                            )
-                        }
-                    }
-                    
-                    // MCP SERVERS Section
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("MCP Servers")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(theme.secondaryText.opacity(0.7))
-                            .textCase(.uppercase)
-                            .tracking(0.8)
-                            .padding(.leading, 8)
-                        
-                        let mcpSources = toolStore.sources.filter { $0.type == .mcp }
-                        
-                        if mcpSources.isEmpty {
-                            VStack(spacing: 6) {
-                                Text("No MCP servers")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(theme.secondaryText)
-                                Button("Add Server") { router.navigate(to: .addMCPServer) }
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .buttonStyle(.plain)
-                                    .foregroundColor(theme.accentColor)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(.vertical, 8)
-                        } else {
-                            ForEach(mcpSources) { source in
-                                mcpSidebarRow(source: source)
-                            }
-                        }
-                    }
-                }
-                .padding(.vertical, 16)
-                .padding(.horizontal, 10)
-            }
-        }
-        .background(theme.secondaryBackground.opacity(0.4))
+        .onAppear { publishFavoriteCount() }
+        .onChange(of: configuredTools.count) { _, _ in publishFavoriteCount() }
     }
 
-    private func sidebarRow(label: String, icon: String, count: Int, tag: SidebarSelection) -> some View {
-        let isSelected = selectedSidebar == tag
-        return HStack(spacing: 8) {
-            Image(systemName: icon)
-                .font(.system(size: 12))
-                .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
-                .frame(width: 18, alignment: .center)
-            
-            Text(label)
-                .font(.system(size: 12, weight: isSelected ? .medium : .regular))
-                .foregroundColor(isSelected ? theme.primaryText : theme.primaryText.opacity(0.85))
-            
-            Spacer()
-            
-            Text("\(count)")
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 1)
-                .background(isSelected ? theme.accentColor.opacity(0.12) : theme.surfaceOverlay)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(isSelected ? theme.accentColor.opacity(0.08) : Color.clear)
-        )
-        .contentShape(Rectangle())
-        .onTapGesture {
-            withAnimation(.interactiveSpring(response: 0.25, dampingFraction: 0.8)) {
-                selectedSidebar = tag
-            }
-        }
-        .tag(tag)
+    /// The pane draws the Pinned section but has no access to the profile's tool list, so
+    /// the count is published from here rather than read there.
+    private func publishFavoriteCount() {
+        ToolLibraryFavoritesBridge.shared.count = favoriteCount
     }
 
-    private func mcpSidebarRow(source: ToolSource) -> some View {
-        let tag = SidebarSelection.mcp(source.id)
-        let isSelected = selectedSidebar == tag
-        
-        return HStack(spacing: 8) {
-            MCPIconView(
-                icons: source.tools.first?.icons,
-                fallbackSymbol: "network",
-                size: 14
-            )
-            .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
-            .frame(width: 18, alignment: .center)
-            
-            Text(source.serverName)
-                .font(.system(size: 12, weight: isSelected ? .medium : .regular))
-                .foregroundColor(isSelected ? theme.primaryText : theme.primaryText.opacity(0.85))
-                .lineLimit(1)
-            
-            Spacer()
-            
-            Text("\(source.tools.count)")
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 1)
-                .background(isSelected ? theme.accentColor.opacity(0.12) : theme.surfaceOverlay)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-            
-            ConnectionStateIndicator(sourceId: source.id)
+
+    // MARK: - Registry adds
+
+    /// Creates a server from a reviewed registry plan, then connects it.
+    ///
+    /// The tool list is intentionally EMPTY at save time: we have not talked to the server
+    /// yet, and inventing tools from registry metadata would put entries in the library that
+    /// may not exist. The connect that follows discovers the real list and persists it — and
+    /// if it fails, the server is still saved, visible, and editable rather than silently
+    /// discarded along with the credentials the user just typed.
+    private func addFromRegistry(plan: MCPRegistryInstallPlan, values: [String: String]) {
+        guard let definition = plan.makeServerDefinition() else {
+            logger.error("""
+                [MCP-DISCOVER] Cannot add '\(plan.server.name)': the plan produced no usable \
+                ServerDefinition. Nothing was saved.
+                """)
+            return
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(isSelected ? theme.accentColor.opacity(0.08) : Color.clear)
-        )
-        .contentShape(Rectangle())
-        .onTapGesture {
-            withAnimation(.interactiveSpring(response: 0.25, dampingFraction: 0.8)) {
-                selectedSidebar = tag
-            }
+
+        // Uniquify against existing names — the registry has no idea what the user already
+        // has, and a collision would be rejected by the store with no explanation here.
+        var name = plan.server.displayName
+        if toolStore.isServerNameTaken(name) {
+            var suffix = 2
+            while toolStore.isServerNameTaken("\(name) \(suffix)") { suffix += 1 }
+            let uniquified = "\(name) \(suffix)"
+            logger.info("[MCP-DISCOVER] '\(name)' is taken; saving as '\(uniquified)'.")
+            name = uniquified
         }
-        .contextMenu {
-            Button("Edit Configuration...") {
-                router.navigate(to: .editMCPServer(sourceID: source.id))
-            }
-            Button("Report Issue...") {
-                bugReportSource = source
-            }
-            Divider()
-            Button("Remove Server", role: .destructive) {
-                toolStore.deleteTool(toolSource: source)
-                if selectedSidebar == .mcp(source.id) {
-                    selectedSidebar = .all
-                }
-            }
+
+        let secrets = MCPRuntimeSecrets(env: values.filter { !$0.value.isEmpty })
+
+        guard let sourceID = toolStore.addTool(
+            serverName: name,
+            serverDefinition: definition,
+            secrets: secrets,
+            newTools: []
+        ) else {
+            logger.error("""
+                [MCP-DISCOVER] Store REFUSED to add '\(name)' from the registry. The user's \
+                supplied values were not persisted; they will need to retry.
+                """)
+            return
         }
+
+        logger.info("""
+            [MCP-DISCOVER] Added '\(name)' (\(sourceID)) from registry entry \
+            '\(plan.server.name)' — \(plan.server.isRemote ? "remote" : "local"), \
+            \(values.count) value(s) stored in Keychain. Connecting now to discover its tools.
+            """)
+
+        // Mark connecting BEFORE switching views. `performConnect` sets this too, but only
+        // after an actor hop — so without it the freshly-selected server renders for a frame
+        // as "Not connected", which reads as a failure rather than work in progress.
+        MCPClientService.shared.connectionStates[sourceID] = .connecting
+
+        nav.section = .mcp
+        nav.selectedSidebar = .mcp(sourceID)
+
+        Task {
+            await MCPConnectionCoordinator.shared.connectIfNeeded(sourceID: sourceID)
+        }
+    }
+
+    private func isConnected(_ source: ToolSource) -> Bool {
+        MCPClientService.shared.connectionStates[source.id]?.isActive ?? false
     }
 
     // MARK: - Detail (Tool List)
@@ -293,21 +206,38 @@ struct ToolLibraryView: View {
     @ViewBuilder
     private var toolDetailView: some View {
         if displayedRows.isEmpty {
-            emptyStateView
+            // An MCP server with no rows is almost never "nothing here" — it is connecting,
+            // or it failed, or the user disabled it. Falling through to the library's generic
+            // empty state showed "No Tools Found / Add MCP Server" for a server that was
+            // mid-handshake, so adding a server looked like it had done nothing until the
+            // user navigated away and back.
+            if case .mcp(let sourceID) = selectedSidebar,
+               let source = toolStore.sources.first(where: { $0.id == sourceID }) {
+                mcpServerStateView(source)
+            } else {
+                emptyStateView
+            }
         } else {
             ZStack(alignment: .bottom) {
                 ScrollView {
                     LazyVStack(spacing: 12) {
                         // Title / Count summary header
-                        HStack {
+                        HStack(spacing: 10) {
                             Text(currentSelectionTitle)
                                 .font(.system(size: 11, weight: .bold))
                                 .foregroundColor(theme.secondaryText.opacity(0.8))
                                 .textCase(.uppercase)
                                 .tracking(0.5)
-                            
+
                             Spacer()
-                            
+
+                            // Which profile these toggles write to. Permanent, so it also
+                            // serves as the profile SWITCHER — the common case when pointing
+                            // several agents at one newly-added MCP server.
+                            if let profileSelector {
+                                profileSelector()
+                            }
+
                             Text("\(displayedRows.count) \(displayedRows.count == 1 ? "tool" : "tools")")
                                 .font(.system(size: 11))
                                 .foregroundColor(theme.secondaryText)
@@ -474,7 +404,10 @@ struct ToolLibraryView: View {
             row: row,
             isEnabled: isEnabled,
             isFavorited: isToolFavorited(row),
-            isSelectionMode: isSelectionMode,
+            // With no profile targeted there is nowhere to write enablement, so the row's
+            // selection circle and enable pill are suppressed entirely.
+            isSelectionMode: isSelectionMode && canConfigureTools,
+            canConfigureTools: canConfigureTools,
             isSelected: selectedToolIDs.contains(row.id),
             showSourceName: selectedSidebar == .all || selectedSidebar == .favorites,
             configuredTools: $configuredTools,
@@ -528,6 +461,8 @@ struct ToolLibraryView: View {
             return "Favorites"
         case .localCategory(let category):
             return category
+        case .marketplace:
+            return "Marketplace"
         case .mcp(let id):
             if let source = toolStore.sources.first(where: { $0.id == id }) {
                 return source.serverName
@@ -542,8 +477,12 @@ struct ToolLibraryView: View {
         var rows: [ToolTableRow] = []
 
         switch selectedSidebar {
+        case .marketplace, .none:
+            // The registry browser draws its own grid — no installed rows to list.
+            break
         case .all:
-            for source in toolStore.sources {
+            // Built-in only; this row lives under the Build-In section.
+            for source in toolStore.sources where source.type == .local {
                 for tool in source.tools where !hiddenToolNames.contains(tool.name) {
                     if matchesSearch(tool) {
                         rows.append(ToolTableRow(source: source, definition: tool))
@@ -596,6 +535,107 @@ struct ToolLibraryView: View {
         tool.description.localizedCaseInsensitiveContains(searchText)
     }
 
+    /// Explains WHY a selected MCP server is showing no tools, rather than implying there is
+    /// nothing to show. Each state names its own next action.
+    @ViewBuilder
+    private func mcpServerStateView(_ source: ToolSource) -> some View {
+        let state = MCPClientService.shared.connectionStates[source.id] ?? .disconnected
+
+        VStack(spacing: 14) {
+            switch state {
+            case .connecting:
+                ProgressView().controlSize(.large)
+                stateTitle("Connecting to \(source.serverName)…")
+                stateDetail(source.serverDefinition?.command != nil
+                    ? "Starting the server and discovering its tools. A first run may download the package, which can take a minute."
+                    : "Opening a connection and discovering its tools.")
+
+            case .reconnecting(let attempt):
+                ProgressView().controlSize(.large)
+                stateTitle("Reconnecting to \(source.serverName)…")
+                stateDetail("Attempt \(attempt). The previous connection dropped.")
+
+            case .error(let message):
+                stateIcon("exclamationmark.triangle", tint: .orange)
+                stateTitle("Couldn't connect to \(source.serverName)")
+                // Selectable: this is the string a user pastes into a search or a bug report.
+                Text(message)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(theme.secondaryText)
+                    .textSelection(.enabled)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: 420)
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.09)))
+
+                HStack(spacing: 8) {
+                    Button("Retry") {
+                        Task { await MCPConnectionCoordinator.shared.reconnect(sourceID: source.id) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Button("Edit Configuration") {
+                        router.navigate(to: .editMCPServer(sourceID: source.id))
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+            case .disconnected where !source.isEnabled:
+                stateIcon("pause.circle", tint: theme.secondaryText)
+                stateTitle("\(source.serverName) is disabled")
+                stateDetail("Its configuration and saved credentials are kept. Enable it to make its tools available again.")
+                Button("Enable Server") {
+                    toolStore.setEnabled(true, sourceID: source.id)
+                }
+                .buttonStyle(.borderedProminent)
+
+            case .disconnected:
+                stateIcon("bolt.horizontal.circle", tint: theme.secondaryText)
+                stateTitle("Not connected")
+                stateDetail("This server hasn't been connected yet in this session.")
+                Button("Connect") {
+                    Task { await MCPConnectionCoordinator.shared.connectIfNeeded(sourceID: source.id) }
+                }
+                .buttonStyle(.borderedProminent)
+
+            case .connected:
+                // Connected and genuinely empty. Rare, but real: a resources-only server whose
+                // capabilities we could not turn into anything callable.
+                stateIcon("puzzlepiece.extension", tint: theme.secondaryText)
+                stateTitle("\(source.serverName) exposes no tools")
+                stateDetail("The server connected but advertised nothing this app can call. Rescan if you expect that to have changed.")
+                Button("Rescan Tools") {
+                    Task { await MCPConnectionCoordinator.shared.rescan(sourceID: source.id) }
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(40)
+    }
+
+    private func stateIcon(_ systemName: String, tint: Color) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 40))
+            .foregroundColor(tint.opacity(0.7))
+    }
+
+    private func stateTitle(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 14, weight: .medium))
+            .foregroundColor(theme.primaryText)
+            .multilineTextAlignment(.center)
+    }
+
+    private func stateDetail(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 12))
+            .foregroundColor(theme.secondaryText)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: 380)
+    }
+
     private var emptyStateView: some View {
         VStack(spacing: 16) {
             Image(systemName: searchText.isEmpty ? "puzzlepiece.extension" : "magnifyingglass")
@@ -624,6 +664,9 @@ private struct ToolRowContent: View {
     let isEnabled: Bool
     let isFavorited: Bool
     let isSelectionMode: Bool
+    /// False when no profile is targeted — the enable/Ask pill is hidden rather than shown
+    /// inert, because a control that looks live with nowhere to write is worse than none.
+    var canConfigureTools: Bool = true
     let isSelected: Bool
     let showSourceName: Bool
     @Binding var configuredTools: [Tool]
@@ -726,12 +769,16 @@ private struct ToolRowContent: View {
                         .transition(.opacity.combined(with: .scale(scale: 0.95)))
                     }
                     
-                    ToolStateControl(
-                        configuredTools: $configuredTools,
-                        source: row.source,
-                        definition: row.definition,
-                        instructions: instructions
-                    )
+                    // Hidden with no profile targeted: this control writes enablement into a
+                    // profile's tool list, and there is nothing to write to.
+                    if canConfigureTools {
+                        ToolStateControl(
+                            configuredTools: $configuredTools,
+                            source: row.source,
+                            definition: row.definition,
+                            instructions: instructions
+                        )
+                    }
                 }
             }
             
@@ -1293,20 +1340,130 @@ private struct AnnotationBadge: View {
     }
 }
 
-/// Displays a colored circle indicating the MCP server's connection state.
+/// Connection state for an MCP server: a coloured dot that opens a details popover.
+///
+/// This used to be an 8×8pt dot whose ONLY affordance was a hover tooltip reading
+/// "Error: <message>". When a server stopped working there was nowhere to look — no last
+/// error you could select or copy, no indication of when the connection was last known
+/// good, no server identity, no latency. Clicking now answers "why isn't this working?"
+/// without going to Console.app.
 private struct ConnectionStateIndicator: View {
     let sourceId: UUID
+    let toolCount: Int
+
+    @State private var isShowingDetails = false
+    @Environment(\.appTheme) private var theme
+
+    private var service: MCPClientService { MCPClientService.shared }
 
     private var state: MCPConnectionState {
-        MCPClientService.shared.connectionStates[sourceId] ?? .disconnected
+        service.connectionStates[sourceId] ?? .disconnected
     }
 
     var body: some View {
-        Circle()
-            .fill(stateColor)
-            .frame(width: 8, height: 8)
-            .help(stateDescription)
+        Button {
+            isShowingDetails.toggle()
+        } label: {
+            Circle()
+                .fill(stateColor)
+                .frame(width: 8, height: 8)
+                // A bare dot reads as decoration; the ring makes it look actionable.
+                .overlay(Circle().stroke(stateColor.opacity(0.3), lineWidth: 3))
+                .contentShape(Rectangle())
+                .frame(width: 16, height: 16)
+        }
+        .buttonStyle(.plain)
+        .help("\(stateDescription) — click for details")
+        .accessibilityLabel("Server status: \(stateDescription)")
+        .popover(isPresented: $isShowingDetails, arrowEdge: .bottom) {
+            detailsPopover
+        }
     }
+
+    // MARK: - Popover
+
+    private var detailsPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Circle().fill(stateColor).frame(width: 8, height: 8)
+                Text(stateDescription)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(theme.primaryText)
+            }
+
+            // The error is the whole reason a user opens this. Selectable so it can be
+            // pasted into a bug report or a search.
+            if case .error(let message) = state {
+                Text(message)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(theme.secondaryText)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: 320, alignment: .leading)
+                    .padding(6)
+                    .background(RoundedRectangle(cornerRadius: 5).fill(Color.red.opacity(0.08)))
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 4) {
+                detailRow("Tools", "\(toolCount)")
+
+                if let info = service.serverInfo(for: sourceId) {
+                    if !info.serverName.isEmpty {
+                        detailRow("Server", "\(info.serverName) \(info.serverVersion)")
+                    }
+                    detailRow("Protocol", info.protocolVersion)
+                    if info.handshakeMS > 0 {
+                        detailRow("Handshake", "\(info.handshakeMS) ms")
+                    }
+                    let features = [
+                        info.supportsResources ? "resources" : nil,
+                        info.supportsPrompts ? "prompts" : nil,
+                        info.supportsLogging ? "logging" : nil,
+                    ].compactMap { $0 }
+                    if !features.isEmpty {
+                        detailRow("Also offers", features.joined(separator: ", "))
+                    }
+                }
+
+                // "Connected" alone is a claim; this is the evidence behind it. Remote
+                // servers in particular used to show green indefinitely.
+                if let verified = service.lastVerified[sourceId] {
+                    detailRow("Last verified", Self.relative(verified))
+                }
+            }
+        }
+        .padding(12)
+        .frame(minWidth: 240)
+    }
+
+    private func detailRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundColor(theme.secondaryText)
+                .frame(width: 84, alignment: .leading)
+            Text(value)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(theme.primaryText)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private static func relative(_ date: Date) -> String {
+        let seconds = Int(Date().timeIntervalSince(date))
+        switch seconds {
+        case ..<5:      return "just now"
+        case ..<60:     return "\(seconds)s ago"
+        case ..<3600:   return "\(seconds / 60)m ago"
+        default:        return "\(seconds / 3600)h ago"
+        }
+    }
+
+    // MARK: - Presentation
 
     private var stateColor: Color {
         switch state {
@@ -1319,11 +1476,11 @@ private struct ConnectionStateIndicator: View {
 
     private var stateDescription: String {
         switch state {
-        case .disconnected: return "Disconnected"
-        case .connecting: return "Connecting..."
+        case .disconnected: return "Not connected"
+        case .connecting: return "Connecting…"
         case .connected: return "Connected"
-        case .reconnecting(let attempt): return "Reconnecting (attempt \(attempt))..."
-        case .error(let msg): return "Error: \(msg)"
+        case .reconnecting(let attempt): return "Reconnecting (attempt \(attempt))…"
+        case .error: return "Connection failed"
         }
     }
 }

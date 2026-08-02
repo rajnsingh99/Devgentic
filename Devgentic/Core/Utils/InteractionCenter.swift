@@ -25,6 +25,25 @@ import Foundation
 import AppKit
 import Observation
 
+/// Where an OUT-OF-BAND human-in-the-loop request should be presented.
+///
+/// The stream pipeline injects an `InteractionCenter` into `ActiveStreamManager`, which
+/// works because every request there originates inside a run. MCP breaks that assumption:
+/// a server's `sampling/createMessage` or `elicitation/create` arrives on the client
+/// connection at a moment of the server's choosing, from code that has no stream in scope.
+///
+/// This is the explicit seam for those callers. `MainApplicationViewModel` claims it;
+/// QuickAccess deliberately does not, so a secondary window can never steal the
+/// presentation target from the main one.
+@MainActor
+enum HITLPresenter {
+    private(set) static weak var center: InteractionCenter?
+
+    static func claim(_ center: InteractionCenter) {
+        self.center = center
+    }
+}
+
 @Observable @MainActor
 final class InteractionCenter {
 

@@ -28,6 +28,16 @@ final class ExplorerViewModel {
                 rootItems = []
                 expandedItemIDs = []
                 errorMessage = nil
+
+                // Publish as an MCP root. Roots are not a Code-mode feature — the folder open
+                // here is "the folder this app is working in" for chat and workflow too, and
+                // is the only workspace boundary those interfaces can offer a server.
+                //
+                // Published even when it fails to open below: an MCP server's access rests on
+                // ordinary file permissions, not on this app's security-scoped grant, so the
+                // boundary is still the right thing to state.
+                let published = selectedRootURL
+                Task { await MCPRootsProvider.setExplorerRoot(published) }
             }
 
             if let newURL = selectedRootURL {

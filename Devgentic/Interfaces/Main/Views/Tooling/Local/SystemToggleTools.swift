@@ -5,6 +5,9 @@
 
 import Foundation
 import AppKit
+import os
+
+private let logger = DGLogger(category: "SystemToggleTools")
 
 // MARK: - Toggle Dark Mode Tool
 
@@ -71,7 +74,7 @@ struct ToggleDarkModeTool: DevgenticTool {
             let desc = scriptObj?.executeAndReturnError(&errorInfo)
 
             if let err = errorInfo {
-                return "AppleScript Error: \(err)"
+                return "Error: AppleScript failed — \(err)"
             }
 
             if arguments.action == "get" {
@@ -86,10 +89,21 @@ struct ToggleDarkModeTool: DevgenticTool {
 
 // MARK: - Toggle Do Not Disturb Tool
 
+/// ⚠️ This tool can only TOGGLE Focus. It cannot set it to a known state.
+///
+/// It works by clicking the Focus checkbox in Control Centre through the accessibility API, and
+/// a click flips whatever is currently there. macOS exposes no readable Focus state to query
+/// first, which is why the implementation clicks a checkbox rather than setting a value.
+///
+/// Until 2026-08-01 the schema advertised `'on'`, `'off'` and `'toggle'`, and all three ran
+/// BYTE-IDENTICAL scripts — so asking to turn Focus ON while it was already on turned it OFF, and
+/// the tool reported `Do Not Disturb 'on' executed`. A model that wanted silence got noise, with
+/// a success message. `on` and `off` are now refused rather than quietly mistranslated: an action
+/// the tool cannot perform must not be advertised as one it can.
 struct ToggleDoNotDisturbTool: DevgenticTool {
     let name = "toggle_do_not_disturb"
     let category = "System Toggles"
-    let description = "Toggles macOS Focus/Do Not Disturb mode via Shortcuts."
+    let description = "Toggles macOS Focus / Do Not Disturb on or off. This FLIPS the current state — it cannot set a specific state, because macOS does not expose the current one to read first."
 
     struct Arguments: Decodable, Sendable {
         let action: String
@@ -98,7 +112,7 @@ struct ToggleDoNotDisturbTool: DevgenticTool {
     var parameterSchema: ToolParameters {
         return SchemaBuilder.object(
             properties: [
-                ("action", "string", "Action: 'on', 'off', 'toggle'")
+                ("action", "string", "Must be 'toggle'. Focus can only be flipped; 'on' and 'off' are not supported because the current state cannot be read.")
             ],
             required: ["action"]
         )
@@ -107,52 +121,46 @@ struct ToggleDoNotDisturbTool: DevgenticTool {
     func call(arguments: Arguments) async throws -> String {
         // Use AppleScript to toggle DND via Focus system
         return await MainActor.run {
-            let script: String
+            // `on` and `off` are refused BEFORE any script runs. They used to map to the same
+            // click as `toggle`, so half the time they did the opposite of what was asked and
+            // said they had succeeded. Refusing names the real capability and lets the model
+            // decide, instead of silently guessing on its behalf.
             switch arguments.action {
-            case "on":
-                script = """
-                tell application "System Events"
-                    tell process "ControlCenter"
-                        -- Click Focus in menu bar
-                        click menu bar item "Focus" of menu bar 1
-                        delay 0.5
-                        click checkbox 1 of group 1 of window 1
-                    end tell
-                end tell
-                """
-            case "off":
-                script = """
-                tell application "System Events"
-                    tell process "ControlCenter"
-                        click menu bar item "Focus" of menu bar 1
-                        delay 0.5
-                        click checkbox 1 of group 1 of window 1
-                    end tell
-                end tell
-                """
             case "toggle":
-                script = """
-                tell application "System Events"
-                    tell process "ControlCenter"
-                        click menu bar item "Focus" of menu bar 1
-                        delay 0.5
-                        click checkbox 1 of group 1 of window 1
-                    end tell
-                end tell
-                """
+                break
+            case "on", "off":
+                logger.notice("[FOCUS] refused '\(arguments.action)' — Focus can only be flipped, and this used to run the toggle script under both names, so it turned Focus the WRONG WAY half the time while reporting success. No change made.")
+                return "Error: Focus cannot be set to a specific state — macOS does not expose the "
+                    + "current state to read. Use action 'toggle' to flip it. If you need a known "
+                    + "state, ask the user to confirm the current one first."
             default:
-                return "Error: Unknown action '\(arguments.action)'. Use on/off/toggle."
+                return "Error: Unknown action '\(arguments.action)'. Use 'toggle'."
             }
+
+            let script = """
+            tell application "System Events"
+                tell process "ControlCenter"
+                    -- Click the Focus control in the menu bar, then its checkbox.
+                    click menu bar item "Focus" of menu bar 1
+                    delay 0.5
+                    click checkbox 1 of group 1 of window 1
+                end tell
+            end tell
+            """
 
             var errorInfo: NSDictionary?
             let scriptObj = NSAppleScript(source: script)
             scriptObj?.executeAndReturnError(&errorInfo)
 
             if let err = errorInfo {
-                return "Focus toggle may require accessibility permission. Error: \(err)"
+                return "Error: could not toggle Focus — this needs Accessibility permission. \(err)"
             }
 
-            return "Do Not Disturb '\(arguments.action)' executed."
+            // States what actually happened — a flip — rather than echoing the requested action.
+            // The old wording ("Do Not Disturb 'on' executed") was the success message that made
+            // the wrong-direction bug invisible.
+            return "Focus toggled. Its state was flipped, not set — check the menu bar to confirm "
+                + "which way it went."
         }
     }
 }
@@ -171,27 +179,43 @@ struct GetWiFiInfoTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
+        // `system_profiler SPAirPortDataType`, not the `airport` binary.
+        //
+        // This tool was **100% broken on any current macOS**: it invoked
+        // `Apple80211.framework/…/airport -I`, and Apple REMOVED that binary. Every call threw
+        // at launch ("The file 'airport' doesn't exist") — so a tool whose description promises
+        // SSID, BSSID, signal strength, channel and security returned nothing but a failure,
+        // every time, on every machine. Earlier work here corrected how the failure was
+        // *reported*; it was still a failure.
+        //
+        // `system_profiler` still ships and still carries what the description advertises —
+        // Card Type, PHY modes, Country Code, and a Current Network Information block with
+        // channel, security and signal. Some fields are withheld unless Location Services is
+        // granted, which is a macOS policy the tool cannot and should not work around; what it
+        // can do is return the data that IS available instead of nothing at all.
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport")
-        process.arguments = ["-I"]
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
+        process.arguments = ["SPAirPortDataType", "-detailLevel", "basic"]
 
         do {
-            // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe
-            // only after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
-            //
-            // combinedOutput, not standardOutput: this site set `standardError = outPipe`,
-            // so its single read returned both. Recent macOS ships this `airport` binary as
-            // a stub that refuses to run and says so on stderr — reading stdout alone turns
-            // that into a bare "No Wi-Fi data", which reads as "you have no Wi-Fi" rather
-            // than "this tool no longer works", and the agent cannot tell the two apart.
-            //
-            // The String -> Data -> String round-trip left over from `readDataToEndOfFile()`
-            // is gone; ProcessRunner already decoded the bytes.
-            let output = try ProcessRunner.run(process).combinedOutput
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return "Wi-Fi Info:\n\(output.isEmpty ? "No Wi-Fi data" : output)"
+            let run = try ProcessRunner.run(process)
+            let output = run.combinedOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard run.succeeded, !output.isEmpty else {
+                logger.error("[WIFI] system_profiler SPAirPortDataType exited \(run.exitCode) with \(output.count) bytes — no Wi-Fi details available to the model this turn.")
+                return "Error: could not read Wi-Fi information (system_profiler exited \(run.exitCode))"
+                    + (output.isEmpty ? "." : ".\n\(output)")
+            }
+
+            // The report is verbose — the supported-channel list alone runs to hundreds of
+            // characters — and the interesting part is near the top.
+            let maxOutput = 4000
+            let trimmed = output.count > maxOutput
+                ? String(output.prefix(maxOutput)) + "\n...[Truncated at \(maxOutput) chars]"
+                : output
+            return "Wi-Fi Info:\n\(trimmed)"
         } catch {
-            return "Error getting Wi-Fi info: \(error.localizedDescription)"
+            return "Error: could not read Wi-Fi information — \(error.localizedDescription)"
         }
     }
 }
@@ -216,32 +240,115 @@ struct ManageBluetoothTool: DevgenticTool {
         )
     }
 
-    func call(arguments: Arguments) async throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
 
-        switch arguments.action {
-        case "status", "list_devices":
-            process.arguments = ["SPBluetoothDataType"]
-        default:
+    /// The parts of `system_profiler SPBluetoothDataType -json` these two actions need.
+    ///
+    /// `static` and given its own type so it can be tested without a Bluetooth radio, and so the
+    /// two actions demonstrably read the SAME report rather than each rolling its own parse.
+    struct Report: Equatable {
+        let poweredOn: Bool
+        let discoverable: Bool?
+        let chipset: String?
+        /// Device names, in the order system_profiler reported them.
+        let connected: [String]
+        let paired: [String]
+    }
+
+    /// Returns nil when the payload is not the shape we expect — the caller then degrades to the
+    /// raw report rather than inventing an answer.
+    static func parseReport(_ json: String) -> Report? {
+        guard let data = json.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let entries = root["SPBluetoothDataType"] as? [[String: Any]],
+              let entry = entries.first else { return nil }
+
+        // Values arrive as "attrib_on" / "attrib_off" rather than booleans.
+        func flag(_ raw: Any?) -> Bool? {
+            guard let text = raw as? String else { return nil }
+            if text.hasSuffix("_on") { return true }
+            if text.hasSuffix("_off") { return false }
+            return nil
+        }
+        func names(_ key: String) -> [String] {
+            (entry[key] as? [[String: Any]] ?? []).compactMap { $0.keys.first }
+        }
+
+        let controller = entry["controller_properties"] as? [String: Any] ?? [:]
+        guard let powered = flag(controller["controller_state"]) else { return nil }
+
+        return Report(
+            poweredOn: powered,
+            discoverable: flag(controller["controller_discoverable"]),
+            chipset: controller["controller_chipset"] as? String,
+            connected: names("device_connected"),
+            paired: names("device_not_connected")
+        )
+    }
+
+    func call(arguments: Arguments) async throws -> String {
+        // The two actions produce DIFFERENT answers.
+        //
+        // Until 2026-08-01 they shared a case — `case "status", "list_devices":` — and both
+        // returned the same ~2 KB `system_profiler` text dump. So a model asking "is Bluetooth
+        // on?" received every paired device's address, chipset and service mask, and had to find
+        // the one word it wanted inside it; and the two actions, advertised as "power state" and
+        // "paired devices", were indistinguishable. Not wrong in the way `toggle_do_not_disturb`
+        // was wrong — the answer was in there — but the caller pays a page of context for a fact
+        // that fits in a line.
+        //
+        // `-json` rather than parsing the human report: the keys are stable, `controller_state`
+        // is a single value, and connected/paired devices arrive already separated.
+        guard arguments.action == "status" || arguments.action == "list_devices" else {
             return "Error: Unknown action '\(arguments.action)'. Use status or list_devices."
         }
 
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
+        process.arguments = ["SPBluetoothDataType", "-json"]
 
         do {
-            // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe
-            // only after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
-            let data = Data(try ProcessRunner.run(process).standardOutput.utf8)
-            var output = String(data: data, encoding: .utf8) ?? "No data"
-
-            let maxOutput = 4000
-            if output.count > maxOutput {
-                output = String(output.prefix(maxOutput)) + "\n...[Truncated]"
+            let run = try ProcessRunner.run(process)
+            guard run.succeeded else {
+                let detail = run.standardError.isEmpty ? run.standardOutput : run.standardError
+                logger.error("[BLUETOOTH] system_profiler exited \(run.exitCode) — no Bluetooth information available to the model this turn. \(detail.prefix(200))")
+                return "Error: could not read Bluetooth information (system_profiler exited \(run.exitCode))."
             }
 
-            return "Bluetooth \(arguments.action):\n\(output)"
+            guard let report = Self.parseReport(run.standardOutput) else {
+                // Degrade rather than fail: hand back the raw report so the caller still gets
+                // something, and say the structured read did not work.
+                logger.notice("[BLUETOOTH] could not parse the -json report; returning it raw. The status/list_devices distinction is lost for this call.")
+                let raw = run.standardOutput.prefix(4000)
+                return "Bluetooth \(arguments.action) (unparsed report):\n\(raw)"
+            }
+
+            switch arguments.action {
+            case "status":
+                var lines = ["Bluetooth: \(report.poweredOn ? "On" : "Off")"]
+                if let discoverable = report.discoverable { lines.append("Discoverable: \(discoverable ? "Yes" : "No")") }
+                if let chipset = report.chipset { lines.append("Chipset: \(chipset)") }
+                lines.append("Connected devices: \(report.connected.count)")
+                lines.append("Paired but not connected: \(report.paired.count)")
+                return lines.joined(separator: "\n")
+
+            default:
+                guard !report.connected.isEmpty || !report.paired.isEmpty else {
+                    return "No paired Bluetooth devices."
+                }
+                var out = ""
+                if !report.connected.isEmpty {
+                    out += "Connected (\(report.connected.count)):\n"
+                    out += report.connected.map { "  - \($0)" }.joined(separator: "\n")
+                }
+                if !report.paired.isEmpty {
+                    if !out.isEmpty { out += "\n\n" }
+                    out += "Paired, not connected (\(report.paired.count)):\n"
+                    out += report.paired.map { "  - \($0)" }.joined(separator: "\n")
+                }
+                return out
+            }
         } catch {
-            return "Error: \(error.localizedDescription)"
+            return "Error: could not read Bluetooth information — \(error.localizedDescription)"
         }
     }
 }

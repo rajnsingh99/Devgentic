@@ -5,6 +5,9 @@
 
 import Foundation
 import CommonCrypto
+import os
+
+private let logger = DGLogger(category: "FileUtilityTools")
 
 // MARK: - Grep Files Tool
 
@@ -75,9 +78,22 @@ struct GrepFilesTool: DevgenticTool {
     func call(arguments: Arguments) async throws -> String {
         let expandedPath = (arguments.path as NSString).expandingTildeInPath
 
-        var grepArgs = ["-rn", "--include=*"]
+        // `-E` — POSIX EXTENDED regex, not grep's default BASIC regex.
+        //
+        // This tool's description and its schema both promise "regex patterns", and a model
+        // writes the dialect every sibling here speaks: `code_search` and the three
+        // `code_search_*` splits run ripgrep, whose syntax is extended. Under BRE the ordinary
+        // metacharacters `+ ? | ( )` are LITERALS and `\(` opens a GROUP — the exact inversion —
+        // so `func [a-z]*\(` matched nothing and this tool answered "No matches found for …".
+        //
+        // That is the failure worth naming: not an error, an authoritative-sounding FALSE
+        // NEGATIVE. An agent asked to find every call site is told there are none, and has no
+        // signal that its pattern was reinterpreted. Same shape as the unindexed-scope miss
+        // `fs_smart_search` grew a filesystem fallback to avoid. `find_definition`'s grep
+        // fallback already passes `-E`; this puts the two in agreement.
+        var grepArgs = ["-rnE", "--include=*"]
         if let ext = arguments.file_extension {
-            grepArgs = ["-rn", "--include=*.\(ext)"]
+            grepArgs = ["-rnE", "--include=*.\(ext)"]
         }
         // `--` ends option parsing: without it a model-supplied `pattern` beginning with `-`
         // is read by grep as a flag, and `-f <path>` makes grep take its pattern list from an
@@ -109,7 +125,7 @@ struct GrepFilesTool: DevgenticTool {
 
             return "\(result)"
         } catch {
-            return "Grep error: \(error.localizedDescription)"
+            return "Error: grep failed — \(error.localizedDescription)"
         }
     }
 }
@@ -147,8 +163,37 @@ struct DiffFilesTool: DevgenticTool {
         do {
             // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe
             // only after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
-            let output = try ProcessRunner.run(process).standardOutput
+            let run = try ProcessRunner.run(process)
 
+            // `diff`'s exit status is a THREE-way answer, not a success flag:
+            //   0 — the files are the same        1 — they differ        2 — trouble
+            // where trouble is a missing, unreadable or otherwise unusable operand, reported on
+            // STDERR with stdout left EMPTY.
+            //
+            // Reading only stdout collapsed 0 and 2 into the same empty string, so comparing a
+            // file against a path that does not exist returned "Files are identical." — the tool
+            // asserting two files match when one of them is not there, with the reason sitting
+            // unread on the other stream. An agent that mistypes a path is told its comparison
+            // SUCCEEDED and found no differences, which is worse than any error.
+            //
+            // Same class as the stdout-only reads already corrected in `preview_file`,
+            // `dns_lookup`, `get_wifi_info` and `run_mac_shortcut`. `-1` is `ProcessRunner`'s
+            // sentinel for a child that never reaped, so it is trouble too.
+            guard run.exitCode == 0 || run.exitCode == 1 else {
+                let detail = (run.standardError.isEmpty ? run.standardOutput : run.standardError)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                logger.error("""
+                    [DIFF] diff exited \(run.exitCode) comparing '\(pathA)' and '\(pathB)' — \
+                    an operand is missing or unreadable. Reported to the model as a failure \
+                    rather than as "Files are identical.", which is what the previous \
+                    stdout-only read returned. Detail: \(detail.isEmpty ? "(silent)" : detail)
+                    """)
+                return "Error: could not compare '\(arguments.file_a)' and '\(arguments.file_b)' "
+                    + "(diff exit \(run.exitCode))\n"
+                    + (detail.isEmpty ? "diff reported no reason." : detail)
+            }
+
+            let output = run.standardOutput
             if output.isEmpty {
                 return "Files are identical."
             }
@@ -157,7 +202,11 @@ struct DiffFilesTool: DevgenticTool {
             let truncated = output.count > maxOutput ? String(output.prefix(maxOutput)) + "\n...[Truncated]" : output
             return "Diff:\n\(truncated)"
         } catch {
-            return "Diff error: \(error.localizedDescription)"
+            // "Error:"-prefixed so `ToolExecutionMediator.isSemanticFailure` classifies it. The
+            // previous "Diff error:" missed by one word — the sniffer tests `hasPrefix("error")`
+            // — so a diff that failed to launch was recorded as a successful comparison. Exactly
+            // the bug `git_tool` had.
+            return "Error: diff failed — \(error.localizedDescription)"
         }
     }
 }

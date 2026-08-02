@@ -27,14 +27,32 @@ final class MCPToolItem {
     /// JSON-encoded `ServerDefinition`.
     var mcpConfigData: Data?
 
+    /// Whether Devgentic may connect to this server.
+    ///
+    /// A disabled server keeps its full configuration and Keychain secrets but is never
+    /// connected and contributes no tools. Before this existed the only way to stop using a
+    /// server was to DELETE it — which purged its credentials and revoked its OAuth grant,
+    /// so "pause this for a bit" meant setting the whole thing up again afterwards.
+    ///
+    /// Defaults to `true` so every server persisted before the flag existed keeps working
+    /// exactly as it did (SwiftData lightweight migration fills the default).
+    var isEnabled: Bool = true
+
     /// Child tool definitions — cascade-deleted when the item is removed.
     @Relationship(deleteRule: .cascade, inverse: \MCPToolDefinitionModel.toolItem)
     var tools: [MCPToolDefinitionModel]
 
-    init(id: UUID = UUID(), serverName: String, mcpConfigData: Data? = nil, tools: [MCPToolDefinitionModel] = []) {
+    init(
+        id: UUID = UUID(),
+        serverName: String,
+        mcpConfigData: Data? = nil,
+        isEnabled: Bool = true,
+        tools: [MCPToolDefinitionModel] = []
+    ) {
         self.id = id
         self.serverName = serverName
         self.mcpConfigData = mcpConfigData
+        self.isEnabled = isEnabled
         self.tools = tools
     }
 }
@@ -130,7 +148,8 @@ extension MCPToolItem {
             type: .mcp,
             serverName: serverName,
             tools: mappedTools,
-            serverDefinition: serverDefinition
+            serverDefinition: serverDefinition,
+            isEnabled: isEnabled
         )
     }
 }

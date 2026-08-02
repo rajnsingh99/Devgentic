@@ -67,12 +67,22 @@ final class DestructiveActionSplitTests: XCTestCase {
     /// A security fix that breaks the tool is not a fix. `list_top` is the whole remaining job of
     /// `manage_processes`, and it must still run — including when `action` is omitted entirely,
     /// since it is now the only thing the tool does.
+    ///
+    /// Asserts the CONTENT rather than a caption. This previously pinned `hasPrefix("Result:")`,
+    /// which broke when the caption changed for an unrelated reason (2026-07-31: the tool stopped
+    /// piping `ps` through `sort | head`, because `sort` was ordering the column header in with
+    /// the data and `head` then cutting it — so the model received four unlabelled numeric
+    /// columns and could not tell %CPU from %MEM). The labelled header is the thing worth
+    /// pinning, so this now checks for it.
     func testManageProcessesStillListsProcesses() async throws {
         for payload in [["action": "list_top"], [:]] {
             let json = try JSONEncoder().encode(payload)
             let args = try JSONDecoder().decode(ManageProcessesTool.Arguments.self, from: json)
             let out = try await ManageProcessesTool().call(arguments: args)
-            XCTAssertTrue(out.hasPrefix("Result:"), "listing must still work for \(payload): \(out)")
+
+            XCTAssertFalse(out.hasPrefix("Error"), "listing must still work for \(payload): \(out)")
+            XCTAssertTrue(out.contains("PID"), "the column header must survive for \(payload): \(out)")
+            XCTAssertTrue(out.contains("%CPU"), "an unlabelled %CPU column cannot be told from %MEM: \(out)")
         }
     }
 

@@ -121,6 +121,9 @@ final class CodeSessionManager {
         if let restored = projectPath {
             rememberRecentPath(restored)
             bootstrapProjectMemory()
+            // Restored across launches — publish it too, or the roots list would only be
+            // populated by an explicit folder change during the session.
+            Task { await MCPRootsProvider.setCodeProjectRoot(restored) }
         }
     }
 
@@ -234,6 +237,11 @@ final class CodeSessionManager {
     func updateProjectPath(_ url: URL) {
         self.projectPath = url
         logger.info("Project path updated to \(url.path)")
+
+        // Publish as an MCP root so filesystem-shaped servers get a workspace boundary
+        // instead of an empty `roots/list`. Connected servers are notified immediately, so
+        // switching project re-scopes them without a reconnect.
+        Task { await MCPRootsProvider.setCodeProjectRoot(url) }
 
         // Update the profile if it exists
         if let profileID = codeProfileID,

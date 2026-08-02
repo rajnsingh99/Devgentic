@@ -205,7 +205,7 @@ struct ActivityBarView: View {
     @Binding var isSidebarVisible: Bool
     @Environment(\.appTheme) private var theme
 
-    private let topTabs: [SidebarTab] = [.conversations, .explorer, .promptLibrary, .scheduler, .backendProfiles, .downloads]
+    private let topTabs: [SidebarTab] = [.conversations, .explorer, .promptLibrary, .scheduler, .backendProfiles, .tools, .downloads]
     private let bottomTabs: [SidebarTab] = [.settings]
 
     var body: some View {

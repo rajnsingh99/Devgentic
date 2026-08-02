@@ -60,6 +60,85 @@ struct ToolParameters: Codable, Hashable {
     let required: [String]
 }
 
+// MARK: - Lenient JSON Schema decoding
+
+// These two types model the narrow JSON-Schema subset the *local* tools use. MCP
+// servers emit arbitrary JSON Schema, and decoding it strictly used to throw for
+// perfectly ordinary shapes:
+//
+//   • no `required` key at all (a tool where every argument is optional)
+//   • `"type": ["string", "null"]` — the nullable-union form
+//   • `"items": { "type": "object", "properties": {...} }` — arrays of objects
+//   • a property carrying only `enum` / `oneOf` / `$ref` and no `type`
+//
+// `MCPClientService.listTools` `compactMap`s on that throw, so each one silently
+// removed a tool from the server's advertised list. The user saw a server that
+// connected successfully and exposed a subset of its tools, with nothing in the UI
+// to say why. Decode leniently instead — fall back to a usable default per field
+// rather than discarding the whole tool.
+//
+// Both inits live in extensions on purpose: declaring `init(from:)` inside the
+// struct body would suppress the compiler-synthesized memberwise init, which the
+// local tools use to build their schemas by hand.
+
+extension ToolParameters {
+
+    private enum LenientKeys: String, CodingKey {
+        case type, properties, required
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: LenientKeys.self)
+        // A schema that omits `type` is an object schema by convention.
+        self.type = (try? container.decode(String.self, forKey: .type)) ?? "object"
+        self.properties = (try? container.decode([String: ToolParameterProperty].self, forKey: .properties)) ?? [:]
+        // Absent `required` means "nothing is required" — not "this tool is invalid".
+        self.required = (try? container.decode([String].self, forKey: .required)) ?? []
+    }
+}
+
+extension ToolParameterProperty {
+
+    private enum LenientKeys: String, CodingKey {
+        case type, description, items
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: LenientKeys.self)
+
+        // `type` may be a plain string, a union array (`["string","null"]`), or absent
+        // when the property is described only by `enum` / `oneOf` / `$ref`. Take the
+        // first meaningful entry of a union; fall back to "string", which is the
+        // safest thing to advertise to a model when the server did not say.
+        if let single = try? container.decode(String.self, forKey: .type) {
+            self.type = single
+        } else if let union = try? container.decode([String].self, forKey: .type),
+                  let first = union.first(where: { $0 != "null" }) ?? union.first {
+            self.type = first
+        } else {
+            self.type = "string"
+        }
+
+        self.description = try? container.decode(String.self, forKey: .description)
+
+        // `items` is modelled as [String: String] for the local tools. A server may
+        // send a nested object schema there; keep the string-valued entries (which
+        // carries the important `type`) and drop the nested structure rather than
+        // failing. Lossy but non-destructive — see ToolDefinition.parameters callers.
+        if let flat = try? container.decode([String: String].self, forKey: .items) {
+            self.items = flat
+        } else if let rich = try? container.decode([String: JSONValue].self, forKey: .items) {
+            let flattened = rich.compactMapValues { value -> String? in
+                if case .string(let s) = value { return s }
+                return nil
+            }
+            self.items = flattened.isEmpty ? nil : flattened
+        } else {
+            self.items = nil
+        }
+    }
+}
+
 /// A generic representation of a single tool's complete definition, regardless of its source.
 /// This includes its name, description, and the all-important parameter schema.
 struct ToolDefinition: Identifiable, Hashable, Codable {
@@ -89,13 +168,24 @@ enum ToolSourceType: Hashable, Codable {
 /// A unified structure representing a source of tools, which can be either the
 /// built-in local tools or a configured remote MCP server.
 struct ToolSource: Identifiable, Hashable {
+
+    /// The fixed identity of the built-in tool catalogue.
+    ///
+    /// Anything whose `sourceId` is NOT this belongs to an MCP server. Tool dispatch
+    /// keys off that distinction, so the literal must not be re-spelled at each site.
+    static let builtInSourceID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+
     let id: UUID
     let type: ToolSourceType
     let serverName: String // For local, this is "Built-in Tools"
     let tools: [ToolDefinition]
-    
+
     // This is optional because local tools don't have a server definition.
     let serverDefinition: ServerDefinition?
+
+    /// Whether Devgentic may connect to this server. Always `true` for the built-in
+    /// catalogue, which has nothing to connect to.
+    var isEnabled: Bool = true
 }
 
 /// A universal protocol for any tool that the Swift client application can run directly.
@@ -139,6 +229,41 @@ struct MCPConfiguration: Codable {
 ///   token / key / OAuth bundle lives in Keychain under the matching scope.
 ///
 /// Callers materialize secrets at use time via `MCPRuntimeSecrets.materialize(...)`.
+/// How Devgentic talks to a REMOTE MCP server.
+///
+/// Remote servers were always constructed with SSE streaming on, which is correct for the
+/// current Streamable HTTP standard but leaves no recourse for a server that does not
+/// implement the SSE GET stream — those servers just failed to connect with no way to
+/// influence it. This is the escape hatch.
+enum MCPTransportMode: String, Codable, Hashable, CaseIterable, Identifiable {
+    /// Streamable HTTP with an SSE stream for server→client push. The current standard and
+    /// the right default: server-initiated notifications (`tools/list_changed`, logging,
+    /// sampling, elicitation) only arrive over this.
+    case streamableHTTP
+
+    /// Plain HTTP request/response, no SSE stream. Compatible with servers that only
+    /// implement POST, at the cost of every server-initiated feature.
+    case httpNoStreaming
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .streamableHTTP:  return "Streamable HTTP (recommended)"
+        case .httpNoStreaming: return "HTTP request/response only"
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .streamableHTTP:
+            return "Standard transport. Required for server-initiated features: live tool-list updates, server logs, sampling and elicitation."
+        case .httpNoStreaming:
+            return "Use only if the server does not support the SSE stream. Server-initiated features will not work."
+        }
+    }
+}
+
 struct ServerDefinition: Codable, Hashable {
     // Properties for Local Process
     let command: String?
@@ -156,18 +281,25 @@ struct ServerDefinition: Codable, Hashable {
     /// and for legacy data prior to the secrets migration.
     let auth: MCPAuthenticationScheme
 
+    /// Remote transport selection. Ignored for local-process servers, which are always
+    /// stdio. Defaults to the standard for new entries and for anything persisted before
+    /// the setting existed.
+    let transport: MCPTransportMode
+
     init(
         command: String? = nil,
         args: [String]? = nil,
         envKeys: [String]? = nil,
         url: String? = nil,
-        auth: MCPAuthenticationScheme = .none
+        auth: MCPAuthenticationScheme = .none,
+        transport: MCPTransportMode = .streamableHTTP
     ) {
         self.command = command
         self.args = args
         self.envKeys = envKeys
         self.url = url
         self.auth = auth
+        self.transport = transport
     }
 
     // MARK: - Codable (forward-compatible)
@@ -176,7 +308,7 @@ struct ServerDefinition: Codable, Hashable {
     /// `auth = .none`. Migration takes care of promoting legacy `authentication`
     /// payloads up-front; this just guards against any blob that slips through.
     private enum CodingKeys: String, CodingKey {
-        case command, args, envKeys, url, auth
+        case command, args, envKeys, url, auth, transport
     }
 
     init(from decoder: Decoder) throws {
@@ -186,6 +318,9 @@ struct ServerDefinition: Codable, Hashable {
         self.envKeys = try container.decodeIfPresent([String].self, forKey: .envKeys)
         self.url = try container.decodeIfPresent(String.self, forKey: .url)
         self.auth = try container.decodeIfPresent(MCPAuthenticationScheme.self, forKey: .auth) ?? .none
+        // Absent for every server saved before the transport picker existed — those were
+        // all streaming, so that is the correct default rather than a guess.
+        self.transport = try container.decodeIfPresent(MCPTransportMode.self, forKey: .transport) ?? .streamableHTTP
     }
 
     func encode(to encoder: Encoder) throws {
@@ -195,6 +330,7 @@ struct ServerDefinition: Codable, Hashable {
         try container.encodeIfPresent(envKeys, forKey: .envKeys)
         try container.encodeIfPresent(url, forKey: .url)
         try container.encode(auth, forKey: .auth)
+        try container.encode(transport, forKey: .transport)
     }
 }
 
@@ -283,6 +419,13 @@ enum MCPManagerError: LocalizedError {
     case connectionFailed(Error)
     case authenticationFailed(String)
     case processFailedToStart(String)
+
+    /// The server ran the tool and the tool itself reported failure (`isError: true`
+    /// on the `tools/call` result). This is a *tool* failure, not a *transport*
+    /// failure: the session is healthy and must not be torn down. `DynamicMCPTool`
+    /// keys its reconnect decision off this distinction.
+    case toolReportedFailure(tool: String, detail: String)
+
     case unknown
 
     var errorDescription: String? {
@@ -303,6 +446,8 @@ enum MCPManagerError: LocalizedError {
             return "Authentication failed: \(reason)"
         case .processFailedToStart(let details):
             return "The server process failed to start. Details:\n\(details)"
+        case .toolReportedFailure(let tool, let detail):
+            return "Tool '\(tool)' failed: \(detail)"
         case .unknown:
             return "An unexpected error occurred."
         }

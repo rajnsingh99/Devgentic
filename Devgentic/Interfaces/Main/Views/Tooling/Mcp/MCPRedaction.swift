@@ -107,7 +107,97 @@ enum MCPRedaction {
             }
         }
 
+        components.path = redactSecretPathSegments(components.path)
+
         return components.string ?? url
+    }
+
+    /// Replaces path segments that look like credentials.
+    ///
+    /// Userinfo and query params used to be the only things stripped, which missed the
+    /// shape hosted MCP providers actually use: the key sits IN THE PATH, as in
+    /// `https://mcp.example.com/v1/sk-live-abc123.../sse`. Those URLs are logged on every
+    /// connect and shipped in bug reports, so the key travelled with them.
+    ///
+    /// Structural, not a keyword match — a segment is suspicious when it carries a known
+    /// token prefix, or when it is long and high-entropy enough that no human named a path
+    /// that. Ordinary segments (`v1`, `sse`, `mcp`, `messages`) are left readable, because
+    /// a redacted-to-uselessness URL defeats the point of logging it.
+    private static func redactSecretPathSegments(_ path: String) -> String {
+        guard !path.isEmpty else { return path }
+
+        let knownTokenPrefixes = ["sk-", "pk-", "tok-", "key-", "ghp_", "gho_", "github_pat_", "xoxb-", "xoxp-"]
+
+        return path
+            .split(separator: "/", omittingEmptySubsequences: false)
+            .map { segment -> String in
+                let value = String(segment)
+                guard !value.isEmpty else { return value }
+
+                let lower = value.lowercased()
+                if knownTokenPrefixes.contains(where: lower.hasPrefix) {
+                    return redactedPlaceholder
+                }
+                return looksLikeHighEntropySecret(value) ? redactedPlaceholder : value
+            }
+            .joined(separator: "/")
+    }
+
+    /// A long, mixed-character, non-word-like blob — UUIDs, base64url keys, hex digests.
+    /// The 24-char floor keeps normal path words (and short IDs a user may need to see)
+    /// out of scope; a real API key clears it comfortably.
+    private static func looksLikeHighEntropySecret(_ value: String) -> Bool {
+        guard value.count >= 24 else { return false }
+
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        guard value.unicodeScalars.allSatisfy(allowed.contains) else { return false }
+
+        let hasDigit = value.contains(where: \.isNumber)
+        let hasLetter = value.contains(where: \.isLetter)
+        // A long run of only letters is far more likely a slug than a secret.
+        return hasDigit && hasLetter
+    }
+
+    /// Redacts secrets in FREE TEXT — child-process stderr, error messages, anything with
+    /// no known structure.
+    ///
+    /// Callers used to reach for `redact(url:)` for this, which is a shape mismatch:
+    /// `URLComponents(string:)` fails to parse a line of stderr, so the function returned
+    /// the input verbatim and the text was effectively unredacted. MCP server CLIs
+    /// routinely echo their configuration — including keys — to stderr on a failed start,
+    /// and that string is stored in `connectionState`, shown in the UI, and bundled into
+    /// bug reports.
+    ///
+    /// Four shapes are handled, in order: bare token literals with a well-known prefix,
+    /// `Header: value` auth lines, `KEY=VALUE` assignments, and `"key": "value"` JSON.
+    static func redact(text: String) -> String {
+        var result = text
+
+        // 1. Well-known token literals, wherever they appear.
+        let tokenLiteral = "(sk-|pk-|tok-|ghp_|gho_|ghu_|ghs_|github_pat_|xoxb-|xoxp-|xapp-|AKIA)[A-Za-z0-9_\\-]{8,}"
+        result = replacing(pattern: tokenLiteral, in: result, with: redactedPlaceholder)
+
+        // 2. `Authorization: Bearer xyz`, `X-API-Key: xyz`, etc. Keep the header name.
+        //    Consumes to end of LINE, not just the next word: `\S+` would stop at the space
+        //    after `Bearer` and leave the token itself in the string.
+        let headerAssignment = "(?i)\\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key)\\s*:\\s*.+"
+        result = replacing(pattern: headerAssignment, in: result, with: "$1: \(redactedPlaceholder)")
+
+        // 3. `SOMETHING_TOKEN=value` / `--api-key=value`. Keep the name.
+        let envAssignment = "(?i)([A-Za-z0-9_\\-\\.]*(key|token|secret|password|passwd|credential|creds|bearer)[A-Za-z0-9_\\-\\.]*)\\s*=\\s*\\S+"
+        result = replacing(pattern: envAssignment, in: result, with: "$1=\(redactedPlaceholder)")
+
+        // 4. `"apiKey": "value"` in embedded JSON. Keep the key.
+        let jsonAssignment = "(?i)(\"[A-Za-z0-9_\\-\\.]*(?:key|token|secret|password|credential|bearer)[A-Za-z0-9_\\-\\.]*\"\\s*:\\s*)\"[^\"]*\""
+        result = replacing(pattern: jsonAssignment, in: result, with: "$1\"\(redactedPlaceholder)\"")
+
+        return result
+    }
+
+    private static func replacing(pattern: String, in input: String, with template: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return input }
+        let range = NSRange(input.startIndex..., in: input)
+        return regex.stringByReplacingMatches(in: input, range: range, withTemplate: template)
     }
 
     // MARK: - Heuristics

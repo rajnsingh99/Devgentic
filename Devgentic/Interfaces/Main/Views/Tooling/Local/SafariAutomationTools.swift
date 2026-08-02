@@ -116,7 +116,7 @@ struct ManageSafariTabsTool: DevgenticTool {
             let desc = scriptObj?.executeAndReturnError(&errorInfo)
 
             if let err = errorInfo {
-                return "AppleScript Error: \(err)"
+                return "Error: AppleScript failed — \(err)"
             }
 
             let output = desc?.stringValue ?? "Success"
@@ -210,42 +210,63 @@ struct ExtractSafariReaderViewTool: DevgenticTool {
             let desc = scriptObj?.executeAndReturnError(&errorInfo)
 
             if let err = errorInfo {
-                return "AppleScript Error: \(err)"
+                return "Error: AppleScript failed — \(err)"
             }
 
             let output = desc?.stringValue ?? "No content found"
-            let startOffset = arguments.offset ?? 0
-            let maxLen = arguments.limit ?? 5000
-            let totalLen = output.count
-
-            // ⚠️ Both are model-supplied Ints and both reach `String.index(_:offsetBy:)`, which
-            // TRAPS — a hard crash, not a thrown error — on a negative distance. The existing
-            // `startOffset < totalLen` guard passes happily for -1. Rejected rather than clamped
-            // so a model that miscalculated an offset is told, instead of silently receiving a
-            // different chunk than it asked for and paginating from the wrong place.
-            guard startOffset >= 0 else {
-                return "Error: 'offset' must be 0 or greater (got \(startOffset))."
-            }
-            guard maxLen > 0 else {
-                return "Error: 'limit' must be greater than 0 (got \(maxLen))."
-            }
-
-            guard startOffset < totalLen else {
-                return "Offset \(startOffset) exceeds content length \(totalLen)."
-            }
-
-            let startIdx = output.index(output.startIndex, offsetBy: startOffset)
-            let endIdx = output.index(startIdx, offsetBy: min(maxLen, totalLen - startOffset))
-            let chunk = String(output[startIdx..<endIdx])
-            let hasMore = (startOffset + maxLen) < totalLen
-
-            var result = chunk
-            result += "\n\n[Total: \(totalLen) chars | Showing: \(startOffset)–\(startOffset + chunk.count)]"
-            if hasMore {
-                result += "\n[More content available — use offset: \(startOffset + chunk.count)]"
-            }
-
-            return result
+            return Self.paginate(output, offset: arguments.offset, limit: arguments.limit)
         }
+    }
+
+    /// Slices `text` for one page of output.
+    ///
+    /// Extracted and made `static` so the guards below can be tested. In place they sat AFTER the
+    /// AppleScript ran, so exercising them meant driving Safari — which is why the crash they
+    /// prevent went unnoticed in the first place.
+    ///
+    /// ⚠️ `offset` and `limit` are model-supplied Ints and both reach
+    /// `String.index(_:offsetBy:)`, which TRAPS — a hard crash, not a thrown error — on a
+    /// negative distance. The natural `startOffset < totalLen` bound passes happily for -1.
+    /// Rejected rather than clamped, so a model that miscalculated is told, rather than silently
+    /// receiving a different chunk than it asked for and paginating on from the wrong place.
+    static func paginate(_ text: String, offset: Int?, limit: Int?) -> String {
+        let startOffset = offset ?? 0
+        let maxLen = limit ?? 5000
+        let totalLen = text.count
+
+        guard startOffset >= 0 else {
+            return "Error: 'offset' must be 0 or greater (got \(startOffset))."
+        }
+        guard maxLen > 0 else {
+            return "Error: 'limit' must be greater than 0 (got \(maxLen))."
+        }
+        guard startOffset < totalLen else {
+            return "Offset \(startOffset) exceeds content length \(totalLen)."
+        }
+
+        let startIdx = text.index(text.startIndex, offsetBy: startOffset)
+        let endIdx = text.index(startIdx, offsetBy: min(maxLen, totalLen - startOffset))
+        let chunk = String(text[startIdx..<endIdx])
+
+        // `startOffset + chunk.count`, NOT `startOffset + maxLen`.
+        //
+        // The two are equivalent whenever the sum is representable — but `maxLen` is a
+        // model-supplied Int with no upper bound, and `startOffset + maxLen` OVERFLOWS for a
+        // large `limit`, which in Swift is a TRAP: the process dies. Every guard above passes
+        // first (`offset` is valid, `limit` is positive, `offset` is inside the text), and the
+        // slice itself is safe because `min` clamps it — so the crash lands on the one line that
+        // looked like bookkeeping. `limit: 9223372036854775807` is a perfectly ordinary thing for
+        // a model to emit when it means "the rest of it".
+        //
+        // `chunk.count` is bounded by `totalLen` by construction, so this cannot overflow, and it
+        // is the more direct statement anyway: is there anything past what we just returned?
+        let hasMore = (startOffset + chunk.count) < totalLen
+
+        var result = chunk
+        result += "\n\n[Total: \(totalLen) chars | Showing: \(startOffset)–\(startOffset + chunk.count)]"
+        if hasMore {
+            result += "\n[More content available — use offset: \(startOffset + chunk.count)]"
+        }
+        return result
     }
 }

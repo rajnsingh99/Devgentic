@@ -29,6 +29,10 @@ enum MCPOAuthDiscoveryError: LocalizedError {
     case malformedResponse(String)
     case unsupportedServer(String)
     case transport(Error)
+    /// RFC 8414 §3.3 — the `issuer` in the document must equal the issuer we asked.
+    case issuerMismatch(requested: String, returned: String)
+    /// An endpoint inside the metadata document is not HTTPS.
+    case insecureEndpoint(name: String, url: String)
 
     var errorDescription: String? {
         switch self {
@@ -38,6 +42,10 @@ enum MCPOAuthDiscoveryError: LocalizedError {
         case .malformedResponse(let s):   return "Discovery response was not valid metadata: \(s)"
         case .unsupportedServer(let s):   return "Authorization server doesn't support the desktop PKCE flow: \(s)"
         case .transport(let err):         return "Discovery transport failed: \(err.localizedDescription)"
+        case .issuerMismatch(let requested, let returned):
+            return "Authorization server identity mismatch: asked '\(requested)', document claims '\(returned)'. Refusing to continue."
+        case .insecureEndpoint(let name, let url):
+            return "Authorization server advertised a non-HTTPS \(name) (\(url)). Refusing to send credentials over it."
         }
     }
 }
@@ -61,7 +69,7 @@ struct MCPOAuthDiscovery {
         // structurally wrong with the URL.
         for url in [oauthPath, oidcPath] {
             do {
-                if let metadata = try await fetch(from: url, session: session) {
+                if let metadata = try await fetch(from: url, expectedIssuer: issuer, session: session) {
                     return metadata
                 }
             } catch MCPOAuthDiscoveryError.http(status: 404, body: _) {
@@ -77,12 +85,12 @@ struct MCPOAuthDiscovery {
     static func fetch(issuer: URL, session: URLSession = .shared) async throws -> MCPOAuthMetadata {
         try validate(issuer: issuer)
         let url = issuer.appendingPathComponent(".well-known/oauth-authorization-server")
-        if let m = try await fetch(from: url, session: session) {
+        if let m = try await fetch(from: url, expectedIssuer: issuer, session: session) {
             return m
         }
         // Fallback to OIDC.
         let oidc = issuer.appendingPathComponent(".well-known/openid-configuration")
-        if let m = try await fetch(from: oidc, session: session) {
+        if let m = try await fetch(from: oidc, expectedIssuer: issuer, session: session) {
             return m
         }
         throw MCPOAuthDiscoveryError.malformedResponse("No metadata found at \(url.absoluteString) or OIDC fallback.")
@@ -92,7 +100,11 @@ struct MCPOAuthDiscovery {
 
     /// Single-URL fetch + decode. Returns nil only on 404 (metadata not at
     /// this path). Other HTTP failures throw.
-    private static func fetch(from url: URL, session: URLSession) async throws -> MCPOAuthMetadata? {
+    private static func fetch(
+        from url: URL,
+        expectedIssuer: URL,
+        session: URLSession
+    ) async throws -> MCPOAuthMetadata? {
         var req = URLRequest(url: url)
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         // 8 seconds is enough for any reasonable AS — too long becomes a
@@ -121,6 +133,16 @@ struct MCPOAuthDiscovery {
 
         do {
             let metadata = try JSONDecoder().decode(MCPOAuthMetadata.self, from: data)
+
+            // Validate the CONTENTS of the document, not just the URL we fetched it from.
+            // Until 2026-08-01 nothing checked these: `validate(issuer:)` vetted the input
+            // URL's scheme and then every endpoint inside the response was trusted verbatim.
+            // `MCPOAuthTokenExchange.postForm` even documented the opposite ("discovery
+            // already validated this, so we don't re-check here"), so a document advertising
+            // `"token_endpoint": "http://attacker.example/collect"` would have received the
+            // authorization code AND the PKCE verifier in clear text.
+            try validateDocument(metadata, requestedIssuer: expectedIssuer)
+
             // Reject up-front rather than letting the caller try authorize
             // and fail with a confusing error.
             guard metadata.supportsDesktopPKCEFlow else {
@@ -135,6 +157,51 @@ struct MCPOAuthDiscovery {
         } catch {
             throw MCPOAuthDiscoveryError.malformedResponse(error.localizedDescription)
         }
+    }
+
+    /// RFC 8414 §3.3 identity check plus a transport check on every advertised endpoint.
+    ///
+    /// Deliberately does NOT require endpoints to share the issuer's host: that is not a
+    /// spec requirement and would break real providers (Google issues from
+    /// `accounts.google.com` but serves tokens from `oauth2.googleapis.com`). The issuer
+    /// match pins WHO the document speaks for, and HTTPS pins the channel — together those
+    /// are what stop an endpoint from being redirected to an attacker.
+    private static func validateDocument(_ metadata: MCPOAuthMetadata, requestedIssuer: URL) throws {
+        // Compare on a normalized form: a trailing slash is not an identity difference,
+        // and comparing raw strings would reject correct servers.
+        func normalized(_ url: URL) -> String {
+            var s = url.absoluteString.lowercased()
+            while s.hasSuffix("/") { s.removeLast() }
+            return s
+        }
+
+        guard normalized(metadata.issuer) == normalized(requestedIssuer) else {
+            throw MCPOAuthDiscoveryError.issuerMismatch(
+                requested: requestedIssuer.absoluteString,
+                returned: metadata.issuer.absoluteString
+            )
+        }
+
+        let endpoints: [(String, URL?)] = [
+            ("authorization_endpoint", metadata.authorizationEndpoint),
+            ("token_endpoint", metadata.tokenEndpoint),
+            ("registration_endpoint", metadata.registrationEndpoint),
+            ("revocation_endpoint", metadata.revocationEndpoint),
+        ]
+        for (name, endpoint) in endpoints {
+            guard let endpoint else { continue }
+            guard isSecureEndpoint(endpoint) else {
+                throw MCPOAuthDiscoveryError.insecureEndpoint(name: name, url: endpoint.absoluteString)
+            }
+        }
+    }
+
+    /// HTTPS, or plain HTTP on loopback for local development (RFC 8252 §7.3).
+    private static func isSecureEndpoint(_ url: URL) -> Bool {
+        let scheme = url.scheme?.lowercased()
+        if scheme == "https" { return true }
+        let host = url.host?.lowercased() ?? ""
+        return scheme == "http" && (host == "localhost" || host == "127.0.0.1" || host == "::1")
     }
 
     /// Refuse non-HTTPS issuers in production. `localhost` / `127.0.0.1` are

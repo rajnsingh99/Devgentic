@@ -7,6 +7,9 @@
 //
 
 import Foundation
+import os
+
+private let logger = DGLogger(category: "NativeFileSystemTools")
 
 // MARK: - List Directory Tool
 
@@ -167,15 +170,58 @@ struct ReadFileTool: DevgenticTool {
         )
     }
     
+    /// Ceiling on the plain-text branch, matching the `maxSize` the document extractors are given.
+    ///
+    /// The document path has always capped at 500 KB and set `wasTruncated`; the plain-text path
+    /// had NO limit, so `read_file` on an 8 MB log returned 8,100,099 characters as one String —
+    /// held in memory, handed to the executor, and pushed at the model's context. Two branches of
+    /// one tool must not disagree about how much a caller can be given.
+    static let maxPlainTextCharacters = 500_000
+
     func call(arguments: Arguments) async throws -> String {
         // Expand ~ and anchor relative paths to HOME (see FilePathResolver).
         let resolvedPath = FilePathResolver.resolve(arguments.path)
         let url = URL(fileURLWithPath: resolvedPath)
 
-        guard FileManager.default.fileExists(atPath: resolvedPath) else {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: resolvedPath, isDirectory: &isDirectory) else {
             // Bare error; `ToolExecutionMediator` enriches this via `ToolRecoveryHints`
             // using only tools that are actually available in the current request.
             return "Error: File not found at '\(resolvedPath)'"
+        }
+
+        // Named as a directory rather than left to Foundation. `String(contentsOfFile:)` on a
+        // folder fails with "The file “x” couldn’t be opened", which is the same shape as an
+        // unreadable file — so the model could not tell it had passed a directory, and would
+        // retry the identical path.
+        guard !isDirectory.boolValue else {
+            return "Error: '\(resolvedPath)' is a directory, not a file. "
+                + "Use list_directory to see what is inside it."
+        }
+
+        // Everything below this point assumes a file that ENDS. A working tree contains things
+        // that do not: a FIFO with no writer blocks in `read(2)` forever — and nothing upstream
+        // can rescue that, because the executor's per-tool timeout cannot interrupt a blocking
+        // syscall (the same structural problem as `execute_shell`'s hang), so one named pipe
+        // anywhere the agent looks wedges the entire run. A character device such as `/dev/zero`
+        // is the opposite failure: it always returns bytes and never reaches EOF, growing the
+        // String until the process dies.
+        //
+        // Checking the TYPE rather than adding a timeout makes both unreachable instead of
+        // survivable. `stat` and not `lstat`, so a symlink to a real file still reads normally —
+        // symlinks are ordinary in a source tree and following them is correct.
+        var info = stat()
+        if stat(resolvedPath, &info) == 0, (info.st_mode & S_IFMT) != S_IFREG {
+            let kind: String
+            switch info.st_mode & S_IFMT {
+            case S_IFIFO: kind = "a named pipe (FIFO)"
+            case S_IFSOCK: kind = "a socket"
+            case S_IFCHR: kind = "a character device"
+            case S_IFBLK: kind = "a block device"
+            default: kind = "not a regular file"
+            }
+            logger.info("[READFILE] '\(resolvedPath)' is \(kind); refused without opening it. Reading one would block forever or never reach EOF.")
+            return "Error: '\(resolvedPath)' is \(kind), not a regular file, and cannot be read as content."
         }
 
         // Try document extraction first (PDF, DOCX, XLSX, CSV, PPTX, RTF)
@@ -200,13 +246,62 @@ struct ReadFileTool: DevgenticTool {
             }
         }
 
-        // Fallback: plain text reading
-        do {
-            let content = try String(contentsOfFile: resolvedPath, encoding: .utf8)
-            return "📄 Contents of file '\(resolvedPath)':\n\(content)"
-        } catch {
-            return "Error reading file: \(error.localizedDescription)"
+        // Fallback: plain text reading.
+        //
+        // UTF-8 first, then Foundation's own detection, then Latin-1.
+        //
+        // This used to be UTF-8 ONLY, which made `read_file` refuse files it can obviously read:
+        // a BOM-marked UTF-16 file (what a good deal of Windows tooling emits) came back as "The
+        // file couldn’t be opened because it isn’t in the correct format", and so did Latin-1 —
+        // even though `CSVExtractor` has fallen back to Latin-1 all along. The same bytes were
+        // readable as `data.csv` and unreadable as `data.txt`.
+        //
+        // `usedEncoding` is tried before Latin-1 on purpose: it honours a BOM and gets UTF-16
+        // right, whereas Latin-1 decodes ANY byte sequence successfully and would silently turn
+        // UTF-16 into interleaved NUL-and-letter mojibake. A lossy decode that cannot fail is the
+        // last thing to try, never the first.
+        var usedEncoding: String.Encoding = .utf8
+        var content: String
+        if let utf8 = try? String(contentsOfFile: resolvedPath, encoding: .utf8) {
+            // Valid UTF-8 is text by definition — no sniffing, no fallbacks, no surprises.
+            content = utf8
+        } else if BinaryContentSniffer.looksBinary(at: url) {
+            // The sniff sits BETWEEN the strict decode and the lossy ones, and that position is
+            // the whole point. ISO Latin-1 maps all 256 byte values, so it CANNOT fail: adding it
+            // as a fallback without this check turned "binary file refused" into a screenful of
+            // mojibake returned as the file's contents — a PDF read through the text branch came
+            // back as junk the model would reason over as though it were the document. Trading a
+            // rejected-but-honest answer for a confident wrong one is the worse bug, so the lossy
+            // decoders are only reachable once the bytes actually look like text.
+            logger.info("[READFILE] '\(resolvedPath)' is not valid UTF-8 and looks binary; refused rather than decoded lossily. Returning junk as content is worse than declining to read it.")
+            return "Error: '\(resolvedPath)' does not appear to be a text file. "
+                + "If it is a document, make sure the extension matches its real format "
+                + "(read_file handles PDF, DOCX, XLSX, CSV, PPTX and RTF by extension)."
+        } else if let detected = try? String(contentsOfFile: resolvedPath, usedEncoding: &usedEncoding) {
+            content = detected
+            logger.info("[READFILE] '\(resolvedPath)' is not UTF-8; decoded as \(usedEncoding.description). Reported to the model as ordinary content.")
+        } else if let data = try? Data(contentsOf: url),
+                  let latin1 = String(data: data, encoding: .isoLatin1) {
+            content = latin1
+            logger.info("[READFILE] '\(resolvedPath)' decoded as ISO Latin-1 after UTF-8 and BOM detection both failed. Bytes that are not valid text will appear as substitute characters.")
+        } else {
+            logger.error("[READFILE] '\(resolvedPath)' could not be decoded as text under any encoding — the model gets no content for this file.")
+            return "Error: '\(resolvedPath)' could not be read as text. "
+                + "It may be a binary file; if it is a document, check the extension is correct."
         }
+
+        // Bounded, and the bound is ANNOUNCED. Silently returning the first 500 KB would leave
+        // the model unable to tell a whole file from a fragment — the difference between "the
+        // function is not defined here" and "I only saw the first part of the file".
+        if content.count > Self.maxPlainTextCharacters {
+            let total = content.count
+            logger.info("[READFILE] '\(resolvedPath)' is \(total) characters; returning the first \(Self.maxPlainTextCharacters) and saying so. The rest is NOT in this observation.")
+            content = String(content.prefix(Self.maxPlainTextCharacters))
+                + "\n\n…[truncated: showing the first \(Self.maxPlainTextCharacters) of \(total) characters. "
+                + "read_file cannot page; use preview_file for the head or tail, or grep_files / code_search to find a region.]"
+        }
+
+        return "📄 Contents of file '\(resolvedPath)':\n\(content)"
     }
 }
 
@@ -404,7 +499,7 @@ struct DeleteFileTool: DevgenticTool {
             try fm.removeItem(atPath: resolvedPath)
             return "Successfully deleted: \(resolvedPath)"
         } catch {
-            return "Deletion failed: \(error.localizedDescription)"
+            return "Error: deletion failed — \(error.localizedDescription)"
         }
     }
 }
@@ -495,7 +590,7 @@ struct MoveFileTool: DevgenticTool {
             try fm.moveItem(atPath: resolvedSource, toPath: resolvedDest)
             return "Successfully moved/renamed to: \(resolvedDest)"
         } catch {
-            return "Move failed: \(error.localizedDescription)"
+            return "Error: move failed — \(error.localizedDescription)"
         }
     }
 }
@@ -580,7 +675,7 @@ struct CopyFileTool: DevgenticTool {
             try fm.copyItem(atPath: resolvedSource, toPath: resolvedDest)
             return "Successfully copied to: \(resolvedDest)"
         } catch {
-            return "Copy failed: \(error.localizedDescription)"
+            return "Error: copy failed — \(error.localizedDescription)"
         }
     }
 }
@@ -646,7 +741,7 @@ struct CreateFolderTool: DevgenticTool {
             try fm.createDirectory(atPath: resolvedPath, withIntermediateDirectories: true, attributes: nil)
             return "Successfully created directory: \(resolvedPath)"
         } catch {
-            return "Creation failed: \(error.localizedDescription)"
+            return "Error: could not create the folder — \(error.localizedDescription)"
         }
     }
 }

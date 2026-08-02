@@ -78,8 +78,20 @@ final class MCPOAuthLoopbackListener: Sendable {
 
     init() throws {
         let parameters = NWParameters.tcp
-        // .any picks a free port; we read it back from listener.port after
-        // .ready fires.
+
+        // Confine the socket to loopback.
+        //
+        // `NWParameters.tcp` with no required local endpoint binds EVERY interface, so
+        // the OAuth callback listener was reachable from anything on the same network —
+        // an ephemeral port on the user's LAN accepting `/callback?code=…`. The `state`
+        // check and PKCE meant a stranger could not actually complete a flow, but the
+        // socket had no business being off-machine in the first place, and RFC 8252 §7.3
+        // specifies the loopback interface for exactly this redirect.
+        //
+        // (`on: .any` below is the PORT — "pick any free one" — not an address. It was
+        // never the thing binding all interfaces.)
+        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
+
         let listener: NWListener
         do {
             listener = try NWListener(using: parameters, on: .any)

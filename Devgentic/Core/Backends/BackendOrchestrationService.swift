@@ -264,6 +264,27 @@ class BackendOrchestrationService {
                     }
                 }
 
+                // 4.5 MCP server instructions — the server author's own guidance on how to
+                // drive their tools correctly, returned in the `initialize` handshake.
+                //
+                // The SDK stores `instructions` privately with no accessor, so the connect
+                // return value is the only chance to read it; we capture it on `MCPSession`
+                // and surface it here. It rides the `<knowledge_base>` layer rather than a
+                // layer of its own: this is exactly what that layer is for — static
+                // reference material the model should have before it acts — and adding a
+                // parallel layer would mean threading a new field through five call sites
+                // for the same result. The heading keeps it distinguishable from profile
+                // knowledge sources in the rendered prompt.
+                let mcpInstructions = await MCPClientService.shared.connectedServerInstructions()
+                if !mcpInstructions.isEmpty {
+                    let block = "### MCP server guidance\n\n" + mcpInstructions
+                    knowledgeBaseContext = [knowledgeBaseContext, block]
+                        .compactMap { $0 }
+                        .filter { !$0.isEmpty }
+                        .joined(separator: "\n\n")
+                    logger.info("[MCP-INSTRUCTIONS] Injected guidance from \(mcpInstructions.count) chars of server instructions into the system knowledge layer.")
+                }
+
                 // 5. Pre-flight context-fit check — every piece of the prompt is known
                 // here, BEFORE any tokens stream. Oversize prompts on local models don't
                 // fail loudly: Ollama HEAD-truncates silently (system prompt first), so

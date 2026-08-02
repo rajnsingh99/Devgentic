@@ -42,6 +42,9 @@ struct ChatInputAreaView: View {
     // root and already consumed by this view's parent — safe to read here.
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
     @Environment(MainViewRouter.self) private var router
+    /// Used only to resolve a profile for the MCP banner's Tool Library navigation, which is
+    /// per-profile even though MCP health is not.
+    @Environment(BackendProfileService.self) private var profileService
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -594,6 +597,32 @@ struct ChatInputAreaView: View {
                 // (self-gates to agent profiles; renders nothing for bot/workflow/imageGen).
                 CapabilityToolbarButtons(profile: $selectedProfile, isEnabled: isInputEnabled)
             }
+
+            // MCP connection summary. Sits directly above the toolbar so the state of the
+            // agent's external capabilities is visible at the moment of sending, rather
+            // than only inside the Tool Library. Renders nothing when no MCP servers are
+            // configured, and stays a muted single line unless something is actually down.
+            // NOT gated on a selected profile. MCP server health is a property of the app,
+            // not of the chosen backend — gating it here meant the banner vanished on the
+            // launch screen, which is exactly when the launch sweep has just run and its
+            // result is most worth seeing. The banner hides itself when no servers exist.
+            MCPStatusBanner {
+                // The Tool Library is per-profile (it edits that profile's tool selection),
+                // so navigation needs *a* profile: the selected one, else the first that
+                // exists. `ToolLibraryContainerView` renders nothing for an id it cannot
+                // find, so an invented UUID would be a dead button.
+                if let profileID = backendConfiguration.selectedProfileID ?? profileService.profiles.first?.id {
+                    router.navigate(to: .toolLibrary(profileID: profileID))
+                } else {
+                    logger.warning("""
+                        [MCP-STATUS] Tool Library requested from the composer banner but NO backend \
+                        profile exists to open it against — the Tool Library is per-profile. \
+                        Navigation skipped; the user sees no response to the tap.
+                        """)
+                }
+            }
+            .padding(.horizontal, 15)
+            .padding(.bottom, 6)
 
             InputToolbarView(
                 isInputEnabled: isInputEnabled,

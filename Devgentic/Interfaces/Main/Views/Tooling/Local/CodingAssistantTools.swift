@@ -29,21 +29,187 @@ enum EditMatcher {
             return .ambiguous(occurrences: occurrences)
         }
 
-        // Fallback: whitespace-normalized single-line match
-        let normalizedSearch = oldString.trimmingCharacters(in: .whitespaces)
+        // Fallback: whitespace-normalized single-line match.
+        //
+        // This exists so an `old_string` whose indentation or trailing space differs from the
+        // file still matches. Two things it must NOT do, both of which it used to:
+        //
+        // 1. **Take the first of several candidates.** Lines that differ only in indentation
+        //    normalize to the same text, so more than one can match. The exact path refuses that
+        //    case as `.ambiguous` precisely because which one the caller meant is unknowable —
+        //    and the fallback edited whichever came first and reported success, so the model
+        //    believed it had changed a location it had not. Same guard, same answer, both paths.
+        //
+        // 2. **Substitute the whole line verbatim.** Replacing `lines[i]` with `newString` drops
+        //    the line's own leading whitespace, so a correctly-written edit lands at column zero.
+        //    In Swift that is untidy; in Python, YAML or a Makefile it is a syntax error written
+        //    to disk under an "Applied edit" success message. The model cannot avoid it either —
+        //    it asked to replace one expression with another and got its indentation removed.
+        //    The matched line's indent is re-applied unless `newString` brings its own.
+        // `.whitespacesAndNewlines`, not `.whitespaces`.
+        //
+        // `components(separatedBy: "\n")` splits a Windows-line-ended file correctly — Foundation
+        // searches at the scalar level — so each line arrives with a TRAILING `\r`. And
+        // `CharacterSet.whitespaces` does not contain `\r`. The result was that on any CRLF file
+        // every comparison was `"let x = 1\r" == "let x = 1"`, so this fallback could never fire:
+        // a model editing a Windows-authored file got "old_string not found" where the identical
+        // edit against an LF file would have matched. Safe, but silently less capable on a whole
+        // class of real repositories.
+        //
+        // The exact-match path above is unaffected — it is a substring replace and never looks at
+        // line boundaries.
+        let normalizedSearch = oldString.trimmingCharacters(in: .whitespacesAndNewlines)
         let lines = content.components(separatedBy: "\n")
 
-        for (lineIdx, line) in lines.enumerated() {
-            if line.trimmingCharacters(in: .whitespaces) == normalizedSearch {
-                var mutableLines = lines
-                mutableLines[lineIdx] = newString
-                return .applied(newContent: mutableLines.joined(separator: "\n"))
-            }
+        let matchedIndices = lines.indices.filter {
+            lines[$0].trimmingCharacters(in: .whitespacesAndNewlines) == normalizedSearch
         }
 
-        return .notFound
+        guard matchedIndices.count <= 1 else {
+            return .ambiguous(occurrences: matchedIndices.count)
+        }
+        guard let lineIdx = matchedIndices.first else {
+            return .notFound
+        }
+
+        // Leading whitespace of the line being replaced. An empty `newString` is a DELETION and
+        // must stay empty; a `newString` that already starts with whitespace is taken as
+        // deliberately indented and is left alone, so nothing is ever double-indented.
+        let indent = String(lines[lineIdx].prefix { $0 == " " || $0 == "\t" })
+        var replacement: String
+        if newString.isEmpty || newString.hasPrefix(" ") || newString.hasPrefix("\t") {
+            replacement = newString
+        } else {
+            replacement = indent + newString
+        }
+
+        // Re-attach the line's own carriage return.
+        //
+        // After splitting on "\n", a CRLF file's lines each end with `\r`. Writing the
+        // replacement without it and rejoining with "\n" would give that ONE line an LF ending
+        // while every other line kept CRLF — a file with mixed line endings, produced silently by
+        // an edit the caller asked to make to a single expression. Whatever the file's convention
+        // is, an edit should not change it.
+        if lines[lineIdx].hasSuffix("\r") && !replacement.hasSuffix("\r") {
+            replacement += "\r"
+        }
+
+        var mutableLines = lines
+        mutableLines[lineIdx] = replacement
+        return .applied(newContent: mutableLines.joined(separator: "\n"))
     }
 }
+
+// MARK: - Search Binary Resolution
+
+/// Which search program the code-search tools run.
+///
+/// ripgrep is preferred, `/usr/bin/grep` is the fallback, and **which one runs depends on whether
+/// the user happens to have ripgrep installed** — so both paths ship, both reach real users, and
+/// both have to work. They are not equivalent: different regex dialect (fixed 2026-07-31),
+/// different flags, different `-c` output shape.
+///
+/// The lookup lives here, once, rather than being repeated at each call site — but the reason it
+/// is a TYPE rather than a function is `discoveryOverride`. A test machine has exactly one of the
+/// two binaries installed, so whichever it is, the other branch is never executed and silently
+/// stops being covered. That is not hypothetical: installing ripgrep on 2026-07-31 to make the rg
+/// branch reachable in production simultaneously retired the grep fallback from every test, and
+/// the counting arguments for grep were written and shipped without ever being run.
+enum SearchBinary {
+
+    /// Where ripgrep is normally installed, in preference order.
+    static let ripgrepCandidates = ["/opt/homebrew/bin/rg", "/usr/local/bin/rg"]
+
+    /// Always present on macOS.
+    static let grep = "/usr/bin/grep"
+
+    enum Override: Sendable {
+        /// Behave as though ripgrep is not installed, so the grep fallback runs.
+        case ripgrepUnavailable
+        /// Use this ripgrep, wherever it is.
+        case ripgrepAt(String)
+    }
+
+    /// **Test-only.** Nil in production, and never written by app code — the app only reads
+    /// `ripgrepPath`. Marked `nonisolated(unsafe)` because it is set once by a test before the
+    /// call it affects and never mutated concurrently; the alternative (threading a dependency
+    /// through four tools' arguments) would change production signatures to serve a test.
+    nonisolated(unsafe) static var discoveryOverride: Override?
+
+    /// The ripgrep to use, or nil when the grep fallback should run.
+    static var ripgrepPath: String? {
+        switch discoveryOverride {
+        case .ripgrepUnavailable:
+            return nil
+        case .ripgrepAt(let path):
+            return path
+        case nil:
+            return ripgrepCandidates.first { FileManager.default.fileExists(atPath: $0) }
+        }
+    }
+}
+
+// MARK: - Search Match Counting
+
+/// The number of MATCHES a search found, as opposed to the number of lines it printed.
+///
+/// These are different numbers whenever context is on, and the display output cannot tell them
+/// apart: `rg`/`grep` print both as `<path><sep><lineno><sep><text>` and distinguish a match
+/// from a neighbour only by a separator character that can itself occur inside a path.
+///
+/// Counting printed lines instead — which is what `code_search` and the `code_search_*` splits
+/// did — reports ONE match as five under the default `context_lines: 2`. That number is what a
+/// model reads to decide whether a search was too broad, and `max_results` truncated against
+/// the same inflated figure, so a search was cut off at roughly a fifth of the matches the
+/// caller asked for while claiming it had exceeded the limit.
+///
+/// `-c` prints `<path>:<count>` per file with the count as the trailing field, so summing is
+/// unambiguous whatever the path contains. It costs a second invocation, which is why callers
+/// only reach for it when context is actually on — `code_search_symbol` and `code_search_files`
+/// request none and pay nothing.
+enum SearchMatchCounter {
+
+    /// Sums the per-file counts, or nil if the counting run could not be completed — callers
+    /// fall back to the printed-line figure rather than reporting nothing.
+    static func exactMatchCount(executable: String, arguments: [String]) -> Int? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+
+        guard let run = try? ProcessRunner.run(process) else { return nil }
+        // Exit 1 means "no matches" for both programs and is a legitimate zero, not a failure.
+        guard run.exitCode == 0 || run.exitCode == 1 else { return nil }
+
+        var total = 0
+        for line in run.standardOutput.split(separator: "\n") {
+            guard let trailing = line.split(separator: ":").last, let count = Int(trailing) else { continue }
+            total += count
+        }
+        return total
+    }
+
+    /// Argument vector for a counting run, mirroring the display run's filters exactly so the
+    /// two answer the same question.
+    static func countingArguments(
+        useRipgrep: Bool,
+        pattern: String,
+        path: String,
+        glob: String?,
+        caseSensitive: Bool,
+        wholeWord: Bool
+    ) -> [String] {
+        var args: [String] = useRipgrep ? ["-c", "--color=never"] : ["-rcE", "--color=never"]
+        if !caseSensitive { args.append("-i") }
+        if wholeWord { args.append("-w") }
+        if let glob { args += useRipgrep ? ["--glob", glob] : ["--include", glob] }
+        // `--` for the same reason the display run passes it: a model-supplied pattern must not
+        // reach the callee's option parser.
+        args += ["--", pattern, path]
+        return args
+    }
+}
+
+// MARK: - Edit Code Tool (continued)
 
 struct EditCodeTool: DevgenticTool {
     let name = "edit_code"
@@ -88,19 +254,27 @@ struct EditCodeTool: DevgenticTool {
     }
 
     var parameterSchema: ToolParameters {
-        return SchemaBuilder.object(
+        // See `edit_code_batch`: `edits` carries OBJECTS, and `SchemaBuilder.object` declares
+        // every array as an array of strings. The item type is what a provider validates the
+        // model's call against, so it has to say what the decoder actually accepts.
+        var properties = SchemaBuilder.object(
             properties: [
                 ("file_path", "string", "Absolute or relative path to the file to edit."),
                 ("old_string", "string", "The exact code block to find and replace. Must be unique in the file. Include enough surrounding context lines to ensure uniqueness."),
-                ("new_string", "string", "The new code to replace old_string with. Use empty string to delete the matched block."),
-                ("edits", "array", "Array of {old_string, new_string} objects for multiple atomic edits in one call. Takes precedence over top-level old_string/new_string.")
+                ("new_string", "string", "The new code to replace old_string with. Use empty string to delete the matched block.")
             ],
-            required: ["file_path"]
+            required: []
+        ).properties
+        properties["edits"] = ToolParameterProperty(
+            type: "array",
+            description: "Array of {old_string, new_string} objects for multiple atomic edits in one call. Takes precedence over top-level old_string/new_string.",
+            items: ["type": "object"]
         )
+        return ToolParameters(type: "object", properties: properties, required: ["file_path"])
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let expandedPath = (arguments.file_path as NSString).expandingTildeInPath
+        let expandedPath = FilePathResolver.resolve(arguments.file_path)
         let fileURL = URL(fileURLWithPath: expandedPath)
 
         guard FileManager.default.fileExists(atPath: expandedPath) else {
@@ -214,7 +388,7 @@ struct CodeSearchTool: DevgenticTool {
         guard let rawPath = arguments.path, !rawPath.isEmpty else {
             return "Error: 'path' is required. Pass the project root or a specific subpath."
         }
-        let resolvedPath = (rawPath as NSString).expandingTildeInPath
+        let resolvedPath = FilePathResolver.resolve(rawPath)
         guard FileManager.default.fileExists(atPath: resolvedPath) else {
             return "Error: path '\(resolvedPath)' does not exist."
         }
@@ -252,9 +426,7 @@ struct CodeSearchTool: DevgenticTool {
         args.append(resolvedPath)
 
         // Check if rg (ripgrep) is available, fallback to grep
-        let rgPath = FileManager.default.fileExists(atPath: "/opt/homebrew/bin/rg") ? "/opt/homebrew/bin/rg"
-            : FileManager.default.fileExists(atPath: "/usr/local/bin/rg") ? "/usr/local/bin/rg"
-            : nil
+        let rgPath = SearchBinary.ripgrepPath
 
         let process = Process()
 
@@ -262,8 +434,15 @@ struct CodeSearchTool: DevgenticTool {
             process.executableURL = URL(fileURLWithPath: rgPath)
             process.arguments = args
         } else {
-            // Fallback to grep -rn
-            var grepArgs = ["-rn", "--color=never"]
+            // Fallback to grep. `-E` — EXTENDED regex, matching the dialect ripgrep speaks.
+            //
+            // Which branch runs depends on whether ripgrep happens to be installed on the
+            // user's machine, so the two must agree about what a pattern MEANS. grep's default
+            // is BASIC regex, where `+ ? | ( )` are literals and `\(` opens a group — the exact
+            // inversion of ripgrep's — so the same search silently found matches on one machine
+            // and reported "No matches found" on another, with no error on either. A false
+            // absence is worse than a failure: the agent believes the codebase, not the tool.
+            var grepArgs = ["-rnE", "--color=never"]
             if !(arguments.case_sensitive ?? true) { grepArgs.append("-i") }
             if arguments.whole_word ?? false { grepArgs.append("-w") }
             if arguments.files_only ?? false { grepArgs.append("-l") }
@@ -291,28 +470,46 @@ struct CodeSearchTool: DevgenticTool {
             return "No matches found for '\(arguments.pattern)'."
         }
 
-        // Truncate to max_results matches
+        // `max_results` bounds the number of PRINTED lines. With context on, one match can print
+        // up to 2N+1 of them, so this is a bound on output volume — which is what it is for
+        // ("Prevents context overflow") — and NOT a count of matches. The two were conflated.
+        let filesOnly = arguments.files_only ?? false
         let lines = rawOutput.components(separatedBy: "\n")
-        var matchCount = 0
+        var shownLines = 0
         var truncatedLines: [String] = []
         var truncated = false
 
         for line in lines {
-            if arguments.files_only ?? false {
-                matchCount += 1
-            } else if !line.isEmpty && !line.hasPrefix("--") {
-                matchCount += 1
-            }
-            if matchCount > maxResults {
+            if !line.isEmpty && !line.hasPrefix("--") { shownLines += 1 }
+            if shownLines > maxResults {
                 truncated = true
                 break
             }
             truncatedLines.append(line)
         }
 
+        // The real figure. Only worth a second invocation when context is on, because that is
+        // the only case where printed lines and matches differ: `files_only` prints one line per
+        // file and a zero-context search prints one line per match, both already exact.
+        let contextInflatesTheCount = !filesOnly && contextLines > 0
+        let exactMatches: Int? = contextInflatesTheCount
+            ? SearchMatchCounter.exactMatchCount(
+                executable: rgPath ?? "/usr/bin/grep",
+                arguments: SearchMatchCounter.countingArguments(
+                    useRipgrep: rgPath != nil,
+                    pattern: arguments.pattern,
+                    path: resolvedPath,
+                    glob: arguments.glob,
+                    caseSensitive: arguments.case_sensitive ?? true,
+                    wholeWord: arguments.whole_word ?? false))
+            : nil
+        let reportedCount = exactMatches ?? shownLines
+
         var result = truncatedLines.joined(separator: "\n")
         if truncated {
-            result += "\n\n[Truncated: >\(maxResults) matches. Refine your pattern or glob to narrow results.]"
+            result += "\n\n[Truncated: output exceeded \(maxResults) lines"
+            if let exactMatches { result += " (\(exactMatches) match\(exactMatches == 1 ? "" : "es") total)" }
+            result += ". Refine your pattern or glob, or lower context_lines, to narrow results.]"
         }
 
         // Cap total output size
@@ -321,7 +518,17 @@ struct CodeSearchTool: DevgenticTool {
             result = String(result.prefix(maxOutput)) + "\n...[Output truncated at \(maxOutput) chars]"
         }
 
-        return "\(result)\n(\(matchCount) match\(matchCount == 1 ? "" : "es"))"
+        let noun = filesOnly ? "file" : "match"
+        return "\(result)\n(\(reportedCount) \(Self.pluralise(noun, count: reportedCount)))"
+    }
+
+    /// "1 match" / "2 matches" / "1 file" / "2 files".
+    ///
+    /// The previous form appended "es" unconditionally, which is right for "match" and produces
+    /// "filees" for the `files_only` path — the one the `code_search_files` split always takes.
+    static func pluralise(_ noun: String, count: Int) -> String {
+        guard count != 1 else { return noun }
+        return noun.hasSuffix("h") || noun.hasSuffix("s") || noun.hasSuffix("x") ? noun + "es" : noun + "s"
     }
 }
 
@@ -367,7 +574,7 @@ struct GlobFilesTool: DevgenticTool {
         guard let rawPath = arguments.path, !rawPath.isEmpty else {
             return "Error: 'path' is required. Pass the project root or a specific subpath."
         }
-        let basePath = (rawPath as NSString).expandingTildeInPath
+        let basePath = FilePathResolver.resolve(rawPath)
         guard FileManager.default.fileExists(atPath: basePath) else {
             return "Error: path '\(basePath)' does not exist."
         }
@@ -494,7 +701,7 @@ struct FindDefinitionTool: DevgenticTool {
         guard let rawPath = arguments.path, !rawPath.isEmpty else {
             return "Error: 'path' is required. Pass the project root or a specific subpath."
         }
-        let basePath = (rawPath as NSString).expandingTildeInPath
+        let basePath = FilePathResolver.resolve(rawPath)
         guard FileManager.default.fileExists(atPath: basePath) else {
             return "Error: path '\(basePath)' does not exist."
         }
@@ -546,9 +753,7 @@ struct FindDefinitionTool: DevgenticTool {
         var allResults: [String] = []
 
         for (pattern, glob) in patterns {
-            let rgPath = FileManager.default.fileExists(atPath: "/opt/homebrew/bin/rg") ? "/opt/homebrew/bin/rg"
-                : FileManager.default.fileExists(atPath: "/usr/local/bin/rg") ? "/usr/local/bin/rg"
-                : nil
+            let rgPath = SearchBinary.ripgrepPath
 
             let process = Process()
 
@@ -565,11 +770,15 @@ struct FindDefinitionTool: DevgenticTool {
                 process.arguments = args
             } else {
                 process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
-                var args = ["-rn", "--color=never", "-A", "5"]
+                // `-E` folded into the seed rather than appended later. It was always passed
+                // here, but stating it beside the other flags is what lets a source scan verify
+                // every grep fallback in the tree requests the same dialect — see the note in
+                // `code_search`.
+                var args = ["-rnE", "--color=never", "-A", "5"]
                 if glob != "*" {
                     args += ["--include", glob]
                 }
-                args += ["-E", "--", pattern, basePath]
+                args += ["--", pattern, basePath]
                 process.arguments = args
             }
 
@@ -720,7 +929,7 @@ struct BatchCommandTool: DevgenticTool {
         guard let rawWD = arguments.working_directory, !rawWD.isEmpty else {
             return "Error: 'working_directory' is required. Pass the project root or a specific subpath."
         }
-        let expandedWD = (rawWD as NSString).expandingTildeInPath
+        let expandedWD = FilePathResolver.resolve(rawWD)
         guard FileManager.default.fileExists(atPath: expandedWD) else {
             return "Error: working_directory '\(expandedWD)' does not exist."
         }
@@ -848,7 +1057,7 @@ struct CreateFileTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let expandedPath = (arguments.file_path as NSString).expandingTildeInPath
+        let expandedPath = FilePathResolver.resolve(arguments.file_path)
         let fileURL = URL(fileURLWithPath: expandedPath)
         let fm = FileManager.default
 
@@ -917,7 +1126,7 @@ struct FileOverviewTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let expandedPath = (arguments.file_path as NSString).expandingTildeInPath
+        let expandedPath = FilePathResolver.resolve(arguments.file_path)
 
         guard FileManager.default.fileExists(atPath: expandedPath) else {
             return "Error: File not found at '\(expandedPath)'."
@@ -1058,7 +1267,7 @@ struct CodebaseMapTool: DevgenticTool {
         guard let rawPath = arguments.path, !rawPath.isEmpty else {
             return "Error: 'path' is required. Pass the project root or a specific subpath."
         }
-        let basePath = (rawPath as NSString).expandingTildeInPath
+        let basePath = FilePathResolver.resolve(rawPath)
         guard FileManager.default.fileExists(atPath: basePath) else {
             return "Error: path '\(basePath)' does not exist."
         }

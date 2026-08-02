@@ -70,6 +70,14 @@ struct DevgenticApp: App {
                 WorkflowRunHistoryStore.shared.reconcileOrphans()
                 // Retired Code Viewer session rows — tabs are in-memory only now.
                 CodeViewerSessionStore.shared.purgePersistedSessions()
+
+                // Bring enabled MCP servers up now, rather than lazily on the agent's first
+                // tool call. That first call used to pay the entire connect cost inside a
+                // turn the user was waiting on — a cold `npx -y` fetch can take a minute —
+                // and a misconfigured server only revealed itself mid-conversation as a tool
+                // failure. Detached from the container setup: a slow or unreachable server
+                // must never delay the app becoming usable.
+                Task { await MCPConnectionCoordinator.shared.connectEnabledServersAtLaunch() }
             }
             return container
         } catch {

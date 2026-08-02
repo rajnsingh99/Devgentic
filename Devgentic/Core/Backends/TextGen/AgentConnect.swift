@@ -180,6 +180,17 @@ class AgentConnect: @unchecked Sendable {
                     }
 
                     // 5. Resolve Tools (model passed for delegation tool to reuse)
+                    // An MCP server's `sampling/createMessage` arrives out-of-band on the client
+                    // connection with no conversation attached. Record which profile and model
+                    // should service it for this run, so the approval banner can be raised in the
+                    // right conversation and the call billed to the profile the user chose.
+                    await MCPSamplingBroker.shared.register(context: MCPSamplingContext(
+                        conversationID: conversationID,
+                        providerConfig: llmConfig,
+                        profileID: profile.id,
+                        registeredAt: Date()
+                    ))
+
                     var activeTools = await self.resolveExecutableTools(
                         profileTools: rawTools,
                         conversationID: conversationID,
@@ -662,6 +673,17 @@ class AgentConnect: @unchecked Sendable {
                         apiKey: llmConfig.apiKey,
                         baseURL: llmConfig.baseURL
                     )
+
+                    // An MCP server's `sampling/createMessage` arrives out-of-band on the client
+                    // connection with no conversation attached. Record which profile and model
+                    // should service it for this run, so the approval banner can be raised in the
+                    // right conversation and the call billed to the profile the user chose.
+                    await MCPSamplingBroker.shared.register(context: MCPSamplingContext(
+                        conversationID: conversationID,
+                        providerConfig: llmConfig,
+                        profileID: profile.id,
+                        registeredAt: Date()
+                    ))
 
                     var activeTools = await self.resolveExecutableTools(
                         profileTools: rawTools,
@@ -1189,12 +1211,44 @@ class AgentConnect: @unchecked Sendable {
 
         var unresolved: [String] = []
         for toolConfig in profileTools where toolConfig.isEnabled {
-            if let agentTool = self.resolveNativeTool(toolName: toolConfig.name, conversationID: conversationID, requiresConfirmation: toolConfig.requiresConfirmation, timeout: toolConfig.timeout, timeoutMessage: toolConfig.timeoutMessage) {
+            // Resolve by SOURCE first, not by name.
+            //
+            // This used to try `resolveNativeTool(toolName:)` unconditionally and only fall
+            // through to MCP when the name missed. Because MCP servers choose their own
+            // tool names, any server exposing a name that collides with a built-in — a
+            // filesystem server offering `read_file`, say — had its calls silently
+            // dispatched to Devgentic's LOCAL implementation instead, ignoring
+            // `toolConfig.sourceId` entirely. The user enabled one tool and a different
+            // one ran, with matching arguments making the swap invisible.
+            let isBuiltIn = toolConfig.sourceId == ToolSource.builtInSourceID
+
+            // Skip tools from a disabled server BEFORE any resolution attempt.
+            //
+            // Returning nil from `resolveMCPTool` alone is not enough: the caller falls
+            // through to `resolveNativeTool`, so a disabled server exposing a name that
+            // collides with a built-in (`read_file`) would have had its calls quietly
+            // executed by Devgentic's LOCAL implementation — the tool-shadowing bug in
+            // reverse, and reachable by simply switching a server off.
+            if !isBuiltIn,
+               let source = allToolSources.first(where: { $0.id == toolConfig.sourceId }),
+               !source.isEnabled {
+                logger.info("""
+                    [TOOLRESOLVE] '\(toolConfig.name)' skipped — server '\(source.serverName)' \
+                    (\(source.id)) is DISABLED by the user. This is deliberate, not a failure: the \
+                    agent runs without this tool until the server is re-enabled. [conv \(conversationID)]
+                    """)
+                continue
+            }
+
+            let resolved: AgentTool? = isBuiltIn
+                ? self.resolveNativeTool(toolName: toolConfig.name, conversationID: conversationID, requiresConfirmation: toolConfig.requiresConfirmation, timeout: toolConfig.timeout, timeoutMessage: toolConfig.timeoutMessage)
+                    ?? self.resolveMCPTool(toolConfig: toolConfig, availableSources: allToolSources, conversationID: conversationID)
+                : self.resolveMCPTool(toolConfig: toolConfig, availableSources: allToolSources, conversationID: conversationID)
+                    ?? self.resolveNativeTool(toolName: toolConfig.name, conversationID: conversationID, requiresConfirmation: toolConfig.requiresConfirmation, timeout: toolConfig.timeout, timeoutMessage: toolConfig.timeoutMessage)
+
+            if let agentTool = resolved {
                 activeTools.append(agentTool)
-                logger.debug("[TOOLRESOLVE] native '\(toolConfig.name)' enabled (confirm: \(toolConfig.requiresConfirmation)) [conv \(conversationID)]")
-            } else if let agentTool = self.resolveMCPTool(toolConfig: toolConfig, availableSources: allToolSources) {
-                activeTools.append(agentTool)
-                logger.debug("[TOOLRESOLVE] MCP '\(toolConfig.name)' enabled from source \(toolConfig.sourceId) [conv \(conversationID)]")
+                logger.debug("[TOOLRESOLVE] \(isBuiltIn ? "native" : "MCP") '\(toolConfig.name)' enabled from source \(toolConfig.sourceId) (confirm: \(toolConfig.requiresConfirmation)) [conv \(conversationID)]")
             } else {
                 // A SILENT CAPABILITY DROP — the loudest thing in this function.
                 //
@@ -1217,6 +1271,32 @@ class AgentConnect: @unchecked Sendable {
             // Summary line so one grep answers "did this run lose anything?" without reading
             // every per-tool line.
             logger.error("[TOOLRESOLVE] \(unresolved.count) of \(profileTools.filter(\.isEnabled).count) enabled tool(s) unresolved: \(unresolved.sorted().joined(separator: ", ")) [conv \(conversationID)]")
+        }
+
+        // Enforce name uniqueness before anything reaches a provider.
+        //
+        // Tool names are the model's only handle on a tool, and MCP servers pick their own.
+        // Two enabled tools sharing a name — two servers exposing `search`, or a server
+        // shadowing a built-in — were emitted as duplicate entries in the request payload.
+        // Anthropic rejects that outright (400, "duplicate tool name"), so ONE colliding
+        // MCP server broke every request in the conversation rather than just its own tool.
+        // Keep the first occurrence (built-ins resolve first) and drop the rest loudly.
+        var seenToolNames = Set<String>()
+        var duplicates: [String] = []
+        activeTools = activeTools.filter { tool in
+            if seenToolNames.insert(tool.name).inserted { return true }
+            duplicates.append(tool.name)
+            return false
+        }
+        if !duplicates.isEmpty {
+            logger.error("""
+                [TOOLRESOLVE] ⚠️ Dropped \(duplicates.count) tool(s) whose name was already taken: \
+                \(duplicates.sorted().joined(separator: ", ")). Tool names must be unique per \
+                request — providers reject duplicates outright, which would have failed EVERY \
+                turn in this conversation, not just calls to the colliding tool. The first \
+                registration won; rename the tool on the MCP server to expose both. \
+                [profile \(profileID?.uuidString ?? "unknown") conv \(conversationID)]
+                """)
         }
 
         // -----------------------------------------------------------------
@@ -1278,11 +1358,49 @@ class AgentConnect: @unchecked Sendable {
         )
     }
 
-    func resolveMCPTool(toolConfig: Tool, availableSources: [ToolSource]) -> AgentTool? {
+    func resolveMCPTool(toolConfig: Tool, availableSources: [ToolSource], conversationID: UUID) -> AgentTool? {
         guard let source = availableSources.first(where: { $0.id == toolConfig.sourceId }),
               let definition = source.tools.first(where: { $0.name == toolConfig.name }) else {
             return nil
         }
+
+        // A disabled server contributes nothing. Its rows stay in the Tool Library so the
+        // user can switch it back on, so this is the seam that makes the toggle mean
+        // something — without it, disabling a server would stop it CONNECTING while its
+        // tools still registered and then failed at call time.
+        guard source.isEnabled else {
+            logger.info("""
+                [TOOLRESOLVE] '\(toolConfig.name)' skipped — its server '\(source.serverName)' \
+                (\(source.id)) is disabled by the user. The agent runs without this tool by \
+                design; re-enable the server in the Tool Library to restore it. [conv \(conversationID)]
+                """)
+            return nil
+        }
+
+        // Tie this source to the conversation now, while we still know both. A server's
+        // sampling / elicitation request arrives later, out-of-band, carrying neither — this
+        // is what lets it be raised in the conversation that actually caused it.
+        // Hop to the main actor — this resolver is nonisolated and both brokers own
+        // main-actor state. Fire-and-forget is correct here: the association only has to be
+        // in place before the server issues a request, which cannot happen until after the
+        // tool is registered and a turn starts.
+        let sourceID = source.id
+        Task { @MainActor in
+            MCPSamplingBroker.shared.noteActivity(sourceID: sourceID, conversationID: conversationID)
+            MCPElicitationBroker.shared.noteActivity(sourceID: sourceID, conversationID: conversationID)
+        }
+
+        // Synthetic resource/prompt tools have no server-side counterpart — `tools/call`
+        // with these names would fail. Route them to the resource/prompt executor instead.
+        if let kind = MCPSyntheticTool.kind(fromQualified: definition.name) {
+            return wrapTool(
+                MCPResourcePromptTool(source: source, definition: definition, kind: kind),
+                requiresConfirmation: toolConfig.requiresConfirmation,
+                timeout: toolConfig.timeout,
+                timeoutMessage: toolConfig.timeoutMessage
+            )
+        }
+
         return wrapTool(DynamicMCPTool(source: source, toolDefinition: definition), requiresConfirmation: toolConfig.requiresConfirmation, timeout: toolConfig.timeout, timeoutMessage: toolConfig.timeoutMessage)
     }
 

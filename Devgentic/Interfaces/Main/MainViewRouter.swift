@@ -16,7 +16,11 @@ enum MainViewDestination: Equatable, Hashable {
     case chat
     case profileDetail(profileID: UUID)
     case settingsDetail(category: SettingsCategory)
-    case toolLibrary(profileID: UUID)
+    /// Profile is OPTIONAL. The Tool Library is reachable from the Tools rail tab with no
+    /// backend chosen — browsing the catalogue, managing MCP servers and Discover need no
+    /// profile. Only per-tool enablement writes to one, and that surface hides itself when
+    /// there is nothing to write to.
+    case toolLibrary(profileID: UUID?)
     case addMCPServer
     case editMCPServer(sourceID: UUID)
     case promptDetail(promptID: UUID)
@@ -65,6 +69,13 @@ final class MainViewRouter {
     func navigate(to destination: MainViewDestination) {
         navigationStack.append(activeDestination)
         activeDestination = destination
+
+        // The Tool Library's navigation lives in the sidebar pane, so entering it with the
+        // pane hidden (⌘B) would leave no way to change category or pick a server. Ask for
+        // the pane; the shell honours it.
+        if case .toolLibrary = destination {
+            NotificationCenter.default.post(name: .requestSidebarVisible, object: nil)
+        }
     }
 
     /// Pop the last destination from the stack.
@@ -153,4 +164,11 @@ final class MainViewRouter {
     func navigateToUserPersonalProfile() {
         navigate(to: .userPersonalProfile)
     }
+}
+
+
+extension Notification.Name {
+    /// Posted when a destination needs the sidebar pane on screen to be usable at all.
+    /// The Tool Library is the only such destination today: its navigation IS the pane.
+    static let requestSidebarVisible = Notification.Name("dg.requestSidebarVisible")
 }

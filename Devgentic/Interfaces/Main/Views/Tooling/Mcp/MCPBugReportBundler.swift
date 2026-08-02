@@ -159,7 +159,10 @@ struct MCPBugReportBundler {
         case .connecting:                   return "connecting"
         case .connected:                    return "connected"
         case .reconnecting(let attempt):    return "reconnecting(attempt=\(attempt))"
-        case .error(let msg):               return "error(\(MCPRedaction.redact(url: msg)))"
+        // `msg` is arbitrary free text — usually the server's own stderr, which commonly
+        // echoes its configuration on a failed start. `redact(url:)` was the wrong tool:
+        // it parses as a URL, fails on prose, and returned the string untouched.
+        case .error(let msg):               return "error(\(MCPRedaction.redact(text: msg)))"
         }
     }
 }

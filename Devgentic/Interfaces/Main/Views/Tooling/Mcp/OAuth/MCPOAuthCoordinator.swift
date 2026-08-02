@@ -72,7 +72,8 @@ struct MCPOAuthCoordinator {
         redirectURI: URL,
         scopes: [String],
         state: String,
-        pkce: MCPPKCEPair
+        pkce: MCPPKCEPair,
+        resource: URL? = nil
     ) -> URL {
         var components = URLComponents(url: metadata.authorizationEndpoint, resolvingAgainstBaseURL: false)!
         var existing = components.queryItems ?? []
@@ -86,6 +87,15 @@ struct MCPOAuthCoordinator {
         ])
         if !scopes.isEmpty {
             existing.append(URLQueryItem(name: "scope", value: scopes.joined(separator: " ")))
+        }
+        // RFC 8707 resource indicator — binds the issued token's audience to THIS MCP
+        // server. Without it the AS mints a general-purpose token, so a malicious or
+        // compromised MCP server could replay a token obtained for it against any other
+        // resource that trusts the same issuer (the token-passthrough problem the MCP
+        // auth spec calls out). Servers that do not implement RFC 8707 ignore the
+        // parameter, so sending it is safe with older ASes.
+        if let resource {
+            existing.append(URLQueryItem(name: "resource", value: resource.absoluteString))
         }
         components.queryItems = existing
         return components.url!
@@ -104,12 +114,17 @@ struct MCPOAuthCoordinator {
     ///   3. Generate PKCE + state
     ///   4. Hand the authorize URL to the redirect handler, await `code`
     ///   5. Exchange the code for tokens
+    /// - Parameter resource: the MCP server URL these tokens are for (RFC 8707). Binds the
+    ///   issued token's audience to that one server, so it cannot be replayed against
+    ///   another resource trusting the same issuer. Nil only when the caller genuinely has
+    ///   no resource URL (a stdio server), in which case no binding is requested.
     static func performInitialAuthorization(
         issuer: URL,
         scopes: [String],
         redirectURI: URL,
         redirectHandler: MCPOAuthRedirectHandler,
-        clientName: String = "Devgentic"
+        clientName: String = "Devgentic",
+        resource: URL? = nil
     ) async throws -> MCPOAuthCredentialBundle {
 
         // 1. Discovery
@@ -158,7 +173,8 @@ struct MCPOAuthCoordinator {
             redirectURI: redirectURI,
             scopes: scopes,
             state: state,
-            pkce: pkce
+            pkce: pkce,
+            resource: resource
         )
         let authorizeStart = Date()
         let code: String
@@ -185,7 +201,8 @@ struct MCPOAuthCoordinator {
                 codeVerifier: pkce.verifier,
                 clientId: registration.clientId,
                 redirectURI: redirectURI,
-                metadata: metadata
+                metadata: metadata,
+                resource: resource
             )
             MCPLog.info(.oauthExchange, "token exchange ok",
                         latencyMS: ms(since: exchangeStart),
@@ -209,7 +226,8 @@ struct MCPOAuthCoordinator {
             refreshToken: tokens.refreshToken,
             accessTokenExpiresAt: tokens.expiresAt,
             registrationAccessToken: registration.registrationAccessToken,
-            registrationClientUri: registration.registrationClientUri
+            registrationClientUri: registration.registrationClientUri,
+            resource: resource
         )
         logger.info("Initial OAuth completed for issuer \(metadata.issuer.absoluteString)")
         return bundle
@@ -221,7 +239,8 @@ struct MCPOAuthCoordinator {
     static func performInitialAuthorizationWithLoopback(
         issuer: URL,
         scopes: [String],
-        clientName: String = "Devgentic"
+        clientName: String = "Devgentic",
+        resource: URL? = nil
     ) async throws -> MCPOAuthCredentialBundle {
         let listener = try MCPOAuthLoopbackListener()
         LoopbackRegistry.shared.register(listener)
@@ -233,7 +252,8 @@ struct MCPOAuthCoordinator {
             scopes: scopes,
             redirectURI: listener.redirectURL,
             redirectHandler: handler,
-            clientName: clientName
+            clientName: clientName,
+            resource: resource
         )
     }
 
@@ -250,7 +270,10 @@ struct MCPOAuthCoordinator {
         // Re-fetch metadata — endpoints can rotate, and the spec mandates
         // we honor the current document on every refresh.
         let metadata = try await MCPOAuthDiscovery.fetch(issuer: bundle.issuer)
-        let tokens = try await MCPOAuthTokenExchange.refresh(bundle: bundle, metadata: metadata)
+        // Repeat the audience binding on refresh — see MCPOAuthCredentialBundle.resource.
+        let tokens = try await MCPOAuthTokenExchange.refresh(
+            bundle: bundle, metadata: metadata, resource: bundle.resource
+        )
 
         bundle.accessToken = tokens.accessToken
         // Some servers rotate the refresh token on every refresh (recommended
@@ -280,6 +303,52 @@ struct MCPOAuthCoordinator {
 
     /// Read the stored bundle for a source. Returns nil when absent or when
     /// the stored blob can't be decoded (e.g. shape changed across versions).
+    /// Best-effort RFC 7009 revocation of a source's tokens, for use just before its
+    /// secrets are purged.
+    ///
+    /// Deleting a server used to only make Devgentic FORGET the tokens — they stayed
+    /// valid at the provider until natural expiry, so a user removing a server they no
+    /// longer trusted had not actually withdrawn its access. Revoke the refresh token
+    /// first (revoking it invalidates the whole grant at most providers), then the access
+    /// token. Never throws: removing a server must succeed even when the provider is
+    /// unreachable or does not implement revocation.
+    /// - Parameter bundle: captured by the CALLER before purging Keychain. Re-reading it
+    ///   here would race `MCPSecretStore.purgeAll`, which runs synchronously on the delete
+    ///   path and would leave this with nothing to revoke.
+    static func revokeTokens(sourceID: UUID, bundle: MCPOAuthCredentialBundle) async {
+        let metadata: MCPOAuthMetadata
+        do {
+            metadata = try await MCPOAuthDiscovery.fetch(issuer: bundle.issuer)
+        } catch {
+            logger.warning("""
+                [MCP-OAUTH] Cannot revoke tokens for source \(sourceID.uuidString): metadata \
+                fetch failed (\(error.localizedDescription)). Tokens may REMAIN VALID at \
+                \(bundle.issuer.absoluteString) until they expire; local secrets are still purged.
+                """)
+            return
+        }
+
+        guard let revocationEndpoint = metadata.revocationEndpoint else {
+            logger.info("""
+                [MCP-OAUTH] Issuer \(bundle.issuer.absoluteString) advertises no revocation_endpoint \
+                (RFC 7009) — tokens for source \(sourceID.uuidString) will remain valid there until \
+                they expire. Nothing else to do; local secrets are purged.
+                """)
+            return
+        }
+
+        if let refreshToken = bundle.refreshToken {
+            await MCPOAuthTokenExchange.revoke(
+                token: refreshToken, tokenTypeHint: "refresh_token",
+                clientId: bundle.clientId, revocationEndpoint: revocationEndpoint
+            )
+        }
+        await MCPOAuthTokenExchange.revoke(
+            token: bundle.accessToken, tokenTypeHint: "access_token",
+            clientId: bundle.clientId, revocationEndpoint: revocationEndpoint
+        )
+    }
+
     static func loadBundle(sourceID: UUID) -> MCPOAuthCredentialBundle? {
         guard let json = MCPSecretStore.shared.retrieve(.oauthBundle, sourceID: sourceID),
               let data = json.data(using: .utf8) else {

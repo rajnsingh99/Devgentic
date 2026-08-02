@@ -82,6 +82,70 @@ final class MCPToolStore {
         return newID
     }
 
+    /// Is `serverName` already taken by a DIFFERENT source?
+    ///
+    /// Adding a server checked for duplicates; renaming one did not, so an edit could
+    /// produce two servers with the same name. That name is the user's only handle on a
+    /// server in the sidebar, in tool categories and in every log line, so two of them is a
+    /// genuine ambiguity rather than a cosmetic one.
+    func isServerNameTaken(_ serverName: String, excluding sourceID: UUID? = nil) -> Bool {
+        let trimmed = serverName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return false }
+        return sources.contains { source in
+            source.id != sourceID
+                && source.serverName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == trimmed
+        }
+    }
+
+    /// Enables or disables a server without touching its configuration or secrets.
+    ///
+    /// Disabling disconnects immediately: leaving a live session behind would keep the
+    /// child process running and the tools callable, which is precisely what the user just
+    /// asked to stop.
+    func setEnabled(_ enabled: Bool, sourceID: UUID) {
+        guard let context = mainContext else {
+            logger.error("""
+                [MCP-STORE] Cannot \(enabled ? "enable" : "disable") source \(sourceID): no \
+                ModelContainer injected. The change was NOT persisted and the UI will revert on \
+                the next fetch.
+                """)
+            return
+        }
+
+        let targetID = sourceID
+        let predicate = #Predicate<MCPToolItem> { $0.id == targetID }
+        var descriptor = FetchDescriptor<MCPToolItem>(predicate: predicate)
+        descriptor.fetchLimit = 1
+
+        do {
+            guard let item = try context.fetch(descriptor).first else {
+                logger.error("[MCP-STORE] Cannot toggle source \(sourceID): no record found. Nothing changed.")
+                return
+            }
+            guard item.isEnabled != enabled else { return }
+
+            item.isEnabled = enabled
+            saveContext()
+            fetchTools()
+
+            logger.info("""
+                [MCP-LIFECYCLE] Server '\(item.serverName)' (\(sourceID)) \
+                \(enabled ? "ENABLED" : "DISABLED") by the user. \
+                \(enabled ? "It will connect now and its tools become available again." : "Its session is being torn down and its \(item.tools.count) tool(s) will not resolve until re-enabled; configuration and Keychain secrets are kept.")
+                """)
+
+            if enabled {
+                Task { await MCPConnectionCoordinator.shared.connectIfNeeded(sourceID: sourceID) }
+            } else {
+                Task { @MainActor in
+                    await MCPClientService.shared.disconnect(sourceId: sourceID)
+                }
+            }
+        } catch {
+            logger.error("[MCP-STORE] Failed to toggle source \(sourceID): \(error.localizedDescription). The server's enabled state is unchanged.")
+        }
+    }
+
     /// Updates an existing tool source configuration and its tools. `secrets`
     /// fully replaces what's currently in Keychain for this source — env-var
     /// removals and auth-scheme changes both take effect.
@@ -162,6 +226,23 @@ final class MCPToolStore {
                           let keys = def.envKeys else { return [] }
                     return Set(keys)
                 }()
+                // Tear the live session down BEFORE dropping the record. Deleting only the
+                // SwiftData row left the MCP client and its child process running with no
+                // owner and no UI entry — the server kept holding its port/pipes until the
+                // app quit, and the user had no way to reach it.
+                Task { @MainActor in
+                    await MCPClientService.shared.disconnect(sourceId: targetID)
+                    logger.info("[MCP-LIFECYCLE] Disconnected session for deleted source \(targetID).")
+                }
+
+                // Withdraw the grant at the provider, not just locally. Purging Keychain
+                // alone left OAuth tokens valid at the issuer until natural expiry, so
+                // "remove this server" did not actually revoke the access the user granted
+                // it. Fire-and-forget: it reads the bundle before `purgeAll` deletes it.
+                if let bundle = MCPOAuthCoordinator.loadBundle(sourceID: targetID) {
+                    Task { await MCPOAuthCoordinator.revokeTokens(sourceID: targetID, bundle: bundle) }
+                }
+
                 MCPSecretStore.shared.purgeAll(sourceID: targetID, knownEnvKeys: envKeys)
                 MCPLogStore.shared.purge(sourceID: targetID)
 

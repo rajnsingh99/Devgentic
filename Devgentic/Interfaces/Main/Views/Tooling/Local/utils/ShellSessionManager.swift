@@ -51,11 +51,19 @@ actor ShellSessionManager {
         // 1. Resolve Context
         // FIX: Default to User Home (~/) instead of App Bundle/Root.
         var cwd = FileManager.default.homeDirectoryForCurrentUser.path
-        
+
         if let savedCWD = sessionCWDs[conversationID] {
-            cwd = savedCWD
+            // Checked, not trusted: the tracked directory can vanish between calls — frequently
+            // removed by the agent itself. `cd` into a missing directory failed the whole
+            // command with a message naming a path the caller never mentioned.
+            if FileManager.default.fileExists(atPath: savedCWD) {
+                cwd = savedCWD
+            } else {
+                logger.notice("[SHELL] conv \(conversationID.uuidString.prefix(8)) — tracked directory '\(savedCWD)' no longer exists; session reset to HOME. The next command runs in \(cwd), NOT where the agent last cd'd, so its relative paths resolve elsewhere.")
+                sessionCWDs[conversationID] = nil
+            }
         }
-        
+
         // 2. Safety & Timeout Setup
         // Phase 10: Token-aware blocking to prevent false positives on non-interactive invocations
         // (e.g. `python3 script.py`, `node index.js`, `topology` containing "top").
@@ -67,39 +75,70 @@ actor ShellSessionManager {
             throw ShellSessionError.blocked(reason: refusal)
         }
 
-        // 3. Construct "Stateful" Command
+        // 3. Construct "Stateful" Script
         //
         // This is the ONE place a shell command string is still built by interpolation, and it
         // is deliberate: `execute_shell` exists to run the caller's shell command, so `command`
         // reaching a shell IS the feature, not an injection. Every other tool that did this
-        // (`glob_files`, `git_tool`, `get_file_hash`, `xcode_orchestrator`) was interpolating
-        // model-supplied values into a shell it never meant to expose, and moved to argv.
+        // (`glob_files`, `git_tool`, `get_file_hash`) was interpolating model-supplied values
+        // into a shell it never meant to expose, and moved to argv. A sweep for interpolated
+        // command strings will land here; that is expected.
         //
-        // `cwd` is this session's own tracked directory, read back from a previous `pwd`, and
-        // `pwdMarker` is a constant — neither is caller-controlled. A sweep for interpolated
-        // command strings will land here; that is expected, and converting it to argv would
-        // remove the tool's purpose.
-        let pwdMarker = "---CWD_MARKER---"
-        let chainedCommand = "cd \"\(cwd)\" && \(command) && echo '\(pwdMarker)' && pwd"
-        
+        // ── Why the working directory is probed into a FILE, and why the command gets its own
+        //    line ────────────────────────────────────────────────────────────────────────────
+        //
+        // The previous form was one `&&` chain:
+        //     cd "<cwd>" && <command> && echo '---CWD_MARKER---' && pwd
+        // which had two defects, both of them silent:
+        //
+        // 1. **stderr was discarded on every successful command.** The marker lands in STDOUT,
+        //    and `combinedOutput` appends stderr AFTER stdout — so the marker split kept only
+        //    what preceded it and threw the rest away, stderr included. `echo OUT; echo ERR 1>&2`
+        //    returned "OUT" and nothing else. For a coding agent that is most of the signal:
+        //    compiler warnings, deprecation notices, npm advisories, test diagnostics — all
+        //    written to stderr by convention, all invisible. Worse, the leftover text polluted
+        //    the parsed `pwd`, so `fileExists` failed and a legitimate `cd` was ALSO lost
+        //    whenever the command happened to write to stderr.
+        //
+        // 2. **`cmd &` was a parse error.** `&` terminates a job-control statement and cannot be
+        //    followed by `&&`, so `npm run dev &` returned `zsh: parse error near '&&'`. That
+        //    made the backgrounded-descendant handling in `ProcessRunner` — the grace window,
+        //    the `outputComplete` flag, the note appended below — unreachable through this tool,
+        //    despite being written for exactly this case.
+        //
+        // Both come from splicing the caller's command into an operator chain. A newline is the
+        // one separator that composes with any complete statement, and moving the probe off the
+        // output streams entirely means nothing has to be parsed back out of them.
+        //
+        // The probe runs UNCONDITIONALLY (not `&&`-guarded), so a `cd` is still recorded when the
+        // command that followed it failed — and `exit $__dg_status` preserves the command's own
+        // status rather than the probe's.
+        let pwdFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dg-pwd-\(UUID().uuidString)")
+            .path
+        defer { try? FileManager.default.removeItem(atPath: pwdFile) }
+
+        let script = """
+        cd \(Self.posixQuoted(cwd)) || exit 1
+        \(command)
+        __dg_status=$?
+        pwd > \(Self.posixQuoted(pwdFile)) 2>/dev/null
+        exit $__dg_status
+        """
+
         // 4. Execution
-        let (output, exitCode) = try await runZshProcess(chainedCommand)
-        
-        // 5. Parse New State (CWD)
-        var cleanOutput = output
-        
-        if output.contains(pwdMarker) {
-            let components = output.components(separatedBy: pwdMarker)
-            if components.count >= 2 {
-                cleanOutput = components[0].trimmingCharacters(in: .whitespacesAndNewlines)
-                let newCWD = components[1].trimmingCharacters(in: .whitespacesAndNewlines)
-                
-                if !newCWD.isEmpty && FileManager.default.fileExists(atPath: newCWD) {
-                    sessionCWDs[conversationID] = newCWD
-                }
+        let (output, exitCode) = try await runZshProcess(script)
+
+        // 5. Parse New State (CWD) — read from the probe file, never from the output.
+        let cleanOutput = output
+        if let probed = try? String(contentsOfFile: pwdFile, encoding: .utf8) {
+            let newCWD = probed.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !newCWD.isEmpty, newCWD != cwd, FileManager.default.fileExists(atPath: newCWD) {
+                sessionCWDs[conversationID] = newCWD
+                logger.info("[SHELL] conv \(conversationID.uuidString.prefix(8)) — working directory now '\(newCWD)'; subsequent commands in this conversation start there.")
             }
         }
-        
+
         // 6. Format Output
         let finalCWD = self.getCWD(for: conversationID)
         let displayOutput = cleanOutput.isEmpty
@@ -144,6 +183,18 @@ actor ShellSessionManager {
     
     private func getCWD(for id: UUID) -> String {
         return sessionCWDs[id] ?? FileManager.default.homeDirectoryForCurrentUser.path
+    }
+
+    /// Wraps a value as a POSIX single-quoted shell word.
+    ///
+    /// Used for the two values this type splices into the script that are NOT the caller's
+    /// command: the tracked working directory and the probe-file path. Neither is model-supplied
+    /// — the directory is read back from a previous `pwd` — but the previous `cd "\(cwd)"` used
+    /// DOUBLE quotes, which still expand `$` and can be closed by a `"` in a directory name. A
+    /// directory called `it's a "test"` broke the command; single-quoting cannot be escaped from,
+    /// since the only special character inside single quotes is the closing quote itself.
+    static func posixQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
     
     private func trackProcess(_ process: Process) {

@@ -118,6 +118,6 @@ extension AgentConnect: WorkflowStreamProvider {
             return native
         }
         let sources = await UnifiedToolStore.shared.sources
-        return resolveMCPTool(toolConfig: tool, availableSources: sources)
+        return resolveMCPTool(toolConfig: tool, availableSources: sources, conversationID: conversationID)
     }
 }

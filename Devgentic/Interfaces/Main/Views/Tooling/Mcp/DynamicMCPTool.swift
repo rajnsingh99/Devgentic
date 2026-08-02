@@ -8,6 +8,8 @@
 
 import Foundation
 
+private let logger = DGLogger(category: "DynamicMCPTool")
+
 /// A generic wrapper that adapts any MCP ToolDefinition into an executable DevgenticTool.
 struct DynamicMCPTool: DevgenticTool {
     
@@ -84,58 +86,108 @@ struct DynamicMCPTool: DevgenticTool {
                 name: self.name,
                 arguments: arguments.rawDictionary
             )
+        } catch let error as MCPManagerError {
+            // A tool that ran and reported failure is NOT a broken connection. Tearing
+            // the server down and respawning it three times would destroy a healthy
+            // session over a bad argument, cost ~7s of backoff, and still end in the
+            // same error. Surface it to the agent immediately so it can correct itself.
+            if case .toolReportedFailure = error {
+                logger.info("""
+                    [MCP-TOOL] '\(name)' on '\(source.serverName)' failed at the tool level; \
+                    session left intact, no reconnect. \(error.localizedDescription)
+                    """)
+                throw error
+            }
+            return try await reconnectAndRetry(arguments: arguments, initialError: error)
         } catch {
-            // 2. Auto-reconnection with exponential backoff
-            guard let serverDef = self.source.serverDefinition else {
-                return "Execution Failed: No active connection and no server definition found to reconnect."
-            }
-
-            let maxRetries = 3
-            var lastError = error
-
-            for attempt in 1...maxRetries {
-                let backoffSeconds = Double(1 << (attempt - 1)) // 1s, 2s, 4s
-                print("DynamicMCPTool: Retry \(attempt)/\(maxRetries) for \(source.serverName) after \(backoffSeconds)s backoff...")
-
-                MCPClientService.shared.connectionStates[source.id] = .reconnecting(attempt: attempt)
-
-                try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
-
-                // Reactive OAuth refresh on the first retry only. If the
-                // initial failure was a 401 / token-expired, refreshing the
-                // bundle here means the subsequent `connect` materializes a
-                // fresh access token via `MCPRuntimeSecrets.materialize`. We
-                // only try once — if the refresh itself fails (revoked
-                // refresh token, etc.) the user has to re-authenticate via
-                // the form.
-                if attempt == 1, case .oauth = serverDef.auth {
-                    do {
-                        _ = try await MCPOAuthCoordinator.refresh(sourceID: self.source.id)
-                    } catch {
-                        // Best-effort: log via the existing connection state
-                        // and let the regular reconnect attempt run anyway.
-                        // Even with a stale token the SDK may reconnect on
-                        // some transports, and surfacing the original tool
-                        // error is more useful than the refresh error.
-                        print("DynamicMCPTool: OAuth refresh failed for \(source.serverName): \(error.localizedDescription)")
-                    }
-                }
-
-                do {
-                    _ = try await MCPClientService.shared.connect(sourceId: self.source.id, config: serverDef)
-                    return try await MCPClientService.shared.executeTool(
-                        sourceId: self.source.id,
-                        name: self.name,
-                        arguments: arguments.rawDictionary
-                    )
-                } catch {
-                    lastError = error
-                }
-            }
-
-            // All retries exhausted
-            MCPClientService.shared.connectionStates[source.id] = .error(lastError.localizedDescription)
-            return "Error executing tool '\(name)' after \(maxRetries) retries: \(lastError.localizedDescription)"
+            return try await reconnectAndRetry(arguments: arguments, initialError: error)
         }
+    }
+
+    /// Transport-level recovery: the session looks dead, so rebuild it with exponential
+    /// backoff and re-issue the call.
+    ///
+    /// Every exit path here THROWS rather than returning a message. A returned string is
+    /// indistinguishable from a successful result to `ToolExecutionMediator`, which scores
+    /// output as failure only when it is empty or begins with "error" — so returning
+    /// `"Execution Failed: …"` used to be recorded as `.success`, complete with a green
+    /// trace span and a `recordToolReliability(isSuccess: true)`.
+    @MainActor
+    private func reconnectAndRetry(arguments: Arguments, initialError: Error) async throws -> String {
+        guard let serverDef = self.source.serverDefinition else {
+            logger.error("""
+                [MCP-TOOL] '\(name)' cannot run and cannot recover: source \(source.id) \
+                ('\(source.serverName)') has no persisted serverDefinition, so there is nothing \
+                to reconnect to. The agent loses this capability for the rest of the run. \
+                Underlying: \(initialError.localizedDescription)
+                """)
+            throw MCPManagerError.connectionFailed(initialError)
+        }
+
+        let maxRetries = 3
+        var lastError = initialError
+
+        for attempt in 1...maxRetries {
+            let backoffSeconds = Double(1 << (attempt - 1)) // 1s, 2s, 4s
+            logger.warning("""
+                [MCP-TOOL] Reconnect \(attempt)/\(maxRetries) for '\(source.serverName)' \
+                (source \(source.id)) after \(backoffSeconds)s backoff — tool '\(name)' is \
+                blocked until this succeeds. Last error: \(lastError.localizedDescription)
+                """)
+
+            MCPClientService.shared.connectionStates[source.id] = .reconnecting(attempt: attempt)
+
+            try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
+
+            // Reactive OAuth refresh on the first retry only. If the initial failure was a
+            // 401 / token-expired, refreshing the bundle here means the subsequent `connect`
+            // materializes a fresh access token via `MCPRuntimeSecrets.materialize`. We only
+            // try once — if the refresh itself fails (revoked refresh token, etc.) the user
+            // has to re-authenticate via the form.
+            if attempt == 1, case .oauth = serverDef.auth {
+                do {
+                    _ = try await MCPOAuthCoordinator.refresh(sourceID: self.source.id)
+                } catch let refreshError {
+                    // Best effort: let the regular reconnect run anyway, since some
+                    // transports recover with a stale token, and the original tool error is
+                    // more useful to surface than the refresh error.
+                    logger.error("""
+                        [MCP-TOOL] OAuth refresh FAILED for '\(source.serverName)' \
+                        (source \(source.id)): \(refreshError.localizedDescription). Continuing \
+                        the reconnect with the existing token; if it is genuinely expired this \
+                        will fail as 401 and the user must re-authenticate from the server form.
+                        """)
+                }
+            }
+
+            do {
+                _ = try await MCPClientService.shared.connect(sourceId: self.source.id, config: serverDef)
+                return try await MCPClientService.shared.executeTool(
+                    sourceId: self.source.id,
+                    name: self.name,
+                    arguments: arguments.rawDictionary
+                )
+            } catch let error as MCPManagerError {
+                // Reconnect worked and the tool ran — it just failed. Stop retrying.
+                if case .toolReportedFailure = error {
+                    logger.info("""
+                        [MCP-TOOL] '\(name)' reconnected on attempt \(attempt) and the tool \
+                        reported failure; not retrying further.
+                        """)
+                    throw error
+                }
+                lastError = error
+            } catch {
+                lastError = error
+            }
+        }
+
+        MCPClientService.shared.connectionStates[source.id] = .error(lastError.localizedDescription)
+        logger.error("""
+            [MCP-TOOL] '\(name)' on '\(source.serverName)' (source \(source.id)) FAILED after \
+            \(maxRetries) reconnect attempts — the agent will proceed without this tool's result. \
+            Last error: \(lastError.localizedDescription)
+            """)
+        throw MCPManagerError.connectionFailed(lastError)
     }
 }

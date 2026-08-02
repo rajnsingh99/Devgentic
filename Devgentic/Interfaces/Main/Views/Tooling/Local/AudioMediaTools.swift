@@ -52,7 +52,7 @@ struct ManageAudioTool: DevgenticTool {
             let desc = scriptObj?.executeAndReturnError(&errorInfo)
 
             if let err = errorInfo {
-                return "AppleScript Error: \(err)"
+                return "Error: AppleScript failed — \(err)"
             }
 
             if arguments.action == "get_volume" {

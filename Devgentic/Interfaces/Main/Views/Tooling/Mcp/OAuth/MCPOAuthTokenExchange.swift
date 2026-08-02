@@ -80,15 +80,21 @@ struct MCPOAuthTokenExchange {
         clientId: String,
         redirectURI: URL,
         metadata: MCPOAuthMetadata,
+        resource: URL? = nil,
         session: URLSession = .shared
     ) async throws -> (accessToken: String, refreshToken: String?, expiresAt: Date, grantedScopes: [String]) {
-        let params: [(String, String)] = [
+        var params: [(String, String)] = [
             ("grant_type",    "authorization_code"),
             ("code",          code),
             ("code_verifier", codeVerifier),
             ("client_id",     clientId),
             ("redirect_uri",  redirectURI.absoluteString),
         ]
+        // RFC 8707 — must be repeated here, not only on the authorize request, for the
+        // AS to bind the audience of the token it actually issues.
+        if let resource {
+            params.append(("resource", resource.absoluteString))
+        }
         let response = try await postForm(to: metadata.tokenEndpoint, params: params, session: session)
         return resolve(response: response)
     }
@@ -99,26 +105,84 @@ struct MCPOAuthTokenExchange {
     static func refresh(
         bundle: MCPOAuthCredentialBundle,
         metadata: MCPOAuthMetadata,
+        resource: URL? = nil,
         session: URLSession = .shared
     ) async throws -> (accessToken: String, refreshToken: String?, expiresAt: Date, grantedScopes: [String]) {
         guard let refreshToken = bundle.refreshToken else {
             throw MCPOAuthTokenExchangeError.missingRefreshToken
         }
-        let params: [(String, String)] = [
+        var params: [(String, String)] = [
             ("grant_type",    "refresh_token"),
             ("refresh_token", refreshToken),
             ("client_id",     bundle.clientId),
         ]
+        // Keep the audience binding across refreshes — otherwise the refreshed token
+        // silently widens back to a general-purpose one.
+        if let resource {
+            params.append(("resource", resource.absoluteString))
+        }
         let response = try await postForm(to: metadata.tokenEndpoint, params: params, session: session)
         return resolve(response: response, fallbackScopes: bundle.grantedScopes)
     }
 
+    /// Best-effort RFC 7009 revocation, used when the user deletes an MCP server.
+    ///
+    /// Purging the Keychain only makes Devgentic forget the token; the token itself stays
+    /// valid at the provider until it expires. Revoking tells the AS to invalidate it now.
+    /// Deliberately non-throwing: deleting a server must succeed even when the provider is
+    /// unreachable or does not implement revocation.
+    static func revoke(
+        token: String,
+        tokenTypeHint: String,
+        clientId: String,
+        revocationEndpoint: URL,
+        session: URLSession = .shared
+    ) async {
+        let params: [(String, String)] = [
+            ("token", token),
+            ("token_type_hint", tokenTypeHint),
+            ("client_id", clientId),
+        ]
+        do {
+            var components = URLComponents()
+            components.queryItems = params.map { URLQueryItem(name: $0.0, value: $0.1) }
+            var req = URLRequest(url: revocationEndpoint)
+            req.httpMethod = "POST"
+            req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+            req.timeoutInterval = 8
+            req.httpBody = (components.percentEncodedQuery ?? "").data(using: .utf8)
+
+            let (_, response) = try await session.data(for: req)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            // RFC 7009 §2.2: the AS returns 200 even for an unknown token.
+            if (200..<300).contains(status) {
+                logger.info("[MCP-OAUTH] Revoked \(tokenTypeHint) at \(MCPRedaction.redact(url: revocationEndpoint.absoluteString)).")
+            } else {
+                logger.warning("""
+                    [MCP-OAUTH] Revocation of \(tokenTypeHint) returned HTTP \(status) — the token \
+                    may REMAIN VALID at the provider until it expires. Local secrets are still purged.
+                    """)
+            }
+        } catch {
+            logger.warning("""
+                [MCP-OAUTH] Revocation of \(tokenTypeHint) failed: \(error.localizedDescription). \
+                The token may REMAIN VALID at the provider until it expires; revoke it manually \
+                there if it mattered. Local secrets are still purged.
+                """)
+        }
+    }
+
     // MARK: - Private
 
-    /// `application/x-www-form-urlencoded` POST per RFC 6749 §3.2. The token
-    /// endpoint *must* be HTTPS for any non-loopback issuer; discovery
-    /// already validated this when the metadata was fetched, so we don't
-    /// re-check here.
+    /// `application/x-www-form-urlencoded` POST per RFC 6749 §3.2.
+    ///
+    /// The token endpoint must be HTTPS for any non-loopback issuer. That IS now
+    /// enforced — `MCPOAuthDiscovery.validateDocument` scheme-checks every endpoint in
+    /// the metadata document before it is ever handed here. Until 2026-08-01 this comment
+    /// claimed the same thing but it was not true: discovery only validated the issuer URL
+    /// the caller passed in, never the endpoints the server returned, so an
+    /// attacker-supplied `"token_endpoint": "http://…"` would have been posted to in the
+    /// clear, carrying the authorization code and PKCE verifier.
     private static func postForm(
         to endpoint: URL,
         params: [(String, String)],

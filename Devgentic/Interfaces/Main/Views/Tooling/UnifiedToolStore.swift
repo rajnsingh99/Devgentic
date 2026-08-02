@@ -10,6 +10,8 @@
 
 import Foundation
 
+private let logger = DGLogger(category: "UnifiedToolStore")
+
 /// A singleton class that acts as the single source of truth for all tool sources,
 /// combining the static, built-in tools with the user's persisted MCP servers.
 @Observable @MainActor
@@ -24,28 +26,32 @@ final class UnifiedToolStore {
     private let mcpStore = MCPToolStore.shared
     private let localManager = LocalToolManager.shared
 
-    /// Observation task that watches MCPToolStore for changes.
-    private var observationTask: Task<Void, Never>?
-
     /// Private initializer to set up data observation.
     private init() {
         // Perform the initial data load.
         refreshSources()
+        observeMCPStore()
+    }
 
-        // Observe MCPToolStore changes via @Observable tracking.
-        // When mcpStore.sources changes, re-read triggers refreshSources().
-        observationTask = Task { [weak self] in
-            while !Task.isCancelled {
+    /// Watches `MCPToolStore.sources` and rebuilds on change.
+    ///
+    /// `withObservationTracking` fires its `onChange` exactly once, so it has to be
+    /// re-armed after every change. This used to be done by re-registering inside a
+    /// `while !Task.isCancelled` loop with a 50 ms sleep — a 20 Hz poll that ran forever
+    /// on the MainActor in a singleton that is never deallocated, and that registered a
+    /// fresh one-shot observer on every tick regardless of whether anything had changed.
+    /// Re-arming from within `onChange` gives the same liveness with no timer, no wakeups
+    /// while idle, and exactly one live observer at a time.
+    private func observeMCPStore() {
+        withObservationTracking {
+            _ = mcpStore.sources
+        } onChange: {
+            // `onChange` fires before the mutation is visible, so hop to the next main-actor
+            // turn to read the settled value, then re-arm for the following change.
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-                let _ = withObservationTracking {
-                    self.mcpStore.sources
-                } onChange: {
-                    Task { @MainActor [weak self] in
-                        self?.refreshSources()
-                    }
-                }
-                // Yield to allow the onChange callback to fire before looping.
-                try? await Task.sleep(for: .milliseconds(50))
+                self.refreshSources()
+                self.observeMCPStore()
             }
         }
     }
@@ -74,7 +80,10 @@ final class UnifiedToolStore {
                 type: source.type,
                 serverName: source.serverName,
                 tools: mappedTools,
-                serverDefinition: source.serverDefinition
+                serverDefinition: source.serverDefinition,
+                // Must be carried explicitly: `isEnabled` defaults to `true`, so omitting it
+                // here would silently re-enable every server the user had switched off.
+                isEnabled: source.isEnabled
             )
         }
         
@@ -95,7 +104,7 @@ final class UnifiedToolStore {
         // 3. Create a single, static ToolSource to represent all built-in tools.
         // We use a fixed, well-known UUID to uniquely identify this group.
         let localSource = ToolSource(
-            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            id: ToolSource.builtInSourceID,
             type: .local,
             serverName: "Built-in Tools",
             tools: localTools.sorted { $0.name < $1.name },
@@ -146,11 +155,29 @@ final class UnifiedToolStore {
         refreshSources()
     }
 
+    /// Enables or disables an MCP server without touching its configuration or secrets.
+    func setEnabled(_ enabled: Bool, sourceID: UUID) {
+        mcpStore.setEnabled(enabled, sourceID: sourceID)
+        refreshSources()
+    }
+
+    /// Is this server name already used by a different source? Used by the Add/Edit form so
+    /// a RENAME is checked for duplicates the same way an add always was.
+    func isServerNameTaken(_ serverName: String, excluding sourceID: UUID? = nil) -> Bool {
+        mcpStore.isServerNameTaken(serverName, excluding: sourceID)
+    }
+
     /// A pass-through method to delete an MCP tool source.
     /// This ensures that the built-in tools cannot be deleted.
     func deleteTool(toolSource: ToolSource) {
         guard toolSource.type == .mcp else {
-            print("Cannot delete the local tool source.")
+            // `print` never reaches LogRecorder's ring buffer, so this refusal was
+            // invisible in a shipped build and absent from any bug report.
+            logger.error("""
+                [MCP-STORE] Refused to delete tool source '\(toolSource.serverName)' \
+                (\(toolSource.id)): it is the built-in catalogue, not an MCP server. \
+                Nothing was deleted and the caller was not told.
+                """)
             return
         }
         mcpStore.deleteTool(toolSource: toolSource)

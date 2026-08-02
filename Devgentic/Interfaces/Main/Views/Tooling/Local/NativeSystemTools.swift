@@ -8,6 +8,9 @@
 
 @preconcurrency import Foundation
 import AppKit
+import os
+
+private let logger = DGLogger(category: "NativeSystemTools")
 
 // MARK: - Terminal Tool
 
@@ -231,13 +234,36 @@ struct RunAppleScriptTool: DevgenticTool {
     func call(arguments: Arguments) async throws -> String {
         return await MainActor.run {
             var errorInfo: NSDictionary?
+
+            // Both failure paths are prefixed "Error:" so `ToolExecutionMediator.isSemanticFailure`
+            // actually classifies them. They previously read "Failed to init script." and
+            // "AppleScript Error: …", and the sniffer requires the word "error" at the START of
+            // the output followed by `:` or whitespace — so a script that failed to compile, or
+            // one that threw, was reported accurately and then recorded as a SUCCESSFUL tool
+            // call. The agent went on to reason about a result that never existed.
+            //
+            // This is the same defect as `git_tool`'s "Git error:" and `diff_files`'s
+            // "Diff error:", both fixed for the same reason: the detection was right and the
+            // prefix missed by one word.
             guard let scriptObject = NSAppleScript(source: arguments.script) else {
-                return "Failed to init script."
+                logger.error("[APPLESCRIPT] NSAppleScript(source:) returned nil — the script could not be compiled, so nothing ran. Reported to the model as a failure.")
+                return "Error: the AppleScript could not be compiled. Check for unbalanced quotes, "
+                    + "parentheses or `tell` blocks."
             }
+
             let descriptor = scriptObject.executeAndReturnError(&errorInfo)
+
             if let err = errorInfo {
-                return "AppleScript Error: \(err)"
+                // The raw NSDictionary dump is unreadable and unactionable. AppleScript supplies
+                // a human message and an error number; surface those and keep the rest out.
+                let message = (err[NSAppleScript.errorMessage] as? String)
+                    ?? (err[NSAppleScript.errorBriefMessage] as? String)
+                    ?? "\(err)"
+                let number = (err[NSAppleScript.errorNumber] as? Int).map { " (error \($0))" } ?? ""
+                logger.error("[APPLESCRIPT] execution failed\(number): \(message) — reported to the model as a failure; no result was produced.")
+                return "Error: AppleScript failed\(number) — \(message)"
             }
+
             return descriptor.stringValue ?? descriptor.description
         }
     }

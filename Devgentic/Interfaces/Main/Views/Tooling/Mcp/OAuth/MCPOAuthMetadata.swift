@@ -53,6 +53,11 @@ struct MCPOAuthMetadata: Codable, Hashable, Sendable {
     /// client which doesn't fit a desktop app.
     let tokenEndpointAuthMethodsSupported: [String]?
 
+    /// OPTIONAL (RFC 7009). Where to POST a token to revoke it. Used on server
+    /// removal so a deleted server's tokens stop being valid rather than merely
+    /// being forgotten locally.
+    let revocationEndpoint: URL?
+
     enum CodingKeys: String, CodingKey {
         case issuer
         case authorizationEndpoint        = "authorization_endpoint"
@@ -62,6 +67,7 @@ struct MCPOAuthMetadata: Codable, Hashable, Sendable {
         case codeChallengeMethodsSupported = "code_challenge_methods_supported"
         case grantTypesSupported          = "grant_types_supported"
         case tokenEndpointAuthMethodsSupported = "token_endpoint_auth_methods_supported"
+        case revocationEndpoint           = "revocation_endpoint"
     }
 }
 
@@ -69,15 +75,26 @@ extension MCPOAuthMetadata {
 
     /// True when the server advertises everything we need:
     /// - authorization-code grant
-    /// - PKCE S256 method
+    /// - PKCE S256 method (must be advertised EXPLICITLY — see below)
     /// - public-client token-endpoint auth (`"none"`) or omits the field entirely
     ///
-    /// Fields the server *omits* are treated as "supported by default" because
-    /// RFC 8414 says omission means "default per the relevant OAuth profile",
-    /// and the OAuth 2.1 default is exactly what we want.
+    /// The omission rules are NOT uniform across these fields, which is what the
+    /// previous `?? true` on all three got wrong:
+    ///
+    /// - `grant_types_supported` — RFC 8414: omitted means `["authorization_code",
+    ///   "implicit"]`, so treating omission as support is correct.
+    /// - `token_endpoint_auth_methods_supported` — omitted means `client_secret_basic`.
+    ///   Strictly that excludes us, but ASes that accept public clients commonly omit
+    ///   the field, and guessing wrong here costs only a clear failure at the token
+    ///   endpoint — no credential is exposed. Left permissive on purpose.
+    /// - `code_challenge_methods_supported` — RFC 8414 is explicit that **omitted means
+    ///   the server does NOT support PKCE**. `?? true` inverted that, so an AS with no
+    ///   PKCE at all was accepted as PKCE-capable: we would send a `code_challenge` the
+    ///   server ignores and then exchange the code with no proof of possession, which is
+    ///   exactly the interception attack PKCE exists to prevent. This one is now strict.
     var supportsDesktopPKCEFlow: Bool {
         let grantsOK = grantTypesSupported?.contains("authorization_code") ?? true
-        let pkceOK = codeChallengeMethodsSupported?.contains("S256") ?? true
+        let pkceOK = codeChallengeMethodsSupported?.contains("S256") ?? false
         let authOK = tokenEndpointAuthMethodsSupported?.contains("none") ?? true
         return grantsOK && pkceOK && authOK
     }

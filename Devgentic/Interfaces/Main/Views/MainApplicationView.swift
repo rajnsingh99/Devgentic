@@ -141,6 +141,12 @@ struct MainApplicationView: View {
             .padding(.trailing, chatSplitInset)
             .frame(maxWidth: .infinity)
             .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
+            .onReceive(NotificationCenter.default.publisher(for: .requestSidebarVisible)) { _ in
+                // The Tool Library's navigation IS the pane; entering it with the pane
+                // hidden would leave no way to change category or pick a server.
+                guard !isSidebarVisible else { return }
+                isSidebarVisible = true
+            }
             .animation(.easeInOut(duration: 0.1), value: currentSidebarPaneWidth)
             .animation(.easeInOut(duration: 0.2), value: router.activeDestination)
             .animation(.easeInOut(duration: 0.2), value: chatSplitInset)
@@ -289,7 +295,7 @@ struct MainApplicationView: View {
         case .settingsDetail(let category):
             SettingsDetailContainerView(category: category)
         case .toolLibrary(let profileID):
-            ToolLibraryContainerView(profileID: profileID)
+            ToolLibraryContainerView(routeProfileID: profileID)
         case .addMCPServer:
             AddMCPServerContainerView(mode: .add)
         case .editMCPServer(let sourceID):
