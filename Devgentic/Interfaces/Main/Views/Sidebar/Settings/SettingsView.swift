@@ -20,6 +20,23 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
 
     var id: String { self.rawValue }
 
+    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
+    /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
+    /// invisible to the String Catalog extractor and would have shipped untranslated inside
+    /// otherwise-translated chrome. `rawValue` stays for `id`/persistence and logging only.
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .general:          return "General"
+        case .coreIntelligence: return "Core Intelligence"
+        case .account:          return "Account"
+        case .notifications:    return "Notifications"
+        case .theme:            return "Theme"
+        case .chatOps:          return "ChatOps"
+        case .quickAccess:      return "Quick Access"
+        case .about:            return "About"
+        }
+    }
+
     /// Returns the appropriate icon for each settings category.
     var iconName: String {
         switch self {
@@ -100,7 +117,7 @@ struct SettingsView: View {
             List(SettingsCategory.allCases, selection: $selectedCategory) { category in
                 NavigationLink(value: category) {
                     Label {
-                        Text(category.rawValue)
+                        Text(category.localizedTitle)
                             .font(theme.fontBody.weight(.medium))
                     } icon: {
                         Image(systemName: category.iconName)

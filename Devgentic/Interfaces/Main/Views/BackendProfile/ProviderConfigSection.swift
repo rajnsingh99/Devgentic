@@ -90,7 +90,8 @@ struct ProviderConfigSection: View {
                 }
             )) {
                 ForEach(providers, id: \.self) { provider in
-                    Text(provider.rawValue).tag(provider)
+                    // Label localizes; the `.tag` keeps the enum value itself (selection identity).
+                    Text(provider.localizedTitle).tag(provider)
                 }
             }
             .labelsHidden()
@@ -437,5 +438,28 @@ struct ProviderConfigSection: View {
 
     static func defaultBaseURL(for provider: ApiProvider) -> String {
         ProviderDefaults.baseURLString(for: provider)
+    }
+}
+
+// MARK: - ApiProvider Localization
+//
+// `ApiProvider` is declared in `BackendProfile.swift`, a Foundation-only model file whose
+// values are `Codable` and reach SwiftData/JSON — it must not import SwiftUI, so the
+// presentation-only property lives here in the SwiftUI layer instead.
+extension ApiProvider {
+    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
+    /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
+    /// invisible to the String Catalog extractor and would have shipped untranslated inside
+    /// otherwise-translated chrome. `rawValue` stays for persistence and logging only.
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .ollama:           return "Ollama (Local)"
+        case .mlx:              return "MLX (Apple Silicon)"
+        case .openAI:           return "OpenAI"
+        case .anthropic:        return "Anthropic"
+        case .google:           return "Google"
+        case .openRouter:       return "OpenRouter"
+        case .openAICompatible: return "Custom (OpenAI-Compatible)"
+        }
     }
 }

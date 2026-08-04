@@ -39,6 +39,11 @@ struct ModelDownloadStatusView: View {
     /// currently surface a delete UI should omit it rather than crash.
     var onDeleteRequested: (() -> Void)? = nil
 
+    /// Opens the model's folder. Supplied only for backends whose models live in a folder the
+    /// app knows about — the installed card previously showed the path as truncated caption
+    /// text with no way to act on it.
+    var onRevealRequested: (() -> Void)? = nil
+
     @Environment(ToastManager.self) private var toastManager
     @Environment(\.appTheme) private var theme
 
@@ -50,7 +55,7 @@ struct ModelDownloadStatusView: View {
     /// we show a "Cleaning up…" indicator instead of a frozen progress bar.
     /// Other backends cancel atomically and don't need this state.
     private var isCleaningUpCancel: Bool {
-        backend == .mlx && MLXModelService.shared.isCancellingDownload
+        backend == .mlx && MLXModelService.shared.isCancellingDownload(repoId: modelIdentifier)
     }
 
     init(
@@ -60,7 +65,8 @@ struct ModelDownloadStatusView: View {
         isInstalled: Bool,
         profileID: UUID? = nil,
         onDownloadRequested: (() -> Void)? = nil,
-        onDeleteRequested: (() -> Void)? = nil
+        onDeleteRequested: (() -> Void)? = nil,
+        onRevealRequested: (() -> Void)? = nil
     ) {
         self.backend = backend
         self.modelIdentifier = modelIdentifier
@@ -69,6 +75,7 @@ struct ModelDownloadStatusView: View {
         self.profileID = profileID
         self.onDownloadRequested = onDownloadRequested
         self.onDeleteRequested = onDeleteRequested
+        self.onRevealRequested = onRevealRequested
     }
 
     /// Most-recent active record for this model, if any. Reading
@@ -120,6 +127,10 @@ struct ModelDownloadStatusView: View {
                 Text("Download")
                     .font(.system(.caption, weight: .medium))
             }
+            // Same intrinsic-width rule as `installedView` — a squeezed row must not be able
+            // to wrap the primary action's label inside its pill.
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background(backend.tintColor.opacity(0.15))
@@ -146,6 +157,8 @@ struct ModelDownloadStatusView: View {
                     Text("Cleaning up…")
                         .font(.caption)
                         .foregroundColor(theme.secondaryText)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
             } else {
                 HStack(spacing: 8) {
@@ -172,7 +185,7 @@ struct ModelDownloadStatusView: View {
                 }
 
                 Text(DownloadSpeedFormatter.compactLine(snapshot: snapshot))
-                    .font(.system(size: 9, design: .monospaced))
+                    .font(.system(.caption2, design: .monospaced))
                     .foregroundColor(theme.tertiaryText)
                     .lineLimit(1)
             }
@@ -206,6 +219,13 @@ struct ModelDownloadStatusView: View {
             Label("Installed", systemImage: "checkmark.seal.fill")
                 .font(.system(.caption, weight: .medium))
                 .foregroundColor(theme.successColor)
+                // ⚠️ A pill must keep its intrinsic width. This is a SHARED component dropped
+                // into rows with very different width budgets — the MLX store card has room,
+                // the Whisper settings row does not — and without this the label wrapped and
+                // hyphenated INSIDE the capsule ("In-stal / led"). `fixedSize` opts the label
+                // out of the parent's compression; `lineLimit(1)` stops the wrap outright.
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(theme.successColor.opacity(0.12))
@@ -216,6 +236,14 @@ struct ModelDownloadStatusView: View {
                     showingRedownloadAlert = true
                 } label: {
                     Label("Re-download…", systemImage: "arrow.clockwise")
+                }
+
+                if let onReveal = onRevealRequested {
+                    Button {
+                        onReveal()
+                    } label: {
+                        Label("Reveal in Finder", systemImage: "folder")
+                    }
                 }
 
                 if let onDelete = onDeleteRequested {
@@ -242,6 +270,21 @@ struct ModelDownloadStatusView: View {
 
     // MARK: - Download trigger
 
+    /// Whether the host's pre-download hook should handle this request instead of the
+    /// coordinator.
+    ///
+    /// ⚠️ Only a FRESH pull may be intercepted. The hook exists so the MLX store can raise its
+    /// RAM-fit advisory before starting a download; a forced re-download is an explicit repair
+    /// of a model already on disk, whose fit was accepted when it was first installed.
+    /// Delegating a forced request would drop the `force` flag — the host's closure calls the
+    /// coordinator without it, the install check short-circuits, and Re-download silently
+    /// becomes the no-op that A7 existed to fix.
+    ///
+    /// Static and free of view state so the rule is testable without building a view.
+    static func shouldDelegateToHost(force: Bool, hasHook: Bool) -> Bool {
+        !force && hasHook
+    }
+
     /// Kicks off the idempotent coordinator flow. `force: true` skips the
     /// "already installed" short-circuit by deleting the current record
     /// first (used for the Re-download path).
@@ -256,7 +299,8 @@ struct ModelDownloadStatusView: View {
             }
         }
 
-        if let onDownloadRequested {
+        if Self.shouldDelegateToHost(force: force, hasHook: onDownloadRequested != nil),
+           let onDownloadRequested {
             onDownloadRequested()
             return
         }
@@ -269,9 +313,13 @@ struct ModelDownloadStatusView: View {
                 profileID: profileID
             )
         case .mlx:
+            // `force` must reach the coordinator: deleting the history record above is not
+            // enough, because the installed check reads the FILESYSTEM. Without this the
+            // Re-download button was a guaranteed no-op on any installed model.
             outcome = await DownloadCoordinator.startMLXDownloadIfNeeded(
                 repoId: modelIdentifier,
-                profileID: profileID
+                profileID: profileID,
+                force: force
             )
         case .whisper:
             outcome = await DownloadCoordinator.startWhisperDownloadIfNeeded(

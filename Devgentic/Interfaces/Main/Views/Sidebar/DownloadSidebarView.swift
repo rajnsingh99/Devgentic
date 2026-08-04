@@ -12,9 +12,25 @@
 import SwiftUI
 import SwiftData
 
+private let logger = DGLogger(category: "DownloadSidebarView")
+
+/// Bounded history query shared by the sidebar and the Downloads screen.
+///
+/// ⚠️ Both views previously used an UNBOUNDED `@Query`, loading every row ever written and then
+/// re-filtering the whole array in each computed property on every body pass. `fetchHistory`
+/// already capped at 200; these bypassed it entirely. The limit matches that cap so the two
+/// paths agree.
+private let boundedDownloadRecords: FetchDescriptor<DownloadRecord> = {
+    var descriptor = FetchDescriptor<DownloadRecord>(
+        sortBy: [SortDescriptor(\DownloadRecord.updatedAt, order: .reverse)]
+    )
+    descriptor.fetchLimit = 200
+    return descriptor
+}()
+
 struct DownloadSidebarView: View {
 
-    @Query(sort: \DownloadRecord.updatedAt, order: .reverse)
+    @Query(boundedDownloadRecords)
     private var allRecords: [DownloadRecord]
 
     @Environment(MainViewRouter.self) private var router
@@ -22,6 +38,9 @@ struct DownloadSidebarView: View {
     @Environment(\.appTheme) private var theme
 
     @State private var recordPendingDeletion: DownloadRecord? = nil
+    /// Reclaimable bytes behind `recordPendingDeletion`, measured when the alert is raised —
+    /// never during render, since it walks the partial-download folder.
+    @State private var pendingDeletionBytes: Int64 = 0
     @State private var recordPendingRedownload: DownloadRecord? = nil
     @State private var showingClearHistoryAlert: Bool = false
 
@@ -56,8 +75,8 @@ struct DownloadSidebarView: View {
                             }
                         }
 
-                        ForEach(groupedHistory, id: \.title) { group in
-                            sectionHeader(LocalizedStringKey(group.title), count: group.records.count)
+                        ForEach(groupedHistory, id: \.id) { group in
+                            sectionHeader(group.bucket.localizedTitle, count: group.records.count)
                             ForEach(group.records) { record in
                                 HistoryDownloadRowView(record: record)
                                     .contextMenu { historyContextMenu(for: record) }
@@ -70,20 +89,39 @@ struct DownloadSidebarView: View {
                 }
             }
         }
+        // ⚠️ Two different questions behind one menu item. For a completed or cancelled row,
+        // removing it really is a neutral tidy-up. For a PAUSED or interrupted one the partial
+        // folder is hidden from the installed list, so this row is the only handle the app has
+        // on those bytes — and the old copy ("The model file (if any) is not affected") told
+        // the user the opposite of what was about to happen.
         .alert(
             "Remove from history?",
             isPresented: Binding(
                 get: { recordPendingDeletion != nil },
-                set: { if !$0 { recordPendingDeletion = nil } }
+                set: { if !$0 { recordPendingDeletion = nil; pendingDeletionBytes = 0 } }
             ),
             presenting: recordPendingDeletion
         ) { record in
-            Button("Remove", role: .destructive) {
-                _ = DownloadHistoryStore.shared.delete(id: record.id)
+            if pendingDeletionBytes > 0 {
+                Button("Delete Files & Remove", role: .destructive) {
+                    discardPartialFiles(for: record)
+                }
+                Button("Keep Files & Remove") {
+                    logger.notice("[DOWNLOAD] Removing history row for '\(record.modelIdentifier)' while its partial files remain on disk, at the user's explicit choice. CONSEQUENCE: those bytes are no longer reachable from the app — only via Finder, or by re-downloading the model.")
+                    _ = DownloadHistoryStore.shared.delete(id: record.id)
+                }
+            } else {
+                Button("Remove", role: .destructive) {
+                    _ = DownloadHistoryStore.shared.delete(id: record.id)
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: { record in
-            Text("“\(record.displayName)” will be removed from your download history. The model file (if any) is not affected.")
+            if pendingDeletionBytes > 0 {
+                Text("“\(record.displayName)” has \(ByteCountFormatter.string(fromByteCount: pendingDeletionBytes, countStyle: .file)) already downloaded. Removing this row is the last way to reach those files from Devgentic.")
+            } else {
+                Text("“\(record.displayName)” will be removed from your download history. The model file (if any) is not affected.")
+            }
         }
         .alert(
             "Re-download \(recordPendingRedownload?.displayName ?? "model")?",
@@ -98,7 +136,10 @@ struct DownloadSidebarView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: { record in
-            Text("Re-pull \(record.displayName) from \(record.backend?.rawValue ?? "the backend")? Existing files will be overwritten.")
+            // ⚠️ The fallback "the backend" is prose and never reached the String Catalog,
+            // because interpolating a `String` into a `Text` leaves it untranslatable. The
+            // product name itself stays `verbatim` — "Ollama" is "Ollama" everywhere.
+            Text("Re-pull \(record.displayName) from \(record.backend.map { Text(verbatim: $0.rawValue) } ?? Text("the backend"))? Existing files will be overwritten.")
         }
         .alert(
             "Clear download history?",
@@ -172,9 +213,31 @@ struct DownloadSidebarView: View {
 
     // MARK: - Date grouping
 
+    /// Date bucket for the history list.
+    ///
+    /// ⚠️ A `String` title fed `LocalizedStringKey(group.title)` at the call site — a RUNTIME
+    /// key, which the compiler cannot extract, so "Today"/"Yesterday"/"This Week"/"This Month"/
+    /// "Earlier" were all absent from the String Catalog and would have shipped in English
+    /// inside a translated sidebar. A case with a static key is extractable.
+    private enum HistoryBucket: String, CaseIterable {
+        case today, yesterday, thisWeek, thisMonth, earlier
+
+        var localizedTitle: LocalizedStringKey {
+            switch self {
+            case .today:     return "Today"
+            case .yesterday: return "Yesterday"
+            case .thisWeek:  return "This Week"
+            case .thisMonth: return "This Month"
+            case .earlier:   return "Earlier"
+            }
+        }
+    }
+
     private struct HistoryGroup {
-        let title: String
+        let bucket: HistoryBucket
         let records: [DownloadRecord]
+        /// Stable identity for `ForEach` — not user-facing.
+        var id: String { bucket.rawValue }
     }
 
     /// Groups terminal records into Today / Yesterday / This Week / This Month /
@@ -209,11 +272,11 @@ struct DownloadSidebarView: View {
         }
 
         var groups: [HistoryGroup] = []
-        if !today.isEmpty     { groups.append(HistoryGroup(title: "Today", records: today)) }
-        if !yesterday.isEmpty { groups.append(HistoryGroup(title: "Yesterday", records: yesterday)) }
-        if !thisWeek.isEmpty  { groups.append(HistoryGroup(title: "This Week", records: thisWeek)) }
-        if !thisMonth.isEmpty { groups.append(HistoryGroup(title: "This Month", records: thisMonth)) }
-        if !earlier.isEmpty   { groups.append(HistoryGroup(title: "Earlier", records: earlier)) }
+        if !today.isEmpty     { groups.append(HistoryGroup(bucket: .today, records: today)) }
+        if !yesterday.isEmpty { groups.append(HistoryGroup(bucket: .yesterday, records: yesterday)) }
+        if !thisWeek.isEmpty  { groups.append(HistoryGroup(bucket: .thisWeek, records: thisWeek)) }
+        if !thisMonth.isEmpty { groups.append(HistoryGroup(bucket: .thisMonth, records: thisMonth)) }
+        if !earlier.isEmpty   { groups.append(HistoryGroup(bucket: .earlier, records: earlier)) }
         return groups
     }
 
@@ -221,6 +284,17 @@ struct DownloadSidebarView: View {
 
     @ViewBuilder
     private func activeContextMenu(for record: DownloadRecord) -> some View {
+        // Pause is offered only for MLX: it is the backend whose transport (HubApi) resumes
+        // from `.incomplete` files. Offering it for a backend that would restart from zero
+        // would be a lie about what the button does.
+        if record.backend == .mlx {
+            Button {
+                MLXModelService.shared.pauseDownload()
+            } label: {
+                Label("Pause Download", systemImage: "pause.circle")
+            }
+        }
+
         Button(role: .destructive) {
             DownloadManager.shared.cancelDownload(record)
         } label: {
@@ -230,6 +304,24 @@ struct DownloadSidebarView: View {
 
     @ViewBuilder
     private func historyContextMenu(for record: DownloadRecord) -> some View {
+        // Resume continues from bytes already on disk; Re-download starts over. Both are
+        // offered because a resume can't repair a corrupt partial, only continue it.
+        if record.backend == .mlx, record.status?.isResumable == true {
+            Button {
+                resume(record)
+            } label: {
+                Label("Resume Download", systemImage: "play.circle")
+            }
+
+            Button(role: .destructive) {
+                discardPartialFiles(for: record)
+            } label: {
+                Label("Discard Partial Files", systemImage: "trash.slash")
+            }
+
+            Divider()
+        }
+
         Button {
             recordPendingRedownload = record
         } label: {
@@ -239,9 +331,43 @@ struct DownloadSidebarView: View {
         Divider()
 
         Button(role: .destructive) {
+            pendingDeletionBytes = reclaimableBytes(for: record)
             recordPendingDeletion = record
         } label: {
             Label("Remove from History", systemImage: "trash")
+        }
+    }
+
+    /// Bytes a resume would re-use, or 0 when there is nothing at stake in removing the row.
+    /// Only MLX retains partials, and only a resumable status kept them.
+    private func reclaimableBytes(for record: DownloadRecord) -> Int64 {
+        guard record.backend == .mlx, record.status?.isResumable == true else { return 0 }
+        let folder = MLXModelService.shared.partialDownloadFolder(for: record.modelIdentifier)
+        return MLXModelService.resumableBytes(at: folder)
+    }
+
+    /// Shared by the context menu and the removal alert. ⚠️ The row is dropped only once the
+    /// bytes are gone — after a refused reclaim it is the last handle on them.
+    private func discardPartialFiles(for record: DownloadRecord) {
+        if MLXModelService.shared.discardPartialDownload(repoId: record.modelIdentifier) {
+            _ = DownloadHistoryStore.shared.delete(id: record.id)
+        } else {
+            logger.error("[DOWNLOAD] Discard of '\(record.modelIdentifier)' reclaimed nothing (see the [MLXSTORE] refusal above). CONSEQUENCE: the history row is KEPT so the user still has a handle on those bytes; it would otherwise be the last reference to them.")
+            toastManager.show("Couldn't remove the partial files for \(record.displayName)", style: .error)
+        }
+    }
+
+    private func resume(_ record: DownloadRecord) {
+        Task { @MainActor in
+            let outcome = await DownloadCoordinator.resumeMLXDownload(repoId: record.modelIdentifier)
+            switch outcome {
+            case .failed(let reason):
+                toastManager.show(reason, style: .error)
+            case .alreadyInstalled:
+                toastManager.show("\(record.displayName) is already installed", style: .success)
+            default:
+                toastManager.show("Resuming \(record.displayName)…", style: .success)
+            }
         }
     }
 
@@ -258,9 +384,12 @@ struct DownloadSidebarView: View {
                     profileID: record.profileID
                 )
             case .mlx:
+                // Explicit user re-download: bypass the installed short-circuit so a
+                // corrupt or truncated model can actually be repaired.
                 outcome = await DownloadCoordinator.startMLXDownloadIfNeeded(
                     repoId: record.modelIdentifier,
-                    profileID: record.profileID
+                    profileID: record.profileID,
+                    force: true
                 )
             case .whisper:
                 outcome = await DownloadCoordinator.startWhisperDownloadIfNeeded(
@@ -294,6 +423,9 @@ private struct ActiveDownloadRowView: View {
     let record: DownloadRecord
 
     @Environment(\.appTheme) private var theme
+    // B19 shipped Dynamic Type but not Reduce Motion, and this file was the gap: both hover
+    // transitions animated unconditionally.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovering = false
 
     private var tint: Color { record.backend?.tintColor ?? .blue }
@@ -346,7 +478,7 @@ private struct ActiveDownloadRowView: View {
                 .controlSize(.small)
 
             Text(DownloadSpeedFormatter.compactLine(snapshot: speedSnapshot))
-                .font(.system(size: 10, design: .monospaced))
+                .font(.system(.caption2, design: .monospaced))
                 .foregroundColor(theme.tertiaryText)
                 .lineLimit(1)
         }
@@ -357,7 +489,7 @@ private struct ActiveDownloadRowView: View {
                 .fill(isHovering ? theme.surfaceOverlay : Color.clear)
         )
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) { isHovering = hovering }
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { isHovering = hovering }
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(record.displayName), \(Int(record.progress * 100))% downloaded, \(DownloadSpeedFormatter.compactLine(snapshot: speedSnapshot))")
@@ -370,6 +502,9 @@ private struct HistoryDownloadRowView: View {
     let record: DownloadRecord
 
     @Environment(\.appTheme) private var theme
+    // B19 shipped Dynamic Type but not Reduce Motion, and this file was the gap: both hover
+    // transitions animated unconditionally.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovering = false
 
     private var tint: Color { record.backend?.tintColor ?? .blue }
@@ -389,8 +524,8 @@ private struct HistoryDownloadRowView: View {
                     .font(.system(.caption, weight: .medium))
                     .foregroundColor(theme.primaryText)
                     .lineLimit(1)
-                Text(subtitle)
-                    .font(.system(size: 10))
+                subtitle
+                    .font(.caption2)
                     .foregroundColor(theme.tertiaryText)
                     .lineLimit(1)
             }
@@ -404,26 +539,34 @@ private struct HistoryDownloadRowView: View {
                 .fill(isHovering ? theme.surfaceOverlay : Color.clear)
         )
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) { isHovering = hovering }
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { isHovering = hovering }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(record.displayName), \(record.status?.rawValue ?? "unknown")")
+        // ⚠️ `Text`, not a String: `accessibilityLabel(_: String)` does not localize, so this
+        // read the persisted `rawValue` out to VoiceOver in English inside otherwise-translated
+        // chrome — C2's trap, on the one surface where it is least noticeable.
+        .accessibilityLabel(Text(record.displayName) + Text(verbatim: ", ")
+                            + Text((record.status ?? .interrupted).localizedTitle))
     }
 
-    private var subtitle: String {
+    // ⚠️ Composed as `Text`, not `String`. The old version built a `String` and fed it to
+    // `Text(_: StringProtocol)`, which does NOT localize — the exact C2 trap. It also switched
+    // over the status with a `default:` arm, so `.paused` (added by G2, in the same session)
+    // rendered as a bare capitalized rawValue while `DownloadRecordStatus.localizedTitle` and
+    // `ModelBackendType.localizedTitle` sat with zero call sites app-wide.
+    private var subtitle: Text {
         let relative = RelativeDateTimeFormatter()
         relative.unitsStyle = .abbreviated
         let when = relative.localizedString(for: record.updatedAt, relativeTo: Date())
-        let backendName = record.backend?.rawValue ?? "Unknown"
-        let statusLabel: String
-        switch record.status {
-        case .completed:   statusLabel = "Completed"
-        case .failed:      statusLabel = "Failed"
-        case .cancelled:   statusLabel = "Cancelled"
-        case .interrupted: statusLabel = "Interrupted"
-        default:           statusLabel = record.status?.rawValue.capitalized ?? ""
-        }
-        return "\(backendName) · \(statusLabel) \(when)"
+        // ⚠️ The backend name is `verbatim`: "Ollama" / "MLX" / "Whisper" are product names, and
+        // putting them in the String Catalog invites a translator to localize a proper noun.
+        // The FALLBACK is prose and must be translatable — that was the actual defect, since a
+        // `String` interpolated into a `Text` never reaches the catalog at all.
+        let backend = record.backend.map { Text(verbatim: $0.rawValue) } ?? Text("Unknown")
+        // Switching over a non-optional means a status added later fails to compile here
+        // rather than silently falling into a question-mark arm.
+        let status = (record.status ?? .interrupted).localizedTitle
+        return backend + Text(verbatim: " · ") + Text(status) + Text(verbatim: " \(when)")
     }
 
     @ViewBuilder
@@ -443,6 +586,11 @@ private struct HistoryDownloadRowView: View {
                 .foregroundColor(theme.warningColor)
         case .interrupted:
             Image(systemName: "bolt.horizontal.circle.fill")
+                .font(.system(.caption))
+                .foregroundColor(theme.warningColor)
+        case .paused:
+            // Pause is a deliberate user action with the bytes intact — not an anomaly.
+            Image(systemName: "pause.circle.fill")
                 .font(.system(.caption))
                 .foregroundColor(theme.warningColor)
         default:

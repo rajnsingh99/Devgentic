@@ -63,6 +63,12 @@ struct DevgenticApp: App {
             Task { @MainActor in
                 DownloadHistoryStore.shared.configureContainer(container)
                 DownloadHistoryStore.shared.reconcileOrphans()
+                // Only now can the manager count active downloads — priming it in its own
+                // init read an unconfigured container and always answered 0.
+                DownloadManager.shared.primeActiveCount()
+                // Retention: history is otherwise monotonic for the life of the install, and
+                // every row is scanned on each bridge reconcile and sidebar render.
+                DownloadHistoryStore.shared.pruneOldRecords()
                 // Any workflow run still in .running at launch is from a prior
                 // session that ended before the run could finalize. Flip to
                 // .cancelled with "Interrupted" so the history list doesn't
@@ -70,6 +76,14 @@ struct DevgenticApp: App {
                 WorkflowRunHistoryStore.shared.reconcileOrphans()
                 // Retired Code Viewer session rows — tabs are in-memory only now.
                 CodeViewerSessionStore.shared.purgePersistedSessions()
+
+                // Partial-download residue from cancelled/interrupted MLX pulls.
+                // READ-ONLY on purpose: these folders are multi-gigabyte user data, a
+                // second app instance could be writing into one, and a user may have
+                // hand-placed files there — so we log what is reclaimable and leave the
+                // delete to an explicit user action (MLXModelService.reclaimOrphanedPartialDownloads).
+                // Until the `partialDownloadFolder` path fix, nothing ever reclaimed these.
+                MLXModelService.logOrphanedPartialDownloadsInBackground()
 
                 // Bring enabled MCP servers up now, rather than lazily on the agent's first
                 // tool call. That first call used to pay the entire connect cost inside a

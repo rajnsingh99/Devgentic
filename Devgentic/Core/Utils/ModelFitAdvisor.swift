@@ -6,12 +6,16 @@
 //
 
 import Foundation
+import SwiftUI
 import os
 
 // MARK: - Assessment Types
 
 /// The verdict on whether a model fits the current system.
-enum ModelFitVerdict: String, Sendable {
+/// ⚠️ `CaseIterable` so "every verdict answers X" tests iterate the real set. They previously
+/// walked a hand-written array, which silently skipped any case added later — exactly the gap
+/// that let `.unknown` ship without a localized title being checked.
+enum ModelFitVerdict: String, Sendable, CaseIterable {
     /// Model uses < 50% of effective budget. Plenty of headroom.
     case comfortable = "Comfortable"
     /// Model uses 50-75% of budget. Works, but limited room for concurrent models.
@@ -20,6 +24,28 @@ enum ModelFitVerdict: String, Sendable {
     case risky = "Risky"
     /// Model uses > 95% of budget. Will likely fail or thrash.
     case incompatible = "Too Large"
+    /// No size data was available, so no fit could be computed.
+    ///
+    /// ⚠️ This case exists because the absence of an answer used to be reported as
+    /// `.comfortable`. A HuggingFace size fetch that failed (a 429 is the common case, not
+    /// the rare one) left every card sizeless, and a sizeless card asserted a comfortable
+    /// fit with `estimatedRuntimeRAM: 0` — hiding the badge too, so there was not even a
+    /// visual clue. A safety advisory must never fail open; "unknown" is not "fine".
+    case unknown = "Size Unknown"
+
+    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
+    /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
+    /// invisible to the String Catalog extractor and would have shipped untranslated inside
+    /// otherwise-translated chrome. `rawValue` stays for persistence and logging only.
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .comfortable:   return "Comfortable"
+        case .tight:         return "Tight Fit"
+        case .risky:         return "Risky"
+        case .incompatible:  return "Too Large"
+        case .unknown:       return "Size Unknown"
+        }
+    }
 
     var systemImage: String {
         switch self {
@@ -27,6 +53,7 @@ enum ModelFitVerdict: String, Sendable {
         case .tight: return "exclamationmark.triangle.fill"
         case .risky: return "exclamationmark.octagon.fill"
         case .incompatible: return "xmark.octagon.fill"
+        case .unknown: return "questionmark.circle.fill"
         }
     }
 }
@@ -67,7 +94,15 @@ struct ModelFitAdvisor {
     /// can add explicit support for new formats later. One bad model never crashes the caller.
     /// - Parameter modelName: Optional model identifier (e.g. "kimi-k2.5:cloud") included in
     ///   diagnostic logs so we can identify which model produced an unusual format.
-    static func assess(metadata: ModelMetadata?, diskSizeString: String? = nil, modelName: String? = nil) -> ModelFitAssessment {
+    /// - Parameter diskSizeBytes: the authoritative byte total when the caller has it.
+    ///   Prefer this over `diskSizeString` — see `parseDiskSize` for why round-tripping a
+    ///   formatted size through a string is lossy in comma-decimal locales.
+    static func assess(
+        metadata: ModelMetadata?,
+        diskSizeString: String? = nil,
+        diskSizeBytes: Int64? = nil,
+        modelName: String? = nil
+    ) -> ModelFitAssessment {
         let profile = SystemHardwareProfiler.shared.profile
 
         // Extract parameter count in billions
@@ -79,7 +114,15 @@ struct ModelFitAdvisor {
         // Emit diagnostic logs for any inputs we couldn't parse — used to add support for new formats later.
         logUnusualInputs(metadata: metadata, parsedBillions: paramBillions, modelName: modelName)
 
-        // If we have parameter count, use the formula
+        // ⚠️ The formula outranks the byte total, and the ORDER here is the whole point of G5.
+        // `assessFromDiskSize` is a flat `diskBytes × 1.2` proxy: it cannot see quantization
+        // or context window, so a bf16 model reads as far cheaper than it runs. With the raw-
+        // bytes short-circuit sitting above this branch, `MLXQuantization.fitMetadata` was
+        // computed and thrown away on every card that had a size — i.e. nearly all of them —
+        // and only cards whose size fetch had been rate-limited ever reached the real
+        // formula. Verdicts flipped between `.risky` and `.tight` on a 24 GB machine as a
+        // result. This does NOT undo A19: raw bytes still outrank the FORMATTED string below,
+        // which was A19's actual concern (round-tripping through a comma-decimal locale).
         if let params = paramBillions {
             return assessWithFormula(
                 paramBillions: params,
@@ -87,6 +130,12 @@ struct ModelFitAdvisor {
                 contextWindow: metadata?.contextWindow,
                 profile: profile
             )
+        }
+
+        // No parameter count: raw bytes are the next best evidence — no parsing, no locale,
+        // no unit inference.
+        if let diskSizeBytes, diskSizeBytes > 0 {
+            return assessFromDiskSize(diskBytes: UInt64(diskSizeBytes), profile: profile)
         }
 
         // Fallback: estimate from disk size string (e.g. "2.4 GB")
@@ -100,13 +149,13 @@ struct ModelFitAdvisor {
         }
 
         // Cannot assess — return a neutral result (graceful degradation)
-        logger.notice("ModelFitAdvisor: unable to assess\(modelName.map { " [model: \($0)]" } ?? "") — no parameter count, disk size, or tier available.")
+        logger.warning("[FIT] Unable to assess RAM fit\(modelName.map { " for '\($0)'" } ?? "") — no parameter count, disk size or tier available (usually a failed HuggingFace size fetch). CONSEQUENCE: reporting .unknown, NOT .comfortable — the card shows \"size unavailable\" rather than implying the model fits.")
         return ModelFitAssessment(
-            verdict: .comfortable,
+            verdict: .unknown,
             estimatedRuntimeRAM: 0,
             headroom: Int64(profile.effectiveBudget),
-            explanation: "Unable to estimate — no size data available",
-            recommendation: nil
+            explanation: "Size unavailable — can't check whether this model fits in memory",
+            recommendation: "Reload the store to retry, or check the model's size on HuggingFace."
         )
     }
 
@@ -147,6 +196,12 @@ struct ModelFitAdvisor {
         case .incompatible:
             explanation = "Combined usage (\(primaryFormatted) + \(secondaryFormatted)) exceeds system capacity"
             recommendation = "Choose a smaller model for either the agent or the Intelligence Core"
+        case .unknown:
+            // Unreachable: `verdict` here is derived from a computed RAM total. Spelled out
+            // rather than defaulted so adding a future verdict fails the build instead of
+            // silently borrowing this branch's copy.
+            explanation = "Combined memory usage could not be estimated"
+            recommendation = "Model sizes are unavailable — reload and try again"
         }
 
         return ModelFitAssessment(
@@ -225,6 +280,10 @@ struct ModelFitAdvisor {
         case .incompatible:
             explanation = "~\(formatted) estimated · exceeds \(budgetFormatted) system budget"
             recommendation = "This model is too large for your system. Consider a smaller variant"
+        case .unknown:
+            // Unreachable: reached only with a computed `estimatedRAM`. See note above.
+            explanation = "Memory usage could not be estimated"
+            recommendation = "Model size is unavailable — reload and try again"
         }
 
         logger.info("Assessment: \(String(format: "%.1f", paramBillions))B Q\(quantBits) → \(formatted) → \(verdict.rawValue)")
@@ -321,22 +380,43 @@ struct ModelFitAdvisor {
         guard let str = str else { return 4 } // Default assumption: 4-bit
         let cleaned = str.lowercased()
 
+        // ⚠️ WIDE FORMATS FIRST, and the order here is load-bearing. These are substring
+        // tests, and "16bit" contains "6bit" while "32bit" contains "2bit" — so with the
+        // single-digit arms above them, a bf16 model parsed as 6-BIT. That is a ~2.7×
+        // UNDER-estimate of runtime RAM, i.e. the unsafe direction: the model reads as
+        // "it fits" and the user gets memory pressure instead of an advisory. Exactly the
+        // collision invariant 28 exists for, in the one place that had not been swept.
+        //
+        // Live, not hypothetical: `MLXQuantization.advisorToken` renders `.sixteenBit` as
+        // "16bit" and G5 feeds it straight into this function.
+        if cleaned.contains("fp32") || cleaned.contains("f32") || cleaned.contains("32bit") || cleaned.contains("32-bit") { return 32 }
+        if cleaned.contains("fp16") || cleaned.contains("f16") || cleaned.contains("bf16") || cleaned.contains("16bit") || cleaned.contains("16-bit") { return 16 }
+
         if cleaned.contains("q2") || cleaned.contains("2bit") || cleaned.contains("2-bit") || cleaned.contains("int2") { return 2 }
         if cleaned.contains("q3") || cleaned.contains("3bit") || cleaned.contains("3-bit") || cleaned.contains("int3") { return 3 }
         if cleaned.contains("q4") || cleaned.contains("4bit") || cleaned.contains("4-bit") || cleaned.contains("int4") || cleaned.contains("mxfp4") { return 4 }
         if cleaned.contains("q5") || cleaned.contains("5bit") || cleaned.contains("5-bit") { return 5 }
         if cleaned.contains("q6") || cleaned.contains("6bit") || cleaned.contains("6-bit") { return 6 }
         if cleaned.contains("q8") || cleaned.contains("8bit") || cleaned.contains("8-bit") || cleaned.contains("int8") { return 8 }
-        if cleaned.contains("fp16") || cleaned.contains("f16") || cleaned.contains("bf16") { return 16 }
-        if cleaned.contains("fp32") || cleaned.contains("f32") { return 32 }
 
         return 4 // Safe default for quantized models
     }
 
     /// Parses disk size strings like "2.4 GB", "750 MB" into bytes.
+    ///
+    /// ⚠️ Lossy by nature — prefer `assess(diskSizeBytes:)` wherever the raw total is known.
+    /// These strings come from a locale-aware `ByteCountFormatter`, which uses "," as the
+    /// decimal separator across most of Europe. The old character filter kept only ASCII
+    /// digits and ".", so the separator was STRIPPED rather than converted and "2,4 GB"
+    /// parsed as 24 GB — a 10× overestimate that pushed compatible models past the RAM
+    /// budget and into a "Model Too Large" gate. Both separators are normalised now.
     static func parseDiskSize(_ str: String) -> UInt64? {
         let cleaned = str.trimmingCharacters(in: .whitespaces).uppercased()
-        let numberString = cleaned.components(separatedBy: CharacterSet(charactersIn: "0123456789.").inverted).joined()
+        let numberString = cleaned
+            .components(separatedBy: CharacterSet(charactersIn: "0123456789.,").inverted)
+            .joined()
+            // `Double(_:)` is locale-invariant and only accepts ".".
+            .replacingOccurrences(of: ",", with: ".")
         guard let value = Double(numberString), value > 0 else { return nil }
 
         if cleaned.contains("GB") {

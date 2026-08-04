@@ -41,12 +41,27 @@ enum MCPRuntimeProbe {
             logger.warning("""
                 [MCP-RUNTIME] '\(name)' NOT found on the augmented PATH. Registry entries \
                 needing it will be listed but not offerable — the user is told to install it \
-                rather than being allowed to add a server that could never start.
+                rather than being allowed to add a server that cannot launch. Note the converse \
+                does NOT hold for container runtimes: finding `docker` proves only that the CLI \
+                is installed, not that its daemon is running — see `isAvailable`.
                 """)
         }
         return resolved
     }
 
+    /// Whether the launcher BINARY exists. Not whether it can currently run anything.
+    ///
+    /// ⚠️ The distinction only matters for container runtimes, and there it matters a lot.
+    /// `npx` and `uvx` present on PATH means they will run; `docker` present on PATH means
+    /// nothing of the sort — Docker Desktop may be stopped, in which case every `docker run`
+    /// exits 125 with "Cannot connect to the Docker daemon". So a docker-backed registry entry
+    /// is offered as installable even when it cannot start today.
+    ///
+    /// That is the RIGHT trade for this call site: it renders a scrolling grid, and probing a
+    /// daemon per row would put a socket round-trip on every frame to answer a question that
+    /// changes while the user is reading. The daemon's absence is caught where it is cheap and
+    /// unambiguous — at connect, where docker's own stderr says exactly what is wrong and
+    /// `processFailedToStart` shows it verbatim.
     static func isAvailable(_ runtime: String) -> Bool {
         resolve(runtime) != nil
     }

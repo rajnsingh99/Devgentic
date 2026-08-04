@@ -353,8 +353,16 @@ actor HistoryCompactionService {
         let selectedModelName = UserDefaults.standard.string(forKey: AppSettings.coreIntelligenceModelKey) ?? ""
         guard !selectedModelName.isEmpty else { return 4096 }
 
+        // Wait for the scan: a list that simply hasn't populated yet is otherwise
+        // indistinguishable from a deleted model, and both silently collapse the IC window
+        // to 4096 — which makes compaction far more aggressive than the model requires.
+        await MLXModelService.shared.ensureLoaded()
         return await MainActor.run {
-            guard let model = MLXModelService.shared.installedModels.first(where: { $0.displayName == selectedModelName }) else {
+            guard let model = MLXModelService.shared.installedModel(named: selectedModelName) else {
+                // Was a silent early return. The other three lookup sites surface the miss
+                // (404 / rejected-load / nodeExecutionFailed); this one feeds every compaction
+                // budget downstream, so a silent 4096 makes history vanish with no explanation.
+                logger.error("[COMPACTION] IC context-window lookup MISSED for model '\(selectedModelName)' — not among \(MLXModelService.shared.installedModels.count) installed model(s). CONSEQUENCE: falling back to a 4096-token IC window, so compaction runs far more aggressively than the model actually requires (frequent checkpoints, history disappearing). Re-select the Intelligence Core model.")
                 return 4096
             }
             let profile = MLXModelService.shared.cachedCognitiveProfile(for: model)

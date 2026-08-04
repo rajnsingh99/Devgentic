@@ -270,6 +270,14 @@ struct ConversationSidebarView: View {
     private enum ConversationFilter: String, CaseIterable {
         case all = "All"
         case pinned = "Pinned"
+
+        /// Display form — `Text(rawValue)` does not localize (audit C2).
+        var localizedTitle: LocalizedStringKey {
+            switch self {
+            case .all:    return "All"
+            case .pinned: return "Pinned"
+            }
+        }
     }
     @State private var selectedFilter: ConversationFilter = .all
 
@@ -368,7 +376,7 @@ struct ConversationSidebarView: View {
                     HStack(spacing: 8) {
                         ForEach(ConversationFilter.allCases, id: \.self) { filter in
                             CategoryChip(
-                                title: filter.rawValue,
+                                title: filter.localizedTitle,
                                 isSelected: selectedFilter == filter,
                                 action: { selectedFilter = filter }
                             )

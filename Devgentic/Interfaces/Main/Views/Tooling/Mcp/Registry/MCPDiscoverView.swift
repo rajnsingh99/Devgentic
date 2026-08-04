@@ -18,6 +18,25 @@ import os
 
 private let logger = DGLogger(category: "MCPDiscoverView")
 
+// MARK: - Localized chip titles
+
+extension ToolDiscoverFilter {
+    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
+    /// the non-localizing `StringProtocol` overload, so the filter chips were invisible to the
+    /// String Catalog extractor and would have shipped untranslated inside otherwise-translated
+    /// chrome. `rawValue` stays as the `Identifiable` id and for logging only.
+    ///
+    /// Declared here rather than next to the enum in `ToolLibraryNavigation.swift` because this
+    /// is the only surface that renders these as labels.
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .all:    return "All"
+        case .local:  return "Local"
+        case .remote: return "Remote"
+        }
+    }
+}
+
 struct MCPDiscoverView: View {
 
     /// Called when the user confirms a plan. The host performs the actual add so this view
@@ -93,7 +112,7 @@ struct MCPDiscoverView: View {
                 Button {
                     ToolLibraryNavigationState.shared.discoverFilter = option
                 } label: {
-                    Text(option.rawValue)
+                    Text(option.localizedTitle)
                         .font(.system(size: 12, weight: filter == option ? .medium : .regular))
                         .foregroundColor(filter == option ? theme.accentColor : theme.secondaryText)
                         .padding(.horizontal, 14)

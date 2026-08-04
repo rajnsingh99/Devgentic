@@ -37,8 +37,19 @@ enum QuickAccessScreenCaptureService {
 
     /// True if `url` is one of our interactive-capture temp files (lives in the temporary
     /// directory and carries the capture prefix).
+    /// Uses `sameLocation` rather than `URL` equality. **This is hardening, not a bug fix** —
+    /// the previous `==` on two `standardizedFileURL`s was correct here, and measured to be:
+    /// both sides are directory-flavoured (`deletingLastPathComponent()` and
+    /// `temporaryDirectory` both produce trailing slashes), and `standardizedFileURL` already
+    /// strips a `/private` prefix, so the `/private/var/folders/…` form matched too.
+    ///
+    /// It is changed because the guard fails in the UNSAFE direction — a false negative means
+    /// `deleteCaptureTempFileIfNeeded` silently no-ops and an unsent screenshot, which
+    /// routinely contains secrets, lingers in $TMPDIR. `sameLocation` additionally resolves
+    /// real symlinks (`standardizedFileURL` does not), so a caller that hands us a path through
+    /// a symlinked directory still gets swept. The prefix check confines deletion to our files.
     nonisolated static func isCaptureTempFile(_ url: URL) -> Bool {
-        url.deletingLastPathComponent().standardizedFileURL == FileManager.default.temporaryDirectory.standardizedFileURL
+        url.deletingLastPathComponent().sameLocation(as: FileManager.default.temporaryDirectory)
             && url.lastPathComponent.hasPrefix(captureFilePrefix)
     }
 

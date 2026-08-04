@@ -58,7 +58,13 @@ struct UserPersonalContainerView: View {
 
     // MARK: - Title Builder
 
-    private var titleWithTimestamp: String {
+    /// ⚠️ `LocalizedStringKey`, not `String`. Both branches are literals, so as keys they
+    /// extract cleanly — the interpolated one as `"Your Profile · %@"`, with the formatted date
+    /// substituted at display time. Built as a `String` it reached the non-localizing `Text`
+    /// overload and this header shipped untranslated (audit C2). Note this only works because
+    /// the literal is written HERE: a string assembled elsewhere and passed in would be
+    /// invisible to the extractor no matter what type it was given.
+    private var titleWithTimestamp: LocalizedStringKey {
         if let lastUpdated = service.lastUpdated {
             return "Your Profile · \(lastUpdated.formatted(date: .abbreviated, time: .shortened))"
         }

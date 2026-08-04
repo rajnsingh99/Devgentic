@@ -15,6 +15,52 @@ private let logger = DGLogger(category: "MLXTokenizerAnalyzer")
 /// its exact tool-calling capabilities and required generation strategy.
 enum MLXTokenizerAnalyzer {
 
+    // MARK: - Sidecar file memoisation
+
+    /// Cached contents of a model's small JSON sidecars, keyed by path + modification date.
+    ///
+    /// ⚠️ `detectCognitiveProfile` reads the same four files repeatedly: config.json 3×,
+    /// tokenizer_config.json 2×, special_tokens_map.json 2×, added_tokens.json 2× — nine
+    /// blocking `Data(contentsOf:)` calls per model, on the MainActor, re-run for every model
+    /// on every `rebuildProfileCache()`. At 18 installed models that is 162 blocking reads,
+    /// and all three runtime consumers can trigger it from the request path. Reading each
+    /// file once per (path, mtime) removes the redundancy without changing any result;
+    /// keying on mtime means an edited or re-downloaded model is still picked up.
+    private static let sidecarLock = NSLock()
+    nonisolated(unsafe) private static var sidecarCache: [String: Data?] = [:]
+
+    /// Drop-in replacement for `try? Data(contentsOf:)` on these sidecars.
+    static func cachedSidecarData(at url: URL) -> Data? {
+        let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)?
+            .timeIntervalSince1970 ?? 0
+        let key = "\(url.standardizedFileURL.path)|\(mtime)"
+
+        sidecarLock.lock()
+        if let hit = sidecarCache[key] {
+            sidecarLock.unlock()
+            return hit
+        }
+        sidecarLock.unlock()
+
+        let data = try? Data(contentsOf: url)
+
+        sidecarLock.lock()
+        // Bounded: a few small JSON files per installed model. Reset wholesale rather than
+        // grow without limit if a pathological library ever blows past this.
+        if sidecarCache.count > 512 { sidecarCache.removeAll(keepingCapacity: true) }
+        sidecarCache[key] = data
+        sidecarLock.unlock()
+        return data
+    }
+
+    /// Invalidate everything — call when models are added or removed on disk.
+    static func clearSidecarCache() {
+        sidecarLock.lock()
+        sidecarCache.removeAll(keepingCapacity: true)
+        sidecarLock.unlock()
+    }
+
+
     // MARK: - Full Profile Detection (Step 1.2)
 
     /// Evaluates model config files and returns a complete `CognitiveProfile` including
@@ -25,6 +71,18 @@ enum MLXTokenizerAnalyzer {
     ///   - modelName: The display name of the model (used as a heuristic fallback).
     /// - Returns: A `CognitiveProfile` encoding both capability and dialect.
     static func detectCognitiveProfile(for modelPath: URL, modelName: String) -> CognitiveProfile {
+        // A missing or unparseable config.json degrades to "no tool logic found / text-only",
+        // which is indistinguishable from a genuinely chat-only model. That verdict then
+        // drives the tool-capability label and (before Batch 1) the store/picker filters, so
+        // a corrupt file silently looked like a model limitation. Report it explicitly.
+        let configURL = modelPath.appendingPathComponent("config.json")
+        if !FileManager.default.fileExists(atPath: configURL.path) {
+            logger.error("[MLXSTORE] '\(modelName)' has no config.json at \(configURL.path). CONSEQUENCE: capability, dialect and context window are all unknown — it will be reported as text-only with no tool support, which looks identical to a genuine chat-only model.")
+        } else if let data = cachedSidecarData(at: configURL),
+                  (try? JSONSerialization.jsonObject(with: data)) == nil {
+            logger.error("[MLXSTORE] '\(modelName)' has an UNPARSEABLE config.json at \(configURL.path) (\(data.count) bytes). CONSEQUENCE: same as missing — reported as text-only with no tool support; the model is likely a truncated or corrupt download.")
+        }
+
         let (capability, dialect, metadata, templateSource) = detectCapabilityAndDialect(for: modelPath, modelName: modelName)
         let stopSequences = extractStopSequences(from: modelPath)
         let modalities = detectVisionModalities(for: modelPath)
@@ -58,7 +116,7 @@ enum MLXTokenizerAnalyzer {
     /// (not `gemma3`), so it correctly stays text-only here.
     private static func detectVisionModalities(for modelPath: URL) -> SupportedModalities {
         let configURL = modelPath.appendingPathComponent("config.json")
-        guard let data = try? Data(contentsOf: configURL),
+        guard let data = cachedSidecarData(at: configURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let modelType = (json["model_type"] as? String)?.lowercased() else {
             return .textOnly
@@ -74,7 +132,7 @@ enum MLXTokenizerAnalyzer {
     /// metadata carries none.
     private static func detectContextWindow(for modelPath: URL) -> Int? {
         let configURL = modelPath.appendingPathComponent("config.json")
-        guard let data = try? Data(contentsOf: configURL),
+        guard let data = cachedSidecarData(at: configURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
@@ -151,7 +209,7 @@ enum MLXTokenizerAnalyzer {
 
         // 1. Check config.json for the true model origin and quantization info
         let configURL = modelPath.appendingPathComponent("config.json")
-        if let data = try? Data(contentsOf: configURL),
+        if let data = cachedSidecarData(at: configURL),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             if let trueName = json["_name_or_path"] as? String {
                 originalModelName = trueName.lowercased()
@@ -165,7 +223,7 @@ enum MLXTokenizerAnalyzer {
 
         // 2. Check special_tokens_map.json for explicit tool tokens (HIGH SIGNAL)
         let specialTokensURL = modelPath.appendingPathComponent("special_tokens_map.json")
-        if let data = try? Data(contentsOf: specialTokensURL),
+        if let data = cachedSidecarData(at: specialTokensURL),
            let jsonString = String(data: data, encoding: .utf8) {
 
             allSpecialTokensRaw += jsonString
@@ -179,7 +237,7 @@ enum MLXTokenizerAnalyzer {
 
         // 2.5 Check added_tokens.json (Fallback HIGH SIGNAL for some architectures)
         let addedTokensURL = modelPath.appendingPathComponent("added_tokens.json")
-        if let data = try? Data(contentsOf: addedTokensURL),
+        if let data = cachedSidecarData(at: addedTokensURL),
            let jsonString = String(data: data, encoding: .utf8) {
 
             allSpecialTokensRaw += jsonString
@@ -193,7 +251,7 @@ enum MLXTokenizerAnalyzer {
 
         // 3. Check tokenizer_config.json for capability + dialect signals
         let tokenizerURL = modelPath.appendingPathComponent("tokenizer_config.json")
-        if let data = try? Data(contentsOf: tokenizerURL) {
+        if let data = cachedSidecarData(at: tokenizerURL) {
 
             // ENHANCED CHECK: Aggressively search the raw JSON string.
             // Many Mistral/Pixtral models stash tokens in "extra_special_tokens" instead of dedicated maps.
@@ -473,7 +531,7 @@ enum MLXTokenizerAnalyzer {
         // --- Source 1: added_tokens.json ---
         // This file contains a list of token objects with {"content": "...", "special": true/false}
         let addedTokensURL = modelPath.appendingPathComponent("added_tokens.json")
-        if let data = try? Data(contentsOf: addedTokensURL),
+        if let data = cachedSidecarData(at: addedTokensURL),
            let tokens = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
 
             for token in tokens {
@@ -498,7 +556,7 @@ enum MLXTokenizerAnalyzer {
         // Provides named roles (eos_token, bos_token, additional_special_tokens)
         // We specifically extract additional_special_tokens that match turn boundaries
         let specialTokensURL = modelPath.appendingPathComponent("special_tokens_map.json")
-        if let data = try? Data(contentsOf: specialTokensURL),
+        if let data = cachedSidecarData(at: specialTokensURL),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
 
             // Extract additional_special_tokens array
@@ -527,7 +585,7 @@ enum MLXTokenizerAnalyzer {
         // markers as a flat string array in "extra_special_tokens" instead of in
         // added_tokens.json or special_tokens_map.json.
         let tokenizerConfigURL = modelPath.appendingPathComponent("tokenizer_config.json")
-        if let data = try? Data(contentsOf: tokenizerConfigURL),
+        if let data = cachedSidecarData(at: tokenizerConfigURL),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let extraTokens = json["extra_special_tokens"] as? [String] {
 

@@ -11,9 +11,25 @@
 import SwiftUI
 import SwiftData
 
+private let logger = DGLogger(category: "DownloadManagerContainer")
+
+/// Bounded history query shared by the sidebar and the Downloads screen.
+///
+/// ⚠️ Both views previously used an UNBOUNDED `@Query`, loading every row ever written and then
+/// re-filtering the whole array in each computed property on every body pass. `fetchHistory`
+/// already capped at 200; these bypassed it entirely. The limit matches that cap so the two
+/// paths agree.
+private let boundedDownloadRecords: FetchDescriptor<DownloadRecord> = {
+    var descriptor = FetchDescriptor<DownloadRecord>(
+        sortBy: [SortDescriptor(\DownloadRecord.updatedAt, order: .reverse)]
+    )
+    descriptor.fetchLimit = 200
+    return descriptor
+}()
+
 struct DownloadManagerContainerView: View {
 
-    @Query(sort: \DownloadRecord.updatedAt, order: .reverse)
+    @Query(boundedDownloadRecords)
     private var allRecords: [DownloadRecord]
 
     @Environment(ToastManager.self) private var toastManager
@@ -126,7 +142,13 @@ private struct ActiveDownloadCardView: View {
 
     private var tint: Color { record.backend?.tintColor ?? .blue }
     private var icon: String { record.backend?.icon ?? "arrow.down.circle" }
-    private var backendName: String { record.backend?.rawValue ?? "Unknown" }
+    /// ⚠️ `Text`, not `String`. "Ollama" / "MLX" / "Whisper" are product names and are
+    /// deliberately `verbatim` — translating them would be wrong. The FALLBACK is ordinary
+    /// prose, and as a `String` in a `Text` it never reached the String Catalog at all.
+    private var backendLabel: Text {
+        guard let backend = record.backend else { return Text("Unknown") }
+        return Text(verbatim: backend.rawValue)
+    }
 
     private var speedSnapshot: DownloadSpeedSnapshot? {
         DownloadManager.shared.activeSpeeds[record.id]
@@ -162,7 +184,7 @@ private struct ActiveDownloadCardView: View {
                     .tint(tint)
 
                 HStack(spacing: 8) {
-                    Text(backendName)
+                    backendLabel
                         .font(.caption)
                         .foregroundColor(theme.secondaryText)
 
@@ -175,6 +197,23 @@ private struct ActiveDownloadCardView: View {
 
                     Spacer()
 
+                    // ⚠️ Pause is offered for MLX ONLY. It is the one backend whose transport
+                    // resumes (HubApi re-reads the `.incomplete` files via a `Range` header);
+                    // offering it elsewhere would promise a continuation that cannot happen.
+                    // G2 shipped this on the sidebar but not here, so the Downloads screen
+                    // could only cancel — discarding bytes the user meant to keep.
+                    if record.backend == .mlx {
+                        Button {
+                            MLXModelService.shared.pauseDownload()
+                        } label: {
+                            Label("Pause", systemImage: "pause.circle")
+                                .font(.caption)
+                                .foregroundColor(theme.secondaryText)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Stops the download but keeps everything already fetched, so it can continue later.")
+                    }
+
                     Button {
                         DownloadManager.shared.cancelDownload(record)
                     } label: {
@@ -183,6 +222,7 @@ private struct ActiveDownloadCardView: View {
                             .foregroundColor(theme.errorColor)
                     }
                     .buttonStyle(.plain)
+                    .help("Stops the download and discards the partial files.")
                 }
             }
         }
@@ -204,10 +244,23 @@ private struct HistoryDownloadCardView: View {
     @Environment(ToastManager.self) private var toastManager
     @Environment(\.appTheme) private var theme
     @State private var showingRedownloadAlert: Bool = false
+    /// Bytes still on disk for a row the user asked to remove — non-nil only while the
+    /// "this would strand them" confirmation is up.
+    @State private var strandedBytesOnRemoval: Int64?
 
     private var tint: Color { record.backend?.tintColor ?? .blue }
     private var icon: String { record.backend?.icon ?? "arrow.down.circle" }
-    private var backendName: String { record.backend?.rawValue ?? "Unknown" }
+    /// ⚠️ `Text`, not `String`. "Ollama" / "MLX" / "Whisper" are product names and are
+    /// deliberately `verbatim` — translating them would be wrong. The FALLBACK is ordinary
+    /// prose, and as a `String` in a `Text` it never reached the String Catalog at all.
+    private var backendLabel: Text {
+        guard let backend = record.backend else { return Text("Unknown") }
+        return Text(verbatim: backend.rawValue)
+    }
+
+    private var isResumableMLX: Bool {
+        record.backend == .mlx && record.status?.isResumable == true
+    }
 
     var body: some View {
         HStack(spacing: 16) {
@@ -229,7 +282,7 @@ private struct HistoryDownloadCardView: View {
                 HStack(spacing: 6) {
                     statusView
                     Text("·").foregroundColor(theme.secondaryText)
-                    Text(backendName).foregroundColor(theme.secondaryText)
+                    backendLabel.foregroundColor(theme.secondaryText)
                     Text("·").foregroundColor(theme.secondaryText)
                     Text(relativeDate).foregroundColor(theme.secondaryText)
                 }
@@ -239,13 +292,30 @@ private struct HistoryDownloadCardView: View {
             Spacer()
 
             Menu {
+                // Resume continues from bytes already on disk; Re-download starts over. Both
+                // are offered because a resume can continue a partial but cannot repair a
+                // corrupt one. MLX only — see the Pause button on the active card.
+                if isResumableMLX {
+                    Button {
+                        resume()
+                    } label: {
+                        Label("Resume Download", systemImage: "play.circle")
+                    }
+                    Button(role: .destructive) {
+                        discardPartialFiles()
+                    } label: {
+                        Label("Discard Partial Files", systemImage: "trash.slash")
+                    }
+                    Divider()
+                }
+
                 Button {
                     showingRedownloadAlert = true
                 } label: {
                     Label("Re-download…", systemImage: "arrow.clockwise")
                 }
                 Button(role: .destructive) {
-                    _ = DownloadHistoryStore.shared.delete(id: record.id)
+                    requestRemoval()
                 } label: {
                     Label("Remove from History", systemImage: "trash")
                 }
@@ -275,7 +345,33 @@ private struct HistoryDownloadCardView: View {
             Button("Download") { triggerRedownload() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Re-pull \(record.displayName) from \(backendName)? Existing files will be overwritten.")
+            // The backend name is NESTED as a `Text`, not interpolated as a String — the
+            // sentence around it must reach the String Catalog with a `%@` placeholder.
+            Text("Re-pull \(record.displayName) from \(backendLabel)? Existing files will be overwritten.")
+        }
+        // ⚠️ Removing the row of a paused/interrupted download is not a neutral tidy-up: the
+        // partial folder is hidden from the installed list, so that row is the ONLY handle on
+        // those bytes. Deleting it leaves them reachable from Finder alone. Ask instead of
+        // silently stranding them.
+        .alert(
+            "Keep the partial download?",
+            isPresented: Binding(
+                get: { strandedBytesOnRemoval != nil },
+                set: { if !$0 { strandedBytesOnRemoval = nil } }
+            )
+        ) {
+            Button("Delete Files & Remove", role: .destructive) {
+                strandedBytesOnRemoval = nil
+                discardPartialFiles()
+            }
+            Button("Keep Files & Remove") {
+                strandedBytesOnRemoval = nil
+                logger.notice("[DOWNLOAD] Removing history row for '\(record.modelIdentifier)' while its partial files remain on disk, at the user's explicit choice. CONSEQUENCE: those bytes are no longer reachable from the app — only via Finder, or by re-downloading the model.")
+                _ = DownloadHistoryStore.shared.delete(id: record.id)
+            }
+            Button("Cancel", role: .cancel) { strandedBytesOnRemoval = nil }
+        } message: {
+            Text("\(record.displayName) has \(ByteCountFormatter.string(fromByteCount: strandedBytesOnRemoval ?? 0, countStyle: .file)) already downloaded. Removing this row is the last way to reach those files from Devgentic.")
         }
     }
 
@@ -301,9 +397,57 @@ private struct HistoryDownloadCardView: View {
         case .interrupted:
             Label("Interrupted", systemImage: "bolt.horizontal.circle.fill")
                 .foregroundColor(theme.warningColor)
+        case .paused:
+            // G2 added `.paused` but this surface never got an arm, so a paused download —
+            // the one state whose bytes are deliberately still on disk — rendered as a grey
+            // question mark labelled with a non-localizing `rawValue.capitalized`.
+            Label("Paused", systemImage: "pause.circle.fill")
+                .foregroundColor(theme.warningColor)
         default:
-            Label(record.status?.rawValue.capitalized ?? "Unknown", systemImage: "questionmark.circle")
+            Label(record.status?.localizedTitle ?? "Unknown", systemImage: "questionmark.circle")
                 .foregroundColor(theme.tertiaryText)
+        }
+    }
+
+    private func resume() {
+        Task { @MainActor in
+            let outcome = await DownloadCoordinator.resumeMLXDownload(repoId: record.modelIdentifier)
+            switch outcome {
+            case .failed(let reason):
+                toastManager.show(reason, style: .error)
+            case .alreadyInstalled:
+                toastManager.show("\(record.displayName) is already installed", style: .success)
+            default:
+                toastManager.show("Resuming \(record.displayName)…", style: .success)
+            }
+        }
+    }
+
+    /// ⚠️ Drop the row only once the bytes are actually gone — the row is the sole remaining
+    /// handle on a partial folder, so removing it after a refused reclaim strands them for good.
+    private func discardPartialFiles() {
+        if MLXModelService.shared.discardPartialDownload(repoId: record.modelIdentifier) {
+            _ = DownloadHistoryStore.shared.delete(id: record.id)
+        } else {
+            logger.error("[DOWNLOAD] Discard of '\(record.modelIdentifier)' reclaimed nothing (see the [MLXSTORE] refusal above). CONSEQUENCE: the history row is KEPT so the user still has a handle on those bytes.")
+            toastManager.show("Couldn't remove the partial files for \(record.displayName)", style: .error)
+        }
+    }
+
+    /// Removing a history row is normally free. It is not when the row points at bytes that
+    /// nothing else in the app can reach, so measure first and ask only in that case.
+    private func requestRemoval() {
+        guard isResumableMLX else {
+            _ = DownloadHistoryStore.shared.delete(id: record.id)
+            return
+        }
+        // Off the render path deliberately — this walks the partial folder.
+        let folder = MLXModelService.shared.partialDownloadFolder(for: record.modelIdentifier)
+        let bytes = MLXModelService.resumableBytes(at: folder)
+        if bytes > 0 {
+            strandedBytesOnRemoval = bytes
+        } else {
+            _ = DownloadHistoryStore.shared.delete(id: record.id)
         }
     }
 
@@ -318,9 +462,12 @@ private struct HistoryDownloadCardView: View {
                     profileID: record.profileID
                 )
             case .mlx:
+                // Explicit user re-download: bypass the installed short-circuit so a
+                // corrupt or truncated model can actually be repaired.
                 outcome = await DownloadCoordinator.startMLXDownloadIfNeeded(
                     repoId: record.modelIdentifier,
-                    profileID: record.profileID
+                    profileID: record.profileID,
+                    force: true
                 )
             case .whisper:
                 outcome = await DownloadCoordinator.startWhisperDownloadIfNeeded(

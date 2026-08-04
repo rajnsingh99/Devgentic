@@ -19,7 +19,7 @@ struct SettingsDetailContainerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            DynamicIslandBar(title: category.rawValue, icon: category.iconName)
+            DynamicIslandBar(title: category.localizedTitle, icon: category.iconName)
 
             ScrollView {
                 category.destination

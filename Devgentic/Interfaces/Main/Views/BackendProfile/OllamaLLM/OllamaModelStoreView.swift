@@ -49,6 +49,10 @@ struct OllamaModelStoreContent: View {
     var showSearchBar: Bool = true
     /// When true, content is centered with maxWidth: 1000 to match DynamicIslandBar width.
     var centeredLayout: Bool = false
+    /// The profile that opened the store, so downloads it starts are attributed to it in
+    /// history. The route carried this all along; `MainApplicationView` was discarding it at
+    /// the destructure, so every Ollama download was recorded with a nil profile.
+    var profileID: UUID?
     @Environment(\.appTheme) private var theme
 
     var body: some View {
@@ -109,7 +113,7 @@ struct OllamaModelStoreContent: View {
                             Menu {
                                 Picker("Sort By", selection: $viewModel.sortOption) {
                                     ForEach(OllamaModelStoreViewModel.SortOption.allCases) { option in
-                                        Label(option.rawValue, systemImage: option.icon).tag(option)
+                                        Label(option.localizedTitle, systemImage: option.icon).tag(option)
                                     }
                                 }
                             } label: {
@@ -140,7 +144,8 @@ struct OllamaModelStoreContent: View {
                                 backend: .ollama,
                                 modelIdentifier: viewModel.searchText,
                                 displayName: viewModel.searchText,
-                                isInstalled: viewModel.displayedModels.contains { $0.name == viewModel.searchText }
+                                isInstalled: viewModel.displayedModels.contains { $0.name == viewModel.searchText },
+                                profileID: profileID
                             )
                         }
                     }
@@ -349,7 +354,7 @@ struct OllamaModelCardView: View {
                         // Capability Badge
                         HStack(spacing: 4) {
                             Image(systemName: capabilityIcon(for: model.cognitiveCapability))
-                            Text(model.cognitiveCapability.rawValue)
+                            Text(model.cognitiveCapability.localizedTitle)
                         }
                         .font(theme.fontCaption2)
                         .fontWeight(.medium)
@@ -421,6 +426,30 @@ struct OllamaModelCardView: View {
         case .parallelActions: return .purple
         case .singleAction: return .blue
         case .none: return .green
+        }
+    }
+}
+
+// MARK: - Localizable Labels
+//
+// This lives here rather than beside the enum declaration on purpose:
+// `OllamaModelStoreViewModel.SortOption` is declared in the view model, which is
+// not part of this change's file scope.
+//
+// `ModelCognitiveCapability.localizedTitle` (used by the capability badge above)
+// is declared once in `AgentConfigDetailView.swift` — its enum lives in
+// `BackendProfile.swift`, a `Foundation`-only model file that must not import SwiftUI.
+
+extension OllamaModelStoreViewModel.SortOption {
+    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` /
+    /// `Label(x.rawValue, …)` bind to the non-localizing `StringProtocol` overload, so every
+    /// rawValue-sourced label was invisible to the String Catalog extractor and would have
+    /// shipped untranslated inside otherwise-translated chrome. `rawValue` stays for
+    /// persistence, `id`, and logging only.
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .name: return "Name"
+        case .size: return "Size"
         }
     }
 }

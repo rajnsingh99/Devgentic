@@ -91,7 +91,12 @@ struct FolderSelectorPopoverView: View {
     }
 
     private func recentRow(_ url: URL) -> some View {
-        let isActive = codeSessionManager.projectPath?.standardizedFileURL == url.standardizedFileURL
+        // Trailing-slash-insensitive so the active project keeps its highlight however the two
+        // URLs were built. **Hardening, not a fixed bug** — both sides are directory-flavoured
+        // today. Deliberately the LEXICAL variant: this runs in a view body on every render and
+        // `sameLocation` touches the filesystem, while `rememberRecentPath` has already
+        // collapsed the list to one canonical entry per folder.
+        let isActive = codeSessionManager.projectPath?.sameLocationLexically(as: url) == true
         return Button {
             isPresented = false
             onSelectRecent(url)

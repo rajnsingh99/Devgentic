@@ -69,11 +69,56 @@ enum MCPRootsProvider {
     /// `notifications/roots/list_changed` contract. Idempotent — an unchanged set is a
     /// no-op, so callers can push on every project-path read without churn.
     static func setRoots(_ urls: [URL]) async {
-        let normalized = urls
-            .map { $0.standardizedFileURL }
-            .reduce(into: [URL]()) { acc, url in
-                if !acc.contains(url) { acc.append(url) }
+        // ⚠️ Symlinks are RESOLVED, not merely standardized. `standardizedFileURL` collapses
+        // `..` and `~` but leaves symlinks alone, so a project reached through a symlinked
+        // parent was advertised as the link path. Servers enforce their boundary by TEXTUAL
+        // containment against the path they resolved for themselves, so the two forms
+        // disagree and a file plainly inside the user's folder reads as outside it —
+        // "Access denied - path outside allowed directories". Verified against
+        // `@modelcontextprotocol/server-filesystem`, which does exactly this.
+        //
+        // ⚠️ This does NOT rewrite `/var` → `/private/var`. Foundation's
+        // `resolvingSymlinksInPath()` deliberately hides the `/private` prefix on macOS's
+        // `/tmp`, `/var` and `/etc`, and forcing it (via `realpath`) would advertise a path
+        // the user never sees in Finder for no benefit — real roots are project folders under
+        // `/Users`, not system temp directories. Anything comparing our roots against a
+        // `realpath`-canonical form must canonicalise both sides itself.
+        //
+        // Resolving also makes the dedup below correct for two paths reaching one directory.
+        // ⚠️ Dedup on the normalized PATH, not on `URL` equality. `file:///a/b` and
+        // `file:///a/b/` are the same directory and compare UNEQUAL as URLs, and the two
+        // slots produce URLs both ways — `NSTemporaryDirectory()`-derived paths carry a
+        // trailing slash while `URL(fileURLWithPath:)` on a symlink does not. Set the same
+        // folder in both slots and it was advertised twice.
+        var seen = Set<String>()
+        var normalized: [URL] = []
+
+        for url in urls {
+            let resolved = url.resolvingSymlinksInPath()
+
+            var key = resolved.path
+            while key.count > 1 && key.hasSuffix("/") { key.removeLast() }
+
+            guard seen.insert(key).inserted else {
+                logger.info("""
+                    [MCP-ROOTS] '\(url.path)' resolves to '\(key)', which is already advertised — \
+                    listing it once. Both root slots can legitimately name the same folder by \
+                    different paths.
+                    """)
+                continue
             }
+
+            if url.standardizedFileURL.path != resolved.path {
+                logger.info("""
+                    [MCP-ROOTS] Canonicalised '\(url.path)' → '\(resolved.path)' before \
+                    advertising it. Servers compare paths textually against their canonical \
+                    form, so advertising the symlinked path would make files inside this folder \
+                    read as outside it.
+                    """)
+            }
+
+            normalized.append(resolved)
+        }
 
         guard normalized != roots else { return }
 

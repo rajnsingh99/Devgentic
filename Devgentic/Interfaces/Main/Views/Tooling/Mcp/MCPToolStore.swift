@@ -482,3 +482,15 @@ final class MCPToolStore {
         }
     }
 }
+
+// MARK: - Host bridge
+
+/// The tool-list sink `MCPClientService` writes through. `replaceTools` already had exactly
+/// this shape, so conformance is a declaration and nothing more — see MCPHostBridge.swift
+/// for why the call is indirect.
+extension MCPToolStore: MCPToolListSink {}
+
+/// The source of truth for which MCP servers exist, for `MCPConnectionCoordinator`. Kept
+/// separate from `MCPToolListSink` so the client service cannot reach it — see
+/// MCPHostBridge.swift.
+extension MCPToolStore: MCPSourceStore {}

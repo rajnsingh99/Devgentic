@@ -115,6 +115,17 @@ struct CreateScheduledTaskView: View {
         case oneShot = "One-shot"
         case recurring = "Recurring"
         var id: String { rawValue }
+
+        /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
+        /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
+        /// invisible to the String Catalog extractor and would have shipped untranslated inside
+        /// otherwise-translated chrome. `rawValue` stays for `id`/`tag` identity only.
+        var localizedTitle: LocalizedStringKey {
+            switch self {
+            case .oneShot:   return "One-shot"
+            case .recurring: return "Recurring"
+            }
+        }
     }
 
     enum CronPreset: String, CaseIterable, Identifiable {
@@ -124,6 +135,17 @@ struct CreateScheduledTaskView: View {
         case custom = "Custom"
 
         var id: String { rawValue }
+
+        /// User-facing name. ⚠️ Separate from `rawValue` on purpose — see `ScheduleType.localizedTitle`.
+        /// `rawValue` stays for `id`/`tag` identity and for `loadFromTask`'s preset matching.
+        var localizedTitle: LocalizedStringKey {
+            switch self {
+            case .daily9am:     return "Daily at 9 AM"
+            case .weekdays9am:  return "Weekdays at 9 AM"
+            case .weeklyMonday: return "Weekly Monday 9 AM"
+            case .custom:       return "Custom"
+            }
+        }
 
         var expression: String? {
             switch self {
@@ -512,7 +534,7 @@ struct CreateScheduledTaskView: View {
         VStack(alignment: .leading, spacing: 16) {
             Picker("", selection: $scheduleType) {
                 ForEach(ScheduleType.allCases) { type in
-                    Text(type.rawValue).tag(type)
+                    Text(type.localizedTitle).tag(type)
                 }
             }
             .pickerStyle(.segmented)
@@ -671,7 +693,7 @@ struct CreateScheduledTaskView: View {
                     .font(theme.fontTitle3)
                     .accessibilityHidden(true)
 
-                Text(preset.rawValue)
+                Text(preset.localizedTitle)
                     .font(theme.fontSubheadline.weight(.medium))
                     .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
 
@@ -704,7 +726,9 @@ struct CreateScheduledTaskView: View {
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(preset.rawValue)
+        // `Text` overload, not the `String` one — `accessibilityLabel(_: String)`
+        // does not localize, so VoiceOver would read the untranslated rawValue.
+        .accessibilityLabel(Text(preset.localizedTitle))
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 

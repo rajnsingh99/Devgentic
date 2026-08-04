@@ -31,9 +31,23 @@ class ShellProcess {
     let stdOutPipe = Pipe()
     let stdErrPipe = Pipe()
     
-    // Internal buffer to store stderr for post-mortem analysis
+    // Internal buffer to store stderr for post-mortem analysis.
+    //
+    // BOUNDED, and it has to be: this only ever grew. stderr is the only channel a stdio MCP
+    // server may use for human output, so a server that logs normally — the reference server
+    // logs on every request — accumulated here for as long as the app ran, with nothing
+    // reading it unless a failure happened to occur. A server left connected all day was a
+    // slow leak nobody would attribute to logging.
+    //
+    // The TAIL is kept rather than the head: this buffer exists for post-mortem, and what
+    // explains a failure is what the server said last, not what it said at startup.
     private var capturedStderr: String = ""
+    private var droppedStderrChars = 0
     private let stderrQueue = DispatchQueue(label: "com.devgentic.shellprocess.stderr")
+
+    /// Ceiling on the retained stderr tail. Comfortably more than a stack trace or the last
+    /// few dozen log lines, which is all any consumer of `readStdErr()` displays.
+    private static let maxCapturedStderrChars = 16_384
 
     let commandLine: String
     
@@ -99,11 +113,30 @@ class ShellProcess {
                 if !trimmed.isEmpty {
                     logger.error("[STDERR] \(trimmed)")
                     self?.stderrQueue.async {
-                        self?.capturedStderr += str
+                        self?.appendStderr(str)
                     }
                 }
             }
         }
+
+        // ⚠️ A CONTAINER runtime does not inherit this process's environment.
+        //
+        // For `npx`/`uvx` the child inherits `mergedEnv` and an env var configured by the
+        // user simply arrives. For `docker`/`podman` the env is set on the CLI, which then
+        // starts a container in its own namespace — the variable reaches the client and stops
+        // there. The convention every published `mcpServers` block uses is to name it in the
+        // args as well (`"args": [… "-e", "GITHUB_TOKEN", "mcp/github"]`), which tells docker
+        // to forward the value it can see.
+        //
+        // Without that the credential vanishes between the form and the server, and the
+        // failure is a bare authentication error inside a container with nothing pointing at
+        // the cause. Same class as the pasted-`env` bug: a secret silently discarded in
+        // transit. Warn rather than rewrite the argv — guessing where `-e` belongs in someone
+        // else's command line is how you break a working configuration.
+        Self.warnAboutContainerEnvironment(
+            command: command, resolvedExecutable: resolvedExecutable,
+            arguments: arguments, environment: environment
+        )
 
         // MCP server CLIs commonly take secrets as args (`--api-key X`, `TOKEN=X`,
         // `Authorization: Bearer X`). Redact before logging — the live `process.arguments`
@@ -111,6 +144,44 @@ class ShellProcess {
         let redactedArgs = MCPRedaction.redact(arguments: arguments).joined(separator: " ")
         logger.info("Spawning ShellProcess: \(resolvedExecutable) \(redactedArgs)")
         logger.info("Constructed PATH: \(currentPath)")
+    }
+
+    /// Container runtimes that start the real process in their own environment namespace.
+    private static let containerRuntimes: Set<String> = ["docker", "podman", "nerdctl"]
+
+    /// Warns when an env var was configured for a CONTAINER runtime but is never named in the
+    /// arguments, so the value cannot reach the server inside the container.
+    ///
+    /// Deliberately conservative: it only fires when the key appears NOWHERE in the argv, so
+    /// `-e KEY`, `--env KEY`, `-eKEY` and `--env=KEY=value` all count as named. A false
+    /// warning about a working configuration would be worse than none.
+    private static func warnAboutContainerEnvironment(
+        command: String,
+        resolvedExecutable: String,
+        arguments: [String],
+        environment: [String: String]
+    ) {
+        guard !environment.isEmpty else { return }
+
+        let launcher = (resolvedExecutable as NSString).lastPathComponent.lowercased()
+        let typed = (command as NSString).lastPathComponent.lowercased()
+        guard containerRuntimes.contains(launcher) || containerRuntimes.contains(typed) else { return }
+
+        let unreachable = environment.keys.filter { key in
+            !arguments.contains { $0.contains(key) }
+        }.sorted()
+
+        guard !unreachable.isEmpty else { return }
+
+        logger.warning("""
+            [SHELL] ⚠️ \(unreachable.count) environment variable(s) configured for the container \
+            runtime '\(launcher)' are NOT named in its arguments \
+            (\(unreachable.joined(separator: ", "))). A container does not inherit this process's \
+            environment, so those values will NOT reach the server and it will behave as though \
+            they were never set — typically an authentication failure with nothing indicating \
+            the cause. Add each one to the arguments as `-e <NAME>` before the image name, \
+            which is what published mcpServers blocks do.
+            """)
     }
 
     /// Resolves `command` to an absolute executable path without going through a shell.
@@ -185,9 +256,36 @@ class ShellProcess {
         }
     }
     
-    /// Returns all standard error output collected so far.
+    /// Appends to the bounded stderr tail. Must be called on `stderrQueue`.
+    private func appendStderr(_ chunk: String) {
+        capturedStderr += chunk
+        guard capturedStderr.count > Self.maxCapturedStderrChars else { return }
+
+        let overflow = capturedStderr.count - Self.maxCapturedStderrChars
+        capturedStderr = String(capturedStderr.suffix(Self.maxCapturedStderrChars))
+        let wasAlreadyTrimming = droppedStderrChars > 0
+        droppedStderrChars += overflow
+
+        // Say it once, not on every chunk: past the cap this fires continuously for a chatty
+        // server, and the fact worth recording is that trimming STARTED. `readStdErr` names
+        // the running total, so nothing is lost by staying quiet afterwards.
+        if !wasAlreadyTrimming {
+            logger.warning("""
+                [SHELL] stderr from '\(commandLine)' passed \(Self.maxCapturedStderrChars) chars \
+                and is now retained as a rolling TAIL. Earlier output is dropped from the buffer \
+                — it is still in the log above, but a connect failure will quote only the most \
+                recent \(Self.maxCapturedStderrChars) chars.
+                """)
+        }
+    }
+
+    /// Returns the retained standard-error tail, prefixed with a marker when earlier output
+    /// was dropped — so a caller quoting this can never present a partial buffer as complete.
     func readStdErr() -> String {
-        return stderrQueue.sync { capturedStderr }
+        return stderrQueue.sync {
+            guard droppedStderrChars > 0 else { return capturedStderr }
+            return "… [\(droppedStderrChars) earlier characters of server output dropped]\n" + capturedStderr
+        }
     }
     
     deinit {

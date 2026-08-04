@@ -15,14 +15,17 @@ import SwiftUI
 struct MLXModelStoreContainerView: View {
 
     let filterForTools: Bool
+    /// The profile that opened the store, so downloads it starts are attributed to it.
+    let profileID: UUID?
 
     /// View model is owned by `DestinationCoordinator` (separate instance per
     /// `filterForTools` value) so its category / search / sort state survives
     /// the view re-creation cascade when navigating away and back.
     @Environment(DestinationCoordinator.self) private var coordinator
 
-    init(filterForTools: Bool = false) {
+    init(filterForTools: Bool = false, profileID: UUID? = nil) {
         self.filterForTools = filterForTools
+        self.profileID = profileID
     }
 
     var body: some View {
@@ -42,7 +45,7 @@ struct MLXModelStoreContainerView: View {
                     Menu {
                         Picker("Sort By", selection: $viewModel.sortOption) {
                             ForEach(MLXModelStoreViewModel.SortOption.allCases) { option in
-                                Label(option.rawValue, systemImage: option.icon).tag(option)
+                                Label(option.localizedTitle, systemImage: option.icon).tag(option)
                             }
                         }
                     } label: {
@@ -71,6 +74,7 @@ struct MLXModelStoreContainerView: View {
             MLXModelStoreContent(
                 viewModel: viewModel,
                 filterForTools: filterForTools,
+                profileID: profileID,
                 showSearchBar: false,
                 centeredLayout: true
             )

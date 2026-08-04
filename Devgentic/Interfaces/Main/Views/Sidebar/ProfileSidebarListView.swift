@@ -19,7 +19,11 @@ struct ProfileSidebarListView: View {
     @Environment(\.appTheme) private var theme
 
     @State private var searchText = ""
-    @State private var selectedTypeFilter: String = "All"
+    /// ⚠️ Modelled as `ProfileType?` (nil = All) rather than a `String`. It was a raw
+    /// string compared against `profileType.rawValue`, which meant the chip label WAS the
+    /// filter key — so localizing the label would have broken filtering, and leaving it
+    /// unlocalized was the C2 bug. Separating identity from display fixes both.
+    @State private var selectedTypeFilter: ProfileType? = nil
     @State private var isAddingProfile = false
     @State private var showingDeleteAlert = false
     @State private var profileToDelete: BackendProfileModel? = nil
@@ -29,15 +33,15 @@ struct ProfileSidebarListView: View {
     @State private var pendingProfileID: UUID? = nil
     @State private var showingDiscardAlert = false
 
-    private let typeFilters = ["All"] + ProfileType.allCases.filter { $0 != .code }.map(\.rawValue)
+    private let typeFilters: [ProfileType?] = [nil] + ProfileType.allCases.filter { $0 != .code }
 
     /// Code profiles are hidden from the sidebar — managed by CodeSessionManager.
     private var filteredProfiles: [BackendProfileModel] {
         var result = profileService.profiles.filter { $0.profileType != .code }
 
         // Type filter
-        if selectedTypeFilter != "All" {
-            result = result.filter { $0.profileType.rawValue == selectedTypeFilter }
+        if let selectedTypeFilter {
+            result = result.filter { $0.profileType == selectedTypeFilter }
         }
 
         // Search filter
@@ -95,7 +99,7 @@ struct ProfileSidebarListView: View {
                 HStack(spacing: 8) {
                     ForEach(typeFilters, id: \.self) { filter in
                         CategoryChip(
-                            title: filter,
+                            title: filter?.localizedTitle ?? "All",
                             isSelected: selectedTypeFilter == filter,
                             action: { selectedTypeFilter = filter }
                         )

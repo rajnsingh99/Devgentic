@@ -1880,10 +1880,10 @@ actor WorkflowExecutor: Executor {
         }
 
         // Resolve MLX model from installed models
+        // Off-actor scan: wait for it rather than fail the node on an empty list.
+        await MLXModelService.shared.ensureLoaded()
         let modelItem: MLXModelItem? = await MainActor.run {
-            let service = MLXModelService.shared
-            if service.installedModels.isEmpty { service.refreshInstalledModels() }
-            return service.installedModels.first(where: { $0.displayName == modelName })
+            MLXModelService.shared.installedModel(named: modelName)
         }
         guard let modelItem else {
             throw WorkflowError.nodeExecutionFailed(nodeID: nodeID, profileName: displayName, underlyingError: "MLX model '\(modelName)' not found on this machine.")
@@ -1895,6 +1895,11 @@ actor WorkflowExecutor: Executor {
 
         let model: any LLMProvider = MLXLLMProvider(
             modelName: modelName,
+            // ⚠️ Critical here specifically: workflow nodes run in parallel via
+            // `withTaskGroup`, so two branches can hold different MLX models. Without this
+            // pin, a branch that paused between iterations resumed on whichever model the
+            // other branch had loaded and produced its answer from the wrong one.
+            modelDirectory: modelItem.localPath,
             dialect: cogProfile.dialect,
             chatTemplateSource: cogProfile.chatTemplateSource,
             stopSequences: cogProfile.stopSequences,

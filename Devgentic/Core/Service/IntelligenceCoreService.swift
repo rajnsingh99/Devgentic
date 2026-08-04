@@ -63,11 +63,11 @@ actor IntelligenceCoreService {
     private func resolveModelPath() async -> URL? {
         let modelName = selectedModelName
         guard !modelName.isEmpty else { return nil }
+        // See AgentConnect: the scan is off-actor, so wait for it rather than risk
+        // reading an empty list and rejecting a model that is installed.
+        await MLXModelService.shared.ensureLoaded()
         return await MainActor.run {
-            if MLXModelService.shared.installedModels.isEmpty {
-                MLXModelService.shared.refreshInstalledModels()
-            }
-            return MLXModelService.shared.installedModels.first(where: { $0.displayName == modelName })?.localPath
+            MLXModelService.shared.installedModel(named: modelName)?.localPath
         }
     }
 

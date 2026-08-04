@@ -22,6 +22,7 @@
 //
 
 import Foundation
+import SwiftUI
 import SwiftData
 
 /// Persistable subset of `DownloadStatus`. Kept separate from the session-only
@@ -35,19 +36,69 @@ enum DownloadRecordStatus: String, CaseIterable, Codable, Hashable {
     case failed
     case cancelled
     case interrupted
+    /// User pressed Pause. The partial bytes are deliberately KEPT on disk — HubApi resumes
+    /// from them via a `Range` header — so this is the one non-active state that is not a
+    /// failure and must never be cleaned up automatically.
+    case paused
 
     /// `true` for states that represent a completed (non-active) lifecycle.
     /// Used to partition the Downloads sidebar into "in-progress" vs history.
+    ///
+    /// `.paused` counts as terminal here because nothing is transferring: it must not appear
+    /// in the "In Progress" section, must not hold the sleep assertion, and must not be
+    /// swept by `reconcileOrphans` (which only touches `.queued`/`.downloading`). Resumability
+    /// is a separate question — see `isResumable`.
     var isTerminal: Bool {
         switch self {
-        case .queued, .downloading:           return false
-        case .completed, .failed, .cancelled, .interrupted: return true
+        case .queued, .downloading:
+            return false
+        case .completed, .failed, .cancelled, .interrupted, .paused:
+            return true
+        }
+    }
+
+    /// `true` when the download can continue from the bytes already on disk.
+    ///
+    /// swift-transformers resumes for free — `Downloader` reads `incompleteFileSize(at:)` and
+    /// sends `Range: bytes=N-` — so the only requirement is that the `.incomplete` files were
+    /// not deleted. `.cancelled` is excluded deliberately: cancelling discards the partial.
+    var isResumable: Bool {
+        switch self {
+        case .paused, .interrupted, .failed: return true
+        case .queued, .downloading, .completed, .cancelled: return false
+        }
+    }
+
+    /// User-facing name. ⚠️ `rawValue` is persisted — never change it for display.
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .queued:      return "Queued"
+        case .downloading: return "Downloading"
+        case .completed:   return "Completed"
+        case .failed:      return "Failed"
+        case .cancelled:   return "Cancelled"
+        case .interrupted: return "Interrupted"
+        case .paused:      return "Paused"
         }
     }
 }
 
 @Model
 final class DownloadRecord {
+
+    /// Indexes on the three predicated columns.
+    ///
+    /// `fetchMostRecent` filters on `(backendRaw, modelIdentifier)` and `fetchActive` on
+    /// `statusRaw`; both are called from the download bridges on every reconcile tick, and
+    /// without indexes each was a full-table predicate scan.
+    ///
+    /// ⚠️ This is a schema change. Adding an index is lightweight-migration compatible (it
+    /// alters no attribute), unlike adding a non-optional property without a default — but the
+    /// app has no `VersionedSchema`/`SchemaMigrationPlan`, so any schema touch is worth
+    /// verifying against a real existing store before shipping. See the migration work tracked
+    /// separately from G15.
+    #Index<DownloadRecord>([\.backendRaw], [\.modelIdentifier], [\.statusRaw], [\.updatedAt])
+
 
     @Attribute(.unique)
     var id: UUID
@@ -66,6 +117,14 @@ final class DownloadRecord {
     /// User-facing name. Falls back to `modelIdentifier` if the backend
     /// doesn't surface a friendlier label.
     var displayName: String
+
+    /// Git commit the model was downloaded at, for MLX.
+    ///
+    /// ⚠️ OPTIONAL on purpose. An optional property (or one with a default) is
+    /// lightweight-migration safe; a non-optional with no default is the change that makes the
+    /// shared container fail to open and bricks the app after a Sparkle update. See
+    /// `SWIFTDATA_MIGRATION_PLAN.md`.
+    var revisionCommitHash: String?
 
     /// Raw value of `DownloadRecordStatus`. See enum doc.
     var statusRaw: String

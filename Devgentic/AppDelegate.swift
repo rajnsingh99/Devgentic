@@ -77,6 +77,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // synthesis opt-in. Idempotent and cheap (a guarded UserDefaults read).
         SynthesisOptIn.migrateLegacyToggleIfNeeded()
 
+        // Point MCPClientService at the app's tool store and HITL brokers. MUST run before
+        // anything can connect a server: the launch sweep lives in the SwiftUI scene's
+        // startup task, and the Add-server form's Test Connection is user-driven — both are
+        // strictly later than this. Without it a connect still succeeds, but its refreshed
+        // tool list has nowhere to land and sampling/elicitation are refused.
+        MCPHostBridge.installAppImplementations()
+
         // Set this delegate so UNUserNotificationCenter can deliver notifications
         // both when the app is in the foreground AND in the background.
         UNUserNotificationCenter.current().delegate = self

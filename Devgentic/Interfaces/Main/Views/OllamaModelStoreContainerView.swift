@@ -14,6 +14,13 @@ import SwiftUI
 
 struct OllamaModelStoreContainerView: View {
 
+    /// The profile that opened the store. See `OllamaModelStoreContent.profileID`.
+    let profileID: UUID?
+
+    init(profileID: UUID? = nil) {
+        self.profileID = profileID
+    }
+
     /// View model is owned by `DestinationCoordinator` so it survives the view
     /// re-creation cascade when the user toggles between chat and non-chat
     /// destinations. Previously `@State private var viewModel = ...` got
@@ -55,7 +62,7 @@ struct OllamaModelStoreContainerView: View {
                     Menu {
                         Picker("Sort By", selection: $viewModel.sortOption) {
                             ForEach(OllamaModelStoreViewModel.SortOption.allCases) { option in
-                                Label(option.rawValue, systemImage: option.icon).tag(option)
+                                Label(option.localizedTitle, systemImage: option.icon).tag(option)
                             }
                         }
                     } label: {
@@ -100,7 +107,8 @@ struct OllamaModelStoreContainerView: View {
             OllamaModelStoreContent(
                 viewModel: viewModel,
                 showSearchBar: false,
-                centeredLayout: true
+                centeredLayout: true,
+                profileID: profileID
             )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

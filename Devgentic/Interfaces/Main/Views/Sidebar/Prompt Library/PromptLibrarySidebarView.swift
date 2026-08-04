@@ -14,6 +14,40 @@ import os
 
 private let logger = DGLogger(category: "PromptLibrarySidebarView")
 
+// MARK: - Localized titles for the sort / source menus
+//
+// Both enums are declared in `Foundation`-only files (`PromptBrowseViewModel.swift`,
+// `PromptCategory.swift`), so the SwiftUI-dependent title lives here, in the file
+// that renders it, rather than forcing `import SwiftUI` into the model layer.
+
+extension PromptSortOrder {
+    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)`
+    /// binds to the non-localizing `StringProtocol` overload, so every rawValue-sourced
+    /// label was invisible to the String Catalog extractor and would have shipped
+    /// untranslated inside otherwise-translated chrome. `rawValue` stays for
+    /// persistence (`UserDefaults` key `promptBrowse.sortOrder`) and logging only.
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .alphabetical:    return "Alphabetical"
+        case .recentlyUsed:    return "Recently Used"
+        case .recentlyCreated: return "Recently Created"
+        }
+    }
+}
+
+extension PromptSourceFilter {
+    /// User-facing name. ⚠️ Separate from `rawValue` on purpose — see
+    /// `PromptSortOrder.localizedTitle`. `rawValue` is persisted to `UserDefaults`
+    /// under `promptBrowse.selectedSource`, so it must never change.
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .all:     return "All"
+        case .user:    return "My Prompts"
+        case .builtIn: return "Built-in"
+        }
+    }
+}
+
 /// Displays the Prompt Library directly in the sidebar.
 struct PromptLibrarySidebarView: View {
     /// Sidebar browse VM owned by `DestinationCoordinator` so search /
@@ -175,7 +209,7 @@ struct PromptLibrarySidebarView: View {
                     Button {
                         viewModel.sortOrder = order
                     } label: {
-                        Label(order.rawValue, systemImage: order.systemImage)
+                        Label(order.localizedTitle, systemImage: order.systemImage)
                         if viewModel.sortOrder == order {
                             Image(systemName: "checkmark")
                         }
@@ -188,7 +222,7 @@ struct PromptLibrarySidebarView: View {
                     Button {
                         viewModel.selectedSource = source
                     } label: {
-                        Label(source.rawValue, systemImage: source.systemImage)
+                        Label(source.localizedTitle, systemImage: source.systemImage)
                         if viewModel.selectedSource == source {
                             Image(systemName: "checkmark")
                         }
@@ -219,8 +253,15 @@ struct PromptLibrarySidebarView: View {
         }
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
-        .help("Sort: \(viewModel.sortOrder.rawValue) · Show: \(viewModel.selectedSource.rawValue)")
-        .accessibilityLabel("Sort and filter. Sort: \(viewModel.sortOrder.rawValue). Showing: \(viewModel.selectedSource.rawValue)")
+        // ⚠️ Composed, not interpolated: `"\(x.localizedTitle)"` would not compile
+        // and `"\(x.rawValue)"` would silently bake an untranslated English word
+        // into an otherwise-translatable sentence. Nesting `Text` keeps the frame
+        // ("Sort: %@ · Show: %@") extractable *and* localizes both values.
+        .help("Sort: \(Text(viewModel.sortOrder.localizedTitle)) · Show: \(Text(viewModel.selectedSource.localizedTitle))")
+        // `accessibilityLabel(_: String)` does not localize — the `Text` overload does.
+        .accessibilityLabel(
+            Text("Sort and filter. Sort: \(Text(viewModel.sortOrder.localizedTitle)). Showing: \(Text(viewModel.selectedSource.localizedTitle))")
+        )
     }
 
     // MARK: - Category Chips
@@ -230,7 +271,7 @@ struct PromptLibrarySidebarView: View {
             HStack(spacing: 8) {
                 ForEach(PromptCategoryFilter.allCases) { filter in
                     CategoryChip(
-                        title: filter.displayName,
+                        title: filter.localizedTitle,
                         isSelected: viewModel.selectedCategory == filter,
                         action: { viewModel.selectedCategory = filter }
                     )

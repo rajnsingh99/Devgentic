@@ -9,6 +9,7 @@
 //
 
 import Foundation
+import SwiftUI   // `LocalizedStringKey` for the `localizedTitle` members below
 
 /// Concrete category assignable to a prompt.
 enum PromptCategory: String, CaseIterable, Identifiable, Codable, Hashable {
@@ -23,7 +24,25 @@ enum PromptCategory: String, CaseIterable, Identifiable, Codable, Hashable {
     case custom       = "Custom"
 
     var id: String { rawValue }
+    /// ⚠️ `rawValue` verbatim — kept for persistence, logging and `Codable`. NOT for display:
+    /// use `localizedTitle`. A prompt's category is stored, so the raw strings must not move.
     var displayName: String { rawValue }
+
+    /// Display form. `Text(displayName)` took the non-localizing `Text` overload, so every
+    /// category chip and picker row shipped untranslated (audit C2).
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .general:      return "General"
+        case .development:  return "Development"
+        case .productivity: return "Productivity"
+        case .creativity:   return "Creativity"
+        case .writing:      return "Writing"
+        case .education:    return "Education"
+        case .research:     return "Research"
+        case .marketing:    return "Marketing"
+        case .custom:       return "Custom"
+        }
+    }
 
     var systemImage: String {
         switch self {
@@ -110,6 +129,14 @@ enum PromptCategoryFilter: Hashable, Identifiable, RawRepresentable {
         switch self {
         case .all:              return "All"
         case .category(let c):  return c.displayName
+        }
+    }
+
+    /// Display form — see `PromptCategory.localizedTitle`.
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .all:              return "All"
+        case .category(let c):  return c.localizedTitle
         }
     }
 

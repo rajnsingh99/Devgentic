@@ -383,7 +383,7 @@ struct ProfileNodeInspectorView: View {
                             .font(.system(size: 12, weight: .medium))
                             .foregroundColor(theme.primaryText)
                         Spacer()
-                        Text(profile.profileType.rawValue)
+                        Text(profile.profileType.localizedTitle)
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(theme.accentColor)
                             .padding(.horizontal, 8)

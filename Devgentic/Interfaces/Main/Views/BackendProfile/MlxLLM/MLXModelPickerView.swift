@@ -41,22 +41,33 @@ struct MLXModelPickerView: View {
                         .foregroundColor(theme.secondaryText)
                         .font(.caption)
                 } else {
-                    // Use cached profiles instead of calling detectCognitiveProfile inline
-                    let visibleModels = filterForTools
-                        ? service.installedModels.filter {
-                            service.cachedCognitiveProfile(for: $0).capability != .none
-                        }
-                        : service.installedModels
+                    // ⚠️ Every installed model stays listed, including in tool-filtering
+                    // mode. This used to `filter` them out, so a model whose tool support the
+                    // heuristic missed — any new family, re-quantized upload or personal
+                    // fine-tune — could not be selected here at all, and the store's Installed
+                    // tab hid it too. The doc comment on `filterForTools` has always said
+                    // "disabled/dimmed"; the code deleted them instead.
+                    // `showUnsupportedAlert` is the correct describe-and-warn shape and still
+                    // fires on selection.
+                    let visibleModels = service.installedModels
 
-                    if visibleModels.isEmpty && filterForTools {
-                        Text("No tool-capable models found.")
-                            .foregroundColor(.orange)
+                    if visibleModels.isEmpty {
+                        Text("No models found.")
+                            .foregroundColor(theme.secondaryText)
                             .font(.caption)
                     } else {
                         Picker("Model", selection: $selectedModel) {
                             ForEach(visibleModels) { model in
+                                let profile = service.cachedCognitiveProfile(for: model)
                                 // Vision badge: flag models the local VLM runtime can see images with.
-                                Text(model.displayName + (service.cachedCognitiveProfile(for: model).modalities.contains(.visionInput) ? "  👁 Vision" : ""))
+                                let vision = profile.modalities.contains(.visionInput) ? "  👁 Vision" : ""
+                                // Tool-capability is LABELLED, not enforced. In an Agent
+                                // profile a model the heuristic can't confirm stays fully
+                                // selectable; the warning alert explains the risk on
+                                // selection and the user decides.
+                                let toolNote = (filterForTools && profile.capability == .none)
+                                    ? "  ⚠︎ tools unconfirmed" : ""
+                                Text(model.displayName + vision + toolNote)
                                     .tag(model.displayName)
                             }
                         }
@@ -70,8 +81,11 @@ struct MLXModelPickerView: View {
                 ModelFitInlineView(assessment: assessment)
             }
         }
-        .onAppear {
-            service.refreshInstalledModels()
+        // `.task` not `.onAppear`: the scan is off the MainActor now, so `attemptAutoSelect`
+        // ran against an empty list and silently selected nothing — and nothing re-triggered
+        // it once the scan landed, leaving the picker blank.
+        .task {
+            await service.ensureLoaded()
             attemptAutoSelect()
         }
         // Listen for async updates (e.g. scan completing)
@@ -81,7 +95,7 @@ struct MLXModelPickerView: View {
         .alert("Unsupported Model", isPresented: $showUnsupportedAlert) {
             Button("OK", role: .cancel) { }
         } message: {
-            Text("You have selected a Chat-Only model. Agent profiles require models with Tool Calling capabilities. Please select a supported model.")
+            Text("We couldn't confirm tool-calling support for this model, so agent runs may fail to call tools. This check is a name-based heuristic and is often wrong for new or re-quantized models — if you know it supports tools, keep it selected.")
         }
     }
 
@@ -90,7 +104,7 @@ struct MLXModelPickerView: View {
         guard let first = service.installedModels.first else { return }
 
         // Check if the current selection is valid (exists in the installed list)
-        let isSelectionValid = service.installedModels.contains { $0.displayName == selectedModel }
+        let isSelectionValid = service.isInstalled(repoId: selectedModel)
 
         // If nothing is selected OR the current selection is invalid (e.g. deleted), pick the first one.
         if selectedModel.isEmpty || !isSelectionValid {
@@ -115,7 +129,7 @@ struct MLXModelPickerView: View {
     }
 
     private func evaluateCognitiveCapability(for modelName: String) {
-        guard let model = service.installedModels.first(where: { $0.displayName == modelName }) else { return }
+        guard let model = service.installedModel(named: modelName) else { return }
 
         // Use cached profile — no file I/O on every evaluation
         let profile = service.cachedCognitiveProfile(for: model)

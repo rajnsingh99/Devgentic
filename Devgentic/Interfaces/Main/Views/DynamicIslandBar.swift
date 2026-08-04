@@ -219,7 +219,9 @@ extension DynamicIslandBar where CenterContent == EmptyView, TrailingContent == 
 /// pattern that drifted across container views.
 struct IslandTitleLabel: View {
 
-    let title: String
+    /// ⚠️ `LocalizedStringKey` — see `CategoryChip.title`. This is the header of every
+    /// container view, so a `String` here left the whole navigation chrome untranslated.
+    let title: LocalizedStringKey
     var icon: String? = nil
 
     @Environment(\.appTheme) private var theme
@@ -251,7 +253,7 @@ struct IslandTitleLabel: View {
 extension DynamicIslandBar where CenterContent == IslandTitleLabel {
     /// Island with a title label in the center and a trailing slot.
     init(
-        title: String,
+        title: LocalizedStringKey,
         icon: String? = nil,
         onBack: (() -> Void)? = nil,
         leadingSymbol: String = "chevron.left",
@@ -267,7 +269,7 @@ extension DynamicIslandBar where CenterContent == IslandTitleLabel {
 extension DynamicIslandBar where CenterContent == IslandTitleLabel, TrailingContent == EmptyView {
     /// Island with just a title label — replaces bare `DynamicIslandBar()` calls
     /// that previously left the capsule visually empty.
-    init(title: String, icon: String? = nil, onBack: (() -> Void)? = nil, leadingSymbol: String = "chevron.left") {
+    init(title: LocalizedStringKey, icon: String? = nil, onBack: (() -> Void)? = nil, leadingSymbol: String = "chevron.left") {
         self.onBack = onBack
         self.leadingSymbol = leadingSymbol
         self.center = IslandTitleLabel(title: title, icon: icon)

@@ -236,7 +236,7 @@ struct ProfileTypeCard: View {
                 }
                 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(type.rawValue)
+                    Text(type.localizedTitle)
                         .font(theme.fontHeadline)
                         .foregroundColor(isSelected ? theme.primaryText : theme.primaryText.opacity(0.9))
                     
@@ -271,7 +271,9 @@ struct ProfileTypeCard: View {
             .scaleEffect(isHovering ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(type.rawValue). \(description)")
+        // `accessibilityLabel(_: String)` does not localize; the `Text` overload does, and a
+        // nested `Text` keeps the type name translatable inside the composed phrase.
+        .accessibilityLabel(Text("\(Text(type.localizedTitle)). \(description)"))
         .onHover { hover in
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                 isHovering = hover

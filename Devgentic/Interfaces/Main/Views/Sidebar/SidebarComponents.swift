@@ -218,7 +218,11 @@ struct BatchHeaderTextButton: View {
 
 // MARK: - Shared Category Chip (Filter Bubble)
 struct CategoryChip: View {
-    let title: String
+    /// ⚠️ `LocalizedStringKey`, not `String`. As a `String` this went to the non-localizing
+    /// `Text` overload, so every filter chip in the app shipped untranslated (audit C2).
+    /// Callers with a genuinely runtime title must model it as an enum rather than reaching
+    /// for `LocalizedStringKey(someString)`, which the extractor cannot see either.
+    let title: LocalizedStringKey
     let isSelected: Bool
     let action: () -> Void
 

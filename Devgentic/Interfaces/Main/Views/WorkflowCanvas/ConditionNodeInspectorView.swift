@@ -59,7 +59,14 @@ struct ConditionNodeInspectorView: View {
         .background(theme.primaryBackground)
         .onAppear {
             loadFromNode()
-            loadInstalledModels()
+        }
+        // ⚠️ `.task`, not `.onAppear`: A15 made the model scan asynchronous, so a synchronous
+        // read right after a fire-and-forget refresh snapshots the EMPTY pre-scan list into
+        // `@State` with nothing observing it afterwards. Opening this inspector before the
+        // launch scan landed showed "No MLX models found" until it was closed and reopened.
+        // Same fix as `MLXModelPickerView`.
+        .task {
+            await loadInstalledModels()
         }
     }
 
@@ -559,9 +566,11 @@ struct ConditionNodeInspectorView: View {
         return theme.accentColor.opacity(0.08)
     }
 
-    private func loadInstalledModels() {
+    /// Awaits at least one completed scan before reading. An empty `installedModels` is
+    /// indistinguishable from "nothing is installed", so it must never be snapshotted early.
+    private func loadInstalledModels() async {
         let service = MLXModelService.shared
-        service.refreshInstalledModels()
+        await service.ensureLoaded()
         installedModels = service.installedModels
     }
 

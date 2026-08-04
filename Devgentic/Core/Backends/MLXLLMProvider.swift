@@ -29,6 +29,12 @@ private final class MLXUsageSink: @unchecked Sendable {
 struct MLXLLMProvider: LLMProvider {
 
     let modelName: String
+
+    /// The on-disk model this provider was configured for. Threaded into every generation so
+    /// `MLXService` serves THIS model or throws — the actor holds one global "last loaded"
+    /// slot, and parallel workflow branches were able to answer from each other's models.
+    let modelDirectory: URL?
+
     let dialect: ModelDialect
     let chatTemplateSource: ChatTemplateSource
 
@@ -42,12 +48,14 @@ struct MLXLLMProvider: LLMProvider {
 
     init(
         modelName: String,
+        modelDirectory: URL? = nil,
         dialect: ModelDialect = .heuristicJson,
         chatTemplateSource: ChatTemplateSource = .embedded,
         stopSequences: [String] = [],
         advancedConfig: MLXAdvancedConfig? = nil
     ) {
         self.modelName = modelName
+        self.modelDirectory = modelDirectory
         self.dialect = dialect
         self.chatTemplateSource = chatTemplateSource
         self.stopSequences = stopSequences
@@ -87,6 +95,7 @@ struct MLXLLMProvider: LLMProvider {
         var fullText = ""
 
         let stream = await MLXService.shared.streamChat(
+            expectedModelDirectory: modelDirectory,
             messages: messages,
             tools: tools,
             maxTokens: generationConfig.maxTokens,
@@ -145,6 +154,7 @@ struct MLXLLMProvider: LLMProvider {
 
         var fullText = ""
         let stream = await MLXService.shared.streamVisionChat(
+            expectedModelDirectory: modelDirectory,
             messages: messages,
             imageData: imageData,
             maxTokens: generationConfig.maxTokens,
@@ -179,9 +189,14 @@ struct MLXLLMProvider: LLMProvider {
         let repPenalty = effectiveRepPenalty(nativeToolsPresent: nativeToolsPresent)
 
         return AsyncThrowingStream { continuation in
-            Task {
+            // Capture the handle so a consumer teardown propagates all the way down to
+            // MLXService's producer and the vendored evaluator. Discarding it here would
+            // leave the GPU decoding after Stop even though MLXService now cancels
+            // correctly — this is the outermost link in that chain.
+            let producer = Task {
                 do {
                     let tokenStream = await MLXService.shared.streamChat(
+                        expectedModelDirectory: modelDirectory,
                         messages: messages,
                         tools: tools,
                         maxTokens: config.maxTokens,
@@ -202,6 +217,10 @@ struct MLXLLMProvider: LLMProvider {
                 } catch {
                     continuation.finish(throwing: error)
                 }
+            }
+
+            continuation.onTermination = { @Sendable _ in
+                producer.cancel()
             }
         }
     }

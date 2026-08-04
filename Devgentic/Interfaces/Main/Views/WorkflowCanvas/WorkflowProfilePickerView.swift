@@ -174,7 +174,7 @@ struct WorkflowProfilePickerView: View {
                     Text(profile.displayName)
                         .font(theme.fontSubheadline.weight(.medium))
                         .foregroundColor(theme.primaryText)
-                    Text(profile.profileType.rawValue)
+                    Text(profile.profileType.localizedTitle)
                         .font(.system(.caption))
                         .foregroundColor(theme.secondaryText)
                 }

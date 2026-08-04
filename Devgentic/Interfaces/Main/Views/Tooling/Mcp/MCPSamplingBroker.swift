@@ -250,3 +250,9 @@ final class MCPSamplingBroker {
         return String(joined.prefix(limit)) + "\n… [\(joined.count - limit) more characters]"
     }
 }
+
+// MARK: - Host bridge
+
+/// `sampling/createMessage` handler for `MCPClientService`. The signature already matched;
+/// conformance just makes the dependency injectable so the connect path can run headless.
+extension MCPSamplingBroker: MCPSamplingRequestHandling {}

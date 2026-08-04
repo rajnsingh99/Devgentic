@@ -182,3 +182,8 @@ final class MCPElicitationBroker {
         return "\(message)\n\n(Requested: \(fields.joined(separator: ", ")) — the first will be filled from your answer.)"
     }
 }
+
+// MARK: - Host bridge
+
+/// `elicitation/create` handler for `MCPClientService`. See MCPHostBridge.swift.
+extension MCPElicitationBroker: MCPElicitationRequestHandling {}

@@ -539,7 +539,7 @@ struct CoreIntelligenceSettingsView: View {
 
     private func updateFitAssessment() {
         guard !selectedModel.isEmpty,
-              let model = modelService.installedModels.first(where: { $0.displayName == selectedModel }) else {
+              let model = modelService.installedModel(named: selectedModel) else {
             currentFitAssessment = nil
             return
         }

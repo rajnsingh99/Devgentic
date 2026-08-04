@@ -306,6 +306,13 @@ private struct BundleEventRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 6) {
+            // ⚠️ DELIBERATELY RAW — do not convert this to a `localizedTitle`.
+            // `SpanEventType.rawValue` (`llmRequest`, `toolResult`, `parseError`, …) is the
+            // literal token written into the exported `trace.json` this viewer decodes. The
+            // Bundle Viewer is the MAINTAINER side of the report loop: its job is to show
+            // what is in the file so a maintainer can grep/cross-reference the raw bundle.
+            // Translating it (or even prettifying it) would break that correspondence, and
+            // there is no user-facing copy here to be inconsistent with.
             Text(event.eventType.rawValue)
                 .font(.caption2.weight(.medium))
                 .foregroundStyle(severityColor)

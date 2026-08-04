@@ -29,7 +29,13 @@ struct MCPOAuthCredentialBundle: Codable, Hashable, Sendable {
     let clientId: String
 
     /// Set of scopes that were granted (may be a subset of what we asked for).
-    let grantedScopes: [String]
+    ///
+    /// `var` because a refresh can return a different set. It used to be `let`, which forced
+    /// `MCPOAuthCoordinator.refresh` to REBUILD the whole bundle whenever the scopes moved —
+    /// and a rebuild is a full re-listing of every field, so the one that was forgotten
+    /// (`resource`, the RFC 8707 audience binding) silently vanished. Mutating the fields
+    /// that actually change removes that failure mode rather than patching it.
+    var grantedScopes: [String]
 
     /// Loopback (or custom-scheme) redirect URI used for this client. Stored
     /// because it has to match exactly on every authorize and refresh call.

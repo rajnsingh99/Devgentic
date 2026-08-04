@@ -42,6 +42,19 @@ struct TrendsView: View {
             case .thirtyDays: return 30
             }
         }
+
+        /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)`
+        /// binds to the non-localizing `StringProtocol` overload, so every rawValue-sourced
+        /// label was invisible to the String Catalog extractor and would have shipped
+        /// untranslated inside otherwise-translated chrome. `rawValue` stays for `id`
+        /// and logging only.
+        var localizedTitle: LocalizedStringKey {
+            switch self {
+            case .oneDay:     return "24h"
+            case .sevenDays:  return "7d"
+            case .thirtyDays: return "30d"
+            }
+        }
     }
 
     /// Profile-type filter for the dashboard. Raw values match the `ProfileType`
@@ -57,9 +70,24 @@ struct TrendsView: View {
         var id: String { rawValue }
 
         /// The string passed to MetricsAggregator. Nil for `.all`.
+        /// ⚠️ PERSISTENCE/WIRE VALUE — matches `traces.profileType` rows written by
+        /// `ProfileType.rawValue`. Never rename a case value here.
         var sqlValue: String? { self == .all ? nil : rawValue }
 
-        var label: String { rawValue }
+        /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)`
+        /// binds to the non-localizing `StringProtocol` overload, so the picker label was
+        /// invisible to the String Catalog extractor. `rawValue` stays for the SQL filter,
+        /// `id`, and logging only.
+        var localizedTitle: LocalizedStringKey {
+            switch self {
+            case .all:       return "All"
+            case .bot:       return "Bot"
+            case .agent:     return "Agent"
+            case .workflow:  return "Workflow"
+            case .code:      return "Code"
+            case .imageGen:  return "ImageGen"
+            }
+        }
     }
 
     var body: some View {
@@ -144,7 +172,7 @@ struct TrendsView: View {
             // scopes every panel to traces matching the selected profile type.
             Picker("", selection: $profileFilter) {
                 ForEach(ProfileFilter.allCases) { p in
-                    Text(p.label).tag(p)
+                    Text(p.localizedTitle).tag(p)
                 }
             }
             .pickerStyle(.menu)
@@ -152,7 +180,7 @@ struct TrendsView: View {
 
             Picker("", selection: $window) {
                 ForEach(Window.allCases) { w in
-                    Text(w.rawValue).tag(w)
+                    Text(w.localizedTitle).tag(w)
                 }
             }
             .pickerStyle(.segmented)
@@ -565,7 +593,13 @@ private struct PhaseSummaryRow: View {
                 if let count = byPhase[phase], count > 0 {
                     HStack(spacing: 4) {
                         Circle().frame(width: 6, height: 6).foregroundColor(color(for: phase))
-                        Text("\(phase.rawValue): \(count)")
+                        // Composition, not substitution: `Text("\(phase.localizedTitle)")`
+                        // would collapse the key back into a plain interpolated String and
+                        // lose localization again.
+                        // `verbatim` — ": %lld" is a punctuation fragment, not a translatable
+                        // phrase, and shipping it to the catalog gives translators nothing to
+                        // act on. The phase name beside it is the part that localizes.
+                        (Text(phase.localizedTitle) + Text(verbatim: ": \(count)"))
                             .font(.caption2.monospacedDigit())
                             .foregroundColor(theme.secondaryText)
                     }
@@ -584,6 +618,32 @@ private struct PhaseSummaryRow: View {
         case .memory:     return .yellow
         case .workflow:   return .pink
         case .session:    return .gray
+        }
+    }
+}
+
+// MARK: - ExecutionPhase display name
+
+/// ⚠️ Declared HERE, not on the enum: `ExecutionPhase` lives in `Observaliblity/`
+/// (Foundation + GRDB) and is a `DatabaseValueConvertible` persisted into
+/// `span_events.phase` — that Core file must not import SwiftUI, and its `rawValue`
+/// is a storage key that can never be renamed.
+///
+/// The property exists at all because `Text(x.rawValue)` binds to the non-localizing
+/// `StringProtocol` overload, so the phase chips were invisible to the String Catalog
+/// extractor and shipped untranslated. The raw values are lowercase identifiers
+/// (`parsing`, `llm`, …) that were being rendered verbatim, so these read as proper
+/// capitalised phrases rather than echoing the storage token.
+private extension ExecutionPhase {
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .parsing:    return "Parsing"
+        case .llm:        return "LLM"
+        case .tooling:    return "Tooling"
+        case .capability: return "Capability"
+        case .memory:     return "Memory"
+        case .workflow:   return "Workflow"
+        case .session:    return "Session"
         }
     }
 }

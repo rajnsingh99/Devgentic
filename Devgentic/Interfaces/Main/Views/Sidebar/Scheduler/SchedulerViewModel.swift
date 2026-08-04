@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import SwiftUI   // `LocalizedStringKey` for `SchedulerFilter.localizedTitle`
 import os
 
 private let logger = DGLogger(category: "SchedulerViewModel")
@@ -19,6 +20,18 @@ enum SchedulerFilter: String, CaseIterable, Identifiable {
     case oneShot = "One-shot"
 
     var id: String { rawValue }
+
+    /// ⚠️ `rawValue` stays as the identity/persistence form; this is the display form.
+    /// `Text(x.rawValue)` binds to the non-localizing overload (audit C2).
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .all:       return "All"
+        case .active:    return "Active"
+        case .paused:    return "Paused"
+        case .recurring: return "Recurring"
+        case .oneShot:   return "One-shot"
+        }
+    }
 }
 
 @Observable @MainActor

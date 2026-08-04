@@ -17,8 +17,33 @@ struct MLXDownloadProgressCircle: View {
 
     @State private var isHovered: Bool = false
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        // A real Button, not a tap gesture on a shape. `onTapGesture` puts nothing in the
+        // accessibility tree and cannot be reached by keyboard or VoiceOver, so cancelling a
+        // download was pointer-only.
+        Button(action: onCancelRequested) {
+            circleBody
+        }
+        .buttonStyle(.plain)
+        .contentShape(Circle())
+        .accessibilityLabel("Cancel download")
+        .accessibilityValue("\(Int(progress * 100)) percent complete")
+        .onHover { hovering in
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.12)) {
+                isHovered = hovering
+            }
+        }
+        // ⚠️ The old code push/popped `NSCursor` from `onHover`. Any exit event that never
+        // arrives — the view being removed mid-hover, which is exactly what happens when a
+        // download completes — leaks a pushed cursor onto the stack for the whole app.
+        // `pointerStyle` is tied to the view's lifetime instead.
+        .pointerStyle(.link)
+        .help("Cancel download")
+    }
+
+    private var circleBody: some View {
         ZStack {
             Circle()
                 .stroke(theme.surfaceOverlayStrong, lineWidth: 3)
@@ -27,11 +52,11 @@ struct MLXDownloadProgressCircle: View {
                 .trim(from: 0, to: max(0.0, min(progress, 1.0)))
                 .stroke(theme.accentColor, style: StrokeStyle(lineWidth: 3, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-                .animation(.easeOut(duration: 0.3), value: progress)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: progress)
 
             if isHovered {
                 Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.system(.caption, weight: .bold))
                     .foregroundColor(theme.errorColor)
             } else {
                 Text("\(Int(progress * 100))%")
@@ -40,21 +65,6 @@ struct MLXDownloadProgressCircle: View {
             }
         }
         .frame(width: 44, height: 44)
-        .contentShape(Circle())
-        .onTapGesture {
-            onCancelRequested()
-        }
-        .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.12)) {
-                isHovered = hovering
-            }
-            if hovering {
-                NSCursor.pointingHand.push()
-            } else {
-                NSCursor.pop()
-            }
-        }
-        .help("Click to cancel download")
     }
 }
 
@@ -80,10 +90,10 @@ struct CapabilityBadge: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: capability.icon)
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(.caption2, weight: .semibold))
                 .foregroundColor(accentColor)
 
-            Text(capability.rawValue)
+            Text(capability.localizedTitle)
                 .font(.caption2)
                 .foregroundColor(theme.primaryText.opacity(0.85))
         }

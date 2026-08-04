@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import AppKit
 
 /// A view for managing user account settings, specifically Google Sign-In.
 struct AccountSettingsView: View {
@@ -17,10 +18,206 @@ struct AccountSettingsView: View {
     @AppStorage("mockGoogleUserEmail") private var userEmail: String = "user@example.com"
     @AppStorage("mockGoogleUserName") private var userName: String = "Devgentic User"
 
+    // MARK: - HuggingFace token (G4)
+
+    /// Draft value while editing. The stored token is never written back into this field —
+    /// the UI shows a masked form instead, so a saved secret is not sitting in view state.
+    @State private var tokenDraft: String = ""
+    @State private var tokenSaved: Bool = false
+    @State private var showTokenWarning: Bool = false
+
+    private var tokenStore: HuggingFaceTokenStore { .shared }
+
+    @ViewBuilder
+    private var huggingFaceSection: some View {
+        SettingsCard(title: "HuggingFace", icon: "key.fill", theme: theme) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Needed only for gated or private models. Without a token those downloads fail, and anonymous requests hit HuggingFace's rate limit sooner.")
+                    .font(.caption)
+                    .foregroundColor(theme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if tokenStore.hasToken, let masked = tokenStore.maskedToken {
+                    HStack(spacing: 10) {
+                        Image(systemName: "checkmark.seal.fill")
+                            .foregroundColor(theme.successColor)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Token saved")
+                                .font(.callout.weight(.medium))
+                                .foregroundColor(theme.primaryText)
+                            // Masked, never the value — a settings screen is shoulder-surfable
+                            // and gets screenshotted into bug reports.
+                            Text(masked)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundColor(theme.secondaryText)
+                        }
+                        Spacer()
+                        Button("Remove", role: .destructive) {
+                            _ = tokenStore.clear()
+                            tokenDraft = ""
+                            tokenSaved = false
+                        }
+                    }
+                } else {
+                    // `SecureField` so the token isn't rendered in plain text as it's typed.
+                    SecureField("hf_…", text: $tokenDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("HuggingFace access token")
+
+                    if showTokenWarning {
+                        Text("That doesn't look like a HuggingFace token (they usually start with \"hf_\"). It has been saved anyway — if downloads still fail, check it on huggingface.co.")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    HStack {
+                        Link("Create a token on HuggingFace",
+                             destination: URL(string: "https://huggingface.co/settings/tokens")!)
+                            .font(.caption)
+                        Spacer()
+                        Button("Save") {
+                            // Shape check only — HuggingFace has shipped more than one token
+                            // format, so an unrecognised shape warns rather than refuses.
+                            showTokenWarning = !HuggingFaceTokenStore.looksLikeToken(tokenDraft)
+                            tokenSaved = tokenStore.store(tokenDraft)
+                            tokenDraft = ""
+                        }
+                        .disabled(tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+
+                if tokenSaved == false && tokenStore.hasToken == false && !tokenDraft.isEmpty {
+                    Text("Couldn't save to the Keychain.")
+                        .font(.caption)
+                        .foregroundColor(theme.errorColor)
+                }
+            }
+        }
+    }
+
+    // MARK: - Models location (G14)
+
+    @State private var locationPath: String = MLXModelsLocation.displayPath ?? ""
+    @State private var locationError: String?
+    @State private var importResult: String?
+
+    @ViewBuilder
+    private var modelsLocationSection: some View {
+        SettingsCard(title: "MLX Models", icon: "internaldrive", theme: theme) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Where downloaded models are stored. Useful if your boot volume is small and you have a faster or larger external drive.")
+                    .font(.caption)
+                    .foregroundColor(theme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 8) {
+                    Text(locationPath.isEmpty ? "Default (Application Support)" : locationPath)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(theme.primaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Button("Reveal") {
+                        MLXModelService.shared.revealModelsDirectoryInFinder()
+                    }
+                    Button("Change…") { chooseDirectory() }
+                    if MLXModelsLocation.hasCustomDirectory {
+                        Button("Reset") {
+                            Task {
+                                await MLXModelService.shared.resetModelsDirectory()
+                                locationPath = ""
+                                locationError = nil
+                            }
+                        }
+                    }
+                }
+
+                // Stated plainly: this is the surprising part of every app that offers it.
+                if MLXModelsLocation.hasCustomDirectory {
+                    Text("Changing this does not move existing models. Anything in the previous folder stays there and stops being listed.")
+                        .font(.caption)
+                        .foregroundColor(theme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if let locationError {
+                    Text(locationError)
+                        .font(.caption)
+                        .foregroundColor(theme.errorColor)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Divider()
+
+                Text("Already have models from mlx_lm, LM Studio or a manual download? Import the folder instead of downloading it again.")
+                    .font(.caption)
+                    .foregroundColor(theme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Button("Import Model Folder…") { importFolder() }
+                    Spacer()
+                }
+
+                if let importResult {
+                    Text(importResult)
+                        .font(.caption)
+                        .foregroundColor(importResult.hasPrefix("Imported") ? theme.successColor : theme.errorColor)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private func chooseDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use This Folder"
+        panel.message = "Choose where Devgentic should store MLX models."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        Task {
+            if await MLXModelService.shared.setModelsDirectory(url) {
+                locationPath = url.path
+                locationError = nil
+            } else {
+                // The resolver has already logged the specific reason.
+                locationError = "Couldn't use that folder. It needs to be a folder Devgentic can read and write — folders inside Desktop, Documents or Downloads may need permission in System Settings › Privacy & Security."
+            }
+        }
+    }
+
+    private func importFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Import"
+        panel.message = "Choose a model folder containing config.json and its weights."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let repoId = MLXModelService.suggestedRepoId(for: url)
+        Task {
+            switch await MLXModelService.shared.importModel(from: url, as: repoId) {
+            case .success(let id):
+                importResult = "Imported \(id)."
+            case .failure(let error):
+                importResult = error.errorDescription ?? "Import failed."
+            }
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(spacing: 32) {
-                
+
+                modelsLocationSection
+
+                huggingFaceSection
+
                 // User Account Section
                 SettingsCard(title: "Google Account", icon: "person.crop.circle.badge.checkmark", theme: theme) {
                     

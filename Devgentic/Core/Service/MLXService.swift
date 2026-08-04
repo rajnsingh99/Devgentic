@@ -38,6 +38,136 @@ actor MLXService {
     /// Only cleared on explicit model *switch* (loading a different model), never on idle unload.
     private var lastModelDirectory: URL?
 
+    /// Errors this actor throws to its callers.
+    enum ServiceError: LocalizedError {
+        /// The resident container is not the model the request asked for, and reloading the
+        /// requested one did not resolve it (a concurrent load won the race).
+        case modelIdentityMismatch(expected: String, actual: String)
+        case noModelLoaded
+
+        var errorDescription: String? {
+            switch self {
+            case .modelIdentityMismatch(let expected, let actual):
+                return "Expected the '\(expected)' model but '\(actual)' is loaded. The request was refused rather than answered by the wrong model."
+            case .noModelLoaded:
+                return "No MLX model is currently loaded. Please load a model first."
+            }
+        }
+    }
+
+    /// Resolves the container for a specific model, loading it if necessary.
+    ///
+    /// ⚠️ The identity check and the container capture MUST stay in the same synchronous
+    /// region — no `await` between them. This actor is reentrant across every suspension, so
+    /// a check-then-await-then-use would let a concurrent `loadModel` swap `modelContainer`
+    /// after the check passed. Capturing the container into a local first means the caller
+    /// holds a strong reference to the model it validated, even if the actor's slot changes
+    /// underneath it a moment later.
+    ///
+    /// Why this exists: `streamChat` took no model identifier, and `lastModelDirectory` is a
+    /// single global slot holding whatever model ANY caller loaded most recently.
+    /// `WorkflowExecutor` runs profile nodes in parallel — branch A (model X) pausing between
+    /// ReAct iterations while branch B loaded model Y meant A's lazy reload restored Y and
+    /// **answered from the classifier's model**, logging only "♻️ Reloading model from: Y".
+    /// The A14 identity rule, as a pure function so it is directly testable.
+    ///
+    /// A request may only be served when a container is loaded AND the directory it was loaded
+    /// from is the one the request expects. ⚠️ `hasContainer` is a separate input on purpose:
+    /// `loadModel` nulls the container BEFORE loading, so "the right path with no container" is
+    /// a real state and it must NOT be treated as resident. Paths are standardized because the
+    /// two sides arrive from different places — a profile's stored URL and the service's own
+    /// record — and `/a/b` vs `/a/b/` vs `/a/c/../b` are the same model.
+    nonisolated static func isResident(expected: URL, resident: URL?, hasContainer: Bool) -> Bool {
+        guard hasContainer, let resident else { return false }
+        return samePath(resident, expected)
+    }
+
+    /// Compare two model directories. See `URL.sameLocationLexically` for the rule and why
+    /// `URL` equality is wrong for this.
+    ///
+    /// Deliberately the LEXICAL variant: this is on the generation hot path
+    /// (`container(expecting:)` runs per request) and every model directory is derived from the
+    /// service's own `modelsDirectory`, so there is no symlink divergence to resolve.
+    nonisolated static func samePath(_ lhs: URL, _ rhs: URL) -> Bool {
+        lhs.sameLocationLexically(as: rhs)
+    }
+
+    private func container(expecting directory: URL?) async throws -> ModelContainer {
+        guard let directory else {
+            // No identity supplied (legacy caller). Preserve the old lazy-reload behaviour,
+            // but say so — an unidentified generation is exactly the case that could be
+            // served by the wrong model.
+            if modelContainer == nil, lastModelDirectory != nil {
+                logger.warning("[MLX-LOAD] Lazy reload with NO expected model identity — restoring '\(self.lastModelDirectory?.lastPathComponent ?? "?")', whichever model that happens to be. CONSEQUENCE: if another caller loaded a different model, this generation is answered by it.")
+                _ = await reloadCurrentModel()
+            }
+            guard let container = modelContainer else { throw ServiceError.noModelLoaded }
+            return container
+        }
+
+        let target = directory.standardizedFileURL
+
+        // Up to two attempts. ⚠️ A single attempt conflated two very different situations:
+        // "another model is resident" (a real wrong-model hazard, must refuse) and "the slot
+        // was emptied underneath us" (a transient interleave). `loadModel` calls
+        // `performUnload()` BEFORE loading, so a concurrent load for a different model nulls
+        // `modelContainer` in the window between our load completing and the check below —
+        // and we threw `modelIdentityMismatch(expected: X, actual: <none>)` for a model that
+        // had just loaded perfectly. `WorkflowExecutor` runs profile nodes in parallel, so
+        // that interleave is routine there, and a hard node failure is the worst possible
+        // response to it. Retrying once lets the transient case settle; sustained contention
+        // still refuses, which is correct.
+        for attempt in 1...2 {
+            if Self.isResident(expected: directory, resident: currentModelDirectory,
+                               hasContainer: modelContainer != nil) { break }
+            if let current = currentModelDirectory, !Self.samePath(current, directory) {
+                logger.notice("[MLX-LOAD] Model identity mismatch (attempt \(attempt) of 2): request expects '\(directory.lastPathComponent)', container holds '\(current.lastPathComponent)' — loading the expected model instead of generating from the resident one.")
+            } else if attempt > 1 {
+                logger.notice("[MLX-LOAD] '\(directory.lastPathComponent)' loaded but the container slot was emptied by a concurrent load before this request could take it — retrying once rather than failing the request.")
+            }
+            try await loadModel(from: directory)
+        }
+
+        // ⚠️ No suspension permitted between here and the return.
+        guard let container = modelContainer,
+              Self.isResident(expected: directory, resident: currentModelDirectory,
+                              hasContainer: true) else {
+            let actual = currentModelDirectory?.lastPathComponent ?? "<none>"
+            logger.error("[MLX-LOAD] REFUSING to generate: expected '\(directory.lastPathComponent)' but '\(actual)' is resident after a load attempt — a concurrent load won the race. CONSEQUENCE: this request throws instead of returning an answer produced by the wrong model.")
+            throw ServiceError.modelIdentityMismatch(expected: directory.lastPathComponent, actual: actual)
+        }
+        return container
+    }
+
+    /// Whether `directory` is the model currently resident in memory, or the one a lazy
+    /// `reloadCurrentModel()` would restore. `MLXModelService.deleteModel` consults this
+    /// before removing files: deleting a resident model leaves in-flight generations reading
+    /// a path that no longer exists, and deleting the `lastModelDirectory` target makes the
+    /// idle-timer recovery resurrect a deleted path and fail with a raw framework error.
+    func isModelLoaded(at directory: URL) -> Bool {
+        // Path comparison — see `samePath`. A false negative here lets `deleteModel` remove
+        // files underneath a resident model.
+        if let current = currentModelDirectory, Self.samePath(current, directory) { return true }
+        if let last = lastModelDirectory, Self.samePath(last, directory) { return true }
+        return false
+    }
+
+    /// Forgets a model directory after its files have been removed, so the lazy reload path
+    /// cannot try to restore it.
+    func forgetModel(at directory: URL) {
+        if let last = lastModelDirectory, Self.samePath(last, directory) {
+            logger.notice("Clearing lastModelDirectory for deleted model \(directory.lastPathComponent) — reload recovery would otherwise target a path that no longer exists.")
+            lastModelDirectory = nil
+        }
+        if let current = currentModelDirectory, Self.samePath(current, directory) {
+            currentModelDirectory = nil
+        }
+    }
+
+    /// True while at least one generation is streaming. Callers that mutate model state on
+    /// disk must not do so underneath a running generation.
+    var hasActiveGenerations: Bool { activeGenerations > 0 }
+
     /// Task handle for the auto-unload timer.
     private var idleCleanupTask: Task<Void, Never>?
 
@@ -88,6 +218,22 @@ actor MLXService {
             return
         }
 
+        // Pre-load headroom, logged BEFORE the allocation. Per the standing directive this
+        // is purely descriptive — nothing here refuses a load; the user's configured model
+        // always loads. But the only prior memory line was a `.debug` "Post-Load" pair
+        // emitted AFTER the allocation, so a field report of "the app hangs my Mac" had no
+        // evidence at all. The agent model and the Intelligence Core hold independent
+        // containers with independent idle timers and no shared budget, so both can be
+        // resident at once during a single turn.
+        let onDiskBytes = MLXModelService.directorySize(at: directory)
+        let hardware = SystemHardwareProfiler.shared.profile
+        let fit = ModelFitAdvisor.assess(
+            metadata: nil,
+            diskSizeBytes: onDiskBytes > 0 ? onDiskBytes : nil,
+            modelName: directory.lastPathComponent
+        )
+        logger.notice("[MLX-LOAD] Loading '\(directory.lastPathComponent)' — on disk \(ByteCountFormatter.string(fromByteCount: onDiskBytes, countStyle: .file)), est. runtime \(fit.formattedEstimatedRAM), budget \(hardware.formattedEffectiveBudget), verdict \(fit.verdict.rawValue). \(fit.verdict == .risky || fit.verdict == .incompatible ? "CONSEQUENCE: this exceeds the safe threshold — expect memory pressure and swapping, especially if an Intelligence Core model is also resident." : "")")
+
         logger.notice("Loading MLX model from: \(directory.path)")
 
         // 1. Clean up previous model to free RAM. FORCED variant: the public
@@ -120,7 +266,13 @@ actor MLXService {
             self.logMemoryStats(label: "Post-Load")
         }
         loadInFlight = load
-        defer { loadInFlight = nil }
+        // ⚠️ Clear only our OWN handle. Both this caller and one coalesced behind it resume
+        // when the previous load finishes; if the other runs first it installs its own
+        // `loadInFlight` before we get here, and an unconditional nil then wiped a live
+        // load's handle — the next caller saw nil, skipped the coalescing check, and started
+        // a duplicate full-model load. That is exactly the transient 2× RAM this handle
+        // exists to prevent. (`Task` is a struct but `Hashable` on task identity, so `==`.)
+        defer { if loadInFlight == load { loadInFlight = nil } }
 
         do {
             try await load.value
@@ -140,7 +292,7 @@ actor MLXService {
     @discardableResult
     func unloadModel() -> [String: Int] {
         guard activeGenerations == 0 else {
-            logger.warning("Refusing model unload — \(self.activeGenerations) generation(s) in flight.")
+            logger.warning("[MLX-LOAD] Refusing model unload — \(self.activeGenerations) generation(s) still in flight for \(self.currentModelDirectory?.lastPathComponent ?? "<none>"). CONSEQUENCE: the model stays resident until they finish or the 2-minute idle timer fires; a cancelled consumer should have cancelled its producer, so a persistent count here means a stream leaked.")
             return [:]
         }
         return performUnload()
@@ -242,7 +394,12 @@ actor MLXService {
     ///   - chatTemplateSource: Describes how to obtain the correct chat template for the model.
     ///     Used when the tokenizer lacks a built-in template. Defaults to `.embedded`.
     /// - Returns: An async stream of string tokens.
+    /// - Parameter expectedModelDirectory: the model this request was configured for. When
+    ///   supplied, the generation is served by THAT model or it throws — it is never answered
+    ///   by whichever model happens to be resident. Nil preserves the legacy behaviour and
+    ///   logs a warning; see `container(expecting:)`.
     func streamChat(
+        expectedModelDirectory: URL? = nil,
         messages: [[String: String]],
         tools: [[String: Any]]? = nil,
         maxTokens: Int = 2048,
@@ -261,18 +418,26 @@ actor MLXService {
         cancelIdleTimer()
 
         return AsyncThrowingStream { continuation in
-            Task {
+            // ⚠️ The producer handle MUST be captured and cancelled on termination.
+            // Without this, pressing Stop unwound the consumer while the model kept
+            // decoding on the GPU until EOS / a stop sequence / maxTokens — discarding
+            // every token, holding `activeGenerations > 0` so `unloadModel()` refused,
+            // and making the user's NEXT message decode concurrently with the orphan on
+            // the same GPU at roughly half token rate. The vendored evaluator already
+            // breaks on `Task.isCancelled`; nothing was ever cancelling it.
+            let producer = Task {
                 activeGenerations += 1
                 defer { activeGenerations -= 1 }
 
                 // Lazy reload: an idle-timer unload between iterations (HITL park,
                 // long tool run) recovers inline instead of failing the request into
                 // the retry classifier — no wasted generation attempt, no error card.
-                if modelContainer == nil, lastModelDirectory != nil {
-                    _ = await reloadCurrentModel()
-                }
-                guard let container = modelContainer else {
-                    continuation.finish(throwing: NSError(domain: "MLXService", code: 404, userInfo: [NSLocalizedDescriptionKey: "No MLX model is currently loaded. Please load a model first."]))
+                // Now identity-checked: see `container(expecting:)`.
+                let container: ModelContainer
+                do {
+                    container = try await self.container(expecting: expectedModelDirectory)
+                } catch {
+                    continuation.finish(throwing: error)
                     return
                 }
 
@@ -372,6 +537,11 @@ actor MLXService {
                 // 2. Inference is complete (success or failure). Start the idle timer.
                 self.startIdleTimer()
             }
+
+            // Mirrors the 14 existing `onTermination` sites in this codebase.
+            continuation.onTermination = { @Sendable _ in
+                producer.cancel()
+            }
         }
     }
     
@@ -405,7 +575,18 @@ actor MLXService {
         // --- Safety Layer 2: Streaming Circuit Breaker ---
         var circuitBreaker = StreamingCircuitBreaker()
 
+        var chunkCount = 0
+
         for await generation in stream {
+            // The vendored evaluator's own `Task.isCancelled` check only fires between
+            // token batches; this is the consumer-side stop, so an abandoned generation
+            // releases the container promptly instead of running to EOS.
+            if Task.isCancelled {
+                logger.notice("[MLX-LOAD] Generation cancelled by consumer after \(chunkCount) chunk(s) — releasing the container instead of decoding to EOS.")
+                break
+            }
+            chunkCount += 1
+
             switch generation {
             case .chunk(let text):
 
@@ -500,7 +681,12 @@ actor MLXService {
     /// NOT apply here is the `applyChatTemplate` two-tier fallback: the VLM's own
     /// `UserInputProcessor` owns templating on this path, so there is no
     /// `ChatTemplateSource` to fall back through.)
+    /// - Parameter expectedModelDirectory: the model this request was configured for. When
+    ///   supplied, the generation is served by THAT model or it throws — it is never answered
+    ///   by whichever model happens to be resident. Nil preserves the legacy behaviour and
+    ///   logs a warning; see `container(expecting:)`.
     func streamVisionChat(
+        expectedModelDirectory: URL? = nil,
         messages: [[String: String]],
         imageData: [Data],
         maxTokens: Int = 2048,
@@ -515,18 +701,26 @@ actor MLXService {
         cancelIdleTimer()
 
         return AsyncThrowingStream { continuation in
-            Task {
+            // ⚠️ The producer handle MUST be captured and cancelled on termination.
+            // Without this, pressing Stop unwound the consumer while the model kept
+            // decoding on the GPU until EOS / a stop sequence / maxTokens — discarding
+            // every token, holding `activeGenerations > 0` so `unloadModel()` refused,
+            // and making the user's NEXT message decode concurrently with the orphan on
+            // the same GPU at roughly half token rate. The vendored evaluator already
+            // breaks on `Task.isCancelled`; nothing was ever cancelling it.
+            let producer = Task {
                 activeGenerations += 1
                 defer { activeGenerations -= 1 }
 
                 // Lazy reload: an idle-timer unload between iterations (HITL park,
                 // long tool run) recovers inline instead of failing the request into
                 // the retry classifier — no wasted generation attempt, no error card.
-                if modelContainer == nil, lastModelDirectory != nil {
-                    _ = await reloadCurrentModel()
-                }
-                guard let container = modelContainer else {
-                    continuation.finish(throwing: NSError(domain: "MLXService", code: 404, userInfo: [NSLocalizedDescriptionKey: "No MLX model is currently loaded. Please load a model first."]))
+                // Now identity-checked: see `container(expecting:)`.
+                let container: ModelContainer
+                do {
+                    container = try await self.container(expecting: expectedModelDirectory)
+                } catch {
+                    continuation.finish(throwing: error)
                     return
                 }
 
@@ -648,6 +842,11 @@ actor MLXService {
                 }
 
                 self.startIdleTimer()
+            }
+
+            // Mirrors the 14 existing `onTermination` sites in this codebase.
+            continuation.onTermination = { @Sendable _ in
+                producer.cancel()
             }
         }
     }

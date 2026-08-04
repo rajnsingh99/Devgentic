@@ -79,7 +79,7 @@ private struct SettingsCategoryRow: View {
                     .frame(width: 22)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(category.rawValue)
+                    Text(category.localizedTitle)
                         .font(theme.fontFootnote.weight(isSelected ? .bold : .medium))
                         .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
 

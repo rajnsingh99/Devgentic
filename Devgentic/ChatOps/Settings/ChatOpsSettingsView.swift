@@ -17,6 +17,19 @@ private enum ChatOpsPlatform: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
+    /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
+    /// invisible to the String Catalog extractor and would have shipped untranslated inside
+    /// otherwise-translated chrome. `rawValue` stays for persistence and logging only.
+    /// These are brand names, but non-Latin locales transliterate them, so they stay extractable.
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .telegram: return "Telegram"
+        case .discord:  return "Discord"
+        case .slack:    return "Slack"
+        }
+    }
+
     var icon: String {
         switch self {
         case .telegram: return "paperplane.fill"
@@ -42,6 +55,24 @@ private enum ChatOpsPlatform: String, CaseIterable, Identifiable {
     }
 
     var isAvailable: Bool { self == .telegram || self == .discord || self == .slack }
+}
+
+// MARK: - Localized Titles
+
+extension ChatOpsSecurityTier {
+    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
+    /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
+    /// invisible to the String Catalog extractor and would have shipped untranslated inside
+    /// otherwise-translated chrome. `rawValue` is the persisted/`Codable` value — never edit it.
+    /// Declared here (not next to the enum in `ChatOpsConfig.swift`) so the model layer keeps
+    /// its `Foundation`-only imports.
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .readOnly: return "Read Only"
+        case .standard: return "Standard"
+        case .full:     return "Full Access"
+        }
+    }
 }
 
 // MARK: - Settings View
@@ -353,7 +384,7 @@ struct ChatOpsSettingsView: View {
                     set: { config.securityTier = $0 }
                 )) {
                     ForEach(ChatOpsSecurityTier.allCases) { tier in
-                        Text(tier.rawValue).tag(tier)
+                        Text(tier.localizedTitle).tag(tier)
                     }
                 }
                 .labelsHidden()
@@ -1084,7 +1115,7 @@ private struct PlatformTab: View {
                     }
                 }
 
-                Text(platform.rawValue)
+                Text(platform.localizedTitle)
                     .font(theme.fontSubheadline.weight(isSelected ? .semibold : .regular))
                     .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
 

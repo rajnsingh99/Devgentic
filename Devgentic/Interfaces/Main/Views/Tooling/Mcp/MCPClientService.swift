@@ -90,8 +90,12 @@ final class MCPClientService {
     /// which routinely exceeds 15s on a first run — the old single budget turned an
     /// ordinary first launch into a timeout on a server that would have worked.
     /// Remote transports do no such setup, so they keep a tight budget.
-    private static let localHandshakeTimeout: TimeInterval = 90
-    private static let remoteHandshakeTimeout: TimeInterval = 20
+    ///
+    /// ⚠️ `var` **only** so `MCPHarness` can shorten them; nothing in the app writes either.
+    /// Testing the timeout path against a server that hangs at `initialize` is otherwise a
+    /// 90-second test, which means in practice it is a test nobody runs.
+    static var localHandshakeTimeout: TimeInterval = 90
+    static var remoteHandshakeTimeout: TimeInterval = 20
 
     /// Cached `resources/list` and `prompts/list` results, invalidated by the matching
     /// `*/list_changed` notification. Both lists are re-read on every agent call otherwise,
@@ -311,12 +315,40 @@ final class MCPClientService {
             logger.error("[MCP-CONNECT] Connection failed for source \(sourceId): \(error.localizedDescription)")
 
             var finalError = error
+            var serverOutput: String? = nil
 
             if let shell = shellProcess {
                 let stderr = MCPRedaction.redact(text: shell.readStdErr())
+                // ⚠️ Whether the child is STILL RUNNING is what decides the diagnosis, and it
+                // has to be read before `terminate()`.
+                //
+                // This branch used to substitute `processFailedToStart(stderr)` for whatever
+                // error had actually occurred, unconditionally, whenever stderr was non-empty.
+                // But stderr is the ONLY channel a stdio server may use for human output, so a
+                // perfectly healthy server writes to it during startup — meaning every later
+                // local failure was reported as "The server process failed to start", quoting
+                // the server's own healthy banner as the cause. A server that started in 40 ms
+                // and then hung at `initialize` for 90 seconds was reported as a start failure,
+                // which sends the user to check the command they typed instead of the server
+                // that is not answering.
+                let processIsAlive = shell.process.isRunning
+
                 if !stderr.isEmpty {
-                    logger.error("[MCP-CONNECT] Last captured stderr for \(sourceId): \(stderr)")
+                    logger.error("""
+                        [MCP-CONNECT] Last captured stderr for \(sourceId) (process \
+                        \(processIsAlive ? "STILL RUNNING" : "exited, status \(shell.process.terminationStatus)")): \
+                        \(stderr)
+                        """)
+                }
+
+                if !processIsAlive, !stderr.isEmpty {
+                    // The child is gone: stderr IS the diagnosis.
                     finalError = MCPManagerError.processFailedToStart(stderr)
+                } else if !stderr.isEmpty {
+                    // The child is alive, so the failure is in the protocol, not the launch.
+                    // Keep the real error — callers key off its case — and carry stderr through
+                    // as context on the message the user sees.
+                    serverOutput = stderr
                 }
                 shell.terminate()
             } else {
@@ -328,7 +360,9 @@ final class MCPClientService {
                 logger.info("[MCP-CONNECT] Tore down the remote client for \(sourceId) after a failed handshake.")
             }
 
-            let message = Self.actionableConnectionMessage(for: finalError, config: config)
+            let message = Self.actionableConnectionMessage(
+                for: finalError, config: config, serverOutput: serverOutput
+            )
             connectionStates[sourceId] = .error(message)
             throw finalError
         }
@@ -337,6 +371,15 @@ final class MCPClientService {
     func disconnect(sourceId: UUID) async {
         healthMonitorTasks[sourceId]?.cancel()
         healthMonitorTasks.removeValue(forKey: sourceId)
+
+        // A debounced `tools/list_changed` refresh can still be sleeping out its 400 ms when
+        // the user disconnects. It was not cancelled, so it woke up, found no session, and
+        // logged "tools/list_changed … with no active session; ignoring" — on an ORDINARY
+        // teardown. A warning that fires during normal operation is a warning people learn to
+        // scroll past, which costs the line its value for the case it was written for (a
+        // notification arriving after a server died on its own).
+        toolListRefreshTasks[sourceId]?.cancel()
+        toolListRefreshTasks.removeValue(forKey: sourceId)
 
         guard let session = activeSessions[sourceId] else { return }
         await session.client.disconnect()
@@ -421,7 +464,11 @@ final class MCPClientService {
             // a server that emits the notification on startup (the reference server fires it
             // repeatedly) wiped them within a second of them appearing.
             let tools = try await composeToolList(client: session.client, serverInfo: session.serverInfo)
-            MCPToolStore.shared.replaceTools(forSourceID: sourceID, with: tools)
+            // Routed through the host bridge rather than straight into `MCPToolStore` — see
+            // MCPHostBridge.swift. A nil sink is loud, not silent: the accessor logs that the
+            // refreshed list was dropped and that the UI keeps a stale one.
+            MCPHostBridge.requireToolListSink(context: "tools/list_changed for source \(sourceID)")?
+                .replaceTools(forSourceID: sourceID, with: tools)
             logger.info("[MCP-TOOLS] Refreshed \(tools.count) tool(s) for source \(sourceID) on list_changed.")
         } catch {
             logger.warning("""
@@ -787,7 +834,41 @@ final class MCPClientService {
     /// "Internal error: Authentication required", which does not tell the user that the fix
     /// is to edit the server and pick an auth scheme. Registry entries carry no auth
     /// metadata at all, so this is the first point at which the requirement is knowable.
-    private static func actionableConnectionMessage(for error: Error, config: ServerDefinition) -> String {
+    ///
+    /// - Parameter serverOutput: stderr from a child that is **still running**. Appended as
+    ///   context rather than substituted for the error, because a live process means the
+    ///   failure is in the protocol, not the launch — see the catch block in `performConnect`.
+    private static func actionableConnectionMessage(
+        for error: Error,
+        config: ServerDefinition,
+        serverOutput: String? = nil
+    ) -> String {
+        let base = Self.baseConnectionMessage(for: error, config: config)
+
+        guard let serverOutput, !serverOutput.isEmpty else { return base }
+
+        // Tail, not head: a server that logged for a while before failing has the useful
+        // part at the end, and the whole buffer can be megabytes on a chatty server.
+        let tail = serverOutput.count > maxStderrContextChars
+            ? "…\n" + String(serverOutput.suffix(maxStderrContextChars))
+            : serverOutput
+
+        return """
+            \(base)
+
+            The server process was still running, so this is not a launch failure. Its most \
+            recent output was:
+
+            \(tail.trimmingCharacters(in: .whitespacesAndNewlines))
+            """
+    }
+
+    /// How much of a live server's stderr to show alongside a connect failure. Enough for a
+    /// stack trace or the last few log lines; bounded because this string is rendered in a
+    /// popover and a chatty server's buffer is unbounded in principle.
+    private static let maxStderrContextChars = 2_000
+
+    private static func baseConnectionMessage(for error: Error, config: ServerDefinition) -> String {
         let raw = error.localizedDescription
         let lowered = raw.lowercased()
 
@@ -840,18 +921,40 @@ final class MCPClientService {
     /// Without these the SDK answers every such request with `methodNotFound`, which is why
     /// filesystem-shaped servers got no workspace boundary and sampling-dependent servers
     /// could not function at all.
+    /// Sampling and elicitation are reached through `MCPHostBridge` rather than their
+    /// concrete brokers: both pull in the agent stack and the InteractionCenter, which is
+    /// what kept this whole path untestable outside a running app. Roots stay direct —
+    /// `MCPRootsProvider` is Foundation-only and has no host dependency to break.
     private func registerClientHandlers(on client: MCP.Client, sourceId: UUID, serverLabel: String) async {
         _ = await client
             .withRootsHandler {
                 await MCPRootsProvider.currentRoots()
             }
             .withSamplingHandler { parameters in
-                try await MCPSamplingBroker.shared.handle(
+                guard let handler = await MCPHostBridge.samplingHandler else {
+                    logger.error("""
+                        [MCP-SAMPLING] '\(serverLabel)' (source \(sourceId)) requested sampling but \
+                        no host handler is installed — REFUSED. The server is told the host cannot \
+                        service sampling; it will disable the feature or fail its own call. In the \
+                        app this means the launch-time bridge install never ran.
+                        """)
+                    throw MCPError.internalError("Devgentic cannot service sampling requests right now.")
+                }
+                return try await handler.handle(
                     parameters: parameters, sourceID: sourceId, serverLabel: serverLabel
                 )
             }
             .withElicitationHandler { parameters in
-                try await MCPElicitationBroker.shared.handle(
+                guard let handler = await MCPHostBridge.elicitationHandler else {
+                    logger.error("""
+                        [MCP-ELICIT] '\(serverLabel)' (source \(sourceId)) asked the user a question \
+                        but no host handler is installed — DECLINED rather than parked, since \
+                        waiting would hang the server's call forever. In the app this means the \
+                        launch-time bridge install never ran.
+                        """)
+                    return CreateElicitation.Result(action: .cancel, content: nil)
+                }
+                return try await handler.handle(
                     parameters: parameters, sourceID: sourceId, serverLabel: serverLabel
                 )
             }
@@ -1021,13 +1124,20 @@ final class MCPClientService {
                             : stderr
                     )
 
+                    // Retire the session BEFORE the await. `client.disconnect()` is async and,
+                    // against a dead transport, is exactly the call that can take a while — and
+                    // for as long as it did, `activeSessions` still held a session the monitor
+                    // had already declared dead. `executeTool` and `requireSession` look the
+                    // caller up there, so a tool call landing in that window was dispatched into
+                    // a corpse and failed with a transport error instead of the actionable
+                    // "server exited" state the UI was already showing.
+                    self.activeSessions.removeValue(forKey: sourceId)
+                    self.healthMonitorTasks.removeValue(forKey: sourceId)
+
                     // Tear the SDK client down too. Dropping the session without this
                     // leaked the `MCP.Client` and left its message loop running against a
                     // dead transport for the rest of the app's lifetime.
                     await session.client.disconnect()
-
-                    self.activeSessions.removeValue(forKey: sourceId)
-                    self.healthMonitorTasks.removeValue(forKey: sourceId)
                     logger.error("""
                         [MCP-HEALTH] Server process for source \(sourceId) exited unexpectedly \
                         (code \(exitCode)) — session torn down and client disconnected. Every tool \

@@ -122,7 +122,7 @@ struct GeminiSettingsView: View {
             ForEach($config.safetySettings.toNonOptional(defaultValue: GeminiAdvancedConfig.default().safetySettings ?? [])) { $setting in
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(formatCategory(setting.category.rawValue))
+                        Text(setting.category.localizedTitle)
                             .fontWeight(.medium)
                     }
                     
@@ -130,7 +130,7 @@ struct GeminiSettingsView: View {
                     
                     Picker("", selection: $setting.threshold) {
                         ForEach(HarmBlockThreshold.allCases, id: \.self) { threshold in
-                            Text(formatThreshold(threshold.rawValue)).tag(threshold)
+                            Text(threshold.localizedTitle).tag(threshold)
                         }
                     }
                     .labelsHidden()
@@ -142,17 +142,38 @@ struct GeminiSettingsView: View {
     }
     
     // Formatting Helpers for Gemini Safety Labels
-    private func formatCategory(_ raw: String) -> String {
-        raw.replacingOccurrences(of: "HARM_CATEGORY_", with: "")
-           .replacingOccurrences(of: "_", with: " ")
-           .capitalized
-    }
+}
 
-    private func formatThreshold(_ raw: String) -> String {
-        let text = raw.replacingOccurrences(of: "BLOCK_", with: "")
-                      .replacingOccurrences(of: "_", with: " ")
-                      .capitalized
-        return text == "None" ? "Block None" : text
+// MARK: - Localized names for the Gemini safety enums (audit C2)
+
+// ⚠️ These replace `formatCategory` / `formatThreshold`, which string-munged the WIRE value at
+// runtime ("HARM_CATEGORY_HATE_SPEECH" -> "Hate Speech"). That output could never be localized:
+// a runtime-built string is not a String Catalog key, and `LocalizedStringKey(someString)` is
+// invisible to the extractor. It was also fragile — it depended on Google's constant spelling,
+// and the `text == "None" ? "Block None"` special case existed only to patch up what the
+// munging produced. ⚠️ The rawValues are WIRE values sent to the Gemini API and are `Codable`
+// (persisted in a profile's advanced config): never change them.
+
+extension HarmCategory {
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .harassment:       return "Harassment"
+        case .hateSpeech:       return "Hate Speech"
+        case .sexuallyExplicit: return "Sexually Explicit"
+        case .dangerousContent: return "Dangerous Content"
+        }
+    }
+}
+
+extension HarmBlockThreshold {
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .unspecified:         return "Default"
+        case .blockLowAndAbove:    return "Block Low and Above"
+        case .blockMediumAndAbove: return "Block Medium and Above"
+        case .blockOnlyHigh:       return "Block Only High"
+        case .blockNone:           return "Block None"
+        }
     }
 }
 

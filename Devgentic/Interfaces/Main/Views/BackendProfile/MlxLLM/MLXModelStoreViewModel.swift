@@ -29,6 +29,18 @@ class MLXModelStoreViewModel {
     var selectedCategory: StoreCategory = .all {
         didSet {
             if selectedCategory != oldValue {
+                // ⚠️ Drop the quantization narrowing on a category switch. It was chosen
+                // against a different result set, and the picker that undoes it only renders
+                // when the NEW set offers more than one quantization — so carrying it over
+                // could present an empty grid with no control to clear it, directly
+                // contradicting the "3 installed · 12.4 GB" summary above it. This view model
+                // is cached by `DestinationCoordinator` for the app lifetime, so leaving the
+                // store did not reset it either. A filter the user cannot see is a filter
+                // that enforces rather than describes.
+                if let cleared = quantizationFilter {
+                    logger.info("[MLXSTORE] Cleared the \(cleared.rawValue)-bit quantization filter on switching to the \(self.selectedCategory.rawValue) tab. CONSEQUENCE: the new tab shows all its models; the filter was chosen against the previous result set.")
+                    quantizationFilter = nil
+                }
                 refreshCategoryData()
             }
         }
@@ -53,13 +65,62 @@ class MLXModelStoreViewModel {
     var displayedModels: [MLXDisplayModel] = []
     var isLoading: Bool = false
 
+    /// Total on-disk size of installed models, formatted, or nil while the background
+    /// sizing pass is still running.
+    var installedStorageSummary: String? {
+        guard let total = service.totalInstalledBytes, total > 0 else { return nil }
+        return ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
+    }
+
+    /// How many models are installed, irrespective of any active filter.
+    var installedCount: Int { service.installedModels.count }
+
+    /// True when the Installed tab is showing a filtered subset.
+    var isFilteringInstalled: Bool {
+        selectedCategory == .installed && !searchText.isEmpty
+    }
+
+    /// Update status for an installed card, or nil if no check has run for it.
+    func updateStatus(for model: MLXDisplayModel) -> MLXModelRevision.UpdateStatus? {
+        service.updateStatus[model.id]
+    }
+
+    var isCheckingForUpdates: Bool { service.isCheckingForUpdates }
+
+    func checkForUpdates() {
+        Task { await service.checkForModelUpdates() }
+    }
+
+    /// The on-disk item behind a card, when it is installed.
+    func installedItem(for model: MLXDisplayModel) -> MLXModelItem? {
+        service.installedModel(named: model.id)
+    }
+
+    /// Formatted size of one installed model, for the delete confirmation.
+    func installedSize(of model: MLXDisplayModel) -> String? {
+        guard let bytes = service.installedSizeBytes[model.id], bytes > 0 else { return nil }
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    /// The last download failure, surfaced as a dismissible banner. A failed MLX download
+    /// used to revert the card to a plain Download button with the reason shown nowhere in
+    /// the store at all — `MLXModelService.errorMessage` had no reader.
+    var downloadError: String?
+
+    /// Why the last remote fetch failed. Mirrored from the service so the grid can explain
+    /// itself: rate-limited, offline, gated and genuinely-empty previously all rendered the
+    /// same "No models found" dead end with a reload button that re-provoked the failure.
+    var loadError: HFRequestError?
+
+    /// The sort the user had before the Installed tab forced `.recent`, so it can be put back.
+    @ObservationIgnored private var sortBeforeInstalledTab: SortOption?
+
     // Pagination State
     @ObservationIgnored private var currentPage = 0
     @ObservationIgnored private let pageSize = 30
 
     // Download State
     var isDownloading: Bool = false
-    var downloadProgress: Double = 0.0
     var currentDownloadName: String = ""
 
     // MARK: - Dependencies
@@ -70,6 +131,9 @@ class MLXModelStoreViewModel {
     
     enum StoreCategory: String, CaseIterable, Identifiable {
         case installed = "Installed"
+        /// Hand-checked starting points. Default tab on a first run, when the raw popularity
+        /// listing is at its least helpful. See `CuratedMLXCatalog`.
+        case recommended = "Recommended"
         case all = "All"
         case reasoning = "Reasoning"
         case toolUse = "Tool Use"
@@ -78,8 +142,25 @@ class MLXModelStoreViewModel {
         
         var id: String { rawValue }
         
+            /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
+            /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
+            /// invisible to the String Catalog extractor and would have shipped untranslated inside
+            /// otherwise-translated chrome. `rawValue` stays for persistence and logging only.
+        var localizedTitle: LocalizedStringKey {
+            switch self {
+            case .installed:   return "Installed"
+            case .recommended: return "Recommended"
+            case .all:         return "All"
+            case .reasoning: return "Reasoning"
+            case .toolUse:   return "Tool Use"
+            case .coding:    return "Coding"
+            case .vision:    return "Vision"
+            }
+        }
+
         var icon: String {
             switch self {
+            case .recommended: return "sparkles"
             case .installed: return "externaldrive.fill.badge.checkmark"
             case .all: return "square.grid.2x2.fill"
             case .reasoning: return "brain.head.profile"
@@ -97,7 +178,7 @@ class MLXModelStoreViewModel {
         /// classify via `MLXDisplayModel.capabilities` (set by `classifyCapabilities`).
         var clientCapability: MLXModelCapability? {
             switch self {
-            case .all, .installed: return nil
+            case .all, .installed, .recommended: return nil
             case .reasoning: return .reasoning
             case .toolUse: return .toolUse
             case .coding: return .coding
@@ -106,11 +187,47 @@ class MLXModelStoreViewModel {
         }
     }
     
+    /// ⚠️ Every category stays available even in tool-filtering mode.
+    ///
+    /// This used to return `[.installed, .toolUse]`, deleting the "All" tab — so a model the
+    /// `classifyCapabilities` name heuristic failed to tag had NO browse path at all. Combined
+    /// with the hard filter below and the picker's own filter, a heuristic false negative
+    /// became a product lockout with no override: the user could not select or download their
+    /// own tool-capable model in an Agent profile. Classification may label and group; it must
+    /// never gate.
     var availableCategories: [StoreCategory] {
-        if filterForTools {
-            return [.installed, .toolUse]
-        } else {
-            return StoreCategory.allCases
+        StoreCategory.allCases
+    }
+
+    /// Show only this quantization, or nil for all. The store previously had no way to narrow
+    /// to 4-bit even though the listing routinely returns the same model at four different
+    /// quantizations as visually identical cards.
+    var quantizationFilter: MLXQuantization? {
+        didSet {
+            if quantizationFilter != oldValue { applyFilterAndSort() }
+        }
+    }
+
+    /// Quantizations actually present in the current results — no point offering a 2-bit
+    /// filter for a page that has none.
+    var availableQuantizations: [MLXQuantization] {
+        let source = selectedCategory == .installed
+            ? service.installedModels.compactMap { MLXQuantization.parse(fromRepoId: $0.displayName) }
+            : service.availableModels.compactMap(\.quantization)
+        var present = Set(source)
+        // ⚠️ Always offer the ACTIVE filter, even when nothing in the current results matches
+        // it. Otherwise the Picker has no tag for its own selection, renders blank, and the
+        // user cannot clear the very filter that emptied the grid.
+        if let quantizationFilter { present.insert(quantizationFilter) }
+        return Array(present).sorted()
+    }
+
+    /// User-facing switch for the tool-capability filter. Defaults on so Agent profiles still
+    /// lead with tool-capable models, but the user can always see everything — the heuristic
+    /// is advice, not an authority.
+    var showToolCapableOnly: Bool = true {
+        didSet {
+            if showToolCapableOnly != oldValue { applyFilterAndSort() }
         }
     }
     
@@ -121,6 +238,15 @@ class MLXModelStoreViewModel {
         case sizeLargest = "Size (Largest)"
 
         var id: String { rawValue }
+
+        var localizedTitle: LocalizedStringKey {
+            switch self {
+            case .popularity:   return "Popularity"
+            case .recent:       return "Recent"
+            case .sizeSmallest: return "Size (Smallest)"
+            case .sizeLargest:  return "Size (Largest)"
+            }
+        }
 
         var icon: String {
             switch self {
@@ -138,7 +264,11 @@ class MLXModelStoreViewModel {
 
     init(filterForTools: Bool = false) {
         self.filterForTools = filterForTools
-        self.selectedCategory = filterForTools ? .installed : .all
+        // A first run — no models on disk — lands on the curated list. That is exactly when
+        // the raw HuggingFace popularity listing is least helpful: its top results included
+        // speech-recognition models badged "Chat" and a 657 GB repo.
+        let hasModels = !MLXModelService.shared.installedModels.isEmpty
+        self.selectedCategory = hasModels ? (filterForTools ? .installed : .all) : .recommended
         setupObserver()
         refreshCategoryData()
     }
@@ -156,18 +286,30 @@ class MLXModelStoreViewModel {
                 guard let self else { return }
                 _ = self.service.availableModels
                 _ = self.service.installedModels
+                _ = self.service.installedSizeBytes
+                _ = self.service.updateStatus
+                _ = self.service.isCheckingForUpdates
                 _ = self.service.isLoadingRemoteModels
+                _ = self.service.remoteLoadError
                 _ = self.service.isDownloading
-                _ = self.service.downloadProgress
+                // ⚠️ `downloadProgress` is deliberately NOT tracked here. It ticks
+                // continuously during a pull, and this observer's `onChange` runs
+                // `applyFilterAndSort()` — a full re-filter and re-sort of the entire grid
+                // per tick. The progress UI reads `DownloadManager`'s per-record state
+                // directly, so nothing in this view model needs the value.
                 _ = self.service.currentDownloadName
+                _ = self.service.errorMessage
             },
             onChange: { [weak self] in
                 guard let self else { return }
                 // Mirror state from service
                 self.isLoading = self.service.isLoadingRemoteModels
+                self.loadError = self.service.remoteLoadError
                 self.isDownloading = self.service.isDownloading
-                self.downloadProgress = self.service.downloadProgress
                 self.currentDownloadName = self.service.currentDownloadName
+                if let message = self.service.errorMessage, !message.isEmpty {
+                    self.downloadError = message
+                }
                 self.applyFilterAndSort()
             }
         )
@@ -178,32 +320,59 @@ class MLXModelStoreViewModel {
     private func refreshCategoryData() {
         currentPage = 0
 
-        if selectedCategory == .installed {
-            // Default installed tab to most-recent-first
-            if sortOption == .popularity { sortOption = .recent }
+        if selectedCategory == .recommended {
+            logger.info("Refresh: category=recommended — serving \(CuratedMLXCatalog.models.count) curated model(s) locally")
+            applyFilterAndSort()
+            // Sizes still come from HuggingFace so the cards show real numbers and the RAM
+            // verdict has a denominator; one bounded fetch, not the 30-per-page fan-out.
+            Task { await service.fetchSizesForCuratedModels() }
+        } else if selectedCategory == .installed {
+            // Default the Installed tab to most-recent-first, remembering what to restore.
+            // This used to flip the sort and never put it back, so returning to All left the
+            // user on "Recent" — which is meaningless for remote results and, before the
+            // comparator was made total, reshuffled the grid on every size-update tick.
+            if sortOption == .popularity {
+                sortBeforeInstalledTab = sortOption
+                sortOption = .recent
+            }
             logger.info("Refresh: category=installed — scanning local models")
-            service.refreshInstalledModels()
-            // The scan is debounced: if the last scan was <2s ago, it returns
-            // without touching `installedModels`, so the observer never fires
-            // and `displayedModels` would keep showing the prior tab's content.
-            // Force a re-filter so the installed cards render immediately.
+            // Force: this path is reached from the Refresh button and from switching to the
+            // Installed tab, both of which are explicit user requests for current data. The
+            // debounce exists to absorb the init + onAppear double-fire, not to ignore the
+            // user. (The comment here used to say the window was <2s while the constant was
+            // 30s — a refresh could silently do nothing for half a minute.)
+            service.forceRefreshInstalledModels()
+            // The observer only fires when the model list actually CHANGED, so re-filter
+            // unconditionally to render the installed cards for this tab immediately.
             applyFilterAndSort()
         } else {
+            if let restore = sortBeforeInstalledTab {
+                sortOption = restore
+                sortBeforeInstalledTab = nil
+            }
             let search = (isRemoteSearchEnabled && !searchText.isEmpty) ? searchText : nil
             logger.info("Refresh: category=\(self.selectedCategory.rawValue) search=\(search ?? "<none>") clientCapability=\(self.selectedCategory.clientCapability?.rawValue ?? "<none>")")
 
             // Clear stale cards from the prior tab so the loading UI shows
             // instead of (incorrectly) rendering the previous category's
             // models until the remote fetch completes.
+            //
+            // `isLoading` is set here, synchronously, alongside the clear. The service sets
+            // its own flag two actor hops later, so for those two hops the grid was empty
+            // AND not-loading — which is exactly the "No models found" empty state. Every
+            // category switch flashed it.
+            isLoading = true
+            loadError = nil
             displayedModels = []
 
-            Task {
+            Task { [category = selectedCategory.rawValue] in
                 await service.fetchRemoteModels(
                     limit: pageSize,
                     offset: 0,
                     tags: nil,
                     search: search,
-                    append: false
+                    append: false,
+                    category: category
                 )
             }
         }
@@ -228,13 +397,14 @@ class MLXModelStoreViewModel {
         let search = (isRemoteSearchEnabled && !searchText.isEmpty) ? searchText : nil
         logger.info("LoadMore: page=\(self.currentPage) offset=\(offset) search=\(search ?? "<none>") currentAvailable=\(self.service.availableModels.count)")
 
-        Task {
+        Task { [category = selectedCategory.rawValue] in
             await service.fetchRemoteModels(
                 limit: pageSize,
                 offset: offset,
                 tags: nil,
                 search: search,
-                append: true
+                append: true,
+                category: category
             )
         }
     }
@@ -248,9 +418,24 @@ class MLXModelStoreViewModel {
     ) -> [MLXDisplayModel] {
         
         var sourceModels: [MLXDisplayModel]
-        
+
         // 1. Select Source
-        if category == .installed {
+        if category == .recommended {
+            let ramGB = Int(SystemHardwareProfiler.shared.profile.totalRAM / (1024 * 1024 * 1024))
+            sourceModels = CuratedMLXCatalog.recommended(forSystemRAMGB: ramGB).map { curated in
+                MLXDisplayModel(
+                    id: curated.id,
+                    size: service.modelSizes[curated.id] ?? curated.formattedSize,
+                    sizeBytes: service.modelSizeBytes[curated.id] ?? curated.approximateBytes,
+                    quantization: MLXQuantization.parse(fromRepoId: curated.id),
+                    capabilities: service.classifyCapabilities(tags: [], pipeline: nil, id: curated.id),
+                    tags: ["Recommended"],
+                    downloads: 0,
+                    likes: 0,
+                    description: curated.rationale
+                )
+            }
+        } else if category == .installed {
             sourceModels = local.map { item in
                 
                 // Use cached profile from MLXModelService instead of re-parsing files
@@ -281,9 +466,15 @@ class MLXModelStoreViewModel {
                     caps.insert(.textGeneration)
                 }
                 
+                // Installed models used to be mapped with `size: nil`, so the Installed tab
+                // showed no disk figure, suppressed the fit badge, and made "Sort by size" a
+                // silent no-op there. Sizes arrive from the background sizing pass.
+                let bytes = service.installedSizeBytes[item.displayName]
                 return MLXDisplayModel(
                     id: item.displayName,
-                    size: nil,
+                    size: bytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) },
+                    sizeBytes: bytes,
+                    quantization: MLXQuantization.parse(fromRepoId: item.displayName),
                     capabilities: caps,
                     tags: ["Installed"],
                     downloads: 0,
@@ -293,12 +484,20 @@ class MLXModelStoreViewModel {
                 )
             }
             
-            // Apply hard filter if we only want tool models
-            if filterForTools {
+            // Soft filter only, and only while the user leaves the toggle on. `capabilities`
+            // here comes from substring matching over the model id, so a false negative is
+            // routine for any newly-released family, re-quantized upload or personal
+            // fine-tune. Hiding those outright removed the only way to reach them.
+            if filterForTools && showToolCapableOnly {
                 sourceModels = sourceModels.filter { $0.capabilities.contains(.toolUse) }
             }
             
         } else {
+            // Only use the remote payload if it was actually fetched for this category.
+            guard service.availableModelsCategory == nil
+                    || service.availableModelsCategory == category.rawValue else {
+                return []
+            }
             sourceModels = remote
 
             // Filter remote results by category capability (client-side).
@@ -313,56 +512,88 @@ class MLXModelStoreViewModel {
             }
         }
 
-        // 2. Filter by Search Text (Local Mode)
-        if !query.isEmpty && !isRemoteSearchEnabled {
+        // 2. Filter by quantization when the user has narrowed to one.
+        if let quantizationFilter {
+            sourceModels = sourceModels.filter { $0.quantization == quantizationFilter }
+        }
+
+        // 3. Filter by search text.
+        //
+        // The `.installed` tab filters unconditionally: there is no HF query behind it, so
+        // gating on `isRemoteSearchEnabled` (which is initialised to true and never assigned
+        // anywhere in the repo) made the entire branch dead code. The field's own placeholder
+        // reads "Filter installed models…" and typing in it did nothing.
+        let filtersLocally = category == .installed || !isRemoteSearchEnabled
+        if !query.isEmpty && filtersLocally {
             sourceModels = sourceModels.filter { model in
                 model.displayName.localizedCaseInsensitiveContains(query) ||
                 (model.description?.localizedCaseInsensitiveContains(query) ?? false)
             }
         }
         
-        // 3. Sort
+        // 3. Sort.
+        //
+        // Every comparator below tie-breaks down to `id`. Swift's `sort` is introsort and is
+        // NOT stable, so a comparator that returns false for every pair (which "Recent" did
+        // for remote models, since none carried a date) permutes the array arbitrarily —
+        // cards visibly jumped under the cursor on each of the ~30 size-update ticks.
+        // The curated list is ordered deliberately — what this machine can run, smallest
+        // first — so a popularity sort (every entry has 0 downloads) would scramble it.
+        if category == .recommended { return sourceModels }
+
         switch sort {
         case .popularity:
-            break
+            // The HF query is already `sort=downloads&direction=-1`, but appended pages and
+            // locally-sourced rows are not, so make the order explicit rather than implied.
+            sourceModels.sort { lhs, rhs in
+                lhs.downloads == rhs.downloads ? lhs.id < rhs.id : lhs.downloads > rhs.downloads
+            }
 
         case .recent:
-            sourceModels.sort { ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast) }
+            sourceModels.sort { lhs, rhs in
+                let l = lhs.createdAt, r = rhs.createdAt
+                if let l, let r, l != r { return l > r }
+                if (l == nil) != (r == nil) { return l != nil }  // dated entries first
+                return lhs.id < rhs.id
+            }
 
         case .sizeSmallest:
-            sourceModels.sort { parseSize($0.size) < parseSize($1.size) }
+            sourceModels.sort { lhs, rhs in
+                sortableBytes(lhs) == sortableBytes(rhs)
+                    ? lhs.id < rhs.id
+                    : sortableBytes(lhs) < sortableBytes(rhs)
+            }
 
         case .sizeLargest:
-            sourceModels.sort { parseSize($0.size) > parseSize($1.size) }
+            sourceModels.sort { lhs, rhs in
+                sortableBytes(lhs) == sortableBytes(rhs)
+                    ? lhs.id < rhs.id
+                    : sortableBytes(lhs) > sortableBytes(rhs)
+            }
         }
-        
+
         return sourceModels
     }
-    
-    /// Helper to approximate size in MB from string like "1.2 GB"
-    private func parseSize(_ sizeStr: String?) -> Double {
-        guard let sizeStr = sizeStr else { return 0 }
-        let normalized = sizeStr.uppercased()
-        
-        // Extract numeric part
-        let numberString = normalized.components(separatedBy: CharacterSet(charactersIn: "0123456789.").inverted).joined()
-        let value = Double(numberString) ?? 0
-        
-        if normalized.contains("GB") {
-            return value * 1024
-        } else if normalized.contains("KB") {
-            return value / 1024
-        }
-        // Assume MB if no unit or just return value
-        return value
+
+    /// Sort key for size. Models whose size hasn't loaded sort last in both directions
+    /// rather than pretending to be 0 bytes (which put every unsized card at the top of
+    /// "Smallest").
+    private func sortableBytes(_ model: MLXDisplayModel) -> Int64 {
+        model.sizeBytes ?? Int64.max
     }
+    
     
     // MARK: - Actions
     
+    /// ⚠️ This used to fall back to `installed.displayName.contains(model.displayName)`.
+    /// `model.displayName` is the bare name with the org stripped, so the substring test
+    /// matched any installed model that merely *contained* it — a different quantization,
+    /// a suffixed variant (`…-4bit` inside `…-4bit-DWQ`), or another org entirely. The card
+    /// then rendered a green "Installed" capsule, and since the Download affordance only
+    /// exists in the `else` branch there was no way to download that model at all.
+    /// Goes through the shared comparator now, which never uses substrings.
     func isInstalled(_ model: MLXDisplayModel) -> Bool {
-        return service.installedModels.contains { installed in
-            installed.displayName == model.id || installed.displayName.contains(model.displayName)
-        }
+        service.isInstalled(repoId: model.id)
     }
     
     func downloadModel(_ model: MLXDisplayModel) {
@@ -370,9 +601,14 @@ class MLXModelStoreViewModel {
     }
     
     func deleteModel(_ model: MLXDisplayModel) {
-        if let item = service.installedModels.first(where: { $0.displayName == model.id }) {
-            service.deleteModel(item)
+        guard let item = service.installedModel(named: model.id) else {
+            // Was a silent no-op: the strict `==` lookup here disagreed with the lenient
+            // `isInstalled` used to render the card, so a card could offer Delete on a model
+            // this lookup could not find, and nothing happened or was logged.
+            logger.error("[MLXSTORE] Delete requested for '\(model.id)' but it is not in the installed list (\(self.service.installedModels.count) model(s)). CONSEQUENCE: nothing was deleted and the card still shows it as installed — the list is stale, refresh the store.")
+            return
         }
+        Task { await service.deleteModel(item) }
     }
     
     func cancelDownload() {
@@ -381,5 +617,12 @@ class MLXModelStoreViewModel {
     
     func refresh() {
         refreshCategoryData()
+    }
+
+    /// Clears the banner and the service flag together. Leaving `errorMessage` set would make
+    /// the DownloadManager bridge classify the NEXT download's terminal state as failed.
+    func dismissDownloadError() {
+        downloadError = nil
+        service.errorMessage = nil
     }
 }

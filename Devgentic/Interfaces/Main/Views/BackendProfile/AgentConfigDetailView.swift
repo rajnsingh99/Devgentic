@@ -19,6 +19,24 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+// MARK: - Localized Titles
+
+extension ModelCognitiveCapability {
+    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
+    /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
+    /// invisible to the String Catalog extractor and would have shipped untranslated inside
+    /// otherwise-translated chrome. `rawValue` stays for persistence and logging only.
+    /// Declared here (not next to the enum in `BackendProfile.swift`) so the model layer keeps
+    /// its `Foundation`-only imports.
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .none:            return "None"
+        case .singleAction:    return "Single Action"
+        case .parallelActions: return "Parallel Actions"
+        }
+    }
+}
+
 struct AgentConfigDetailView: View {
     @Bindable var editBuffer: ProfileEditBuffer
     var onDelete: ((UUID) -> Void)? = nil
@@ -359,7 +377,7 @@ struct AgentConfigDetailView: View {
                             HStack(spacing: 6) {
                                 let capability = providerConfig.wrappedValue.cognitiveCapability
                                 Image(systemName: capabilityIcon(for: capability))
-                                Text(capability.rawValue)
+                                Text(capability.localizedTitle)
                                     .font(theme.fontCaption)
                                     .fontWeight(.semibold)
                             }

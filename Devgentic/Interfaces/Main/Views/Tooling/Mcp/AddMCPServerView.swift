@@ -27,6 +27,17 @@ private enum ConnectionType: String, CaseIterable, Identifiable {
         case .remoteURL: return "network"
         }
     }
+
+    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
+    /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
+    /// invisible to the String Catalog extractor and would have shipped untranslated inside
+    /// otherwise-translated chrome. `rawValue` stays for persistence and logging only.
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .localProcess: return "Local Process"
+        case .remoteURL:    return "Remote URL"
+        }
+    }
 }
 
 private struct KeyValueItem: Identifiable, Hashable {
@@ -44,6 +55,18 @@ private enum AuthFormScheme: String, CaseIterable, Identifiable, Hashable {
     case oauth = "OAuth"
 
     var id: Self { self }
+
+    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
+    /// the non-localizing `StringProtocol` overload, so the picker's segment titles were
+    /// invisible to the String Catalog extractor. `rawValue` stays for identity/logging only.
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .none:         return "None"
+        case .bearer:       return "Bearer"
+        case .apiKeyHeader: return "API Key"
+        case .oauth:        return "OAuth"
+        }
+    }
 }
 
 private struct ServerConfigFormData: Hashable {
@@ -76,6 +99,16 @@ private struct ServerConfigFormData: Hashable {
 private enum ConfigMode: String, CaseIterable {
     case wizard = "Visual"
     case json = "JSON"
+
+    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
+    /// the non-localizing `StringProtocol` overload, so the segment titles were invisible to
+    /// the String Catalog extractor. `rawValue` stays for identity/logging only.
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .wizard: return "Visual"
+        case .json:   return "JSON"
+        }
+    }
 }
 
 // MARK: - Main View
@@ -297,7 +330,7 @@ struct AddMCPServerView: View {
             controlColumn(label: "TRANSPORT") {
                 Picker("", selection: $formData.connectionType) {
                     ForEach(ConnectionType.allCases) { type in
-                        Label(type.rawValue, systemImage: type.icon).tag(type)
+                        Label(type.localizedTitle, systemImage: type.icon).tag(type)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -307,7 +340,7 @@ struct AddMCPServerView: View {
             controlColumn(label: "CONFIG MODE") {
                 Picker("", selection: $configMode) {
                     ForEach(ConfigMode.allCases, id: \.self) { mode in
-                        Text(mode.rawValue).tag(mode)
+                        Text(mode.localizedTitle).tag(mode)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -443,7 +476,7 @@ struct AddMCPServerView: View {
                     .foregroundColor(theme.secondaryText)
                 Picker("", selection: $formData.authScheme) {
                     ForEach(AuthFormScheme.allCases) { scheme in
-                        Text(scheme.rawValue).tag(scheme)
+                        Text(scheme.localizedTitle).tag(scheme)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -1173,18 +1206,14 @@ struct AddMCPServerView: View {
     }
 
     private func parseJSONAndUpdateForm() {
-        guard let data = configInput.data(using: .utf8) else { isJSONValid = false; return }
+        // Parsing lives in `MCPConfigPaste` so it can be tested: this is the one parse in the
+        // subsystem that can silently discard credentials, and while it was a private method
+        // on this view nothing could reach it. The view keeps only the form mapping.
         do {
-            let config = try JSONDecoder().decode(MCPConfiguration.self, from: data)
-            guard let (name, def) = config.mcpServers.first else { return }
-
-            // `ServerDefinition` deliberately carries no secrets, so it models env as
-            // `envKeys` (names only). Every MCP server README in the wild, however, ships
-            // `"env": { "API_KEY": "sk-..." }` — a key→VALUE map. Codable ignored that
-            // unknown key, so pasting a working config produced a server with its
-            // credentials silently stripped, which then failed to authenticate with no
-            // hint as to why. Re-read the raw JSON for the values the typed shape drops.
-            let sidecar = Self.parseSidecarFields(rawJSON: data, serverName: name)
+            let parsed = try MCPConfigPaste.parse(configInput)
+            let name = parsed.serverName
+            let def = parsed.definition
+            let sidecar = (env: parsed.envValues, headers: parsed.headers)
 
             var newForm = ServerConfigFormData()
             newForm.serverName = name
@@ -1223,46 +1252,18 @@ struct AddMCPServerView: View {
 
                 // A pasted `headers` map carrying an Authorization bearer is the other
                 // common README shape. Map what we can represent; anything else is
-                // reported rather than dropped in silence.
-                if let auth = sidecar.headers.first(where: { $0.key.lowercased() == "authorization" }),
-                   auth.value.lowercased().hasPrefix("bearer "),
-                   case .none = def.auth {
+                // reported by the parser rather than dropped in silence.
+                if let bearer = parsed.inferredBearerToken {
                     newForm.authScheme = .bearer
-                    newForm.authSecret = String(auth.value.dropFirst("bearer ".count))
+                    newForm.authSecret = bearer
                 }
-            }
-
-            let unmapped = sidecar.headers.keys.filter { $0.lowercased() != "authorization" }
-            if !unmapped.isEmpty {
-                logger.warning("""
-                    [MCP-CONFIG] Pasted config for '\(name)' carries \(unmapped.count) header(s) \
-                    Devgentic cannot represent (\(unmapped.sorted().joined(separator: ", "))) — \
-                    they will NOT be sent. Only Authorization/bearer and a single API-key header \
-                    are supported.
-                    """)
             }
 
             self.formData = newForm
             isJSONValid = true
         } catch {
+            logger.warning("[MCP-CONFIG] Pasted configuration rejected: \(error.localizedDescription)")
             isJSONValid = false
         }
-    }
-
-    /// Fields the standard `mcpServers` block carries that `ServerDefinition` deliberately
-    /// does not model (it holds no secrets). Read straight off the raw JSON so a pasted
-    /// config keeps its credentials instead of losing them to Codable's unknown-key handling.
-    private static func parseSidecarFields(
-        rawJSON: Data,
-        serverName: String
-    ) -> (env: [String: String], headers: [String: String]) {
-        guard let root = try? JSONSerialization.jsonObject(with: rawJSON) as? [String: Any],
-              let servers = root["mcpServers"] as? [String: Any],
-              let server = servers[serverName] as? [String: Any] else {
-            return ([:], [:])
-        }
-        let env = (server["env"] as? [String: Any])?.compactMapValues { $0 as? String } ?? [:]
-        let headers = (server["headers"] as? [String: Any])?.compactMapValues { $0 as? String } ?? [:]
-        return (env, headers)
     }
 }

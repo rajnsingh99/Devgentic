@@ -348,7 +348,7 @@ struct ProfileRowView: View {
                     Text(profile.displayName)
                         .font(theme.fontFootnote.weight(.medium))
                         .foregroundColor(theme.primaryText)
-                    Text(profile.profileType.rawValue)
+                    Text(profile.profileType.localizedTitle)
                         .font(.system(.caption))
                         .foregroundColor(theme.secondaryText)
                 }
@@ -388,7 +388,9 @@ struct ProfileRowView: View {
             }
         }
         .contentShape(Rectangle())
-        .accessibilityLabel("\(profile.displayName), \(profile.profileType.rawValue)")
+        // `accessibilityLabel(_: String)` does not localize; the `Text` overload does, and a
+        // nested `Text` keeps the type name translatable inside the composed phrase.
+        .accessibilityLabel(Text("\(profile.displayName), \(Text(profile.profileType.localizedTitle))"))
         .onTapGesture(perform: onSelect)
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
@@ -520,6 +522,27 @@ struct DuplicateProfileSheet: View {
         .background(theme.primaryBackground)
         .onAppear {
             displayName = "\(sourceProfile.displayName) (Copy)"
+        }
+    }
+}
+
+// MARK: - ProfileType Localization
+//
+// `ProfileType` is declared in `BackendProfile.swift`, a Foundation-only model file whose
+// values are `Codable` and reach SwiftData/JSON — it must not import SwiftUI, so the
+// presentation-only property lives here in the SwiftUI layer instead.
+extension ProfileType {
+    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
+    /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
+    /// invisible to the String Catalog extractor and would have shipped untranslated inside
+    /// otherwise-translated chrome. `rawValue` stays for persistence and logging only.
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .bot:      return "Bot"
+        case .agent:    return "Agent"
+        case .workflow: return "Workflow"
+        case .imageGen: return "Image Generator"
+        case .code:     return "Code"
         }
     }
 }

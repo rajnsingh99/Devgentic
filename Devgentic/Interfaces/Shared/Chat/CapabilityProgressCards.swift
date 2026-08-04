@@ -248,7 +248,7 @@ struct PlanProgressCard: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Step \(index + 1): \(step.title), \(step.status.rawValue)")
+            .accessibilityLabel(Text("Step \(index + 1): \(step.title), \(Text(step.status.localizedTitle))"))
 
             if expanded && hasDetail {
                 VStack(alignment: .leading, spacing: 6) {
@@ -512,7 +512,7 @@ struct ReflectionAttemptsCard: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Attempt \(attempt.trial), \(attempt.status.rawValue)")
+            .accessibilityLabel(Text("Attempt \(attempt.trial), \(Text(attempt.status.localizedTitle))"))
 
             if expanded && hasDetail {
                 AgentTimelineView(
@@ -765,3 +765,38 @@ struct CapabilityProgressCards_Previews: PreviewProvider {
     }
 }
 #endif
+
+// MARK: - Localized status names (audit C2)
+
+// ⚠️ Declared HERE, not on the enums themselves. `PlanStepStatus` and `ReflectionAttemptStatus`
+// live in `ChatMessage.swift`, a Foundation-only model file, and both are `Codable` — their
+// `rawValue`s are PERSISTED in saved messages. Adding a SwiftUI dependency to that file to get
+// `LocalizedStringKey` would drag the view layer into the persistence model, so the display
+// form lives beside the view that renders it.
+
+extension PlanStepStatus {
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .pending:   return "Pending"
+        case .running:   return "Running"
+        case .completed: return "Completed"
+        case .warning:   return "Completed with warnings"
+        case .failed:    return "Failed"
+        case .cancelled: return "Cancelled"
+        }
+    }
+}
+
+extension ReflectionAttemptStatus {
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .running:    return "Running"
+        case .evaluating: return "Evaluating"
+        case .rejected:   return "Retrying"
+        case .accepted:   return "Accepted"
+        case .completed:  return "Completed"
+        case .failed:     return "Failed"
+        case .cancelled:  return "Cancelled"
+        }
+    }
+}

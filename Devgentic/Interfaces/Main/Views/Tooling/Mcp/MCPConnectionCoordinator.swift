@@ -56,10 +56,23 @@ final class MCPConnectionCoordinator {
     }
 
     private func performLaunchConnect() async {
-        let allSources = MCPToolStore.shared.sources
+        let allSources = MCPHostBridge.configuredSources(context: "launch sweep")
         let enabled = allSources.filter { $0.isEnabled && $0.serverDefinition != nil }
         let disabledCount = allSources.count { !$0.isEnabled }
         let unconfigured = allSources.count { $0.isEnabled && $0.serverDefinition == nil }
+
+        // ⚠️ BEFORE the empty-guard, not after. `enabled` excludes servers with no
+        // definition, so when EVERY configured server is corrupt the guard returns first and
+        // this error never runs — the one case where the corruption is total is the one case
+        // that was reported as a bland "nothing to connect" info line. The diagnostic has to
+        // be unconditional on how many servers survived the filter.
+        if unconfigured > 0 {
+            logger.error("""
+                [MCP-LAUNCH] \(unconfigured) enabled server(s) have NO serverDefinition and were \
+                skipped — their tools cannot resolve and the user has no way to fix this from the \
+                UI. Usual cause: a corrupt or undecodable mcpConfigData blob.
+                """)
+        }
 
         guard !enabled.isEmpty else {
             logger.info("""
@@ -67,14 +80,6 @@ final class MCPConnectionCoordinator {
                 \(disabledCount) disabled, \(unconfigured) missing a server definition).
                 """)
             return
-        }
-
-        if unconfigured > 0 {
-            logger.error("""
-                [MCP-LAUNCH] \(unconfigured) enabled server(s) have NO serverDefinition and were \
-                skipped — their tools cannot resolve and the user has no way to fix this from the \
-                UI. Usual cause: a corrupt or undecodable mcpConfigData blob.
-                """)
         }
 
         isPerformingLaunchConnect = true
@@ -110,7 +115,8 @@ final class MCPConnectionCoordinator {
 
     /// Connects one source if it is enabled and not already connected.
     func connectIfNeeded(sourceID: UUID) async {
-        guard let source = MCPToolStore.shared.sources.first(where: { $0.id == sourceID }) else {
+        let sources = MCPHostBridge.configuredSources(context: "connectIfNeeded \(sourceID)")
+        guard let source = sources.first(where: { $0.id == sourceID }) else {
             logger.warning("[MCP-CONNECT] connectIfNeeded for unknown source \(sourceID); ignoring.")
             return
         }
@@ -124,7 +130,8 @@ final class MCPConnectionCoordinator {
 
     /// Forces a fresh connect, discarding any existing session. Used by "Reconnect".
     func reconnect(sourceID: UUID) async {
-        guard let source = MCPToolStore.shared.sources.first(where: { $0.id == sourceID }) else { return }
+        let sources = MCPHostBridge.configuredSources(context: "reconnect \(sourceID)")
+        guard let source = sources.first(where: { $0.id == sourceID }) else { return }
         logger.info("[MCP-CONNECT] User asked to reconnect '\(source.serverName)' (\(sourceID)).")
         await MCPClientService.shared.disconnect(sourceId: sourceID)
         await connect(source: source, reason: "user reconnect")
@@ -143,7 +150,8 @@ final class MCPConnectionCoordinator {
             let (_, tools) = try await MCPClientService.shared.connect(sourceId: source.id, config: definition)
             // Refresh the persisted tool list: a server may have gained or lost tools since
             // the last time we looked, and nothing else would notice until it announced it.
-            MCPToolStore.shared.replaceTools(forSourceID: source.id, with: tools)
+            MCPHostBridge.requireToolListSink(context: "connect \(source.id) (\(reason))")?
+                .replaceTools(forSourceID: source.id, with: tools)
             logger.info("[MCP-CONNECT] '\(source.serverName)' connected (\(reason)) with \(tools.count) tool(s).")
         } catch {
             // `connect` has already set `.error` state with the detail; this states the
@@ -166,7 +174,8 @@ final class MCPConnectionCoordinator {
     /// - Returns: the new tool count, or nil if the rescan failed.
     @discardableResult
     func rescan(sourceID: UUID) async -> Int? {
-        guard let source = MCPToolStore.shared.sources.first(where: { $0.id == sourceID }),
+        let sources = MCPHostBridge.configuredSources(context: "rescan \(sourceID)")
+        guard let source = sources.first(where: { $0.id == sourceID }),
               let definition = source.serverDefinition else {
             logger.error("[MCP-RESCAN] Cannot rescan \(sourceID): unknown source or missing definition.")
             return nil
@@ -178,7 +187,8 @@ final class MCPConnectionCoordinator {
             // alive?" gesture, and a stale session would answer from cache.
             await MCPClientService.shared.disconnect(sourceId: sourceID)
             let (_, tools) = try await MCPClientService.shared.connect(sourceId: sourceID, config: definition)
-            MCPToolStore.shared.replaceTools(forSourceID: sourceID, with: tools)
+            MCPHostBridge.requireToolListSink(context: "rescan \(sourceID)")?
+                .replaceTools(forSourceID: sourceID, with: tools)
 
             let delta = tools.count - before
             logger.info("""
@@ -213,7 +223,7 @@ final class MCPConnectionCoordinator {
 
     /// Live connection summary for the composer banner and the Tool Library.
     func status() -> Status {
-        let sources = MCPToolStore.shared.sources
+        let sources = MCPHostBridge.configuredSources(context: "status")
         let enabled = sources.filter(\.isEnabled)
         let states = MCPClientService.shared.connectionStates
 

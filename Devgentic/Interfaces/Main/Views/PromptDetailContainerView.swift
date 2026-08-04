@@ -291,7 +291,7 @@ struct PromptDetailContainerView: View {
                 HStack(spacing: 8) {
                     ForEach(PromptCategory.allCases) { cat in
                         CategoryChip(
-                            title: cat.displayName,
+                            title: cat.localizedTitle,
                             isSelected: editVM.category == cat,
                             action: { editVM.category = cat }
                         )

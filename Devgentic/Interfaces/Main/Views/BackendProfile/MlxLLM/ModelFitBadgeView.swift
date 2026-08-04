@@ -26,24 +26,64 @@ struct ModelFitBadgeView: View {
         case .tight: return .yellow
         case .risky: return .orange
         case .incompatible: return .red
+        // Deliberately grey, not green: an unknown fit must not read as a safe one.
+        case .unknown: return .secondary
+        }
+    }
+
+    /// Verdict + estimate in text. The badge used to encode the verdict in the dot's COLOUR
+    /// alone and show only a bare "2.9 GB" — which sat next to the card's disk size and read
+    /// as a duplicate of it, with nothing saying it meant RAM. Colour-only is also invisible
+    /// to anyone who can't distinguish these hues.
+    /// VoiceOver form of the badge.
+    ///
+    /// ⚠️ Returns `Text`, not `String`: `accessibilityLabel(_: String)` does not localize, so
+    /// this read `verdict.rawValue` out in English while the visible label beside it — already
+    /// converted to `localizedTitle` — was translated.
+    ///
+    /// ⚠️ Exhaustive, with no `default:`. The old `default:` arm both hid the raw value and
+    /// meant a verdict added later would silently fall into it, which is exactly how `.paused`
+    /// came to render as a raw string on the download rows.
+    private var accessibleLabel: Text {
+        let verdict = Text(assessment.verdict.localizedTitle)
+        switch assessment.verdict {
+        case .unknown:
+            return verdict
+        case .comfortable, .tight, .risky, .incompatible:
+            guard assessment.estimatedRuntimeRAM > 0 else { return verdict }
+            return verdict + Text(" · ~\(assessment.formattedEstimatedRAM) RAM")
         }
     }
 
     var body: some View {
         HStack(spacing: 5) {
-            Circle()
-                .fill(badgeColor)
-                .frame(width: 6, height: 6)
-
-            Text(compact ? assessment.verdict.rawValue : assessment.formattedEstimatedRAM)
+            // A per-verdict symbol so the signal survives without colour.
+            Image(systemName: assessment.verdict.systemImage)
                 .font(.caption2)
-                .foregroundColor(theme.primaryText.opacity(0.85))
+                .foregroundColor(badgeColor)
+
+            // Composed rather than interpolated into one string: the verdict is a
+            // translatable key, the RAM figure is a formatted number appended after it.
+            // `Text(label)` would have bound to the non-localizing overload and lost both.
+            Group {
+                if compact || assessment.estimatedRuntimeRAM <= 0 {
+                    Text(assessment.verdict.localizedTitle)
+                } else {
+                    Text(assessment.verdict.localizedTitle)
+                        + Text(verbatim: " · ~\(assessment.formattedEstimatedRAM) RAM")
+                }
+            }
+            .font(.caption2)
+            .foregroundColor(theme.primaryText.opacity(0.85))
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(theme.surfaceOverlay)
         .clipShape(Capsule())
         .help(assessment.explanation)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("Memory fit: \(accessibleLabel)"))
+        .accessibilityHint(assessment.explanation)
     }
 }
 
@@ -57,6 +97,8 @@ struct ModelFitInlineView: View {
         case .tight: return .yellow
         case .risky: return .orange
         case .incompatible: return .red
+        // Deliberately grey, not green: an unknown fit must not read as a safe one.
+        case .unknown: return .secondary
         }
     }
 
@@ -85,6 +127,13 @@ struct ModelFitAdvisoryView: View {
 
     private var accentColor: Color {
         assessment.verdict == .incompatible ? .red : .orange
+    }
+
+    private var freeDisk: String? {
+        guard let bytes = MLXModelService.availableBytes(
+            onVolumeContaining: MLXModelService.shared.modelsDirectory
+        ) else { return nil }
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
     var body: some View {
@@ -146,6 +195,19 @@ struct ModelFitAdvisoryView: View {
                         .font(.caption)
                         .fontWeight(.semibold)
                         .foregroundColor(accentColor)
+                }
+                // This sheet models RAM only, but the user is about to commit multiple
+                // gigabytes of DISK. Showing free space here is the difference between an
+                // informed "Download Anyway" and one that fills the startup volume.
+                if let freeDisk {
+                    VStack(spacing: 2) {
+                        Text("Free Disk")
+                            .font(.caption2)
+                            .foregroundColor(theme.secondaryText)
+                        Text(freeDisk)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                    }
                 }
             }
             .padding()

@@ -11,6 +11,24 @@ import os
 
 private let logger = DGLogger(category: "MainApplicationView")
 
+// MARK: - Localized Titles
+
+extension MainApplicationViewModel.InterfaceMode {
+    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
+    /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
+    /// invisible to the String Catalog extractor and would have shipped untranslated inside
+    /// otherwise-translated chrome. `rawValue` is a PERSISTENCE key — `SettingsCoordinator`
+    /// round-trips it through UserDefaults (`devgentic.interfaceMode`) — so it must never change.
+    /// Declared here rather than beside the enum so the view-model file stays view-layer free.
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .chat:     return "Chat"
+        case .workflow: return "Workflow"
+        case .code:     return "Code"
+        }
+    }
+}
+
 // MARK: - Main View
 struct MainApplicationView: View {
     @Environment(MainApplicationViewModel.self) private var viewModel
@@ -309,10 +327,10 @@ struct MainApplicationView: View {
                 prefillPrompt: prefillPrompt,
                 prefillConversationID: prefillConversationID
             )
-        case .ollamaModelStore:
-            OllamaModelStoreContainerView()
-        case .mlxModelStore(_, let filterForTools):
-            MLXModelStoreContainerView(filterForTools: filterForTools)
+        case .ollamaModelStore(let profileID):
+            OllamaModelStoreContainerView(profileID: profileID)
+        case .mlxModelStore(let profileID, let filterForTools):
+            MLXModelStoreContainerView(filterForTools: filterForTools, profileID: profileID)
         case .downloadManager:
             DownloadManagerContainerView()
         case .userPersonalProfile:
@@ -548,7 +566,7 @@ private struct ModeTabButton: View {
                     .font(.system(size: 11, weight: isActive ? .bold : .medium))
                     .foregroundColor(isActive ? modeColor : (isHovering ? theme.primaryText : theme.secondaryText))
 
-                Text(mode.rawValue)
+                Text(mode.localizedTitle)
                     .font(.system(size: 12, weight: isActive ? .semibold : .medium))
                     .foregroundColor(isActive ? theme.primaryText : (isHovering ? theme.primaryText : theme.secondaryText))
             }

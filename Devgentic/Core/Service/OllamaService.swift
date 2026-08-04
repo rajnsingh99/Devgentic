@@ -313,8 +313,19 @@ class OllamaService {
 
     func pullModel(name: String, baseURL: String) async {
         let trimmedModelName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedModelName.isEmpty else { return }
-        guard !isPullingModel else { return }
+        guard !trimmedModelName.isEmpty else {
+            logger.error("[DOWNLOAD] Ollama pull refused — empty model name. CONSEQUENCE: nothing is pulled and the caller has already reported success to the user.")
+            return
+        }
+        // Silent return: the caller (DownloadCoordinator) computes its outcome BEFORE
+        // dispatching this, so a refusal here surfaced to the user as "Downloading …"
+        // with no pull, no record, no sidebar row and no log line. `DownloadCoordinator`
+        // now pre-checks `isPullingModel`, but log it here too — this is reachable from
+        // any caller.
+        guard !isPullingModel else {
+            logger.error("[DOWNLOAD] Ollama pull of '\(trimmedModelName)' REFUSED — '\(self.modelToPull)' is already pulling. CONSEQUENCE: the request is dropped; only one Ollama pull runs at a time.")
+            return
+        }
         guard !isRemovingModel else {
             self.modelPullError = "Cannot pull model while another is being removed."
             return

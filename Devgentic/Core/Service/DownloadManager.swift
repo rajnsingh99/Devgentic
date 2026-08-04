@@ -30,6 +30,14 @@ enum ModelBackendType: String, Equatable, Hashable {
     case mlx     = "MLX"
     case whisper = "Whisper"
 
+    /// ⚠️ `rawValue` is a PERSISTENCE key (`DownloadRecord.backendRaw`, the pre-seed dictionary
+    /// key). Never change it for display purposes.
+    ///
+    /// There is deliberately NO `localizedTitle` here, unlike the other enums the C2 sweep
+    /// touched. These three are product names: a catalog entry mapping "Ollama" to "Ollama" in
+    /// every locale is noise, and worse, it invites a translator to localize a proper noun.
+    /// Display sites render `Text(verbatim: backend.rawValue)` and localize only the
+    /// *fallback* prose ("Unknown", "the backend"), which is where the real defect was.
     var icon: String {
         switch self {
         case .ollama:  return "server.rack"
@@ -47,20 +55,95 @@ enum ModelBackendType: String, Equatable, Hashable {
     }
 }
 
+/// How a download ended, as decided by a bridge's terminal branch.
+///
+/// Typed rather than a raw string so the notification policy can be unit-tested without
+/// driving a real download, and so a typo can't silently drop a case.
+/// ⚠️ `CaseIterable` so the notification-policy test covers the real set rather than a
+/// hand-written array that a new terminal state would slip past unnoticed.
+enum DownloadTerminalClassification: String, CaseIterable {
+    case completed
+    case failed
+    case cancelled
+    case paused
+
+    /// Whether finishing this way should reach the user, and how insistently.
+    enum NotificationPolicy: Equatable {
+        /// User-initiated — they pressed the button a moment ago.
+        case silent
+        /// Deliver even when the app is frontmost.
+        case always
+        /// Deliver only when the user has switched away.
+        case whenAway
+    }
+
+    var notificationPolicy: NotificationPolicy {
+        switch self {
+        case .completed:
+            // Visible in the sidebar row, the activity badge and the store card while the app
+            // is in front, so notifying then would only duplicate what is already on screen.
+            return .whenAway
+        case .failed:
+            // The only in-app failure surface is the MLX store's banner, which a user sitting
+            // in a chat never sees — worth interrupting for wherever they are.
+            return .always
+        case .cancelled, .paused:
+            return .silent
+        }
+    }
+}
+
 // MARK: - Download Manager
 
 @Observable @MainActor
 final class DownloadManager {
     static let shared = DownloadManager()
 
+    @ObservationIgnored private let logger = DGLogger(category: "DownloadManager")
+
     // MARK: - Live counters (read from SwiftData on demand)
 
+    /// ⚠️ Read `activeCount` / `hasActiveDownloads` from views, not this.
+    ///
+    /// `@Observable` only instruments STORED properties. This computed one touches nothing on
+    /// `self` — it calls into `DownloadHistoryStore` (a plain `@MainActor` class) which runs a
+    /// fetch and returns records without reading any observable property. Inside SwiftUI's
+    /// `withObservationTracking` nothing gets registered, so a view built on it never
+    /// invalidates: the activity-bar badge only appeared when its body happened to re-run for
+    /// an unrelated reason (a hover changing `@State`), and went stale again afterwards —
+    /// visibly disagreeing with the `@Query`-backed sidebar. It also costs a full predicated
+    /// main-thread fetch per access.
     var activeRecords: [DownloadRecord] {
         DownloadHistoryStore.shared.fetchActive()
     }
 
-    var hasActiveDownloads: Bool { !activeRecords.isEmpty }
-    var activeCount: Int { activeRecords.count }
+    /// Stored, therefore actually observable. Maintained from the same bridge transitions
+    /// that write `activeRecordIDsByKey`.
+    private(set) var activeCount: Int = 0
+    var hasActiveDownloads: Bool { activeCount > 0 }
+
+    /// Recomputes the observable counter. Called on every bridge start/terminal transition;
+    /// the fetch is the same one the computed property did, but now it happens once per
+    /// actual state change rather than once per view-body evaluation.
+    private func refreshActiveCount() {
+        let count = DownloadHistoryStore.shared.fetchActive().count
+        if count != activeCount {
+            logger.info("[DOWNLOAD] Active download count \(self.activeCount) → \(count).")
+            activeCount = count
+        }
+        // Single seam for the sleep assertion across all three backends: every bridge start
+        // and terminal transition already routes through here. Keyed off the aggregate count
+        // rather than per-download so a leaked key cannot pin the machine awake — when
+        // nothing is active we release everything unconditionally.
+        if count > 0 {
+            DownloadPowerAssertion.shared.begin(
+                "downloads",
+                reason: "Downloading \(count) model\(count == 1 ? "" : "s")"
+            )
+        } else {
+            DownloadPowerAssertion.shared.endAll()
+        }
+    }
 
     /// Live speed + ETA per active record. Updated every time a bridge
     /// records a new byte sample. Views observe this to animate the
@@ -112,6 +195,18 @@ final class DownloadManager {
         bindOllama()
         bindMLX()
         bindWhisper()
+        // ⚠️ Deliberately NOT priming `activeCount` here. This singleton is constructed
+        // during launch BEFORE `DownloadHistoryStore.configureContainer` runs (that happens
+        // in an async Task in DevgenticApp), so a fetch here hits an unconfigured container,
+        // logs a hard error on every single launch, and returns 0 regardless of reality.
+        // `DevgenticApp` calls `primeActiveCount()` once the container is up and orphans
+        // have been reconciled.
+    }
+
+    /// Seeds `activeCount` after the SwiftData container is configured. Call once at launch,
+    /// after `DownloadHistoryStore.reconcileOrphans()`.
+    func primeActiveCount() {
+        refreshActiveCount()
     }
 
     // MARK: - Pre-seed hook for coordinators
@@ -198,6 +293,109 @@ final class DownloadManager {
         }
     }
 
+    // MARK: - Active-record identity
+
+    /// True when `recordID`'s persisted `modelIdentifier` still matches the model the
+    /// service reports as in-flight.
+    ///
+    /// The services expose a single download slot, but `isDownloading` does not return to
+    /// false between one pull being superseded and its replacement starting — both happen
+    /// in the same MainActor turn. Without this check the bridge only saw "still
+    /// downloading", so the NEW model's progress ticks were persisted into the OLD model's
+    /// record, and when the old pull's terminal branch fired it nil'd the active ID —
+    /// leaving the new download with no record, no sidebar row and no cancel button.
+    /// A missing record counts as a mismatch so we re-open rather than write into nothing.
+    private func activeRecordMatches(_ recordID: UUID, modelName: String) -> Bool {
+        DownloadHistoryStore.shared.fetch(id: recordID)?.modelIdentifier == modelName
+    }
+
+    /// Close a record whose download was superseded by a different model on the same
+    /// backend, so the replacement can open a clean one.
+    private func supersedeActiveRecord(
+        _ recordID: UUID,
+        backend: ModelBackendType,
+        replacedBy modelName: String
+    ) {
+        let previous = DownloadHistoryStore.shared.fetch(id: recordID)?.modelIdentifier ?? "<record missing>"
+        logger.error("[DOWNLOAD] \(backend.rawValue) active download changed identity mid-flight: '\(previous)' → '\(modelName)' (record \(recordID.uuidString)). CONSEQUENCE: closing the old record as superseded and opening a fresh one, so the new download gets its own progress, speed/ETA and cancel affordance.")
+        _ = DownloadHistoryStore.shared.markCancelled(id: recordID, reason: "Superseded by \(modelName)")
+        clearTransients(recordID: recordID, backend: backend, modelIdentifier: previous)
+    }
+
+    /// Logs how a terminal transition was classified. Every one of these branches was
+    /// previously silent, so a download that ended up "failed" in history left no trace
+    /// of which signal produced that verdict.
+    private func logTerminal(
+        backend: ModelBackendType,
+        recordID: UUID,
+        modelIdentifier: String,
+        classification: DownloadTerminalClassification,
+        progress: Double,
+        isInstalledNow: Bool,
+        errorMessage: String?
+    ) {
+        logger.notice("[DOWNLOAD] \(backend.rawValue) '\(modelIdentifier)' terminal → \(classification.rawValue) (record \(recordID.uuidString), progress=\(String(format: "%.3f", progress)), installedNow=\(isInstalledNow), error=\(errorMessage ?? "nil")).")
+        notifyTerminal(backend: backend, modelIdentifier: modelIdentifier,
+                       classification: classification, errorMessage: errorMessage)
+    }
+
+    /// Surfaces a finished download through the app's notification channel.
+    ///
+    /// Model downloads are the longest-running operation in the app — tens of minutes to hours
+    /// — and the terminal transition used to write a SwiftData row and nothing else, so a user
+    /// who switched away had to poll the sidebar to learn the model was ready.
+    ///
+    /// This is emitted from `logTerminal`, which every backend's reconcile already funnels
+    /// through, so all three are covered by one seam rather than three parallel call sites.
+    ///
+    /// Two deliberate policy choices:
+    ///
+    /// 1. **Only completion and failure notify.** `cancelled` and `paused` are user-initiated —
+    ///    the user pressed the button a moment ago and does not need telling.
+    /// 2. **Success is suppressed while the app is frontmost; failure is not.** When the app is
+    ///    in front, a successful download is already visible in the sidebar row, the activity
+    ///    badge and the store card, so a banner would only duplicate what is on screen. A
+    ///    FAILURE's only in-app surface is the MLX store's error banner, which a user sitting
+    ///    in a chat never sees — so that one is worth interrupting for wherever they are.
+    private func notifyTerminal(
+        backend: ModelBackendType,
+        modelIdentifier: String,
+        classification: DownloadTerminalClassification,
+        errorMessage: String?
+    ) {
+        let policy = classification.notificationPolicy
+        guard policy != .silent else { return }
+        let succeeded = (classification == .completed)
+
+        Task.detached(priority: .utility) {
+            if policy == .whenAway {
+                // Mirrors ActiveStreamManager's rule: the QuickAccess panel can be key while
+                // `NSApp.isActive` is false, so check both or a watched completion notifies
+                // on top of what the user is already looking at.
+                let userIsViewing = await MainActor.run {
+                    NSApp.isActive || (AppDelegate.shared?.isQuickAccessPanelKey ?? false)
+                }
+                if userIsViewing { return }
+            }
+
+            let config = await NotificationConfiguration.shared
+            guard await config.isNotificationEnabled(for: nil) else { return }
+
+            let payload = AppNotificationPayload(
+                title: succeeded ? "Model ready" : "Download failed",
+                body: succeeded
+                    ? "\(modelIdentifier) finished downloading."
+                    : "\(modelIdentifier) — \(errorMessage ?? "the download did not complete").",
+                metadata: [
+                    "source": "download",
+                    "backend": backend.rawValue,
+                    "model": modelIdentifier
+                ]
+            )
+            await NotificationDispatcher.shared.dispatch(payload)
+        }
+    }
+
     /// Terminal cleanup for a record — removes sampler + speed snapshot,
     /// clears backend-specific active ID + public active lookup.
     /// Called from each bridge's reconcile when the service flips
@@ -206,6 +404,7 @@ final class DownloadManager {
         samplers.removeValue(forKey: recordID)
         activeSpeeds.removeValue(forKey: recordID)
         activeRecordIDsByKey.removeValue(forKey: Self.presseedKey(backend, modelIdentifier))
+        refreshActiveCount()
     }
 
     /// Public lookup used by `ModelDownloadStatusView` — returns the
@@ -253,7 +452,7 @@ final class DownloadManager {
         totalBytes: Int64?
     ) {
         if isPulling && !modelName.isEmpty {
-            if let id = ollamaActiveID {
+            if let id = ollamaActiveID, activeRecordMatches(id, modelName: modelName) {
                 applyProgress(
                     recordID: id,
                     fractionalProgress: progress,
@@ -262,6 +461,9 @@ final class DownloadManager {
                     throttler: &ollamaThrottler
                 )
             } else {
+                if let stale = ollamaActiveID {
+                    supersedeActiveRecord(stale, backend: .ollama, replacedBy: modelName)
+                }
                 let id = UUID()
                 ollamaActiveID = id
                 ollamaThrottler.reset()
@@ -270,6 +472,7 @@ final class DownloadManager {
                     forKey: Self.presseedKey(.ollama, modelName)
                 )
                 activeRecordIDsByKey[Self.presseedKey(.ollama, modelName)] = id
+                defer { refreshActiveCount() }
                 _ = DownloadHistoryStore.shared.startDownload(
                     id: id,
                     backend: .ollama,
@@ -285,13 +488,20 @@ final class DownloadManager {
             // before flipping `isPullingModel = false`, so by the time
             // we see the transition, `localModels` is fresh.
             let isInstalledNow = OllamaService.shared.localModels.contains { $0.name == modelIdentifier }
+            let classification: DownloadTerminalClassification
             if let err = errorMessage, !err.isEmpty {
+                classification = .failed
                 _ = DownloadHistoryStore.shared.markFailed(id: id, message: err)
             } else if isInstalledNow || progress >= 0.99 {
+                classification = .completed
                 _ = DownloadHistoryStore.shared.markCompleted(id: id, fileSizeBytes: totalBytes)
             } else {
+                classification = .cancelled
                 _ = DownloadHistoryStore.shared.markCancelled(id: id, reason: nil)
             }
+            logTerminal(backend: .ollama, recordID: id, modelIdentifier: modelIdentifier,
+                        classification: classification, progress: progress,
+                        isInstalledNow: isInstalledNow, errorMessage: errorMessage)
             clearTransients(recordID: id, backend: .ollama, modelIdentifier: modelIdentifier)
             ollamaActiveID = nil
         }
@@ -326,7 +536,7 @@ final class DownloadManager {
         errorMessage: String?
     ) {
         if isDownloading && !modelName.isEmpty {
-            if let id = mlxActiveID {
+            if let id = mlxActiveID, activeRecordMatches(id, modelName: modelName) {
                 // MLX doesn't expose completed bytes — the applyProgress
                 // helper derives bytes from progress × totalBytes using
                 // whatever we pre-seeded on the record.
@@ -339,6 +549,9 @@ final class DownloadManager {
                     throttler: &mlxThrottler
                 )
             } else {
+                if let stale = mlxActiveID {
+                    supersedeActiveRecord(stale, backend: .mlx, replacedBy: modelName)
+                }
                 let id = UUID()
                 mlxActiveID = id
                 mlxThrottler.reset()
@@ -347,6 +560,7 @@ final class DownloadManager {
                     forKey: Self.presseedKey(.mlx, modelName)
                 )
                 activeRecordIDsByKey[Self.presseedKey(.mlx, modelName)] = id
+                defer { refreshActiveCount() }
                 _ = DownloadHistoryStore.shared.startDownload(
                     id: id,
                     backend: .mlx,
@@ -363,16 +577,30 @@ final class DownloadManager {
             // MLXModelService calls `forceRefreshInstalledModels()`
             // (synchronous on MainActor) before flipping isDownloading,
             // so installedModels is fresh at this moment.
-            let isInstalledNow = MLXModelService.shared.installedModels.contains {
-                $0.displayName == modelIdentifier
-            }
+            // Goes through the shared identity comparator: an exact `displayName ==` test
+            // never matched for publishers other than `mlx-community`, so a successful
+            // download of those fell through to the `progress >= 0.99` fallback and could
+            // be written to history as `.cancelled`.
+            let isInstalledNow = MLXModelService.shared.isInstalled(repoId: modelIdentifier)
+            let classification: DownloadTerminalClassification
             if let err = errorMessage, !err.isEmpty {
+                classification = .failed
                 _ = DownloadHistoryStore.shared.markFailed(id: id, message: err)
             } else if isInstalledNow || progress >= 0.99 {
+                classification = .completed
                 _ = DownloadHistoryStore.shared.markCompleted(id: id, fileSizeBytes: totalBytes)
+            } else if MLXModelService.shared.pausedRepoId == modelIdentifier {
+                // A pause and a cancel both stop the task; only the pause keeps the bytes, so
+                // recording it as cancelled would tell the user their progress was discarded.
+                classification = .paused
+                _ = DownloadHistoryStore.shared.markPaused(id: id)
             } else {
+                classification = .cancelled
                 _ = DownloadHistoryStore.shared.markCancelled(id: id, reason: nil)
             }
+            logTerminal(backend: .mlx, recordID: id, modelIdentifier: modelIdentifier,
+                        classification: classification, progress: progress,
+                        isInstalledNow: isInstalledNow, errorMessage: errorMessage)
             clearTransients(recordID: id, backend: .mlx, modelIdentifier: modelIdentifier)
             mlxActiveID = nil
         }
@@ -413,7 +641,7 @@ final class DownloadManager {
         totalBytes: Int64?
     ) {
         if isDownloading && !modelName.isEmpty {
-            if let id = whisperActiveID {
+            if let id = whisperActiveID, activeRecordMatches(id, modelName: modelName) {
                 // IMPORTANT: Whisper's `completedBytes` / `totalBytes` from
                 // the service are *file counts* (WhisperKit's `Progress`
                 // unit-count is per-file, not per-byte). Passing them to
@@ -429,6 +657,9 @@ final class DownloadManager {
                     throttler: &whisperThrottler
                 )
             } else {
+                if let stale = whisperActiveID {
+                    supersedeActiveRecord(stale, backend: .whisper, replacedBy: modelName)
+                }
                 let id = UUID()
                 whisperActiveID = id
                 whisperThrottler.reset()
@@ -437,6 +668,7 @@ final class DownloadManager {
                     forKey: Self.presseedKey(.whisper, modelName)
                 )
                 activeRecordIDsByKey[Self.presseedKey(.whisper, modelName)] = id
+                defer { refreshActiveCount() }
                 _ = DownloadHistoryStore.shared.startDownload(
                     id: id,
                     backend: .whisper,
@@ -455,13 +687,20 @@ final class DownloadManager {
             // before resetDownloadState flips isDownloading=false, so
             // this is the authoritative "installed?" check.
             let isInstalledNow = WhisperModelDownloadService.shared.downloadedModelIds.contains(modelIdentifier)
+            let classification: DownloadTerminalClassification
             if let err = errorMessage, !err.isEmpty {
+                classification = .failed
                 _ = DownloadHistoryStore.shared.markFailed(id: id, message: err)
             } else if isInstalledNow || progress >= 0.99 {
+                classification = .completed
                 _ = DownloadHistoryStore.shared.markCompleted(id: id, fileSizeBytes: recordTotal)
             } else {
+                classification = .cancelled
                 _ = DownloadHistoryStore.shared.markCancelled(id: id, reason: nil)
             }
+            logTerminal(backend: .whisper, recordID: id, modelIdentifier: modelIdentifier,
+                        classification: classification, progress: progress,
+                        isInstalledNow: isInstalledNow, errorMessage: errorMessage)
             clearTransients(recordID: id, backend: .whisper, modelIdentifier: modelIdentifier)
             whisperActiveID = nil
         }

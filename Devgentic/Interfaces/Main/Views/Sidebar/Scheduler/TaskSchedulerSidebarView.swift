@@ -47,7 +47,7 @@ struct TaskSchedulerSidebarView: View {
                 HStack(spacing: 8) {
                     ForEach(SchedulerFilter.allCases) { filter in
                         CategoryChip(
-                            title: filter.rawValue,
+                            title: filter.localizedTitle,
                             isSelected: viewModel.selectedFilter == filter,
                             action: { viewModel.selectedFilter = filter }
                         )

@@ -82,7 +82,8 @@ struct DeveloperReportView: View {
             HStack(spacing: 12) {
                 Picker("Scope", selection: $viewModel.scope) {
                     ForEach(ReportScope.allCases) { scope in
-                        Text(scope.rawValue).tag(scope)
+                        // `.tag` keeps the case itself — only the visible label changes.
+                        Text(scope.localizedTitle).tag(scope)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -302,7 +303,7 @@ private struct FilterChipView: View {
             HStack(spacing: 4) {
                 Image(systemName: filter.icon)
                     .font(.system(size: 10))
-                Text(filter.rawValue)
+                Text(filter.localizedTitle)
                     .font(.system(.caption, weight: isActive ? .semibold : .medium))
             }
             .foregroundStyle(isActive ? .white : chipColor)
@@ -333,6 +334,38 @@ private struct FilterChipView: View {
             withAnimation(.easeInOut(duration: 0.2)) {
                 isHovering = hover
             }
+        }
+    }
+}
+
+// MARK: - Localized labels for the report enums
+
+/// ⚠️ Declared here rather than on the enums themselves: `ReportScope` and
+/// `EventTypeFilter` live in `ReportViewModel.swift`, and this view is their only
+/// user-facing rendering site.
+///
+/// They exist because `Text(x.rawValue)` binds to the non-localizing `StringProtocol`
+/// overload, so these labels were invisible to the String Catalog extractor and would
+/// have shipped untranslated inside otherwise-translated chrome. `rawValue` stays for
+/// `id` / `Identifiable` and logging only, and is never changed.
+private extension ReportScope {
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .currentSpan:      return "This Message"
+        case .previousSpans:    return "Previous Messages"
+        case .fullConversation: return "Full Conversation"
+        }
+    }
+}
+
+private extension EventTypeFilter {
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .all:      return "All"
+        case .thoughts: return "Thoughts"
+        case .tools:    return "Tools"
+        case .llm:      return "LLM"
+        case .errors:   return "Errors"
         }
     }
 }

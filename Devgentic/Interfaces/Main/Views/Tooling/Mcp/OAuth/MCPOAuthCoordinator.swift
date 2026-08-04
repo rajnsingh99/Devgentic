@@ -275,27 +275,38 @@ struct MCPOAuthCoordinator {
             bundle: bundle, metadata: metadata, resource: bundle.resource
         )
 
+        // MUTATE the fields the refresh actually changed. This branch used to REBUILD the
+        // bundle from scratch whenever the server rotated the refresh token — and a rebuild
+        // is a full re-listing of every field, so `resource` (the RFC 8707 audience binding)
+        // was silently dropped. Rotation is not an edge case: OAuth 2.1 recommends it and
+        // most modern providers do it, so the binding disappeared on the FIRST refresh and
+        // every token minted afterwards widened back to a general-purpose audience — exactly
+        // the token-passthrough problem the resource indicator was threaded end-to-end to
+        // prevent, and invisible because the tokens keep working.
         bundle.accessToken = tokens.accessToken
-        // Some servers rotate the refresh token on every refresh (recommended
-        // by OAuth 2.1). When they don't, keep the old one.
+        bundle.accessTokenExpiresAt = tokens.expiresAt
+        bundle.grantedScopes = tokens.grantedScopes
+
+        // Some servers rotate the refresh token on every refresh. When they don't, keep the
+        // old one — a nil here means "unchanged", not "revoked".
         if let newRefresh = tokens.refreshToken {
-            bundle = MCPOAuthCredentialBundle(
-                issuer: bundle.issuer,
-                clientId: bundle.clientId,
-                grantedScopes: tokens.grantedScopes,
-                redirectURI: bundle.redirectURI,
-                accessToken: tokens.accessToken,
-                refreshToken: newRefresh,
-                accessTokenExpiresAt: tokens.expiresAt,
-                registrationAccessToken: bundle.registrationAccessToken,
-                registrationClientUri: bundle.registrationClientUri
-            )
-        } else {
-            bundle.accessTokenExpiresAt = tokens.expiresAt
+            if newRefresh != bundle.refreshToken {
+                logger.info("""
+                    [MCP-OAUTH] Issuer \(bundle.issuer.absoluteString) rotated the refresh token \
+                    for source \(sourceID.uuidString); the previous one is now dead at the \
+                    provider and the new one is persisted below.
+                    """)
+            }
+            bundle.refreshToken = newRefresh
         }
 
         try persist(bundle, sourceID: sourceID)
-        logger.info("Refreshed OAuth tokens for source \(sourceID.uuidString)")
+        logger.info("""
+            [MCP-OAUTH] Refreshed OAuth tokens for source \(sourceID.uuidString) — \
+            expires in \(Int(tokens.expiresAt.timeIntervalSinceNow))s, \
+            scopes: \(bundle.grantedScopes.joined(separator: " ")), \
+            audience binding: \(bundle.resource?.absoluteString ?? "none").
+            """)
         return bundle
     }
 

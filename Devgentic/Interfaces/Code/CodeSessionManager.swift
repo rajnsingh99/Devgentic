@@ -262,7 +262,14 @@ final class CodeSessionManager {
     /// capping the list. Persists to UserDefaults.
     private func rememberRecentPath(_ url: URL) {
         let standardized = url.standardizedFileURL
-        var updated = recentProjectPaths.filter { $0.standardizedFileURL != standardized }
+        // `sameLocation`, not `!=`. **Hardening, not a fixed bug**: today both sides are
+        // directory-flavoured (`NSOpenPanel` hands back a directory URL, and reloaded entries
+        // go through `URL(fileURLWithPath:)`, which stats the path), so `!=` compared correctly.
+        // It is worth the change anyway — a symlinked project folder DOES diverge here, since
+        // `standardizedFileURL` never resolves symlinks, and the failure is a silent duplicate
+        // row in Recent Projects. This loop already stats every entry below, so resolution
+        // costs nothing extra.
+        var updated = recentProjectPaths.filter { !$0.sameLocation(as: standardized) }
         updated.insert(standardized, at: 0)
         // Drop entries whose folders no longer exist on disk (user moved/deleted them).
         updated = updated.filter { FileManager.default.fileExists(atPath: $0.path) }

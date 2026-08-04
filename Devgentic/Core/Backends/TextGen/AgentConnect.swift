@@ -1121,11 +1121,13 @@ class AgentConnect: @unchecked Sendable {
             
         case .mlx:
             let modelName = llmConfig.modelName
+            // `ensureLoaded()` rather than a fire-and-forget refresh: the scan is now
+            // off-actor, so reading the list straight after asking for a refresh can observe
+            // an empty one — indistinguishable from "the model isn't installed", which would
+            // fail the turn with a 404 for a model that is present.
+            await MLXModelService.shared.ensureLoaded()
             let modelPath: URL? = await MainActor.run {
-                if MLXModelService.shared.installedModels.isEmpty {
-                    MLXModelService.shared.refreshInstalledModels()
-                }
-                return MLXModelService.shared.installedModels.first(where: { $0.displayName == modelName })?.localPath
+                MLXModelService.shared.installedModel(named: modelName)?.localPath
             }
             guard let path = modelPath else {
                 throw NSError(domain: "AgentConnect", code: 404, userInfo: [NSLocalizedDescriptionKey: "Local MLX model '\(modelName)' not found."])
@@ -1152,6 +1154,9 @@ class AgentConnect: @unchecked Sendable {
 
             return MLXLLMProvider(
                 modelName: modelName,
+                // Pin the provider to the model we just resolved and loaded, so a lazy
+                // reload cannot substitute whatever another caller loaded meanwhile.
+                modelDirectory: path,
                 dialect: llmConfig.cognitiveProfile.dialect,
                 chatTemplateSource: llmConfig.cognitiveProfile.chatTemplateSource,
                 stopSequences: llmConfig.cognitiveProfile.stopSequences,
