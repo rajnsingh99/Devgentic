@@ -23,14 +23,30 @@ struct MLXAdvancedConfig: Codable, Equatable {
         self.maxTokens = maxTokens
     }
 
-    /// Backward-compatible decoding: existing saved configs may lack `repetitionContextSize`.
+    /// Backward-compatible decoding: EVERY field falls back to its default rather than throwing.
+    ///
+    /// ⚠️ This used to hard-`decode` four of the five fields, so a blob missing any one of them
+    /// failed the whole decode. That is not a per-field loss: `BackendProfileService.decodeConfig`
+    /// answers a throw with nil and `ProviderAdvancedConfigManager.load` answers nil with
+    /// `?? .default()`, so ONE absent key silently replaced the user's entire advanced panel with
+    /// app defaults — and the panel then presented those defaults as the user's own settings.
+    ///
+    /// The hazard is not hypothetical here: `repetitionContextSize` was already grandfathered in
+    /// this way, which is proof that fields get added to this struct over time. The next one added
+    /// would have reintroduced the same failure.
+    ///
+    /// `try?` per field also absorbs a wrong-typed value (the legacy number-saved-as-Bool shape the
+    /// sibling configs repair explicitly). Falling back to the documented default is preferred over
+    /// those siblings' `bool ? 1.0 : 0.0` coercion — a temperature of 1.0 invented from a `true` is
+    /// a worse answer than the tuned default, and just as silent.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        temperature = try container.decode(Double.self, forKey: .temperature)
-        topP = try container.decode(Double.self, forKey: .topP)
-        repetitionPenalty = try container.decode(Double.self, forKey: .repetitionPenalty)
-        repetitionContextSize = try container.decodeIfPresent(Int.self, forKey: .repetitionContextSize) ?? 20
-        maxTokens = try container.decode(Int.self, forKey: .maxTokens)
+        let fallback = Self.default()
+        temperature = (try? container.decode(Double.self, forKey: .temperature)) ?? fallback.temperature
+        topP = (try? container.decode(Double.self, forKey: .topP)) ?? fallback.topP
+        repetitionPenalty = (try? container.decode(Double.self, forKey: .repetitionPenalty)) ?? fallback.repetitionPenalty
+        repetitionContextSize = (try? container.decode(Int.self, forKey: .repetitionContextSize)) ?? 20
+        maxTokens = (try? container.decode(Int.self, forKey: .maxTokens)) ?? fallback.maxTokens
     }
 
     /// Default values optimized for Agentic reasoning and structured outputs
@@ -191,6 +207,8 @@ struct MLXSettingsView: View {
                 Spacer(minLength: 16)
                 HStack {
                     Slider(value: $config.temperature, in: 0.0...2.0, step: 0.05)
+                        .accessibilityLabel("Temperature")
+                        .accessibilityValue(String(format: "%.2f", config.temperature))
                         .frame(width: 150)
                     Text("\(config.temperature, specifier: "%.2f")")
                         .monospacedDigit()
@@ -212,6 +230,8 @@ struct MLXSettingsView: View {
                 Spacer(minLength: 16)
                 HStack {
                     Slider(value: $config.topP, in: 0.0...1.0, step: 0.05)
+                        .accessibilityLabel("Top P")
+                        .accessibilityValue(String(format: "%.2f", config.topP))
                         .frame(width: 150)
                     Text("\(config.topP, specifier: "%.2f")")
                         .monospacedDigit()
@@ -233,6 +253,8 @@ struct MLXSettingsView: View {
                 Spacer(minLength: 16)
                 HStack {
                     Slider(value: $config.repetitionPenalty, in: 1.0...2.0, step: 0.05)
+                        .accessibilityLabel("Repetition penalty")
+                        .accessibilityValue(String(format: "%.2f", config.repetitionPenalty))
                         .frame(width: 150)
                     Text("\(config.repetitionPenalty, specifier: "%.2f")")
                         .monospacedDigit()
@@ -257,10 +279,13 @@ struct MLXSettingsView: View {
                 HStack(spacing: 6) {
                     AdvancedConfigNumericField(
                         value: $config.repetitionContextSize,
-                        width: 70
+                        width: 70,
+                        accessibilityName: "Repetition context size"
                     )
                     Stepper("", value: $config.repetitionContextSize, in: 10...repCtxCap, step: 5)
                         .labelsHidden()
+                        .accessibilityLabel("Repetition context size stepper")
+                        .accessibilityValue("\(config.repetitionContextSize)")
                 }
             }
             .onChange(of: config.repetitionContextSize) { _, newVal in
@@ -290,10 +315,13 @@ struct MLXSettingsView: View {
                 HStack(spacing: 6) {
                     AdvancedConfigNumericField(
                         value: $config.maxTokens,
-                        width: 80
+                        width: 80,
+                        accessibilityName: "Max tokens"
                     )
                     Stepper("", value: $config.maxTokens, in: 256...maxTokensCap, step: 256)
                         .labelsHidden()
+                        .accessibilityLabel("Max tokens stepper")
+                        .accessibilityValue("\(config.maxTokens)")
                 }
             }
             .onChange(of: config.maxTokens) { _, newVal in

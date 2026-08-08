@@ -62,13 +62,52 @@ struct OpenAILLMProvider: LLMProvider {
         return nil
     }
 
-    /// Applies common generation parameters to the request body.
+    /// The request contract this model accepts (register A55).
+    private var modelFamily: OpenAIModelFamily { OpenAIModelFamily.classify(modelName: config.modelName) }
+
+    /// Applies common generation parameters to the request body, in the shape the selected model
+    /// actually accepts.
+    ///
+    /// ⚠️ Register A55: this used to send one shape to everything — `max_tokens`, `temperature`,
+    /// `top_p`, plus `reasoning_effort` whenever the picker had been touched. A reasoning model
+    /// rejects `max_tokens` and a non-default `temperature`; a normal model rejects
+    /// `reasoning_effort`. So the panel's own defaults 400'd on o-series, and setting Reasoning
+    /// Effort 400'd everywhere else.
+    ///
+    /// ⚠️ Every parameter dropped here is LOGGED. Silently omitting a value the user set in the
+    /// panel is how a knob becomes decorative without anyone noticing (registers A19/A24/A25).
     private func applyGenerationParams(to body: inout [String: Any]) {
-        if let maxTokens = maxTokens { body["max_tokens"] = maxTokens }
-        if let temp = temperature { body["temperature"] = temp }
-        if let topP = topP { body["top_p"] = topP }
+        let family = modelFamily
+
+        if let maxTokens = maxTokens {
+            body[family.maxTokensParameterName] = maxTokens
+        }
+
+        if family.acceptsSamplingParameters {
+            if let temp = temperature { body["temperature"] = temp }
+            if let topP = topP { body["top_p"] = topP }
+        } else if temperature != nil || topP != nil {
+            logger.notice(
+                "[PROFILE] Omitting temperature/top_p for reasoning model '\(config.modelName)'. "
+                + "CONSEQUENCE: the request uses the model's fixed default sampling — sending them "
+                + "is a 400 on this family, so the panel's values cannot be honoured here."
+            )
+        }
+
         if let stops = stopSequences, !stops.isEmpty { body["stop"] = stops }
-        if let effort = reasoningEffort { body["reasoning_effort"] = effort }
+
+        if let effort = reasoningEffort {
+            if family.acceptsReasoningEffort {
+                body["reasoning_effort"] = effort
+            } else {
+                logger.notice(
+                    "[PROFILE] Omitting reasoning_effort '\(effort)' for non-reasoning model "
+                    + "'\(config.modelName)'. CONSEQUENCE: the setting has no effect on this model, "
+                    + "and sending it would fail the whole request — the picker is hidden for "
+                    + "models that cannot use it, so this profile predates that gating."
+                )
+            }
+        }
     }
 
     /// Creates a standard OpenAI URLRequest with proper headers.

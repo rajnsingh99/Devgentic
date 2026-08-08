@@ -19,6 +19,8 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+private let logger = DGLogger(category: "AgentConfigDetail")
+
 // MARK: - Localized Titles
 
 extension ModelCognitiveCapability {
@@ -70,8 +72,16 @@ struct AgentConfigDetailView: View {
     // Unsaved-changes guard on back navigation.
     @State private var showingBackAlert = false
 
+    /// Advisory findings from the last save, shown until dismissed or the next save (register A34).
+    /// ⚠️ Cleared on every save, so it always describes the CURRENT state of the profile — a stale
+    /// note about a model the user has since changed would be worse than no note.
+    @State private var saveAdvisories: [ProfileValidationError] = []
+
     // File Importer State
     @State private var showingKnowledgeImporter = false
+    /// Why the last "Add File" did nothing, shown inline. Nil when there is nothing to report.
+    /// ⚠️ Register A60: the import result was previously discarded, so a failure was invisible.
+    @State private var knowledgeImportError: String?
 
     // Guide
     @State private var showingAgentGuide = false
@@ -147,6 +157,14 @@ struct AgentConfigDetailView: View {
                 }
             }
         )
+    }
+
+    /// The profile's legacy single retry knob — what `Auto` in Error Recovery / Loop Safety
+    /// actually resolves to (register A70). Read-only: there is no UI for it, but its value is what
+    /// those "Auto (N)" labels must state.
+    private var legacyRetryPolicy: RetryPolicy? {
+        if case .agent(let config) = editBuffer.draft.details { return config.retryPolicy }
+        return nil
     }
 
     private var maxIterationsBinding: Binding<Int?> {
@@ -295,7 +313,7 @@ struct AgentConfigDetailView: View {
             // exist here. Default path keeps the chevron + handleBackTap so
             // the standalone profile screen behaves identically to before.
             DynamicIslandBar(
-                onBack: onCancel ?? handleBackTap,
+                onBack: handleBackTap,
                 leadingSymbol: onCancel != nil ? "xmark" : "chevron.left"
             ) {
                 actionButtons
@@ -303,6 +321,14 @@ struct AgentConfigDetailView: View {
 
             ScrollView {
                 VStack(spacing: 32) {
+
+                    // ⚠️ Register A34. Sits at the top of the scroll view, where the user's eye already is
+                    // after pressing Save in the island bar above. Dismissible, and replaced on the next
+                    // save — never a permanent fixture, because an advisory describes a choice the user
+                    // already made rather than a fault they must fix.
+                    SaveAdvisoryBanner(advisories: saveAdvisories) {
+                        withAnimation { saveAdvisories = [] }
+                    }
 
                     // 1. Identity Header
                     HStack(alignment: .center, spacing: 16) {
@@ -577,55 +603,29 @@ struct AgentConfigDetailView: View {
                                 allowedContentTypes: [.item],
                                 allowsMultipleSelection: true
                             ) { result in
-                                if case let .success(urls) = result {
-                                    for url in urls {
-                                        let source = KnowledgeSource(type: .file, location: url.path)
-                                        if !knowledgeSourcesBinding.wrappedValue.contains(where: { $0.location == source.location }) {
-                                            knowledgeSourcesBinding.wrappedValue.append(source)
-                                        }
-                                    }
-                                }
+                                knowledgeImportError = KnowledgeSourceImport.apply(
+                                    result, to: knowledgeSourcesBinding, profileKind: "agent")
                             }
+                            }
+
+                            // The reason "Add File" appeared to do nothing (register A60). Cleared as soon as the
+                            // next import succeeds or is cancelled, so it never lingers past the attempt it describes.
+                            if let knowledgeImportError {
+                                Label(knowledgeImportError, systemImage: "exclamationmark.triangle")
+                                    .font(theme.fontCaption)
+                                    .foregroundColor(theme.warningColor)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .padding(8)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(theme.warningColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
                             }
 
                             if !knowledgeSourcesBinding.wrappedValue.isEmpty {
                             VStack(spacing: 8) {
                                 ForEach(knowledgeSourcesBinding.wrappedValue) { source in
-                                    HStack {
-                                        Image(systemName: "doc.text.fill")
-                                            .foregroundColor(source.exists ? theme.warningColor : theme.errorColor)
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(source.fileName)
-                                                .font(theme.fontCallout)
-                                                .lineLimit(1)
-                                            if !source.exists {
-                                                Text("File not found")
-                                                    .font(theme.fontCaption2)
-                                                    .foregroundColor(theme.errorColor)
-                                            } else {
-                                                Text(source.location)
-                                                    .font(theme.fontCaption2)
-                                                    .foregroundColor(theme.secondaryText)
-                                                    .lineLimit(1)
-                                                    .truncationMode(.middle)
-                                            }
-                                        }
-                                        Spacer()
-                                        Button {
-                                            knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
-                                        } label: {
-                                            Image(systemName: "xmark.circle.fill")
-                                                .foregroundColor(theme.secondaryText)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .accessibilityLabel("Remove \(source.fileName)")
+                                    KnowledgeSourceRow(source: source, theme: theme) {
+                                        knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
                                     }
-                                    .padding(10)
-                                    .background(theme.secondaryBackground.opacity(0.5))
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(
-                                        source.exists ? theme.dividerColor : theme.errorColor.opacity(0.3), lineWidth: 1
-                                    ))
                                 }
                             }
                             .padding(.leading, 12)
@@ -688,7 +688,8 @@ struct AgentConfigDetailView: View {
 
                             ErrorRecoverySection(
                                 resilienceOverrides: resilienceOverridesBinding,
-                                errorRecovery: errorRecoveryBinding
+                                errorRecovery: errorRecoveryBinding,
+                                legacyRetryPolicy: legacyRetryPolicy
                             )
                             .padding(.leading, 12)
                         }
@@ -704,7 +705,8 @@ struct AgentConfigDetailView: View {
                                 .foregroundColor(theme.primaryText)
 
                             LoopSafetySection(
-                                resilienceOverrides: resilienceOverridesBinding
+                                resilienceOverrides: resilienceOverridesBinding,
+                                legacyRetryPolicy: legacyRetryPolicy
                             )
                             .padding(.leading, 12)
                         }
@@ -800,6 +802,10 @@ struct AgentConfigDetailView: View {
             Button("Delete", role: .destructive) {
                 do {
                     try profileService.deleteProfile(withId: editBuffer.draft.id)
+                    // ⚠️ Without this the container re-evaluates, finds no edit buffer, and renders
+                    // "Profile Not Found — this profile may have been deleted": a deliberate,
+                    // confirmed action reported back to the user as an error.
+                    router.returnToChat()
                 } catch {
                     toastManager.show(error.localizedDescription, style: .error)
                 }
@@ -814,14 +820,25 @@ struct AgentConfigDetailView: View {
             // own or click "Use Default Persona". This forces a deliberate
             // choice so small/Q4 models don't run with zero guidance just
             // because the user accepted the default without reading it.
-            configManager.load(from: providerConfig.wrappedValue, using: profileService)
+            configManager.load(from: providerConfig.wrappedValue, using: profileService, defaultProfile: .agent)
+
+            // ⌘Q has no teardown to commit the floating editor on, so hand the service a way to
+            // reach it (register B3). `[weak promptWindowManager]` captures the manager object,
+            // never the view struct — capturing `self` here would route a closure the service
+            // owns back into this view's `@State`, which is the retain shape register A72 is
+            // about. `commitChanges` is nil while no window is open, so the hook is a safe no-op.
+            profileService.commitPendingPromptEdits = { [weak promptWindowManager] in
+                promptWindowManager?.commitChanges?()
+            }
         }
         .onDisappear {
             // Cleanup: Close the floating window if the user leaves the panel entirely
-            promptWindowManager.closeWindow()
+            // Committing close: navigating away must not destroy unsaved editor text.
+            promptWindowManager.closeWindowCommittingChanges()
+            profileService.commitPendingPromptEdits = nil
         }
         .onChange(of: providerConfig.wrappedValue.apiProvider) { _, _ in
-            configManager.load(from: providerConfig.wrappedValue, using: profileService)
+            configManager.load(from: providerConfig.wrappedValue, using: profileService, defaultProfile: .agent)
         }
         .advancedConfigSync(configManager: configManager, providerConfig: providerConfig, profileService: profileService)
         // NOTE: Auto-applying an Ollama preset on every modelName change was
@@ -831,13 +848,28 @@ struct AgentConfigDetailView: View {
         .unsavedChangesBackGuard(
             isDirty: editBuffer.isDirty,
             showingAlert: $showingBackAlert,
-            onDiscard: { editBuffer.revert() }
+            onDiscard: { editBuffer.revert() },
+            onLeave: { leaveEditor() }
         )
     }
 
     private func handleBackTap() {
         if editBuffer.isDirty {
             showingBackAlert = true
+        } else {
+            leaveEditor()
+        }
+    }
+
+    /// The ONE way out of this editor.
+    ///
+    /// ⚠️ Register A28. The leading button used to be wired `onBack: onCancel ?? handleBackTap`,
+    /// so in the workflow sheet the xmark called `dismiss()` directly and never consulted
+    /// `editBuffer.isDirty` — the identical view, routed, prompted correctly. The dirty check now
+    /// happens for both hosts and only the EXIT differs: dismiss the sheet, or pop the router.
+    private func leaveEditor() {
+        if let onCancel {
+            onCancel()
         } else {
             withAnimation(.easeInOut(duration: 0.2)) {
                 router.goBack()
@@ -865,7 +897,7 @@ struct AgentConfigDetailView: View {
                     keyboardShortcut: .cancelAction
                 ) {
                     editBuffer.revert()
-                    configManager.load(from: providerConfig.wrappedValue, using: profileService)
+                    configManager.load(from: providerConfig.wrappedValue, using: profileService, defaultProfile: .agent)
                 }
 
                 IslandPillButton(
@@ -878,18 +910,33 @@ struct AgentConfigDetailView: View {
                     // routinely produces looping or wandering behaviour. We don't
                     // auto-fill a default anymore — the user must make a deliberate
                     // choice — so block the save and surface the inline error.
-                    let trimmed = instructionsBinding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if trimmed.isEmpty {
-                        instructionsError = String(localized: "System instructions are required.")
+                    // ⚠️ Register A35: the rule and its wording now come from `ProfileValidator`,
+                    // the single definition. Each editor used to carry its own copy of both, and
+                    // every non-editor save path had neither.
+                    if ProfileValidator.instructionsAreMissing(instructionsBinding.wrappedValue) {
+                        instructionsError = ProfileValidator.missingInstructionsMessage
                         return
                     }
                     instructionsError = nil
 
                     do {
-                        try profileService.saveProfile(editBuffer.draft)
+                        // ⚠️ Register A34: advisories are RETURNED now, not just logged. The
+                        // save succeeded either way — the banner explains what may not work, it
+                        // does not report a failure.
+                        saveAdvisories = try profileService.saveProfile(editBuffer.draft)
                         editBuffer.markSaved()
                         toastManager.show("Profile saved", style: .success)
                     } catch {
+                        // ⚠️ A toast and NOTHING else was the whole record of a failed save on the
+                        // primary user-data write path. It disappears in seconds, so "my agent
+                        // config won't stick" arrived with no profile id, no type and no error to
+                        // correlate against.
+                        logger.error(
+                            "[PROFILE] Save FAILED for '\(editBuffer.draft.displayName)' "
+                            + "(\(editBuffer.draft.id), agent): \(error.localizedDescription). "
+                            + "CONSEQUENCE: the edit buffer stays dirty and the persisted profile is "
+                            + "unchanged; the user's edits are still on screen but not on disk."
+                        )
                         toastManager.show(error.localizedDescription, style: .error)
                     }
                 }

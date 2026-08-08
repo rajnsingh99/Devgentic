@@ -91,6 +91,11 @@ struct ConversationExporter {
 
             case .checkpoint(let summary):
                 lines.append("---\n**History Checkpoint**\n\(summary)\n---")
+
+            case .unknown(let type, _):
+                // Marked, not silently dropped: an export that quietly omits a turn misrepresents
+                // the conversation. The payload is not printed — it is raw JSON, not prose.
+                lines.append("*[Content from a newer version of Devgentic (\(type)) — not shown]*")
             }
 
             lines.append("")

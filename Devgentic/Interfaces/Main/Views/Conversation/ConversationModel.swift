@@ -127,6 +127,9 @@ struct Conversation: Identifiable, Codable, Equatable {
             return artifact.label ?? artifact.kind.rawValue
         case .checkpoint:
             return "History checkpoint"
+        case .unknown:
+            // Honest, and reassuring: the content is preserved, this build just cannot draw it.
+            return "Content from a newer version"
         }
     }
 

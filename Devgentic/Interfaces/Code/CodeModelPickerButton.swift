@@ -75,7 +75,46 @@ private struct CodeModelEntry: Identifiable, Hashable {
     let parameterSize: String?
     let parameterSizeValue: Double
     let cognitiveProfile: CognitiveProfile
-    let isEligible: Bool  // .parallelActions + 14B+
+
+    /// ⚠️ These two used to be ONE `isEligible: Bool` that ANDed a capability verdict with a size
+    /// floor, and every model failing either simply vanished from the list (register G95). Fusing
+    /// them made the two rationales inseparable, which mattered because they are not the same kind
+    /// of judgement: capability is classification metadata, which may label but never gate, while
+    /// the size floor is a deliberate quality position stated to the user in `CodeDedicatedView`.
+    /// Kept apart so each can be presented on its own terms.
+
+    /// Detected tool-calling tier. NOT a gate — `.singleAction` runs fine in Code mode via the
+    /// Markdown/ReAct generator, and even `.none` now proceeds with a warning rather than a refusal.
+    var capability: ModelCognitiveCapability { cognitiveProfile.capability }
+
+    /// Display order only — nothing is ever removed from the list.
+    /// 0 = matches every Code-mode recommendation · 1 = runnable, below the size guidance ·
+    /// 2 = parallel tool calling not confirmed (still selectable; the runtime warns and proceeds).
+    var rank: Int {
+        if capability != .parallelActions { return 2 }
+        return belowRecommendedSize == true ? 1 : 0
+    }
+
+    /// Short caveat shown on the row, or nil when the model matches every recommendation.
+    var caveatNote: String? {
+        if capability != .parallelActions {
+            return ProfileCapabilityFilter.toolCapabilityNote(
+                capability: capability,
+                caveat: cognitiveProfile.toolSupportCaveat,
+                profileType: .agent
+            ) ?? "⚠︎ Single-action tools"
+        }
+        if belowRecommendedSize == true { return "⚠︎ Below 14B" }
+        return nil
+    }
+
+    /// Below the size Code mode recommends. `nil` when the size could not be read at all.
+    ///
+    /// ⚠️ Deliberately OPTIONAL. The old code took `parameterSizeValue ?? 0` and compared it to the
+    /// floor, so a missing or unparseable `parameter_size` scored 0 and the model disappeared —
+    /// "we could not read the size" was silently treated as "too small". Unknown must never resolve
+    /// to excluded; it resolves to unknown, and the row says so.
+    let belowRecommendedSize: Bool?
 }
 
 private struct CodeModelSelectorPopover: View {
@@ -269,10 +308,16 @@ private struct CodeModelSelectorPopover: View {
                     Image(systemName: "cpu")
                         .font(.system(size: 24))
                         .foregroundColor(theme.tertiaryText)
-                    Text("No eligible models found")
+                    // ⚠️ The old copy was a single string — "No eligible models found / Code mode
+                    // requires 14B+ models with tool calling support" — shown for THREE unrelated
+                    // causes: everything filtered out, a search typo, and the Ollama daemon being
+                    // unreachable. It told a user whose daemon was simply not running to go install
+                    // bigger models. Capability no longer hides anything, so only two causes remain
+                    // and they are now distinguished.
+                    Text(emptyStateTitle)
                         .font(theme.fontSubheadline.weight(.semibold))
                         .foregroundColor(theme.secondaryText)
-                    Text("Code mode requires 14B+ models with tool calling support.")
+                    Text(emptyStateDetail)
                         .font(.system(size: 11))
                         .foregroundColor(theme.secondaryText.opacity(0.7))
                         .multilineTextAlignment(.center)
@@ -293,11 +338,54 @@ private struct CodeModelSelectorPopover: View {
         }
     }
 
-    /// Models filtered to eligible only (parallelActions + 14B+), then by search text.
+    /// Models that clear the size guidance, tool-capable ones first, then by search text.
+    ///
+    /// ⚠️ The old filter ANDed two unlike judgements — `capability == .parallelActions && size >= 14`
+    /// — and dropped anything failing either (register G95). Two separate problems:
+    ///
+    /// 1. **Capability was a gate.** A `.singleAction` model runs fine in Code mode via the
+    ///    Markdown/ReAct generator, and `.none` now proceeds with a warning rather than a refusal,
+    ///    yet both were indistinguishable from "not installed" and the search box could not reach
+    ///    them. Capability is classification metadata: it may label, never gate. It now ranks and
+    ///    annotates the row instead.
+    /// 2. **The size floor failed CLOSED on missing data.** `parameterSizeValue` returns 0 for an
+    ///    unparseable or absent `parameter_size`, so "we could not read the size" was silently
+    ///    treated as "too small". Unknown now means unknown and the model is shown.
+    ///
+    /// The floor itself SURVIVES as a filter, deliberately: a parameter count is a quality judgement,
+    /// not a capability classification, and Code mode states the 14B guidance to the user as a
+    /// promise. Only its fail-closed behaviour was a defect.
     private var eligibleModels: [CodeModelEntry] {
-        let eligible = localModels.filter { $0.isEligible }
-        if modelSearchText.isEmpty { return eligible }
-        return eligible.filter { $0.name.localizedCaseInsensitiveContains(modelSearchText) }
+        let sizeAppropriate = localModels.filter { $0.belowRecommendedSize != true }
+        let ranked = sizeAppropriate.sorted { a, b in
+            if a.rank != b.rank { return a.rank < b.rank }
+            return a.name < b.name
+        }
+        if modelSearchText.isEmpty { return ranked }
+        return ranked.filter { $0.name.localizedCaseInsensitiveContains(modelSearchText) }
+    }
+
+    /// Installed models hidden purely for being under the size guidance — needed so the empty state
+    /// can say which of several unrelated causes it is looking at.
+    private var hiddenForSize: Int {
+        localModels.filter { $0.belowRecommendedSize == true }.count
+    }
+
+    private var emptyStateTitle: String {
+        if !modelSearchText.isEmpty { return "No models match your search" }
+        if hiddenForSize > 0 { return "No models meet the size guidance" }
+        return "No local models found"
+    }
+
+    private var emptyStateDetail: String {
+        if !modelSearchText.isEmpty {
+            return "Clear the search to see the available models."
+        }
+        if hiddenForSize > 0 {
+            return "\(hiddenForSize) installed model\(hiddenForSize == 1 ? " is" : "s are") under the "
+                + "14B Code mode recommends. Larger models finish multi-step edits in far fewer turns."
+        }
+        return "Install a model in Ollama or the MLX model manager, then reopen this list."
     }
 
     private func modelRow(_ entry: CodeModelEntry) -> some View {
@@ -335,7 +423,14 @@ private struct CodeModelSelectorPopover: View {
             } else if provider == .mlx {
                 localModels = listDownloadedMLXModels()
             }
-            logger.info("Loaded \(localModels.count) models (\(localModels.filter(\.isEligible).count) eligible for Code)")
+            logger.info(
+                "[CODE] Loaded \(localModels.count) local model(s) for the Code picker — "
+                + "\(localModels.filter { $0.rank == 0 }.count) fully recommended, "
+                + "\(localModels.filter { $0.belowRecommendedSize == true }.count) below the 14B "
+                + "guidance, \(localModels.filter { $0.capability != .parallelActions }.count) "
+                + "without confirmed parallel tool calling. CONSEQUENCE: none are hidden — all are "
+                + "listed and selectable, ranked with the recommended ones first."
+            )
         } catch {
             logger.error("Failed to fetch models: \(error.localizedDescription)")
             localModels = []
@@ -354,14 +449,17 @@ private struct CodeModelSelectorPopover: View {
                     do {
                         let response = try await OllamaConnect.fetchModelDetails(name: name, baseURL: baseURL)
                         let profile = response.cognitiveProfile
-                        let paramValue = response.details?.parameterSizeValue ?? 0
-                        let isEligible = profile.capability == .parallelActions && paramValue >= 14.0
+                        // `parameterSizeValue` returns 0 for a nil or unparseable size, so the raw
+                        // field decides whether we know anything at all — never the computed 0.
+                        let knownSize: Double? = response.details?.parameterSize == nil
+                            ? nil
+                            : response.details?.parameterSizeValue
                         return CodeModelEntry(
                             name: name,
                             parameterSize: response.details?.parameterSize,
-                            parameterSizeValue: paramValue,
+                            parameterSizeValue: knownSize ?? 0,
                             cognitiveProfile: profile,
-                            isEligible: isEligible
+                            belowRecommendedSize: knownSize.map { $0 > 0 && $0 < 14.0 }
                         )
                     } catch {
                         return nil
@@ -414,7 +512,10 @@ private struct CodeModelSelectorPopover: View {
                     parameterSize: profile.metadata?.parameterCount,
                     parameterSizeValue: 0,
                     cognitiveProfile: profile,
-                    isEligible: profile.capability == .parallelActions
+                    // MLX exposes no parsed parameter count here, so the size is genuinely unknown.
+                    // The old code passed 0 and the Ollama arm's floor made that "too small"; this
+                    // arm never applied the floor at all, so the two providers silently disagreed.
+                    belowRecommendedSize: nil
                 )
             }
             .sorted { $0.name < $1.name }
@@ -510,7 +611,13 @@ private struct CodeModelRow: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
 
-                    if let size = entry.parameterSize {
+                    // Caveats are DESCRIBED here rather than enforced by hiding the row (G95).
+                    if let caveat = entry.caveatNote {
+                        Text(caveat)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(theme.warningColor)
+                            .lineLimit(1)
+                    } else if let size = entry.parameterSize {
                         Text(size)
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundColor(theme.secondaryText)

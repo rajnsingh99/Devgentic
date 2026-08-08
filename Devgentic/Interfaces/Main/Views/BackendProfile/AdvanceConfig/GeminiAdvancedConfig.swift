@@ -41,7 +41,15 @@ struct GeminiAdvancedConfig: Codable, Hashable {
         GeminiAdvancedConfig(
             temperature: 0.9,
             topP: 1.0,
-            topK: 1,
+            // ⚠️ register A54 — was `1`, which is GREEDY DECODING: a one-element candidate set is
+            // invariant under temperature and Top P, so the two controls displayed directly above
+            // it were inert and every Gemini profile returned flat, repeatable output. Google's own
+            // default is 64. `nil` omits the key so the model applies its own default, matching
+            // `AnthropicAdvancedConfig`, which defaults `topK` to nil for the same reason.
+            // ⚠️ This value is not merely displayed: `AgentConnect.initializeModel` encodes
+            // `.default()` for an UNCONFIGURED Gemini profile (register A24), so the shipped
+            // default goes on the wire for profiles the user never opened the panel on.
+            topK: nil,
             maxOutputTokens: 2048,
             stopSequences: [],
             safetySettings: [
@@ -94,12 +102,21 @@ struct GeminiAdvancedConfig: Codable, Hashable {
         }
 
         // **FIXED**: For `topK`, first try to decode an Int. If that fails, try a Bool.
+        //
+        // ⚠️ register A54 — a stored `1` is REPAIRED to nil here rather than honoured. Changing
+        // `default()` alone fixes new profiles and leaves every existing one decoding the greedy
+        // value forever, and the blob is the only place it lives (a corrected write site does not
+        // fix data already on disk — registers A11/A12). The repair is safe to do blind because
+        // the old stepper's range floor was `1`, so a stored 1 is indistinguishable from "never
+        // touched"; greedy-by-accident is overwhelmingly likelier than greedy-on-purpose, and a
+        // user who wants it can still set it — the floor is unchanged.
         if let topKInt = try? container.decode(Int.self, forKey: .topK) {
-            self.topK = topKInt
+            self.topK = topKInt == 1 ? nil : topKInt
         } else if let topKBool = try? container.decode(Bool.self, forKey: .topK) {
-            self.topK = topKBool ? 1 : 0 // Convert bool to a sensible default int
+            self.topK = topKBool ? nil : 0 // legacy bool: `true` meant 1, i.e. the greedy value
         } else {
-            self.topK = try container.decodeIfPresent(Int.self, forKey: .topK)
+            let stored = try container.decodeIfPresent(Int.self, forKey: .topK)
+            self.topK = stored == 1 ? nil : stored
         }
         
         // **FIXED**: For `maxOutputTokens`, first try to decode an Int. If that fails, try a Bool.

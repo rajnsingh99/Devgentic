@@ -308,9 +308,17 @@ struct PlanGeneratorStrategy: Sendable {
             return [SubTask(id: "step_1", description: fallbackDescription)]
         }
 
-        // Cap to configured max
+        // Cap to configured max — logged for the same reason as the twin site in
+        // `PlanningCapability`: a silent truncation is indistinguishable from a short plan.
         if subtasks.count > planningConfig.maxSubtasks {
+            let generated = subtasks.count
+            let dropped = generated - planningConfig.maxSubtasks
             subtasks = Array(subtasks.prefix(planningConfig.maxSubtasks))
+            logger.warning("""
+                [PLANNING] Parsed plan truncated: \(generated) subtask(s) parsed but Max Subtasks \
+                is \(planningConfig.maxSubtasks). CONSEQUENCE: \(dropped) step(s) were DISCARDED \
+                and will not be attempted — raise Max Subtasks if the task needs them.
+                """)
         }
 
         logger.info("Parsed \(subtasks.count) subtask(s) from numbered list.")

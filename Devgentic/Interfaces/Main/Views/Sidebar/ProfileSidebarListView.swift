@@ -112,13 +112,28 @@ struct ProfileSidebarListView: View {
             // Profile list
             if filteredProfiles.isEmpty {
                 if profileService.profiles.isEmpty {
-                    SidebarEmptyStateView(
-                        title: "No Profiles",
-                        subtitle: "Create an AI profile to get started.",
-                        buttonTitle: "New Profile",
-                        systemImage: "cpu",
-                        onAction: { isAddingProfile = true }
-                    )
+                    // ⚠️ "We could not read your profiles" and "you have none yet" rendered
+                    // IDENTICALLY before this. At launch `loadProfiles()` runs from `init`, where
+                    // there is no prior list to fall back on, so a fetch failure showed a first-run
+                    // empty state — with a "New Profile" button — to a user whose store was full.
+                    // Creating one from there is the worst available next action.
+                    if let loadError = profileService.lastLoadError {
+                        SidebarEmptyStateView(
+                            title: "Couldn't Load Profiles",
+                            subtitle: "\(loadError)\n\nYour profiles have not been deleted — they could not be read.",
+                            buttonTitle: "Retry",
+                            systemImage: "exclamationmark.triangle",
+                            onAction: { profileService.loadProfiles() }
+                        )
+                    } else {
+                        SidebarEmptyStateView(
+                            title: "No Profiles",
+                            subtitle: "Create an AI profile to get started.",
+                            buttonTitle: "New Profile",
+                            systemImage: "cpu",
+                            onAction: { isAddingProfile = true }
+                        )
+                    }
                 } else {
                     VStack(spacing: 8) {
                         Spacer()
@@ -137,7 +152,11 @@ struct ProfileSidebarListView: View {
                                 profile: profile,
                                 isSelected: activeProfileID == profile.id,
                                 onSelect: {
-                                    if (profileService.editBuffer?.isDirty == true) && activeProfileID != profile.id {
+                                    // ⚠️ `hasUnsavedEditorChanges`, not `editBuffer?.isDirty`: a
+                                    // workflow canvas keeps its dirt in `WorkflowCanvasState`, so
+                                    // the buffer check alone reported "clean" for a canvas full of
+                                    // unsaved nodes and switched away without prompting.
+                                    if profileService.hasUnsavedEditorChanges && activeProfileID != profile.id {
                                         pendingProfileID = profile.id
                                         showingDiscardAlert = true
                                     } else {
@@ -165,24 +184,42 @@ struct ProfileSidebarListView: View {
             AddBackendProfileView(
                 existingProfileNames: profileService.profiles.map(\.displayName)
             ) { newProfile in
-                do {
-                    try profileService.saveProfile(newProfile)
-                    router.navigateToProfile(newProfile.id, activatingBufferOn: profileService)
-                } catch {
-                    toastManager.show(error.localizedDescription, style: .error)
-                }
+                // ⚠️ Deliberately NOT caught here (register A64). The throw is what keeps the sheet
+                // open with the user's name and type intact; swallowing it into a toast is exactly
+                // the behaviour that made a rejected create unrecoverable.
+                try profileService.saveProfile(newProfile)
+                router.navigateToProfile(newProfile.id, activatingBufferOn: profileService)
             }
         }
         .alert("Delete Profile?", isPresented: $showingDeleteAlert, presenting: profileToDelete) { profile in
             Button("Delete", role: .destructive) {
-                try? profileService.deleteProfile(withId: profile.id)
-                if activeProfileID == profile.id {
-                    router.returnToChat()
+                // ⚠️ Was `try?` followed by an UNCONDITIONAL `returnToChat()`. On a throw the user
+                // got no toast, the row stayed (the service's `loadProfiles()` never ran because
+                // the throw preceded it), and they were still yanked out of the profile they were
+                // editing — a failure that looked exactly like a UI bug. The create/duplicate arms
+                // ten lines above already do this correctly.
+                do {
+                    try profileService.deleteProfile(withId: profile.id)
+                    if activeProfileID == profile.id {
+                        router.returnToChat()
+                    }
+                } catch {
+                    toastManager.show(error.localizedDescription, style: .error)
                 }
             }
             Button("Cancel", role: .cancel) {}
         } message: { profile in
-            Text("Are you sure you want to delete '\(profile.displayName)'? This action cannot be undone.")
+            // ⚠️ Register A30. This used to say only "This action cannot be undone" — true, and
+            // useless: it names no consequence beyond the profile itself, so a user deleting an
+            // agent had no way to learn that a nightly scheduled task depended on it. The warning
+            // is only useful BEFORE the delete; afterwards there is nothing to decide.
+            if let warning = ProfileReferenceIndex.deletionWarning(
+                for: ProfileReferenceIndex.references(to: profile.id, in: profileService.profiles)
+            ) {
+                Text("Delete '\(profile.displayName)'? This can't be undone.\n\n\(warning)")
+            } else {
+                Text("Are you sure you want to delete '\(profile.displayName)'? This action cannot be undone.")
+            }
         }
         .sheet(item: $profileToDuplicate) { source in
             DuplicateProfileSheet(
@@ -199,7 +236,23 @@ struct ProfileSidebarListView: View {
             }
         }
         .confirmationDialog("Unsaved Changes", isPresented: $showingDiscardAlert) {
+            // Offered only when a canvas is actually dirty — the field editor has its own Save
+            // pill, and a second Save button that silently did nothing for it would be worse
+            // than none.
+            if profileService.canvasEditGuard.hasUnsavedChanges {
+                Button("Save Changes") {
+                    profileService.canvasEditGuard.saveHook?()
+                    if let id = pendingProfileID {
+                        router.navigateToProfile(id, activatingBufferOn: profileService)
+                    }
+                    pendingProfileID = nil
+                }
+            }
             Button("Discard Changes", role: .destructive) {
+                // ⚠️ Actually discard. Navigating away used to be the whole of "discard", which
+                // worked by accident for the field buffer (it is rebuilt on activate) and not at
+                // all for a canvas, whose state outlives the row change.
+                profileService.canvasEditGuard.discardHook?()
                 if let id = pendingProfileID {
                     router.navigateToProfile(id, activatingBufferOn: profileService)
                 }

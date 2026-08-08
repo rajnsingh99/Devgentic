@@ -54,5 +54,10 @@ struct WorkflowProfileEditorView: View {
             }
         }
         .frame(width: 800, height: 750)
+        // ⚠️ The xmark now prompts when there are unsaved edits (register A28), but a sheet has
+        // exits the view does not own — Esc, click-away, the drag-dismiss gesture — and each of
+        // them destroyed the whole local buffer without asking. Closing those leaves exactly one
+        // way out of a dirty editor, and it is the one that prompts.
+        .interactiveDismissDisabled(localBuffer.isDirty)
     }
 }

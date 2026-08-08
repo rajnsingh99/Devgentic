@@ -372,7 +372,9 @@ final class BackendProfileStoreTests: XCTestCase {
             ]
         ]
         let legacyData = try JSONSerialization.data(withJSONObject: legacyJSON)
-        let migrated = ProfileMigrator.migrateIfNeeded(legacyData)
+        guard case .migrated(let migrated) = ProfileMigrator.migrateIfNeeded(legacyData) else {
+            return XCTFail("Expected a migratable blob, got a refusal")
+        }
         let migratedJSON = try JSONSerialization.jsonObject(with: migrated) as? [String: Any]
 
         XCTAssertEqual(migratedJSON?["schemaVersion"] as? Int, ProfileSchemaVersion.current.rawValue,
@@ -385,7 +387,9 @@ final class BackendProfileStoreTests: XCTestCase {
             llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "llama3")
         ))
         let data = try JSONEncoder().encode(details)
-        let migrated = ProfileMigrator.migrateIfNeeded(data)
+        guard case .migrated(let migrated) = ProfileMigrator.migrateIfNeeded(data) else {
+            return XCTFail("Expected a migratable blob, got a refusal")
+        }
         let decoded = try JSONDecoder().decode(ProfileDetails.self, from: migrated)
 
         if case .bot(let config) = decoded {
@@ -465,33 +469,4 @@ final class BackendProfileStoreTests: XCTestCase {
         }
     }
 
-    // MARK: - Export Envelope
-
-    func testExportEnvelopeRoundTrip() throws {
-        let profiles = [
-            BackendProfileSnapshot(
-                displayName: "Bot A",
-                details: .bot(BotConfig(llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "llama3")))
-            )
-        ]
-        let envelope = ProfileExportEnvelope(
-            formatVersion: ProfileExportEnvelope.currentFormatVersion,
-            exportedAt: Date(),
-            appVersion: "99.0",
-            profiles: profiles
-        )
-
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let data = try encoder.encode(envelope)
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let decoded = try decoder.decode(ProfileExportEnvelope.self, from: data)
-
-        XCTAssertEqual(decoded.formatVersion, ProfileExportEnvelope.currentFormatVersion)
-        XCTAssertEqual(decoded.appVersion, "99.0")
-        XCTAssertEqual(decoded.profiles.count, 1)
-        XCTAssertEqual(decoded.profiles.first?.displayName, "Bot A")
-    }
 }

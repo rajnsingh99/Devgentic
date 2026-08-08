@@ -192,6 +192,17 @@ final class ProfileValidatorTests: XCTestCase {
 
     // MARK: - Agent Profile Validation
 
+    /// ⚠️ Assertion CHANGED 2026-08-06 (G92), and the change is the point rather than a repair.
+    ///
+    /// This test was written 2026-04-02 and went red on 2026-04-16, when a capability warning was
+    /// appended to the same array. It stayed red for ~4 months. The profile it builds is genuinely
+    /// valid — a local Ollama agent on llama3 — and the right fix was to stop that advisory finding
+    /// from carrying the force of an error, NOT to delete it.
+    ///
+    /// So the bar is now `blocking.isEmpty` ("this profile can be saved"), not `isEmpty` ("nothing
+    /// was observed about it"). `cognitiveCapability` defaults to `.none`, so the advisory IS still
+    /// produced here — asserting `isEmpty` would now mean asserting the warning had been thrown
+    /// away. See ProfileValidationSeverityTests for the full contract.
     func testValidAgentProfilePasses() {
         let config = AgentConfig(
             llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "llama3", baseURL: "http://localhost:11434"),
@@ -199,7 +210,7 @@ final class ProfileValidatorTests: XCTestCase {
         )
         let profile = BackendProfileSnapshot(displayName: "Agent", details: .agent(config))
         let errors = ProfileValidator.validate(profile, strict: true)
-        XCTAssertTrue(errors.isEmpty, "Valid agent profile should pass: \(errors)")
+        XCTAssertTrue(errors.blocking.isEmpty, "Valid agent profile should be saveable: \(errors.blocking)")
     }
 
     // MARK: - Workflow Validation (strict mode only)
@@ -261,7 +272,11 @@ final class ProfileValidatorTests: XCTestCase {
         )
         return BackendProfileSnapshot(
             displayName: name,
-            details: .bot(BotConfig(llmConfig: llmConfig))
+            // ⚠️ Register A35: instructions are now part of what "valid" MEANS for a bot in strict
+            // mode. `BotConfigDetailView` has always refused to save without them; the rule simply
+            // lived in the view and the validator never knew. This fixture asserts a fully-valid
+            // profile, so it has to be one the app's own Save button would accept.
+            details: .bot(BotConfig(llmConfig: llmConfig, instructions: "Be helpful."))
         )
     }
 }

@@ -17,6 +17,21 @@ private let logger = DGLogger(category: "PlanningCapability")
 // MARK: - Capability Definition
 
 struct PlanningCapability: ExecutorCapability, Sendable {
+
+    /// Whether parallel subtask execution is honoured at all.
+    ///
+    /// ⚠️ Register A67. `AgentCapabilitiesSection` hides the "Parallel Subtasks" toggle with a
+    /// comment claiming "Default is forced to false below" — and nothing forced it. The tolerant
+    /// decoder defaults the field only when the key is ABSENT, so a profile that persisted `true`
+    /// before the toggle was removed decoded as `true` and took the parallel branch, with no
+    /// control and no way for the user to see or change it.
+    ///
+    /// The reasoning for hiding it stands: parallel subtasks serialize at the LLM layer (one GPU
+    /// for local models, shared rate-limit tokens for cloud), so the parallelism is illusory and
+    /// only adds ordering nondeterminism. This constant is what actually enforces that, and it is
+    /// the ONE place to flip when batch inference or multi-model routing makes it real. The stored
+    /// field is deliberately left intact so those profiles keep their preference for that day.
+    static let parallelSubtasksSupported = false
     let config: PlanningCapabilityConfig
 
     func wrap(_ executor: any Executor) -> any Executor {
@@ -147,6 +162,19 @@ actor PlanningExecutorWrapper: Executor {
                     // re-asks inside any subtask (threaded via subtaskInput below).
                     let interactionMemory = input.interactionMemory ?? RunInteractionMemory()
 
+                    // ⚠️ Register A67: a stored preference this build will not honour must say so.
+                    // These profiles exist — the toggle was removed after they were saved — and
+                    // "my agent used to run subtasks in parallel and now doesn't" has no other
+                    // answer available anywhere in the app.
+                    if config.parallelSubtasks && !PlanningCapability.parallelSubtasksSupported {
+                        logger.notice(
+                            "[PLANNING] This profile has Parallel Subtasks stored as ON, but parallel "
+                            + "execution is disabled in this build (PlanningCapability."
+                            + "parallelSubtasksSupported). CONSEQUENCE: subtasks run SEQUENTIALLY. "
+                            + "The stored preference is preserved, not rewritten."
+                        )
+                    }
+
                     let planGenerator = PlanGeneratorStrategy(planningConfig: config)
                     var subtasks: [SubTask]
 
@@ -200,9 +228,25 @@ actor PlanningExecutorWrapper: Executor {
                             }
                         }
 
-                        // Cap to configured max
+                        // Cap to configured max.
+                        //
+                        // ⚠️ MUST be logged. This silently discarded model-generated steps: given
+                        // an 8-step task at the default cap of 5, the plan card rendered 5, the
+                        // agent executed 5 and reported completion, and the last three requirements
+                        // were simply never attempted. The user's only signal was a wrong answer —
+                        // every neighbouring failure path in this function already logs, which made
+                        // the omission read as "nothing was dropped".
                         if subtasks.count > config.maxSubtasks {
+                            let generated = subtasks.count
+                            let dropped = generated - config.maxSubtasks
                             subtasks = Array(subtasks.prefix(config.maxSubtasks))
+                            logger.warning("""
+                                [PLANNING] Plan truncated for conversation \
+                                \(input.conversationID.uuidString.prefix(8)): the model generated \
+                                \(generated) subtask(s) but Max Subtasks is \(config.maxSubtasks). \
+                                CONSEQUENCE: \(dropped) step(s) were DISCARDED and the run will not \
+                                attempt them — raise Max Subtasks if the task needs them.
+                                """)
                         }
                     } catch is CancellationError {
                         // Stop must propagate, not be folded into a single-task fallback that keeps
@@ -280,7 +324,7 @@ actor PlanningExecutorWrapper: Executor {
                         let levelSubtasks = levelIDs.compactMap { id in subtasks.first(where: { $0.id == id }) }
                         logger.info("Executing level \(levelIndex + 1)/\(levels.count) (\(levelSubtasks.count) subtask(s)).")
 
-                        if config.parallelSubtasks && levelSubtasks.count > 1 {
+                        if PlanningCapability.parallelSubtasksSupported && config.parallelSubtasks && levelSubtasks.count > 1 {
                             // Parallel execution — catch per-subtask errors so one failure
                             // doesn't discard results from siblings that completed successfully.
                             // Snapshot results from prior levels for dependency seeding.

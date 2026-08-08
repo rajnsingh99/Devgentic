@@ -357,7 +357,25 @@ struct ToolLibraryContainerView: View {
         // Persist
         if let idx = profileService.profiles.firstIndex(where: { $0.id == profileID }) {
             profileService.profiles[idx].details = writeTools(tools, into: profileService.profiles[idx].details)
-            try? profileService.saveProfile(profileService.profiles[idx])
+            // ⚠️ Was a bare `try?`. The in-memory arrays above are ALREADY mutated, so a throw here
+            // leaves the Tool Library showing the new tool set while disk keeps the old one — the
+            // change survives until relaunch and then silently reverts, with no toast and (before
+            // this) no log line either. This was the only one of the affected save paths that
+            // produced zero diagnostic output.
+            do {
+                try profileService.saveProfile(profileService.profiles[idx])
+                // ⚠️ Re-baseline ONLY on success, and only onto what was actually written. Without
+                // this the detail editor kept an `original` describing the pre-change tool list, so
+                // it showed Save/Revert pills for an edit the user never made — and Revert restored
+                // that stale list while disk and every send kept the new one.
+                profileService.rebaseEditBuffer(to: profileService.profiles[idx])
+            } catch {
+                logger.error(
+                    "[TOOLS] Failed to persist tool selection for profile \(profileID): \(error). "
+                    + "CONSEQUENCE: the Tool Library shows the new selection but it was NOT written "
+                    + "to disk — it reverts on relaunch."
+                )
+            }
         }
     }
 
@@ -437,7 +455,19 @@ struct ToolLibraryContainerView: View {
                 // Also write to profile service for persistence
                 guard let idx = self.profileService.profiles.firstIndex(where: { $0.id == self.profileID }) else { return }
                 self.profileService.profiles[idx].details = self.writeTools(newTools, into: self.profileService.profiles[idx].details)
-                try? self.profileService.saveProfile(self.profileService.profiles[idx])
+                // ⚠️ Same as above — the binding's setter has already mutated both the edit buffer
+                // and the service array, so a swallowed throw desynchronises the UI from disk.
+                do {
+                    try self.profileService.saveProfile(self.profileService.profiles[idx])
+                    // Same re-baseline as the bulk path above — see the note there.
+                    self.profileService.rebaseEditBuffer(to: self.profileService.profiles[idx])
+                } catch {
+                    logger.error(
+                        "[TOOLS] Failed to persist tool binding for profile \(self.profileID): \(error). "
+                        + "CONSEQUENCE: the UI shows the new tool set but it was NOT written to disk — "
+                        + "it reverts on relaunch."
+                    )
+                }
             }
         )
     }

@@ -14,20 +14,34 @@
 
 import SwiftUI
 import AppKit
+import os
+
+private let logger = DGLogger(category: "SimplePromptWindow")
 
 // MARK: - Window Manager
 
 /// Manages a single floating NSWindow for the simple prompt editor. One
 /// instance per consuming view. The class is `@MainActor` because every
 /// AppKit touch must happen on the main thread.
+///
+/// ⚠️ An `NSObject` subclass and its own `NSWindowDelegate` (register A71). Closing the window with
+/// the red button does NOT route through `closeWindow()`, and `isReleasedWhenClosed` is false, so
+/// `window` stayed pointing at a closed `NSWindow` — which retains its `NSHostingView`, which
+/// retains the text binding and the `ThemeManager`. Worse, the next `showEditor` found a non-nil
+/// but not-visible window, fell through to the "create a new one" path, and abandoned the old one:
+/// a leak per red-button close, for the lifetime of the profile editor.
 @MainActor
-final class SimplePromptWindowManager {
+final class SimplePromptWindowManager: NSObject, NSWindowDelegate {
     private var window: NSWindow?
 
     /// Spawns or brings the editor window to the front.
+    /// ⚠️ `botName` is a BINDING, not a `String` (register A75). The editor lives inside an
+    /// `NSHostingView` whose root view is built once, so a plain `String` is frozen at open time —
+    /// an `.onChange` on it could never fire. A binding into the `@Observable` draft re-renders the
+    /// hosted view exactly the way the existing `text` binding already does.
     func showEditor(
         text: Binding<String>,
-        botName: String,
+        botName: Binding<String>,
         themeManager: ThemeManager,
         contextWindow: Int? = nil
     ) {
@@ -35,27 +49,27 @@ final class SimplePromptWindowManager {
 
         if let existingWindow = window, existingWindow.isVisible {
             existingWindow.contentView = NSHostingView(
-                rootView: SimplePromptEditorHost(
-                    themeManager: themeManager,
-                    text: text,
-                    botName: botName,
-                    contextWindow: contextWindow,
-                    onClose: { [weak self] in self?.closeWindow() }
-                )
+                rootView: makeHost(text: text, botName: botName,
+                                   themeManager: themeManager, contextWindow: contextWindow)
             )
-            existingWindow.title = "System Instructions: \(botName)"
+            existingWindow.title = Self.title(for: botName.wrappedValue)
             existingWindow.backgroundColor = NSColor(theme.primaryBackground)
             existingWindow.makeKeyAndOrderFront(nil)
+            logger.info("[PROFILE] Re-presented the floating prompt editor for '\(botName.wrappedValue)'.")
             return
         }
 
-        let editorView = SimplePromptEditorHost(
-            themeManager: themeManager,
-            text: text,
-            botName: botName,
-            contextWindow: contextWindow,
-            onClose: { [weak self] in self?.closeWindow() }
-        )
+        // ⚠️ Reached with a non-nil `window` after a red-button close. Before the delegate below
+        // existed this silently orphaned the old window; now it should never happen, so say so if
+        // it does rather than leaking quietly a second time.
+        if window != nil {
+            logger.error(
+                "[PROFILE] A closed prompt-editor window was still retained when opening a new one "
+                + "for '\(botName.wrappedValue)'. CONSEQUENCE: releasing it now; if this appears, the "
+                + "windowWillClose delegate is not firing and the leak from A71 is back."
+            )
+            window = nil
+        }
 
         let newWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 600, height: 500),
@@ -65,29 +79,76 @@ final class SimplePromptWindowManager {
         )
 
         newWindow.center()
-        newWindow.title = "System Instructions: \(botName)"
+        newWindow.title = Self.title(for: botName.wrappedValue)
         newWindow.isReleasedWhenClosed = false
-        newWindow.contentView = NSHostingView(rootView: editorView)
+        newWindow.contentView = NSHostingView(
+            rootView: makeHost(text: text, botName: botName,
+                               themeManager: themeManager, contextWindow: contextWindow)
+        )
         newWindow.level = .floating
+        newWindow.delegate = self
 
         newWindow.isOpaque = false
         newWindow.backgroundColor = NSColor(theme.primaryBackground).withAlphaComponent(0.98)
 
         self.window = newWindow
         newWindow.makeKeyAndOrderFront(nil)
+        logger.info("[PROFILE] Opened the floating prompt editor for '\(botName.wrappedValue)' "
+                    + "(context window: \(contextWindow.map(String.init) ?? "unknown")).")
+    }
+
+    private func makeHost(
+        text: Binding<String>,
+        botName: Binding<String>,
+        themeManager: ThemeManager,
+        contextWindow: Int?
+    ) -> SimplePromptEditorHost {
+        SimplePromptEditorHost(
+            themeManager: themeManager,
+            text: text,
+            botName: botName,
+            contextWindow: contextWindow,
+            onClose: { [weak self] in self?.closeWindow() },
+            // ⚠️ Register A75. `updateTitle` was never wrong — it was never CALLED from the bot
+            // editor, so renaming a bot left the detached window advertising the old name. (The
+            // scheduler does call it, correctly, which is why this only ever broke in one of the
+            // two places.) Driving it from the host's own re-render removes the call site that can
+            // be forgotten: keeping the title current stops being the caller's job.
+            onTitleChange: { [weak self] newName in self?.updateTitle(botName: newName) }
+        )
     }
 
     func closeWindow() {
+        // `window?.close()` triggers `windowWillClose`, which clears the reference and logs.
         window?.close()
         window = nil
     }
 
-    /// Updates the floating window's title without rebuilding the content
-    /// view (so the editor keeps focus). No-op when the window isn't open —
-    /// callers can fire this on every name keystroke without checks.
+    /// Updates the floating window's title without rebuilding the content view (so the editor
+    /// keeps focus). No-op when the window isn't open — callers can fire it on every keystroke.
+    ///
+    /// Still `internal`: `CreateScheduledTaskView` drives it explicitly because its title is a
+    /// derived string (with an "unnamed task" fallback), not a plain binding into the draft.
     func updateTitle(botName: String) {
         guard let window, window.isVisible else { return }
-        window.title = "System Instructions: \(botName)"
+        window.title = Self.title(for: botName)
+    }
+
+    private static func title(for botName: String) -> String {
+        String(localized: "System Instructions: \(botName)")
+    }
+
+    // MARK: - NSWindowDelegate
+
+    /// ⚠️ The whole point of A71. Fires for EVERY close — the red button, ⌘W, the Done button, and
+    /// a window closed as the app terminates — so the manager stops retaining a dead window and its
+    /// hosting view in all of them.
+    nonisolated func windowWillClose(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            logger.info("[PROFILE] Floating prompt editor closed; releasing its window and hosting view.")
+            window?.delegate = nil
+            window = nil
+        }
     }
 }
 
@@ -99,19 +160,22 @@ final class SimplePromptWindowManager {
 private struct SimplePromptEditorHost: View {
     @Bindable var themeManager: ThemeManager
     @Binding var text: String
-    var botName: String
+    @Binding var botName: String
     var contextWindow: Int?
     var onClose: () -> Void
+    /// Called when the host re-renders under a new name, so the window title can follow (A75).
+    var onTitleChange: (String) -> Void
 
     var body: some View {
         SimplePromptEditorView(
             text: $text,
-            botName: botName,
+            botName: $botName,
             contextWindow: contextWindow,
             onClose: onClose
         )
         .environment(\.appTheme, themeManager.currentTheme)
         .preferredColorScheme(themeManager.currentTheme.colorScheme)
+        .onChange(of: botName) { _, newName in onTitleChange(newName) }
     }
 }
 
@@ -119,7 +183,8 @@ private struct SimplePromptEditorHost: View {
 
 struct SimplePromptEditorView: View {
     @Binding var text: String
-    var botName: String
+    /// A binding so a profile rename reaches the detached window — see `showEditor`.
+    @Binding var botName: String
     /// Context window size in tokens for the active model. `nil` if unknown.
     var contextWindow: Int?
     var onClose: () -> Void

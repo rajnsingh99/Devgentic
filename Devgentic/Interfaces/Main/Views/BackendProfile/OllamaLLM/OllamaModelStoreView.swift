@@ -154,6 +154,40 @@ struct OllamaModelStoreContent: View {
                 .background(showSearchBar ? theme.primaryBackground : Color.clear)
             }
 
+            // MARK: - Failure Banner
+            //
+            // ⚠️ Neither of these strings was rendered anywhere. `downloadErrorMessage` had exactly
+            // two references in the repo — its declaration and its assignment — and
+            // `modelRemoveError` had none outside the service that writes it. A refused delete or a
+            // failed pull left the store looking idle and unchanged.
+            if let message = viewModel.deleteErrorMessage ?? viewModel.downloadErrorMessage {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(theme.errorColor)
+                        .accessibilityHidden(true)
+                    Text(message)
+                        .font(theme.fontCaption)
+                        .foregroundColor(theme.primaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 8)
+                    Button {
+                        viewModel.dismissErrors()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(theme.secondaryText)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Dismiss")
+                    .accessibilityLabel("Dismiss error")
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(theme.errorColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+                .accessibilityElement(children: .combine)
+            }
+
             // MARK: - Main Content Area
             ZStack {
                 if viewModel.isLoading && viewModel.displayedModels.isEmpty {

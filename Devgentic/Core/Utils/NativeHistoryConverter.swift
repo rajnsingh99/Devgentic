@@ -296,6 +296,24 @@ struct NativeHistoryConverter {
         var pendingUser: HistoryTurn? = nil
 
         for message in history {
+            // ⚠️ A message this build cannot READ must not be sent as an EMPTY STRING.
+            //
+            // `MessageContent.unknown` preserves content written by a newer build, and its
+            // `textContent` is deliberately nil — emitting synthetic text would put words into the
+            // conversation that nobody said. But `?? ""` then turned that nil into an empty content
+            // block, and Anthropic rejects an empty string with a 400: the read-side
+            // forward-compatibility guard was creating a request-side failure (G84).
+            //
+            // Gated on `isUnrecognised` specifically, NOT on "textContent == nil" — `.mediaArtifact`
+            // also has nil text, and dropping those would silently strip image turns from history.
+            guard !message.content.isUnrecognised else {
+                logger.warning("[HISTORY] Skipping message \(message.id.uuidString.prefix(8), privacy: .public) — content written by a newer build, unreadable, so there is no text to send. CONSEQUENCE: this turn is omitted from the model's history (stored bytes untouched); sending it as an empty content block is a provider 400.")
+                // Clear any pending user turn: without this, the NEXT assistant message would pair
+                // with a stale earlier user turn and the model would see a mismatched exchange.
+                pendingUser = nil
+                continue
+            }
+
             if message.sender == .user {
                 let text = message.content.textContent ?? ""
                 var parts: [HistoryTurn.Part] = [.text(text)]

@@ -294,6 +294,10 @@ struct AgentTimelineView: View {
             case .mediaGeneration:
                 pendingActions.append(event)
 
+            case .unknown(let id, let caseName, _):
+                flushActions()
+                nodes.append(.unrecognized(id: id, caseName: caseName))
+
             case .capabilityMilestone(let id, let kind, let detail):
                 flushActions()
                 nodes.append(.capabilityMilestone(id: id, kind: kind, detail: detail))
@@ -376,6 +380,13 @@ enum TimelineNode: Identifiable {
     case planCard(PlanRunData)
     /// Structured Reflexion card (attempt rows with nested sub-timelines).
     case reflectionCard(ReflectionRunData)
+    /// An event a NEWER build wrote that this build has no renderer for.
+    ///
+    /// ⚠️ Rendered, not hidden. Silently dropping it makes the timeline under-report what the run
+    /// actually did — and if the unrecognised event is a capability card, its whole nested
+    /// sub-timeline vanishes with no indication anything is missing. A visible row is the only
+    /// honest option: the data IS preserved on disk, this build just cannot draw it.
+    case unrecognized(id: UUID, caseName: String)
 
     var id: UUID {
         switch self {
@@ -386,6 +397,7 @@ enum TimelineNode: Identifiable {
         case .warning(let id, _, _):           return id
         case .planCard(let data):              return data.id
         case .reflectionCard(let data):        return data.id
+        case .unrecognized(let id, _):         return id
         }
     }
 }
@@ -436,6 +448,9 @@ struct TimelineNodeGroupView: View {
 
         case .warning(_, let category, let text):
             WarningRow(category: category, text: text)
+
+        case .unrecognized(_, let caseName):
+            UnrecognizedEventRow(caseName: caseName)
 
         case .planCard(let data):
             PlanProgressCard(data: data, isStreaming: isStreaming)
@@ -1697,5 +1712,35 @@ extension AgentTimelineView: Equatable {
             && lhs.compactReasoning == rhs.compactReasoning
             && lhs.streamingContext?.startedAt == rhs.streamingContext?.startedAt
             && (lhs.isStreaming || lhs.finalContentText == rhs.finalContentText)
+    }
+}
+
+
+// MARK: - Unrecognized Event Row
+
+/// Rendered for a timeline event written by a NEWER build of Devgentic.
+///
+/// ⚠️ Shown rather than hidden on purpose. The event's bytes ARE preserved on disk — this build
+/// simply has no renderer for it — so hiding it would make the timeline silently under-report what
+/// the run did, and would make an unrecognised capability card's whole nested sub-timeline vanish
+/// with no indication. The wording says "this version" because the data is not lost, only
+/// undrawable here.
+struct UnrecognizedEventRow: View {
+    let caseName: String
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "questionmark.square.dashed")
+                .font(.caption)
+                .foregroundStyle(theme.secondaryText)
+            Text("This version can't display this step (\(caseName)). It's kept and will appear in a newer version.")
+                .font(.caption)
+                .foregroundStyle(theme.secondaryText)
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 4)
     }
 }

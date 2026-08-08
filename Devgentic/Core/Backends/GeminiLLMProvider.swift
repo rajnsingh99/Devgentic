@@ -52,6 +52,27 @@ struct GeminiLLMProvider: LLMProvider {
         return nil
     }
 
+    /// The user's per-category safety thresholds, in Gemini's wire shape.
+    ///
+    /// ⚠️ These are TOP-LEVEL on the request body, a sibling of `generationConfig` — not a field
+    /// inside it. That is why they were missed: `buildGenerationConfig` copied every other advanced
+    /// setting, so the omission looked like completeness.
+    private var safetySettings: [[String: String]]? {
+        guard case .array(let entries)? = config.options?["safetySettings"] else { return nil }
+
+        let mapped: [[String: String]] = entries.compactMap { entry in
+            guard case .object(let fields) = entry,
+                  case .string(let category)? = fields["category"],
+                  case .string(let threshold)? = fields["threshold"]
+            else { return nil }
+            // `HARM_BLOCK_THRESHOLD_UNSPECIFIED` is this app's "Default" option — omit the entry
+            // entirely so the account default applies, rather than pinning the unspecified value.
+            guard threshold != HarmBlockThreshold.unspecified.rawValue else { return nil }
+            return ["category": category, "threshold": threshold]
+        }
+        return mapped.isEmpty ? nil : mapped
+    }
+
     /// Builds the generationConfig section from advanced config options.
     private func buildGenerationConfig() -> [String: Any]? {
         var generationConfig: [String: Any] = [:]
@@ -63,6 +84,49 @@ struct GeminiLLMProvider: LLMProvider {
         return generationConfig.isEmpty ? nil : generationConfig
     }
 
+    /// Applies `generationConfig` and `safetySettings` to a request body.
+    ///
+    /// ⚠️ Exists so the two cannot drift apart again. Safety Settings shipped as four pickers that
+    /// NO request builder read: a user who set every category to "Block None" to get past a refusal
+    /// on legitimate red-team or medical work still had the account defaults applied and still got
+    /// blocked, and the inverse failed too — tightening to "Block Low and Above" for a kids-facing
+    /// bot added no filtering whatsoever. A safety control that silently does nothing is worse than
+    /// no control, because the user believes it worked. Every builder must call this, not
+    /// `buildGenerationConfig()` directly.
+    private func applyGenerationSettings(to body: inout [String: Any]) {
+        if let generationConfig = buildGenerationConfig() {
+            body["generationConfig"] = generationConfig
+        }
+        if let safetySettings {
+            body["safetySettings"] = safetySettings
+        }
+    }
+
+    // MARK: - Request Body Builders
+
+    // ⚠️ Shared so the shape assertions in `AdvancedConfigDeliveryTests` exercise the SAME code the
+    // shipped builders run. Safety Settings shipped dead for exactly this reason: nothing compared
+    // what the panel wrote against what a request carried.
+
+    /// Body for the agent/tool-calling path.
+    private func generateBody(messages: [[String: String]], tools: [[String: Any]]?) -> [String: Any] {
+        let (contents, systemInstruction) = translateMessages(messages)
+        var body: [String: Any] = ["contents": contents]
+        if let systemInstruction { body["systemInstruction"] = systemInstruction }
+        if let tools, !tools.isEmpty { body["tools"] = tools }
+        applyGenerationSettings(to: &body)
+        return body
+    }
+
+    /// Body for the bot/streaming path. `tools` are deliberately absent — see the call site.
+    private func streamingBody(messages: [[String: String]]) -> [String: Any] {
+        let (contents, systemInstruction) = translateMessages(messages)
+        var body: [String: Any] = ["contents": contents]
+        if let systemInstruction { body["systemInstruction"] = systemInstruction }
+        applyGenerationSettings(to: &body)
+        return body
+    }
+
     // MARK: - Agent Flow (NativeAPI Tool Interception)
 
     func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
@@ -70,21 +134,7 @@ struct GeminiLLMProvider: LLMProvider {
     }
 
     func generateWithUsage(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?) {
-        let (contents, systemInstruction) = translateMessages(messages)
-
-        var body: [String: Any] = ["contents": contents]
-
-        if let systemInstruction = systemInstruction {
-            body["systemInstruction"] = systemInstruction
-        }
-
-        if let tools = tools, !tools.isEmpty {
-            body["tools"] = tools
-        }
-
-        if let generationConfig = buildGenerationConfig() {
-            body["generationConfig"] = generationConfig
-        }
+        let body = generateBody(messages: messages, tools: tools)
 
         let url = try buildURL(endpoint: ":generateContent")
 
@@ -186,7 +236,7 @@ struct GeminiLLMProvider: LLMProvider {
         var body: [String: Any] = ["contents": contents]
         if let systemInstruction = systemInstruction { body["systemInstruction"] = systemInstruction }
         if let tools = tools, !tools.isEmpty { body["tools"] = tools }
-        if let generationConfig = buildGenerationConfig() { body["generationConfig"] = generationConfig }
+        applyGenerationSettings(to: &body)
 
         let url = try buildURL(endpoint: ":generateContent")
         var request = makeRequest(url: url)
@@ -222,9 +272,7 @@ struct GeminiLLMProvider: LLMProvider {
             body["tools"] = tools
         }
 
-        if let generationConfig = buildGenerationConfig() {
-            body["generationConfig"] = generationConfig
-        }
+        applyGenerationSettings(to: &body)
 
         // --- NATIVE THINKING CONFIGURATION ---
         // Enabled for models that support internal reasoning traces (e.g. Gemini 2.0 Thinking)
@@ -320,9 +368,7 @@ struct GeminiLLMProvider: LLMProvider {
             body["tools"] = tools
         }
 
-        if let generationConfig = buildGenerationConfig() {
-            body["generationConfig"] = generationConfig
-        }
+        applyGenerationSettings(to: &body)
 
         body["thinking_config"] = ["include_thoughts": true]
 
@@ -386,17 +432,9 @@ struct GeminiLLMProvider: LLMProvider {
         // Transport (read loop, cancellation, stall timeout) is owned by SSEStreamParser.
         SSEStreamParser.stream(
             openBytes: {
-                let (contents, systemInstruction) = self.translateMessages(messages)
-
-                var body: [String: Any] = ["contents": contents]
-                if let systemInstruction = systemInstruction {
-                    body["systemInstruction"] = systemInstruction
-                }
-                if let generationConfig = self.buildGenerationConfig() {
-                    body["generationConfig"] = generationConfig
-                }
-
                 // `tools` are intentionally ignored here so the Bot flow stays strictly conversational.
+                let body = self.streamingBody(messages: messages)
+
                 let url = try self.buildURL(endpoint: ":streamGenerateContent", streamFormat: "sse")
 
                 var request = self.makeRequest(url: url)
@@ -507,5 +545,22 @@ struct GeminiLLMProvider: LLMProvider {
             request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         }
         return request
+    }
+}
+
+// MARK: - Test Seam
+
+// ⚠️ Thin pass-throughs with NO logic of their own — the only reason asserting on them is
+// equivalent to asserting on a live request.
+extension GeminiLLMProvider {
+
+    /// Renders the agent request body without issuing a request.
+    func debugRequestBody(messages: [[String: String]], tools: [[String: Any]]?) -> [String: Any] {
+        generateBody(messages: messages, tools: tools)
+    }
+
+    /// Renders the bot/streaming request body without opening a stream.
+    func debugStreamingRequestBody(messages: [[String: String]]) -> [String: Any] {
+        streamingBody(messages: messages)
     }
 }

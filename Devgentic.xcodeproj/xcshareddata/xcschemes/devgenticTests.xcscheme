@@ -26,7 +26,7 @@
       buildConfiguration = "Debug"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
-      shouldUseLaunchSchemeArgsEnv = "YES">
+      shouldUseLaunchSchemeArgsEnv = "NO">
       <Testables>
          <TestableReference
             skipped = "NO">
@@ -39,6 +39,37 @@
             </BuildableReference>
          </TestableReference>
       </Testables>
+      <EnvironmentVariables>
+         <!-- ⚠️ TEST ISOLATION. TEST_HOST is the real app, so without these a plain `xcodebuild test`
+              or Cmd-U boots devgentic.app against the DEVELOPER'S REAL STORE and runs the destructive
+              launch sweep against it. Demonstrated 2026-08-04: the real store's -wal mtime moved on an
+              unprefixed run and did not on a prefixed one (SWIFTDATA_GAP_REGISTER.md G55).
+              ⚠️ UNPREFIXED here, deliberately. The two mechanisms differ and mixing them up silently
+              does nothing: on the COMMAND LINE xcodebuild does not forward the shell environment to
+              the test host, so you must pass TEST_RUNNER_DEVGENTIC_* and xcodebuild strips the prefix.
+              In a SCHEME the name is handed to the host verbatim, so it must be the name the app
+              actually reads. Putting TEST_RUNNER_DEVGENTIC_STORE_URL here sets a variable nothing
+              reads, and the tests open the real store while looking correctly configured — observed.
+              The overrides are DEBUG-only in source, so a Release build can never be redirected.
+              ⚠️ A LITERAL path, not $(TMPDIR): scheme env VALUES are not build-setting-expanded, so
+              "$(TMPDIR)devgentic-testhost.store" reached the app verbatim and the host died on
+              "Failed to create file; code = 30" against a directory named $(TMPDIR) — observed. -->
+         <EnvironmentVariable
+            key = "DEVGENTIC_STORE_URL"
+            value = "/tmp/devgentic-testhost.store"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "DEVGENTIC_SKIP_LAUNCH_SWEEP"
+            value = "1"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "DEVGENTIC_SUPPRESS_FATAL_ALERT"
+            value = "1"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+      </EnvironmentVariables>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"

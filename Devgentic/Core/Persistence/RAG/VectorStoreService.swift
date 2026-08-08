@@ -38,9 +38,25 @@ final class VectorStoreService: @unchecked Sendable {
     static let shared = VectorStoreService()
 
     // MARK: - Private Properties
-    private let store: Store
-    private let parentBox: Box<ParentDocumentEntity>
-    private let childBox: Box<ChildChunkEntity>
+    /// The three ObjectBox handles, held together so availability is ONE decision.
+    ///
+    /// ⚠️ Optional on purpose. `init` used to end in `fatalError("Could not initialize ObjectBox
+    /// store")`, on the same cold launch path as the SwiftData container — so a corrupt or
+    /// unwritable vector-db KILLED THE APP with no message, no path and no dialog, for a store the
+    /// app does not actually need to function.
+    ///
+    /// The vector index is semantic-memory retrieval. Without it chats, profiles, tools and
+    /// workflows all work; RAG recall degrades. That is a feature outage, not a reason to refuse to
+    /// launch — so a failure now disables retrieval and says so, loudly, once.
+    private struct Backing {
+        let store: Store
+        let parentBox: Box<ParentDocumentEntity>
+        let childBox: Box<ChildChunkEntity>
+    }
+    private let backing: Backing?
+
+    /// False when the vector store could not be opened. Retrieval is disabled; everything else works.
+    var isAvailable: Bool { backing != nil }
     private let logger = DGLogger(category: "VectorStoreService")
 
     // MARK: - HNSW Search Constants
@@ -91,6 +107,27 @@ final class VectorStoreService: @unchecked Sendable {
 
     // MARK: - Initialization
 
+    /// The on-disk vector-db directory.
+    ///
+    /// ⚠️ STATIC on purpose: the failure path needs to name this path precisely when `init` did NOT
+    /// complete, so it cannot be an instance property. Also drops the previous
+    /// `Bundle.main.bundleIdentifier!` force-unwrap — a nil bundle id would have crashed the app on
+    /// the cold launch path, which is the exact class of failure this service was hardened to stop.
+    static func storeDirectoryURL() throws -> URL {
+        guard let bundleID = Bundle.main.bundleIdentifier else {
+            throw VectorStoreLocationError.bundleIdentifierUnavailable
+        }
+        return try FileManager.default.url(
+            for: .applicationSupportDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: true)
+            .appendingPathComponent(bundleID)
+            .appendingPathComponent("vector-db")
+    }
+
+    /// Display/reveal form. Empty string when even the location cannot be resolved — callers use it
+    /// for a Reveal-in-Finder affordance, where an empty path simply reveals nothing.
+    static var storeDirectoryPath: String { (try? storeDirectoryURL())?.path ?? "" }
+
     /// Private initializer to set up the ObjectBox store and entity box.
     ///
     /// ⚠️ HNSW migration note: If migrating a large pre-existing dataset, the ObjectBox engine
@@ -100,11 +137,7 @@ final class VectorStoreService: @unchecked Sendable {
     /// is empty so graph compilation is instantaneous.
     private init() {
         do {
-            let appSupport = try FileManager.default.url(
-                for: .applicationSupportDirectory, in: .userDomainMask,
-                appropriateFor: nil, create: true)
-                .appendingPathComponent(Bundle.main.bundleIdentifier!)
-                .appendingPathComponent("vector-db")
+            let appSupport = try Self.storeDirectoryURL()
 
             // --- SCHEMA GATE (in-directory marker, not preferences) ---
             // Replaces the Phase 2/3 UserDefaults-gated wipes: the destroy decision
@@ -129,13 +162,11 @@ final class VectorStoreService: @unchecked Sendable {
                     logger.info("Vector store: current-schema database predates the marker (legacy flag verified) — stamping v\(Self.currentSchemaVersion), no wipe.")
                 }
             case .wipeAndStamp:
-                // The only lossy path — and it's loud: conversation memory for
-                // existing turns is gone and repopulates from new activity only
-                // (there is no reindex-from-transcripts mechanism).
-                logger.warning("Vector store: on-disk schema (\(markerVersion.map(String.init) ?? "unmarked")) is not v\(Self.currentSchemaVersion) — wiping vector-db for rebuild.")
-                if FileManager.default.fileExists(atPath: appSupport.path) {
-                    try FileManager.default.removeItem(at: appSupport)
-                }
+                Self.quarantineSupersededStore(
+                    at: appSupport,
+                    previousVersion: markerVersion,
+                    logger: logger
+                )
             }
 
             try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true, attributes: nil)
@@ -153,15 +184,87 @@ final class VectorStoreService: @unchecked Sendable {
                 }
             }
 
-            self.store = try Store(directoryPath: appSupport.path)
-            self.parentBox = self.store.box(for: ParentDocumentEntity.self)
-            self.childBox = self.store.box(for: ChildChunkEntity.self)
+            let store = try Store(directoryPath: appSupport.path)
+            self.backing = Backing(
+                store: store,
+                parentBox: store.box(for: ParentDocumentEntity.self),
+                childBox: store.box(for: ChildChunkEntity.self)
+            )
 
             logger.info("VectorStoreService (HNSW) initialized. DB path: \(appSupport.path)")
         } catch {
-            logger.critical("Failed to initialize VectorStoreService: \(error.localizedDescription)")
-            fatalError("Could not initialize ObjectBox store: \(error)")
+            // ⚠️ DEGRADE, do not trap. This runs on the cold launch path; a `fatalError` here took
+            // the whole app down — with no message, no path and no dialog — because a SECONDARY
+            // cache could not open. The SwiftData container earns that treatment (it holds every
+            // conversation); this does not.
+            self.backing = nil
+            logger.critical(
+                "[STARTUP] VectorStoreService FAILED to initialize — \(error). CONSEQUENCE: semantic "
+                + "retrieval (RAG over conversation memory and knowledge sources) is DISABLED for this "
+                + "launch and every query returns no matches; chats, profiles, tools and workflows are "
+                + "unaffected. The on-disk vector-db was NOT deleted. Previously this crashed the app "
+                + "at launch."
+            )
         }
+    }
+
+    /// Moves a superseded vector-db aside instead of deleting it.
+    ///
+    /// ⚠️ This used to be `removeItem` — an irreversible delete of semantic memory that CANNOT be
+    /// rebuilt (there is no reindex-from-transcripts mechanism), performed silently at launch with
+    /// no consent. That is exactly what the SwiftData failure path refuses to do, and this store
+    /// deserves the same rule.
+    ///
+    /// Exactly ONE superseded generation is kept, under a fixed `-superseded` name replaced on each
+    /// schema bump, so disk usage stays bounded at one copy. A timestamped name would accumulate
+    /// forever, which is its own kind of bug.
+    ///
+    /// Static and side-effect-explicit so it is testable without constructing the singleton —
+    /// matching `schemaGateAction`, which is pure for the same reason.
+    static func quarantineSupersededStore(at storeURL: URL, previousVersion: Int?, logger: DGLogger) {
+        let fileManager = FileManager.default
+        let supersededURL = storeURL.deletingLastPathComponent()
+            .appendingPathComponent(storeURL.lastPathComponent + "-superseded", isDirectory: true)
+        let bytes = directorySize(at: storeURL)
+
+        do {
+            if fileManager.fileExists(atPath: supersededURL.path) {
+                try fileManager.removeItem(at: supersededURL)
+            }
+            if fileManager.fileExists(atPath: storeURL.path) {
+                try fileManager.moveItem(at: storeURL, to: supersededURL)
+            }
+            logger.warning(
+                "[RAG] On-disk vector schema (\(previousVersion.map(String.init) ?? "unmarked")) is not "
+                + "v\(currentSchemaVersion) — moved \(bytes) bytes ASIDE to "
+                + "\(supersededURL.lastPathComponent) and starting a fresh index. CONSEQUENCE: semantic "
+                + "recall of existing turns is gone until they are re-indexed by new activity, and "
+                + "there is no reindex-from-transcripts mechanism — but the old index is on disk, not "
+                + "deleted, and one superseded generation is retained."
+            )
+        } catch {
+            // Falling back to a delete would reintroduce the exact irreversibility this exists to
+            // remove, so refuse and leave the old index in place instead. Opening it under the new
+            // schema may then fail — which now degrades rather than trapping.
+            logger.error(
+                "[RAG] Could not move the superseded vector-db aside (\(error)). CONSEQUENCE: the old "
+                + "index is left in place and NOT deleted; opening it under the new schema may fail, "
+                + "in which case retrieval is disabled for this launch."
+            )
+        }
+    }
+
+    /// Total bytes under a directory, for the quarantine log line. Best-effort: a failure to
+    /// enumerate reports 0 rather than blocking the launch path.
+    private static func directorySize(at url: URL) -> Int64 {
+        guard let enumerator = FileManager.default.enumerator(
+            at: url, includingPropertiesForKeys: [.fileSizeKey]
+        ) else { return 0 }
+        var total: Int64 = 0
+        for case let file as URL in enumerator {
+            total += Int64((try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        }
+        return total
     }
 
     // MARK: - Public API
@@ -171,6 +274,17 @@ final class VectorStoreService: @unchecked Sendable {
     /// The child's `conversationID` is denormalised from the parent here so that HNSW result
     /// post-filtering can scope by conversation without an additional relation traversal per result.
     func addSemanticDocument(parent: ParentDocumentEntity, children: [ChildChunkEntity]) {
+        guard let backing else {
+            logger.warning(
+                "[RAG] Skipping index of \(children.count) chunk(s) for conversation "
+                + "\(parent.conversationID.uuidString.prefix(8)): the vector store is unavailable. "
+                + "CONSEQUENCE: this content will not be retrievable by semantic search, and there is "
+                + "no reindex-from-transcripts mechanism, so it stays unindexed until it is written "
+                + "again on a launch where the store opens."
+            )
+            return
+        }
+        let childBox = backing.childBox
         do {
             let convIDString = parent.conversationID.uuidString
             for child in children {
@@ -213,6 +327,18 @@ final class VectorStoreService: @unchecked Sendable {
         if let convID = conversationID {
             return findNearestInConversation(queryEmbedding: queryEmbedding, queryText: queryText, limit: limit, conversationID: convID, excludedParentMessageIDs: excludedParentMessageIDs)
         }
+
+        guard let backing else {
+            // Logged at error level here — this is the user-visible outage (a query silently
+            // returning nothing), and it is the one call site a user action reaches directly.
+            logger.error(
+                "[RAG] Semantic search returned no results because the vector store is unavailable "
+                + "for this launch. CONSEQUENCE: the agent answers without retrieved context, which "
+                + "reads as forgetfulness rather than as an error."
+            )
+            return []
+        }
+        let childBox = backing.childBox
 
         do {
             // Global (unscoped) search keeps the HNSW graph — O(log N) over the corpus.
@@ -265,6 +391,8 @@ final class VectorStoreService: @unchecked Sendable {
     /// denormalised String key (an indexed property query, no vector work in the
     /// engine), then rank them in Swift. See `findNearest` for why this is NOT HNSW.
     private func findNearestInConversation(queryEmbedding: [Float], queryText: String?, limit: Int, conversationID: UUID, excludedParentMessageIDs: Set<UUID>) -> [RetrievedDocument] {
+        guard let backing else { return [] }   // `findNearest` already logged the outage once.
+        let childBox = backing.childBox
         do {
             let chunks = try childBox.query {
                 ChildChunkEntity.conversationID == conversationID.uuidString
@@ -564,6 +692,17 @@ final class VectorStoreService: @unchecked Sendable {
     /// memory dies with it. (Before this API the store was append-only: orphaned
     /// vectors survived conversation deletion forever, inflating every HNSW search.)
     func deleteDocuments(forConversation conversationID: UUID) {
+        guard let backing else {
+            logger.warning(
+                "[RAG] Cannot delete indexed documents for conversation "
+                + "\(conversationID.uuidString.prefix(8)): the vector store is unavailable. "
+                + "CONSEQUENCE: the conversation's vectors REMAIN on disk after it was deleted, and "
+                + "will be retrievable again on a launch where the store opens."
+            )
+            return
+        }
+        let childBox = backing.childBox
+        let parentBox = backing.parentBox
         do {
             let convIDString = conversationID.uuidString
             let childQuery = try childBox.query {
@@ -598,6 +737,16 @@ final class VectorStoreService: @unchecked Sendable {
     /// Rows written before `sourceIdentifier` existed carry "" and are never matched.
     func removeDocuments(sourceIdentifier: String, conversationID: UUID) {
         guard !sourceIdentifier.isEmpty else { return }
+        guard let backing else {
+            logger.warning(
+                "[RAG] Cannot remove indexed documents for source '\(sourceIdentifier)': the vector "
+                + "store is unavailable. CONSEQUENCE: stale vectors for this source remain on disk and "
+                + "can still be retrieved on a launch where the store opens."
+            )
+            return
+        }
+        let childBox = backing.childBox
+        let parentBox = backing.parentBox
         do {
             let matchingParents = try parentBox.query {
                 ParentDocumentEntity.sourceIdentifier == sourceIdentifier
@@ -622,6 +771,18 @@ final class VectorStoreService: @unchecked Sendable {
             logger.debug("Replace-on-reindex: removed \(matchingParents.count) prior parent(s) + \(doomedChildren.count) chunk(s) for source '\(sourceIdentifier)'.")
         } catch {
             logger.error("Replace-on-reindex removal failed for '\(sourceIdentifier)': \(error.localizedDescription)")
+        }
+    }
+}
+
+/// Failures resolving the vector store's location, before ObjectBox is involved.
+enum VectorStoreLocationError: LocalizedError {
+    case bundleIdentifierUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .bundleIdentifierUnavailable:
+            return "The application bundle identifier could not be read, so the search index location cannot be resolved."
         }
     }
 }

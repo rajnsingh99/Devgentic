@@ -32,6 +32,17 @@ final class SchedulerService {
     /// The shared model container, injected during app init.
     private var modelContainer: ModelContainer?
 
+    /// True once `loadAllTasks()` has populated `scheduledTasks` from the store.
+    ///
+    /// ⚠️ Distinct from "the container is configured": the container can be set while the array is
+    /// still empty, and every scheduling decision reads the ARRAY. Without this, an early
+    /// `evaluateAndFireDueTasks()` looks like "nothing is due" rather than "nothing is loaded yet".
+    private(set) var hasLoadedTasks = false
+
+    /// Set when an evaluation was requested before the tasks were loaded, so the bootstrap can
+    /// replay it instead of the request being lost (G52).
+    private var pendingEvaluationAfterLoad = false
+
     private var mainContext: ModelContext? {
         modelContainer?.mainContext
     }
@@ -47,7 +58,11 @@ final class SchedulerService {
 
     func loadAllTasks() {
         guard let context = mainContext else {
-            logger.error("loadAllTasks called before ModelContainer configured.")
+            logger.error(
+                "[SCHEDULER] loadAllTasks called before the ModelContainer was configured. "
+                + "CONSEQUENCE: no scheduled task is loaded, armed or caught up this launch — every "
+                + "recurring and one-shot task is inert until the next launch."
+            )
             return
         }
 
@@ -57,9 +72,23 @@ final class SchedulerService {
             )
             let models = try context.fetch(descriptor)
             scheduledTasks = models.map { $0.toStruct() }
+            hasLoadedTasks = true
             logger.info("Loaded \(self.scheduledTasks.count) scheduled task(s).")
+
+            // ⚠️ Replay an evaluation that arrived too early. `didBecomeActive` fires during a cold
+            // launch and can beat this method; without the replay that request was dropped and an
+            // overdue task silently never ran (G52).
+            if pendingEvaluationAfterLoad {
+                pendingEvaluationAfterLoad = false
+                logger.info("[SCHEDULER] Replaying the catch-up evaluation that arrived before load.")
+                evaluateAndFireDueTasks()
+            }
         } catch {
-            logger.error("Failed to load scheduled tasks: \(error.localizedDescription)")
+            logger.error(
+                "[SCHEDULER] Failed to load scheduled tasks: \(error.localizedDescription). "
+                + "CONSEQUENCE: `scheduledTasks` stays empty, so nothing is armed or caught up — "
+                + "every task is inert this launch. The stored rows are untouched."
+            )
         }
     }
 
@@ -104,6 +133,44 @@ final class SchedulerService {
     }
 
     // MARK: - State Changes
+
+    /// Stops a task whose backend profile no longer exists, instead of letting it fail on every fire.
+    ///
+    /// ⚠️ Register A30. Deleting a profile cascades only to its own workflow layout, so a task bound
+    /// to that profile kept its dangling `profileID`. This guard marked the run `.failed` and
+    /// returned — and then the timer fired again on the next schedule, and the next, indefinitely.
+    /// A nightly task failed every night with "Backend profile not found." and nothing ever stopped
+    /// it or said why in terms the user could act on.
+    ///
+    /// ⚠️ Disabled, **not deleted**. A scheduled task is user-authored work — its prompt, its cron,
+    /// its conversation binding. Deleting it as a side effect of deleting a profile is data loss the
+    /// user never asked for. Disabling is recoverable: repoint it at another profile and switch it
+    /// back on.
+    ///
+    /// ⚠️ Reached by more than deletion — a store that fails to read, or a profile removed by any
+    /// other route, lands here too. That is deliberate: whatever the cause, a task that cannot
+    /// resolve its profile cannot run, and retrying on a schedule will not change that.
+    private func disableTaskWithMissingProfile(_ task: ScheduledTask) {
+        let profileDescription = task.profileID.map(\.uuidString) ?? "none set"
+        logger.error(
+            "[SCHEDULER] Task '\(task.displayName)' (\(task.id)) references backend profile "
+            + "\(profileDescription), which is not in the store. CONSEQUENCE: the task is being "
+            + "DISABLED rather than left to fail on every fire; its prompt and schedule are kept so "
+            + "the user can repoint it at another profile and re-enable it."
+        )
+
+        var updated = task
+        updated.isEnabled = false
+        updated.isPaused = false
+        updated.status = .failed
+        updated.lastRunSummary = String(
+            localized: "Stopped: the backend profile this task used was deleted. Choose another profile and re-enable.")
+        updated.nextRunAt = nil
+        updateTask(updated)
+
+        // Cancel any armed timer so the disabled task cannot fire from an in-flight schedule.
+        cancelTimer(for: task.id)
+    }
 
     func toggleEnabled(taskID: UUID) {
         guard var task = scheduledTasks.first(where: { $0.id == taskID }) else { return }
@@ -204,14 +271,43 @@ final class SchedulerService {
 
     // MARK: - Catch-up (App Foreground)
 
+    /// Fires anything already overdue — the catch-up path for tasks whose moment passed while the
+    /// app was closed or in the background.
+    ///
+    /// ⚠️ THIS IS THE ONLY WAY AN OVERDUE ONE-SHOT TASK EVER RUNS. `scheduleTimer` arms a timer only
+    /// for a FUTURE date: a cron task gets its next future occurrence (the missed one is skipped),
+    /// and a `scheduledAt` in the past falls through to "no valid schedule" and gets no timer at all.
+    ///
+    /// ⚠️ ORDERING (G52). It is called from `didBecomeActive`, which fires during a cold launch —
+    /// potentially BEFORE the bootstrap `Task` has run `loadAllTasks()`. When that happened this
+    /// method iterated an EMPTY `scheduledTasks`, did nothing, and said nothing: a task due at 3pm
+    /// with the app opened at 4pm was silently skipped, recovering only if the user happened to
+    /// switch away and back. The bootstrap now calls this itself after loading, and an early call
+    /// records that it must be replayed rather than being lost.
     func evaluateAndFireDueTasks() {
+        guard hasLoadedTasks else {
+            pendingEvaluationAfterLoad = true
+            logger.warning(
+                "[SCHEDULER] evaluateAndFireDueTasks called BEFORE tasks were loaded — the store "
+                + "bootstrap has not finished. CONSEQUENCE: nothing is evaluated right now, so an "
+                + "overdue task would have been silently skipped; the evaluation is queued and runs "
+                + "as soon as loadAllTasks() completes."
+            )
+            return
+        }
+
         let now = Date()
+        var fired = 0
         for task in scheduledTasks where task.isEnabled && !task.isPaused {
             if let nextRun = task.nextRunAt, nextRun <= now, !runningTaskIDs.contains(task.id) {
+                fired += 1
                 Task { @MainActor in
                     await self.fireTask(task)
                 }
             }
+        }
+        if fired > 0 {
+            logger.info("[SCHEDULER] Catch-up: fired \(fired) overdue task(s) out of \(self.scheduledTasks.count).")
         }
     }
 
@@ -231,8 +327,7 @@ final class SchedulerService {
         // Verify profile exists
         guard let profileID = task.profileID,
               let profile = (try? BackendProfileStore.shared.fetchProfiles())?.first(where: { $0.id == profileID }) else {
-            logger.error("Profile not found for task '\(task.displayName)' — marking as failed.")
-            updateTaskStatus(id: task.id, status: .failed, summary: "Backend profile not found.")
+            disableTaskWithMissingProfile(task)
             return
         }
 

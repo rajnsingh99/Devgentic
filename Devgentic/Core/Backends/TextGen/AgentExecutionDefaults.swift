@@ -1,0 +1,28 @@
+//
+//  AgentExecutionDefaults.swift
+//  Devgentic
+//
+//  Created on 08/08/26.
+//
+//  What an agent's execution limits fall back to when the profile leaves them on Auto.
+//
+//  ⚠️ Register A38. The iteration cap's default was a bare `15` written at four separate sites —
+//  `Executor` twice, `ExecutionLimitsSection`'s "Auto" label, and `TraceConfigSnapshot` — and they
+//  had already drifted: `BackendProfileService.logProfileSelection` printed `?? 20`. So the
+//  configuration dump a support engineer reads stated a cap of 20 for a run the executor bounded at
+//  15. A number that decides when a run stops must have exactly one definition.
+//
+//  Same shape as `ResolvedResiliencePolicy.autoDefault(legacy:)`, which fixed the identical class of
+//  drift for the per-tier breaker caps (register A70).
+//
+
+import Foundation
+
+enum AgentExecutionDefaults {
+
+    /// Think-act-observe cycles allowed when the profile does not specify a cap.
+    ///
+    /// ⚠️ Changing this changes when runs terminate — it is not a display value. `ExecutionLimitsSection`
+    /// renders it as the "Auto (N)" label, so the panel follows automatically.
+    static let maxIterations = 15
+}

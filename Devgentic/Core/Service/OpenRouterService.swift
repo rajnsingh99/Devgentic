@@ -67,10 +67,16 @@ struct OpenRouterService {
 
     /// Verifies the API key against GET /key, then fetches the public model catalog.
     /// Sorted alphabetically by id; the picker applies tool filtering per profile type.
-    func verifyAndFetchModels(apiKey: String) async throws -> [OpenRouterModel] {
-        try await verifyKey(apiKey: apiKey)
+    /// - Parameter baseURL: the profile's configured API Endpoint. ⚠️ Defaulted, never hardcoded:
+    ///   a user on a corporate or self-hosted gateway sets that endpoint and pastes a
+    ///   GATEWAY-SCOPED key. This call used to ignore it and transmit that key to the vendor's
+    ///   public API on every keystroke-debounced fetch — a host they had deliberately routed
+    ///   around, and one their policy may forbid. Same `?? ProviderDefaults.x` shape `AgentConnect`
+    ///   already uses, so listing and chat can never disagree about where a profile talks.
+    func verifyAndFetchModels(apiKey: String, baseURL: URL? = nil) async throws -> [OpenRouterModel] {
+        try await verifyKey(apiKey: apiKey, baseURL: baseURL)
 
-        let url = ProviderDefaults.openRouterBaseURL.appendingPathComponent("models")
+        let url = (baseURL ?? ProviderDefaults.openRouterBaseURL).appendingPathComponent("models")
         var request = URLRequest(url: url, timeoutInterval: 15.0)
         request.httpMethod = "GET"
 
@@ -90,8 +96,10 @@ struct OpenRouterService {
     /// GET /key — the cheapest authenticated OpenRouter endpoint. A 401 here means
     /// a bad key; anything 2xx means the key exists (credit state surfaces later
     /// as 402 at request time, classified by ProviderErrorClassifier).
-    private func verifyKey(apiKey: String) async throws {
-        let url = ProviderDefaults.openRouterBaseURL.appendingPathComponent("key")
+    private func verifyKey(apiKey: String, baseURL: URL? = nil) async throws {
+        // The key check must hit the SAME host as the catalog fetch — otherwise a gateway-routed
+        // profile validates against the public API and lists from the gateway, or vice versa.
+        let url = (baseURL ?? ProviderDefaults.openRouterBaseURL).appendingPathComponent("key")
         var request = URLRequest(url: url, timeoutInterval: 15.0)
         request.httpMethod = "GET"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")

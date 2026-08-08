@@ -29,9 +29,9 @@ struct ExecutionLimitsSection: View {
                 Spacer(minLength: 16)
 
                 Stepper(
-                    "\(maxIterations ?? 15)",
+                    "\(maxIterations ?? AgentExecutionDefaults.maxIterations)",
                     value: Binding(
-                        get: { maxIterations ?? 15 },
+                        get: { maxIterations ?? AgentExecutionDefaults.maxIterations },
                         set: { maxIterations = $0 == 15 ? nil : $0 }
                     ),
                     in: 3...30
@@ -90,11 +90,16 @@ struct ErrorRecoverySection: View {
     /// the provider and intentionally not exposed here.
     @Binding var resilienceOverrides: ResilienceOverrides?
     @Binding var errorRecovery: ErrorRecovery?
+    /// The profile's legacy single retry knob. ⚠️ Register A70: `Auto` does NOT mean 3 — it means
+    /// this. Passed in rather than assumed so the label cannot drift from the resolver.
+    var legacyRetryPolicy: RetryPolicy?
     @Environment(\.appTheme) private var theme
 
-    /// The default each cap falls back to when left on Auto (matches
-    /// `ResolvedResiliencePolicy.resolved`'s `RetryPolicy()` default).
-    private let autoDefault = 3
+    /// What each cap actually falls back to when left on Auto — read from the same source
+    /// `ResolvedResiliencePolicy.resolved` reads, never restated as a literal.
+    private var autoDefault: Int {
+        ResolvedResiliencePolicy.autoDefault(legacy: legacyRetryPolicy)
+    }
 
     private var effectiveOverrides: ResilienceOverrides { resilienceOverrides ?? ResilienceOverrides() }
     private var effectiveRecovery: ErrorRecovery { errorRecovery ?? ErrorRecovery() }
@@ -277,11 +282,14 @@ struct ErrorRecoverySection: View {
 /// "Error Recovery".
 struct LoopSafetySection: View {
     @Binding var resilienceOverrides: ResilienceOverrides?
+    /// See `ErrorRecoverySection.legacyRetryPolicy` — the repetition cap falls back to this (A70).
+    var legacyRetryPolicy: RetryPolicy?
     @Environment(\.appTheme) private var theme
 
-    /// Matches `ResolvedResiliencePolicy.resolved`'s `RetryPolicy()` fallback for the
-    /// repetition cap (the denial cap has its own fixed default, shown inline).
-    private let autoDefault = 3
+    /// The repetition cap's real Auto value. The denial cap has its own fixed default below.
+    private var autoDefault: Int {
+        ResolvedResiliencePolicy.autoDefault(legacy: legacyRetryPolicy)
+    }
 
     private var effectiveOverrides: ResilienceOverrides { resilienceOverrides ?? ResilienceOverrides() }
 
@@ -342,7 +350,7 @@ struct LoopSafetySection: View {
                     get: { effectiveOverrides.maxConsecutiveDenials },
                     set: { newValue in updateOverrides { $0.maxConsecutiveDenials = newValue } }
                 )) {
-                    Text("Auto (2)").tag(Int?.none)
+                    Text("Auto (\(ResolvedResiliencePolicy.defaultMaxConsecutiveDenials))").tag(Int?.none)
                     Text("1").tag(Int?.some(1))
                     Text("2").tag(Int?.some(2))
                     Text("3").tag(Int?.some(3))

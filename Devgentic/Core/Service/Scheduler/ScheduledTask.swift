@@ -55,6 +55,15 @@ struct ScheduledTask: Identifiable, Equatable {
     var promptTemplate: String
     var profileID: UUID?
     var attachedFileURLs: [URL]
+
+    /// True when `attachedFileURLsJSON` could not be decoded, so `attachedFileURLs` is empty because
+    /// it was UNREADABLE rather than because the task has no attachments.
+    ///
+    /// ⚠️ Load-scoped, and excluded from `==`: it describes this read, not the task. The writer
+    /// checks it and refuses to null the stored column — otherwise one failed decode plus any routine
+    /// edit erased the user's attachment list permanently (G23). Same shape as
+    /// `ChatMessage.timelineDecodeFailed`.
+    var attachedFileURLsUnreadable: Bool = false
     var cronExpression: String?
     var scheduledAt: Date?
     var isEnabled: Bool

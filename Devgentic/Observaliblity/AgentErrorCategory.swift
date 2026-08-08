@@ -344,6 +344,10 @@ extension WarningCategory {
         case .circuitBreaker:   return .cbRepetitiveAction     // most common CB trigger
         case .resourceUnavailable: return .fileReadFailed      // attachment/file couldn't be read
         case .midRunError:      return .executionFailed        // demoted mid-run `.error` card (ASM-1) — original category is in the event text
+        // ⚠️ The generic bucket, not a specific one. A category from a newer build must not be
+        // mis-attributed to a concrete failure mode — that would corrupt the analytics it feeds.
+        // The raw value survives on the event itself for anyone reading the timeline.
+        case .other:            return .executionFailed
         }
     }
 }
@@ -359,6 +363,11 @@ extension ToolFailureCategory {
         case .invalidArgs:        return .toolArgInvalid
         case .notFound:           return .toolNotFound
         case .cancelled:          return .toolUserDenied      // semantic overlap — user skipped ask_user
+        // A category written by a newer build. `.toolSemanticFail` is the least-specific tool-tier
+        // bucket: honest that it failed, without inventing a specific cause the telemetry would
+        // then group it under. Never map this to a SPECIFIC category — that is how an unknown
+        // becomes a confident wrong classification in the error dashboards.
+        case .other:              return .toolSemanticFail
         }
     }
 }

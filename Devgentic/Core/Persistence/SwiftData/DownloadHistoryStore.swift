@@ -286,6 +286,25 @@ final class DownloadHistoryStore {
         }
     }
 
+    /// Row count without materializing the rows.
+    ///
+    /// Exists for the launch-sweep pre-flight log: the retention sweep is destructive, so the
+    /// support log records how many rows were at stake BEFORE it runs, not only how many it removed
+    /// (which is lost if the app dies mid-sweep).
+    func totalRecordCount() -> Int {
+        guard let context = requireContext("totalRecordCount") else { return 0 }
+        do {
+            return try context.fetchCount(FetchDescriptor<DownloadRecord>())
+        } catch {
+            logger.error(
+                "[DOWNLOAD] totalRecordCount FAILED: \(error.localizedDescription). "
+                + "CONSEQUENCE: the launch-sweep pre-flight log reports 0 rows, which is "
+                + "indistinguishable from an empty history."
+            )
+            return 0
+        }
+    }
+
     // MARK: - Retention
 
     /// Terminal records older than this are eligible for pruning.

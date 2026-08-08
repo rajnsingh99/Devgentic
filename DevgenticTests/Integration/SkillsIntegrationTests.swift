@@ -79,8 +79,11 @@ final class ProfileDetailsSkillCodableTests: XCTestCase {
         let json: [String: Any] = [
             "schemaVersion": 4,
             "profileType": "Agent",
+            // ⚠️ `ApiProvider` is a display-string enum — `.ollama.rawValue` is "Ollama (Local)",
+            // not "ollama". This fixture hard-coded the case name and had been failing to decode
+            // ever since; derive it so a future rawValue change updates the fixture too.
             "llmConfig": [
-                "apiProvider": "ollama",
+                "apiProvider": ApiProvider.ollama.rawValue,
                 "modelName": "llama3"
             ],
             "tools": [] as [[String: Any]],
@@ -90,7 +93,9 @@ final class ProfileDetailsSkillCodableTests: XCTestCase {
         let data = try JSONSerialization.data(withJSONObject: json)
 
         // Migrate (v4 → v5 stamps version, but no data changes needed)
-        let migratedData = ProfileMigrator.migrateIfNeeded(data)
+        guard case .migrated(let migratedData) = ProfileMigrator.migrateIfNeeded(data) else {
+            return XCTFail("Expected a migratable blob, got a refusal")
+        }
         let decoded = try JSONDecoder().decode(ProfileDetails.self, from: migratedData)
 
         guard case .agent(let config) = decoded else {

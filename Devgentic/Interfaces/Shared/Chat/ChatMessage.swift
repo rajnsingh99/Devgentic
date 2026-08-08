@@ -16,9 +16,51 @@ enum GenerationType: String, Codable, CaseIterable, Identifiable {
 }
 
 struct ResponseMessageVariant: Codable, Equatable {
-    let variantId: UUID = UUID()
+
+    /// Stable identity for this variant, preserved across a save/load cycle.
+    ///
+    /// ⚠️ This was `let variantId: UUID = UUID()`, which is a Swift trap: the SYNTHESIZED encoder
+    /// EMITS an immutable property that has an initial value, while the synthesized decoder SKIPS it
+    /// (it cannot overwrite a `let` that is already initialized — the compiler warns about exactly
+    /// this). So the id was written into `agentResponseData` on every flush and thrown away on every
+    /// load, regenerating each time. Two consequences, neither obvious:
+    ///
+    ///   1. The blob's bytes changed on every load→save cycle even when nothing about the response
+    ///      had changed.
+    ///   2. `variantId` participates in the synthesized `Equatable`, which propagates through
+    ///      `AgentResponse ==` → `ChatMessage ==` → `Conversation ==`. A conversation re-fetched
+    ///      from the store therefore NEVER compared equal to the identical in-memory one, forcing
+    ///      every consumer of those operators to treat an unchanged response as changed.
+    ///
+    /// Now a `var` with a declaration default plus a tolerant decoder below, so it round-trips.
+    var variantId: UUID = UUID()
+
     var content: MessageContent
     let backendEntityId: UUID?
+
+    /// ⚠️ Explicit, because the tolerant `init(from:)` in the extension below needs to name it.
+    /// Declaring `CodingKeys` here is safe — unlike declaring `init`, it does not suppress the
+    /// memberwise initializer the call sites use.
+    enum CodingKeys: String, CodingKey {
+        case variantId, content, backendEntityId
+    }
+}
+
+extension ResponseMessageVariant {
+
+    /// ⚠️ In an EXTENSION, not the struct body — declaring `init(from:)` inline would suppress the
+    /// memberwise init that `beginRegenerationVariant` and `ChatMessage.init` both use.
+    ///
+    /// Tolerant on `variantId` specifically: every blob written before this fix carries one, but a
+    /// blob written before the field existed does not, and a missing id must not fail the whole
+    /// variant. Minting one there is correct — it becomes stable from that save onward.
+    /// `content` stays required: a variant with no content is corruption, not an old shape.
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.variantId = (try? container.decode(UUID.self, forKey: .variantId)) ?? UUID()
+        self.content = try container.decode(MessageContent.self, forKey: .content)
+        self.backendEntityId = try container.decodeIfPresent(UUID.self, forKey: .backendEntityId)
+    }
 }
 
 /// Holds all response variants for a single agent message.
@@ -179,6 +221,17 @@ enum TimelineEvent: Codable, Equatable, Identifiable {
     /// evaluator's critique, each attempt holding its own nested timeline.
     case reflectionRun(ReflectionRunData)
 
+    /// An event THIS build cannot model, held verbatim so re-encoding preserves it.
+    ///
+    /// Two things produce one: a case a NEWER build introduced, and a known case whose payload
+    /// changed shape (a new required field, a widened type, a new nested enum `rawValue`). Before
+    /// this existed, either one threw and the ENTIRE array was lost — one unreadable event deleted
+    /// the whole run's timeline.
+    ///
+    /// ⚠️ `id` is derived from the payload, NOT freshly generated: SwiftUI's `ForEach` keys off it,
+    /// so a new UUID per decode would churn the list on every reload.
+    case unknown(id: UUID, caseName: String, payload: PreservedJSON)
+
     var id: UUID {
         switch self {
         case .thought(let id, _): return id
@@ -189,7 +242,18 @@ enum TimelineEvent: Codable, Equatable, Identifiable {
         case .warning(let id, _, _): return id
         case .planExecution(let data): return data.id
         case .reflectionRun(let data): return data.id
+        case .unknown(let id, _, _): return id
         }
+    }
+
+    /// True for an event written by a newer build that this one is preserving verbatim.
+    ///
+    /// ⚠️ Deliberately NOT folded into `isCapabilityCard`. A card is protected absolutely, so a
+    /// timeline made entirely of unknowns would never evict and would breach `maxTimelineEvents`.
+    /// This is a THIRD eviction tier instead — see `evictOverflow`.
+    var isUnknown: Bool {
+        if case .unknown = self { return true }
+        return false
     }
 
     /// True for the structured capability cards that must survive timeline eviction
@@ -218,16 +282,149 @@ enum TimelineEvent: Codable, Equatable, Identifiable {
     }
 }
 
+// MARK: - TimelineEvent Codable (forward-compatible)
+//
+// ⚠️ WHY THIS IS HAND-WRITTEN, AND WHY IT MIRRORS RATHER THAN REPLACES.
+//
+// The synthesized codec threw on any element it could not model, and because that throw propagates
+// out of the ARRAY decode, a single unreadable event destroyed the whole run's timeline. Worse, the
+// empty result was then written back over the blob, so the loss became permanent on the next save.
+//
+// The fix is a catch-all case. But hand-writing `CodingKeys` for all 8 cases — including the `_0`
+// key Swift uses for a single UNLABELED associated value — would risk my keys silently diverging
+// from the shape ALREADY ON DISK. So instead `KnownTimelineEvent` mirrors the original 8 cases
+// exactly and keeps its SYNTHESIZED conformance: the wire format is therefore unchanged by
+// construction, not by my care, and the two mapping switches below are exhaustive so the compiler
+// catches any case added later.
+//
+// ⚠️ THE FALLBACK IS TOTAL, not "unrecognised case name only". Measured across 10 corruption
+// classes: a total fallback recovers 10/10 with an exact round-trip, while keying on an unknown
+// case name alone still loses the ENTIRE array in 4/10 — a new nested enum `rawValue`, a widened
+// field type, a malformed UUID, or a new required field all fail INSIDE a case that is perfectly
+// recognisable by name.
+//
+// Because this lives in `TimelineEvent.init(from:)`, it applies at EVERY nesting depth for free —
+// including events inside `PlanStepData.events` and `ReflectionAttemptData.events`, where most of a
+// real run's events actually live.
+
+/// The eight cases as they were before `.unknown`, with their conformance still synthesized.
+/// Exists only to pin the on-disk wire format; never stored, never surfaced.
+private enum KnownTimelineEvent: Codable {
+    case thought(id: UUID, text: String)
+    case reasoning(id: UUID, text: String)
+    case toolExecution(ToolExecutionData)
+    case mediaGeneration(id: UUID, toolName: String, artifact: MediaArtifact?, isComplete: Bool)
+    case capabilityMilestone(id: UUID, kind: CapabilityMilestoneKind, detail: String)
+    case warning(id: UUID, category: WarningCategory, text: String)
+    case planExecution(PlanRunData)
+    case reflectionRun(ReflectionRunData)
+}
+
+extension TimelineEvent {
+
+    init(from decoder: Decoder) throws {
+        do {
+            switch try KnownTimelineEvent(from: decoder) {
+            case .thought(let id, let text):        self = .thought(id: id, text: text)
+            case .reasoning(let id, let text):      self = .reasoning(id: id, text: text)
+            case .toolExecution(let data):          self = .toolExecution(data)
+            case .mediaGeneration(let id, let toolName, let artifact, let isComplete):
+                self = .mediaGeneration(id: id, toolName: toolName, artifact: artifact, isComplete: isComplete)
+            case .capabilityMilestone(let id, let kind, let detail):
+                self = .capabilityMilestone(id: id, kind: kind, detail: detail)
+            case .warning(let id, let category, let text):
+                self = .warning(id: id, category: category, text: text)
+            case .planExecution(let data):          self = .planExecution(data)
+            case .reflectionRun(let data):          self = .reflectionRun(data)
+            }
+        } catch {
+            // Preserve rather than throw. If even this fails the value is not JSON at all, and the
+            // error propagates to the array decode — which `ChatMessageSD.toChatMessage` reports as
+            // a total failure and the write-refusal guard then protects.
+            let payload = try PreservedJSON(from: decoder)
+            let entry = payload.singleKeyEntry
+            self = .unknown(
+                id: (entry?.value ?? payload).stableIdentity,
+                caseName: entry?.key ?? "<malformed>",
+                payload: payload
+            )
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        let known: KnownTimelineEvent
+        switch self {
+        case .thought(let id, let text):        known = .thought(id: id, text: text)
+        case .reasoning(let id, let text):      known = .reasoning(id: id, text: text)
+        case .toolExecution(let data):          known = .toolExecution(data)
+        case .mediaGeneration(let id, let toolName, let artifact, let isComplete):
+            known = .mediaGeneration(id: id, toolName: toolName, artifact: artifact, isComplete: isComplete)
+        case .capabilityMilestone(let id, let kind, let detail):
+            known = .capabilityMilestone(id: id, kind: kind, detail: detail)
+        case .warning(let id, let category, let text):
+            known = .warning(id: id, category: category, text: text)
+        case .planExecution(let data):          known = .planExecution(data)
+        case .reflectionRun(let data):          known = .reflectionRun(data)
+
+        case .unknown(_, _, let payload):
+            // Re-emit exactly what was read, at whatever depth this sits. The parent's encoder sees
+            // a single value, so nothing upstream needs to know this element is opaque.
+            var container = encoder.singleValueContainer()
+            try container.encode(payload)
+            return
+        }
+        try known.encode(to: encoder)
+    }
+}
+
 // MARK: - Capability Card Data (Plan & Execute)
 
 /// Live status of one plan step — the UI vocabulary for `PlanStepData`.
 /// (Distinct from `SubTaskStatus`, which belongs to the planner's own model.)
-enum PlanStepStatus: String, Codable, Equatable, Sendable {
+/// ⚠️ Hand-written `RawRepresentable` so an unrecognised status is PRESERVED, not rejected.
+/// An unknown value here used to fail `PlanStepData`, which failed `PlanRunData`, which made the
+/// WHOLE capability card opaque — taking every nested tool call out of `flattenedTimelineEvents`
+/// and disqualifying the run from resuming. Stdlib gives byte-identical Codable and rawValue-based
+/// equality, so no call site changes.
+enum PlanStepStatus: RawRepresentable, Codable, Equatable, Sendable {
     case pending, running, completed
     /// Ended early but usable (inner run finished `.completedWithWarnings`, e.g. circuit-breaker abort).
     case warning
     case failed
     case cancelled
+    /// A status written by a newer build, carried verbatim.
+    case other(String)
+
+    init?(rawValue: String) {
+        switch rawValue {
+        case "pending": self = .pending
+        case "running": self = .running
+        case "completed": self = .completed
+        case "warning": self = .warning
+        case "failed": self = .failed
+        case "cancelled": self = .cancelled
+        default: self = .other(rawValue)
+        }
+    }
+
+    var rawValue: String {
+        switch self {
+        case .pending: return "pending"
+        case .running: return "running"
+        case .completed: return "completed"
+        case .warning: return "warning"
+        case .failed: return "failed"
+        case .cancelled: return "cancelled"
+        case .other(let raw): return raw
+        }
+    }
+
+    /// True for a status written by a newer build. Named rather than pattern-matched at call
+    /// sites so predicates that must account for it are greppable.
+    var isUnrecognised: Bool {
+        if case .other = self { return true }
+        return false
+    }
 }
 
 /// One step of a plan card: identity + live status + its own nested timeline.
@@ -288,17 +485,27 @@ struct PlanRunData: Codable, Equatable, Identifiable {
         self.finishedAt = finishedAt
     }
 
+    /// ⚠️ `.other` is deliberately NOT counted. An unrecognised status might be a new terminal
+    /// state or a new in-flight one; counting it as completed would overstate what actually
+    /// finished, which is the more misleading of the two errors.
     var completedCount: Int {
         steps.filter { $0.status == .completed || $0.status == .warning }.count
     }
+
+    /// ⚠️ `.other` IS counted as degraded. This build cannot verify the step succeeded, and the
+    /// point of the indicator is "do not take this run's output at face value" — which is exactly
+    /// the situation. Left to fall through silently, an unreadable status would have rendered as a
+    /// clean run.
     var hasDegradedSteps: Bool {
-        steps.contains { $0.status == .warning || $0.status == .failed }
+        steps.contains { $0.status == .warning || $0.status == .failed || $0.status.isUnrecognised }
     }
 }
 
 // MARK: - Capability Card Data (Reflexion)
 
-enum ReflectionAttemptStatus: String, Codable, Equatable, Sendable {
+/// ⚠️ Hand-written `RawRepresentable` — same reasoning as `PlanStepStatus`: an unknown value made
+/// the entire Reflexion card opaque, hiding every nested tool call from resume and episodic memory.
+enum ReflectionAttemptStatus: RawRepresentable, Codable, Equatable, Sendable {
     case running
     case evaluating
     case rejected     // evaluator said RETRY — critique carries why
@@ -307,6 +514,34 @@ enum ReflectionAttemptStatus: String, Codable, Equatable, Sendable {
     case completed
     case failed
     case cancelled
+    /// A status written by a newer build, carried verbatim.
+    case other(String)
+
+    init?(rawValue: String) {
+        switch rawValue {
+        case "running": self = .running
+        case "evaluating": self = .evaluating
+        case "rejected": self = .rejected
+        case "accepted": self = .accepted
+        case "completed": self = .completed
+        case "failed": self = .failed
+        case "cancelled": self = .cancelled
+        default: self = .other(rawValue)
+        }
+    }
+
+    var rawValue: String {
+        switch self {
+        case .running: return "running"
+        case .evaluating: return "evaluating"
+        case .rejected: return "rejected"
+        case .accepted: return "accepted"
+        case .completed: return "completed"
+        case .failed: return "failed"
+        case .cancelled: return "cancelled"
+        case .other(let raw): return raw
+        }
+    }
 }
 
 /// One Reflexion trial: its verdict, the evaluator's critique, and its nested timeline.
@@ -363,7 +598,14 @@ struct ReflectionRunData: Codable, Equatable, Identifiable {
 }
 
 /// Describes the type of capability milestone for timeline rendering.
-enum CapabilityMilestoneKind: String, Codable, Equatable, Sendable {
+/// ⚠️ Hand-written `RawRepresentable` so an unrecognised milestone is PRESERVED, not rejected.
+/// This one degrades gracefully: the row renders `detail` (a plain String), so an unknown kind
+/// still shows a fully readable chip — only the icon and tint are generic.
+///
+/// Worth hardening despite that, because the stream vocabulary is already richer than this enum
+/// (`ActiveStreamManager` folds `.planApproved`/`.requestPlanReview` onto `.planGenerated`), so a
+/// faithful new case here is a near-term likelihood rather than a hypothetical.
+enum CapabilityMilestoneKind: RawRepresentable, Codable, Equatable, Sendable {
     // Planning
     case planGenerated          // "Planned 3 subtasks"
     case planReviewRequested    // "Plan awaiting approval"
@@ -385,6 +627,47 @@ enum CapabilityMilestoneKind: String, Codable, Equatable, Sendable {
     case compactionCompleted    // "History compacted — 15 turns summarized"
     case compactionFailed       // "History compaction failed — continuing uncompacted"
 
+    /// A milestone written by a newer build, carried verbatim.
+    case other(String)
+
+    init?(rawValue: String) {
+        switch rawValue {
+        case "planGenerated": self = .planGenerated
+        case "planReviewRequested": self = .planReviewRequested
+        case "subtaskStarted": self = .subtaskStarted
+        case "subtaskCompleted": self = .subtaskCompleted
+        case "reflectionTrialStarted": self = .reflectionTrialStarted
+        case "reflectionEvaluating": self = .reflectionEvaluating
+        case "reflectionRetrying": self = .reflectionRetrying
+        case "reflectionAccepted": self = .reflectionAccepted
+        case "delegationStarted": self = .delegationStarted
+        case "delegationCompleted": self = .delegationCompleted
+        case "compactionStarted": self = .compactionStarted
+        case "compactionCompleted": self = .compactionCompleted
+        case "compactionFailed": self = .compactionFailed
+        default: self = .other(rawValue)
+        }
+    }
+
+    var rawValue: String {
+        switch self {
+        case .planGenerated: return "planGenerated"
+        case .planReviewRequested: return "planReviewRequested"
+        case .subtaskStarted: return "subtaskStarted"
+        case .subtaskCompleted: return "subtaskCompleted"
+        case .reflectionTrialStarted: return "reflectionTrialStarted"
+        case .reflectionEvaluating: return "reflectionEvaluating"
+        case .reflectionRetrying: return "reflectionRetrying"
+        case .reflectionAccepted: return "reflectionAccepted"
+        case .delegationStarted: return "delegationStarted"
+        case .delegationCompleted: return "delegationCompleted"
+        case .compactionStarted: return "compactionStarted"
+        case .compactionCompleted: return "compactionCompleted"
+        case .compactionFailed: return "compactionFailed"
+        case .other(let raw): return raw
+        }
+    }
+
     /// SF Symbol for rendering in the timeline.
     var icon: String {
         switch self {
@@ -401,6 +684,7 @@ enum CapabilityMilestoneKind: String, Codable, Equatable, Sendable {
         case .compactionStarted: return "archivebox"
         case .compactionCompleted: return "archivebox.fill"
         case .compactionFailed: return "archivebox.badge.exclamationmark"
+        case .other: return "circle.dashed"
         }
     }
 
@@ -411,6 +695,9 @@ enum CapabilityMilestoneKind: String, Codable, Equatable, Sendable {
         case .reflectionTrialStarted, .reflectionEvaluating, .reflectionRetrying, .reflectionAccepted: return .reflection
         case .delegationStarted, .delegationCompleted: return .delegation
         case .compactionStarted, .compactionCompleted, .compactionFailed: return .compaction
+        // A neutral tint rather than borrowing one of the four capability colours — tinting an
+        // unrecognised milestone "planning" would assert a family it may not belong to.
+        case .other: return .unrecognised
         }
     }
 
@@ -419,6 +706,8 @@ enum CapabilityMilestoneKind: String, Codable, Equatable, Sendable {
         case reflection  // purple tint
         case delegation  // green tint
         case compaction  // orange tint
+        /// A milestone from a newer build — neutral, claims no capability family.
+        case unrecognised
     }
 }
 
@@ -775,6 +1064,98 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         didSet { timelineRevision &+= 1 }
     }
 
+    /// True when this message was loaded from a store whose `timelineEventsData` could not be
+    /// decoded, so `timelineEvents` is EMPTY BY FAILURE rather than because the run had no events.
+    ///
+    /// ⚠️ This flag is the only thing standing between a read failure and permanent data loss.
+    /// Both persistence writers null the blob whenever the in-memory timeline is empty
+    /// (`ChatMessageSD.from` and `ChatPersistenceStore.addMessages`), so without it the sequence is:
+    /// load an undecodable blob → `timelineEvents == []` → the next flush writes nil → the original
+    /// bytes are gone. The `timelineRevision` skip-cache is NOT a safety net: the revision is seeded
+    /// randomly per instance, so a freshly-loaded message always looks changed and the very first
+    /// flush takes the write branch.
+    ///
+    /// ⚠️ It lives on the VALUE object, not as a `@Transient` on `ChatMessageSD`, because the
+    /// decode happens on one fetched instance while the write happens after a SEPARATE fetch — a
+    /// model-side flag would silently reset to false in between and the destructive write would
+    /// proceed. This value flows to both writers by construction.
+    ///
+    /// Deliberately excluded from `CodingKeys` and from `==`: it describes THIS LOAD, not the
+    /// message, and two messages differing only by a failed read are the same message.
+    @ObservationIgnored var timelineDecodeFailed: Bool = false
+
+    /// The placeholder issued when `contentData` could not be decoded at all, or nil if it decoded.
+    ///
+    /// ⚠️ `contentData` IS the conversation, so this is the most consequential of the write guards.
+    /// A genuinely corrupt blob yields a "Decode Error" card, and BOTH writers used to re-encode
+    /// that card straight over the original bytes — so a message that might have been recoverable
+    /// by a later build became permanently a Decode Error card instead.
+    ///
+    /// Stores the placeholder rather than a bare Bool so the setter can tell an opportunistic save
+    /// (handing the same card back) from a deliberate replacement, matching the `BackendProfile`
+    /// rule. Load-scoped, like `timelineDecodeFailed`, and excluded from `CodingKeys` and `==`.
+    ///
+    /// Note this is for CORRUPT bytes only. Readable JSON of an unknown shape now decodes to
+    /// `MessageContent.unknown` and needs no guard — it is preserved by the codec itself.
+    @ObservationIgnored var undecodableContentPlaceholder: MessageContent?
+
+    /// Set when `agentResponseData` could not be decoded on this load.
+    ///
+    /// ⚠️ The third column of this kind, and the one that was missed. `contentData` and
+    /// `timelineEventsData` both got a write refusal; `agentResponseData` did not, even though its
+    /// decode-failure path sets `agentResponse = nil` — and nil is exactly what the writers persist.
+    /// So a response blob this build cannot read (variants written by a newer build, or genuine
+    /// corruption) was turned into NULL the first time the message was re-persisted, which happens
+    /// on any resume or in-flight flush of the enclosing conversation.
+    ///
+    /// Load-scoped and on the VALUE object for the same reason as `timelineDecodeFailed`, and
+    /// likewise excluded from `CodingKeys` and `==`.
+    @ObservationIgnored var agentResponseDecodeFailed: Bool = false
+
+    /// Whether it is safe to persist `content` over the stored blob.
+    ///
+    /// False only in the exact case that loses data: the decode failed AND the caller is handing
+    /// back the very placeholder we issued. Anything else — a live agent writing real content, a
+    /// deliberate replacement — writes normally, so a message never becomes permanently stuck.
+    var canPersistContent: Bool {
+        guard let placeholder = undecodableContentPlaceholder else { return true }
+        return (currentAgentContent ?? content) != placeholder
+    }
+
+    /// Whether it is safe to persist `agentResponse` over the stored blob.
+    ///
+    /// Same shape as the timeline rule, and deliberately NOT the profile rule: false only when the
+    /// decode failed AND nothing has replaced it, so the caller is handing back the nil we produced.
+    /// A regeneration that appends a real variant onto a failed load still writes — the record stays
+    /// repairable rather than frozen.
+    var canPersistAgentResponse: Bool {
+        !(agentResponseDecodeFailed && agentResponse == nil)
+    }
+
+    /// Whether it is safe to persist `timelineEvents` over the stored blob.
+    ///
+    /// False only in the exact case that loses data: the decode failed AND nothing has been appended
+    /// since, so the caller is handing back the empty placeholder. A live run that appended new
+    /// events onto a failed load IS written — matching the profile rule that a different value is a
+    /// deliberate edit, so the record stays repairable.
+    ///
+    /// ⚠️ Never gate on `timelineEvents.isEmpty` alone: every user message and every bot message
+    /// legitimately has an empty timeline and must still be able to clear its blob.
+    var canPersistTimeline: Bool {
+        !(timelineDecodeFailed && timelineEvents.isEmpty)
+    }
+
+    /// True when the timeline is not a faithful record of what the run actually did.
+    ///
+    /// ⚠️ Disqualifying for RESUME, which is a different bar from disqualifying for display. An
+    /// `.unknown` renders as a visible placeholder — fine for a human reading the history — but it
+    /// is invisible to `TimelineTurnReconstructor`, so a completed tool call hiding inside one makes
+    /// the model believe that tool never ran. An unrecognised CAPABILITY CARD is worse still: its
+    /// entire nested sub-timeline disappears from `flattenedTimelineEvents`.
+    var timelineIsDegraded: Bool {
+        timelineDecodeFailed || flattenedTimelineEvents.contains(where: \.isUnknown)
+    }
+
     /// [P4/TL-4] Change marker for `timelineEvents`, bumped by `didSet` so EVERY
     /// mutation path counts — append, eviction, in-place card updates, subscript
     /// writes, decode-time assignment. Consumers: the persistence flush skips
@@ -811,9 +1192,24 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         }) {
             events.remove(at: firstNarrativeIndex)
             DGLogger(category: "ChatMessage").debug("[TIMELINE] Evicted oldest narrative event (\(context), cap \(maxTimelineEvents)).")
-        } else if let firstEvictableIndex = events.firstIndex(where: { !$0.isCapabilityCard }) {
+        } else if let firstEvictableIndex = events.firstIndex(where: { !$0.isCapabilityCard && !$0.isUnknown }) {
             events.remove(at: firstEvictableIndex)
             DGLogger(category: "ChatMessage").debug("[TIMELINE] Evicted oldest non-card event (\(context), cap \(maxTimelineEvents)).")
+        } else if let firstUnknownIndex = events.firstIndex(where: { $0.isUnknown }) {
+            // ⚠️ THIRD TIER, and deliberately last. An `.unknown` is neither narrative nor a
+            // recognisable card, so under the old two-tier rule it was the FIRST non-narrative
+            // victim — meaning a capability card written by a newer build would be preferentially
+            // deleted, which is the exact opposite of the card-protection rule's intent.
+            //
+            // It is not folded into `isCapabilityCard` either: a card is protected absolutely, so a
+            // timeline made entirely of unknowns would never evict at all and would breach the cap.
+            let dropped = events.remove(at: firstUnknownIndex)
+            DGLogger(category: "ChatMessage").error(
+                "[TIMELINE] Evicted an UNRECOGNISED event (\(context), cap \(maxTimelineEvents), "
+                + "id \(dropped.id.uuidString.prefix(8))). CONSEQUENCE: an event written by a newer "
+                + "build is gone from the in-memory record; if this message is re-persisted, a newer "
+                + "build reloading it will not get that event back."
+            )
         }
     }
     
@@ -851,6 +1247,11 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
             return max(1, codeTokens + proseTokens)
         case .plainText(let text):
             return max(1, text.count / 4)
+        case .unknown:
+            // Contributes nothing to the budget: this build cannot read the content, so it never
+            // reaches a prompt. Deliberately not a guess at the payload's size — an over-estimate
+            // would silently shrink the real budget.
+            return 0
         case .error(let title, let details, _, _):
             // Measures the string that actually ships. Every other case here estimates
             // exactly what `textContent` returns; this one summed the raw fields and missed
@@ -963,6 +1364,10 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         case .codeBlock(let language, let code):
             return [ContentBlock(id: "block-0", type: .code(language: language ?? "text", content: code, fileName: nil))]
         case .error, .mediaArtifact:
+            return []
+        case .unknown:
+            // Not indexed for RAG. Indexing an opaque payload would put JSON scaffolding into the
+            // retrieval corpus and surface it as if it were something the user wrote.
             return []
         case .checkpoint(let summary):
             return getOrCreateMarkdownBlocks(from: summary)
@@ -1093,6 +1498,18 @@ enum MessageContent: Equatable, Codable {
     /// Contains a structured summary of older conversation turns.
     case checkpoint(summary: String)
 
+    /// Content THIS build cannot model, held verbatim so re-encoding preserves it.
+    ///
+    /// ⚠️ This is the highest-stakes catch-all in the app: `contentData` IS the conversation. The
+    /// decoder previously ended in `default: throw … "Invalid MessageContent type"`, so a single
+    /// case added by a newer build turned the message into a "Decode Error" card — which both
+    /// writers then re-encoded over the original bytes. The message text was gone, permanently,
+    /// from one enum case.
+    ///
+    /// Distinct from the Decode Error card, which remains the presentation for genuinely corrupt
+    /// bytes. This case means "readable JSON, unknown shape" and is fully recoverable.
+    case unknown(type: String, payload: PreservedJSON)
+
     enum CodingKeys: String, CodingKey {
         case type, text, language, code, title, details, imageUrl, imageAlt, imageData, artifact, summary
         case category, suggestion   // structured error enrichment (Round 2 Phase 4)
@@ -1154,7 +1571,13 @@ enum MessageContent: Equatable, Codable {
             let summary = try container.decode(String.self, forKey: .summary)
             self = .checkpoint(summary: summary)
         default:
-            throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Invalid MessageContent type: \(type)")
+            // ⚠️ PRESERVE, never throw. A `type` this build does not know is overwhelmingly a case
+            // a NEWER build added — not corruption. Throwing here turned the whole message into a
+            // Decode Error card that the next save wrote over the original bytes, so one new enum
+            // case permanently destroyed the message text. Capture the WHOLE object (not just the
+            // known keys) so re-encoding is faithful.
+            let payload = try PreservedJSON(from: decoder)
+            self = .unknown(type: type, payload: payload)
         }
     }
 
@@ -1180,6 +1603,14 @@ enum MessageContent: Equatable, Codable {
         case .mediaArtifact(let artifact):
             try container.encode("mediaArtifact", forKey: .type)
             try container.encode(artifact, forKey: .artifact)
+        case .unknown(_, let payload):
+            // Re-emit exactly what was read. Uses a single-value container rather than the keyed
+            // one above because the payload IS the whole object, including keys this build has no
+            // CodingKey for — encoding it key-by-key would silently drop them.
+            var single = encoder.singleValueContainer()
+            try single.encode(payload)
+            return
+
         case .checkpoint(let summary):
             try container.encode("checkpoint", forKey: .type)
             try container.encode(summary, forKey: .summary)
@@ -1194,6 +1625,15 @@ enum MessageContent: Equatable, Codable {
         case .error(let title, let details, _, _): return "\(title ?? "Error"): \(details)"
         case .mediaArtifact: return nil
         case .checkpoint(let summary): return summary
+        // nil, not a placeholder string. `textContent` feeds prompts, RAG and exports — emitting
+        // synthetic text would put words into the conversation that nobody said.
+        case .unknown: return nil
         }
+    }
+
+    /// True for content a newer build wrote that this one is preserving verbatim.
+    var isUnrecognised: Bool {
+        if case .unknown = self { return true }
+        return false
     }
 }

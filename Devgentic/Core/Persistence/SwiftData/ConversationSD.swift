@@ -29,10 +29,9 @@ final class ConversationSD {
     @Relationship(deleteRule: .cascade, inverse: \WorkflowRunRecordSD.conversation)
     var workflowRuns: [WorkflowRunRecordSD] = []
 
-    /// The Code Viewer's saved tab session for this conversation (at most one) —
-    /// cascade-deleted with it, so closed conversations never leave orphan sessions.
-    @Relationship(deleteRule: .cascade, inverse: \CodeViewerSessionSD.conversation)
-    var codeViewerSessions: [CodeViewerSessionSD] = []
+    // RETIRED 2026-08-04: `codeViewerSessions`. The Code Viewer no longer persists anything —
+    // tabs live in `ChatHistoryViewModel.tabsByConversation` for the app session only — so the
+    // relationship and its `CodeViewerSessionSD` destination were both dropped.
 
     init(id: UUID = UUID(), timestamp: Date = Date(), userDefinedTitle: String? = nil,
          isPinned: Bool = false, openAIThreadID: String? = nil,

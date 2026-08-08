@@ -103,8 +103,18 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         }
 
         context.insert(sd)
-        saveContext()
-        logger.info("Added conversation \(conversation.id.uuidString).")
+        if saveContext() {
+            logger.info(
+                "[PERSISTENCE] Added conversation \(conversation.id.uuidString) with "
+                + "\(conversation.messages.count) message(s)."
+            )
+        } else {
+            logger.error(
+                "[PERSISTENCE] Conversation \(conversation.id.uuidString) was NOT persisted "
+                + "(\(conversation.messages.count) message(s)). CONSEQUENCE: it appears in the sidebar "
+                + "for this session and is gone after relaunch."
+            )
+        }
     }
 
     func getConversation(withId id: UUID) -> ConversationSD? {
@@ -190,7 +200,20 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
     }
 
     func addMessages(_ messages: [ChatMessage], toConversation conversationId: UUID) async {
-        guard let context = mainContext else { return }
+        // ⚠️ This was a bare `guard let context = mainContext else { return }` (G53). It is the
+        // worst-placed silent return in the app: the caller has already streamed a full assistant
+        // turn and shown it on screen, so dropping the write here means the conversation reads
+        // normally until relaunch and then comes back missing turns, with nothing anywhere saying
+        // why. The write cannot be recovered from here — but it must not vanish unrecorded.
+        guard let context = mainContext else {
+            logger.error(
+                "[PERSISTENCE] addMessages(\(messages.count) messages → conversation "
+                + "\(conversationId.uuidString.prefix(8))) called before the ModelContainer was "
+                + "configured. CONSEQUENCE: these messages are NOT written to disk — they stay "
+                + "visible in the running session and are GONE after relaunch."
+            )
+            return
+        }
 
         // [P4] Bound the skip cache — a wholesale prune costs at most one redundant
         // encode per live message afterwards, never a missed write.
@@ -234,20 +257,89 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
 
             if let existing {
                 // Update existing message in-place
-                let contentToEncode = message.currentAgentContent ?? message.content
-                existing.contentData = (try? JSONEncoder().encode(contentToEncode)) ?? Data()
-                existing.agentResponseData = message.agentResponse.flatMap { try? JSONEncoder().encode($0) }
+                // ⚠️ A read failure must not become a write failure — and `contentData` IS the
+                // conversation, so this is the most consequential of the guards. When the stored
+                // bytes could not be decoded, the caller is holding the "Decode Error" card we
+                // issued; writing it back would replace a possibly-recoverable message with the
+                // card, permanently. A real value (a live agent writing content, a deliberate
+                // replacement) still writes normally.
+                if message.canPersistContent {
+                    let contentToEncode = message.currentAgentContent ?? message.content
+                    existing.contentData = ChatMessageSD.encodeContent(contentToEncode, messageID: messageId)
+                } else {
+                    logger.error(
+                        "[PERSISTENCE] Refusing to overwrite unreadable contentData for message "
+                        + "\(messageId.uuidString.prefix(8)): the stored content failed to decode on "
+                        + "load and the caller is handing back the decode-error placeholder. "
+                        + "CONSEQUENCE: the original bytes are preserved for a build that can read "
+                        + "them; this message renders as a decode-error card until then."
+                    )
+                }
+                // ⚠️ TWO guards, closing two different holes on the same column.
+                //
+                // `canPersistAgentResponse` is the READ side (G91): a blob that failed to decode
+                // yielded `agentResponse == nil`, and nil is exactly what this line persists — so an
+                // unreadable response was nulled on the first flush after the failed load.
+                //
+                // `.write` vs `.preserveExisting` is the ENCODE side (G21): `flatMap { try? … }`
+                // collapsed "value is nil" and "encoding threw" into the same nil.
+                if message.canPersistAgentResponse {
+                    if case .write(let data) = ChatMessageSD.encodeAuxiliaryBlob(
+                        message.agentResponse, column: "agentResponseData", messageID: messageId,
+                        version: ChatMessageSD.agentResponseBlobVersion
+                    ) {
+                        existing.agentResponseData = data
+                    }
+                } else {
+                    logger.error(
+                        "[PERSISTENCE] Refusing to null agentResponseData for message "
+                        + "\(messageId.uuidString.prefix(8)): the stored blob failed to decode on load "
+                        + "and nothing has replaced it, so this write would erase the response "
+                        + "variants. CONSEQUENCE: the original bytes are preserved for a build that "
+                        + "can read them; this message shows no variant picker until then."
+                    )
+                }
                 // [P4] The timeline is the heavyweight blob (up to 500 events) and it
                 // changes far less often than content — yet every in-flight flush
                 // (~2s during streaming) re-encoded ALL of it on the MainActor,
                 // quadratic over a run. Skip when the revision says nothing changed;
                 // the random per-instance seed makes cross-instance aliasing (reload,
                 // regenerate) impossible, so a real change can never be skipped.
+                // ⚠️ The revision check is a PERFORMANCE skip, not a safety net — the opposite, in
+                // fact. `timelineRevision` is seeded randomly per instance so two instances of the
+                // same persisted message can never alias, which means a freshly-loaded message
+                // ALWAYS looks changed and this branch always fires on the first flush after a load.
+                // That is precisely when an undecodable blob would be nulled, so the safety check
+                // has to be its own condition.
                 if lastEncodedTimelineRevision[messageId] != message.timelineRevision {
-                    existing.timelineEventsData = message.timelineEvents.isEmpty
-                        ? nil
-                        : (try? JSONEncoder().encode(message.timelineEvents))
-                    lastEncodedTimelineRevision[messageId] = message.timelineRevision
+                    if message.canPersistTimeline {
+                        // ⚠️ Cache the revision only on a successful write. The old form nulled the
+                        // column on an encode failure AND stamped the revision, so the skip above
+                        // suppressed every later retry — one transient failure permanently deleted
+                        // the run's timeline (G21).
+                        switch ChatMessageSD.encodeAuxiliaryBlob(
+                            ChatMessageSD.wrappedTimeline(message.timelineEvents),
+                            column: "timelineEventsData", messageID: messageId,
+                            version: ChatMessageSD.timelineBlobVersion
+                        ) {
+                        case .write(let data):
+                            existing.timelineEventsData = data
+                            lastEncodedTimelineRevision[messageId] = message.timelineRevision
+                        case .preserveExisting:
+                            break  // helper logged it; leave the revision uncached so a later flush retries
+                        }
+                    } else {
+                        // Read failure must not become a write failure. Leave the bytes alone and do
+                        // NOT cache the revision, so a later flush carrying real events still writes.
+                        logger.error(
+                            "[PERSISTENCE] Refusing to null timelineEventsData for message "
+                            + "\(messageId.uuidString.prefix(8)): the stored blob failed to decode on "
+                            + "load and nothing has been appended since, so this write would replace "
+                            + "the run's timeline with nothing. CONSEQUENCE: the original bytes are "
+                            + "preserved for a build that can read them; the timeline renders empty "
+                            + "until then."
+                        )
+                    }
                 }
                 existing.traceID = message.traceID
                 existing.senderType = message.sender.rawValue
@@ -262,7 +354,12 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
                 // flush has already INSERTed the row — so finalize always lands on this
                 // UPDATE branch. Without this line the badge and conversation totals were
                 // visible live but gone on every reload (INSERT was the only writer).
-                existing.tokenUsageData = message.tokenUsage.flatMap { try? JSONEncoder().encode($0) }
+                if case .write(let data) = ChatMessageSD.encodeAuxiliaryBlob(
+                    message.tokenUsage, column: "tokenUsageData", messageID: messageId,
+                    version: ChatMessageSD.tokenUsageBlobVersion
+                ) {
+                    existing.tokenUsageData = data
+                }
 
                 // [G1] Resume lifecycle + run-identity stamp. `ChatMessageSD.from` writes these on
                 // first INSERT, but the in-flight flush path upserts an already-inserted row: the
@@ -321,8 +418,21 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
 
         // Update conversation timestamp
         conversation?.timestamp = Date()
-        saveContext()
-        logger.debug("Upserted \(messages.count) messages for conversation \(conversationId.uuidString).")
+        // ⚠️ .info, not .debug: DGLogger never routes .debug to the ring buffer, so the only
+        // positive confirmation that the app's MAIN WRITE PATH ran was absent from every exported
+        // bug bundle.
+        if saveContext() {
+            logger.info(
+                "[PERSISTENCE] Upserted \(messages.count) message(s) for conversation "
+                + "\(conversationId.uuidString)."
+            )
+        } else {
+            logger.error(
+                "[PERSISTENCE] \(messages.count) message(s) for conversation "
+                + "\(conversationId.uuidString) were NOT persisted. CONSEQUENCE: the turn is on screen "
+                + "but not on disk — it disappears on relaunch."
+            )
+        }
 
         // [Conversation memory] Index USER turns here — the one persistence funnel
         // every surface flows through (main chat, ChatOps, QuickAccess, scheduler) —
@@ -348,8 +458,15 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
             return
         }
         conversation.openAIThreadID = threadId
-        saveContext()
-        logger.info("Updated conversation \(conversationId.uuidString) with OpenAI thread ID.")
+        if saveContext() {
+            logger.info("[PERSISTENCE] Updated conversation \(conversationId.uuidString) with OpenAI thread ID.")
+        } else {
+            logger.error(
+                "[PERSISTENCE] OpenAI thread ID for conversation \(conversationId.uuidString) was NOT "
+                + "persisted. CONSEQUENCE: the assistant thread is re-created on the next launch and "
+                + "server-side history for this conversation is orphaned."
+            )
+        }
     }
 
     func deleteConversation(with id: UUID) {
@@ -367,11 +484,27 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
             $0 + $1.attachedTextFiles.count + $1.attachedImageFiles.count
         }
         let runCount = conversation.workflowRuns.count
-        let sessionCount = conversation.codeViewerSessions.count
 
         context.delete(conversation)
-        saveContext()
-        logger.info("[DELETE] Conversation \(id.uuidString.prefix(8)) removed — cascaded \(messageCount) message(s), \(attachmentCount) attachment(s), \(runCount) workflow run(s), \(sessionCount) code-viewer session(s).")
+        // Code-viewer sessions are no longer counted here: the entity was retired 2026-08-04 and
+        // tabs are in-memory only, so there is nothing left for the cascade to remove.
+        //
+        // ⚠️ A destructive cascade must never be reported before it commits. This claimed 42 messages
+        // deleted on a save that could have thrown — and the conversation reappearing on relaunch
+        // then looks like a resurrection bug rather than a failed delete.
+        if saveContext() {
+            logger.notice(
+                "[PERSISTENCE] Conversation \(id.uuidString.prefix(8)) deleted — cascaded "
+                + "\(messageCount) message(s), \(attachmentCount) attachment(s), \(runCount) workflow run(s)."
+            )
+        } else {
+            logger.error(
+                "[PERSISTENCE] Delete of conversation \(id.uuidString.prefix(8)) was NOT persisted "
+                + "(\(messageCount) message(s), \(attachmentCount) attachment(s), \(runCount) workflow "
+                + "run(s) still on disk). CONSEQUENCE: it disappears from the sidebar now and RETURNS "
+                + "on the next launch."
+            )
+        }
     }
 
     func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?) {
@@ -381,8 +514,14 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         }
         conversation.backendType = backendType?.rawValue
         conversation.backendEntityId = backendEntityId
-        saveContext()
-        logger.info("Updated conversation \(id.uuidString) with backend type: \(backendType?.rawValue ?? "none").")
+        if saveContext() {
+            logger.info("[PERSISTENCE] Updated conversation \(id.uuidString) backend: \(backendType?.rawValue ?? "none").")
+        } else {
+            logger.error(
+                "[PERSISTENCE] Backend change for conversation \(id.uuidString) was NOT persisted. "
+                + "CONSEQUENCE: the conversation reverts to its previous backend on relaunch."
+            )
+        }
     }
 
     func updateProfileType(for conversationId: UUID, profileTypeRaw: String) {
@@ -391,8 +530,14 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
             return
         }
         conversation.profileTypeRaw = profileTypeRaw
-        saveContext()
-        logger.info("Updated conversation \(conversationId.uuidString) with profileType: \(profileTypeRaw).")
+        if saveContext() {
+            logger.info("[PERSISTENCE] Updated conversation \(conversationId.uuidString) profileType: \(profileTypeRaw).")
+        } else {
+            logger.error(
+                "[PERSISTENCE] profileType change for conversation \(conversationId.uuidString) was NOT "
+                + "persisted. CONSEQUENCE: it reverts on relaunch."
+            )
+        }
     }
 
     func togglePinStatus(for conversationId: UUID) {
@@ -401,8 +546,14 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
             return
         }
         conversation.isPinned.toggle()
-        saveContext()
-        logger.info("Toggled pin for conversation \(conversationId.uuidString) to \(conversation.isPinned).")
+        if saveContext() {
+            logger.info("[PERSISTENCE] Pin for conversation \(conversationId.uuidString) → \(conversation.isPinned).")
+        } else {
+            logger.error(
+                "[PERSISTENCE] Pin toggle for conversation \(conversationId.uuidString) was NOT "
+                + "persisted. CONSEQUENCE: the sidebar shows the new state until relaunch, then reverts."
+            )
+        }
     }
 
     // MARK: - Private
@@ -455,12 +606,35 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         return reconciled
     }
 
-    private func saveContext() {
-        guard let context = mainContext else { return }
+    /// Commits the pending changes. Returns whether they actually reached disk.
+    ///
+    /// ⚠️ `@discardableResult` is deliberately ABSENT. This used to return `Void` and swallow its
+    /// error, and around it sat a dozen call sites logging "Added conversation X" / "Upserted N
+    /// messages" / "removed — cascaded 42 message(s)" as accomplished facts. On a save failure every
+    /// one of those lines asserted something that never happened, so a support log positively
+    /// confirmed writes that were gone after relaunch — pointing any investigation at the load path
+    /// instead of the save. Callers must now decide what to say based on what happened.
+    private func saveContext() -> Bool {
+        guard let context = mainContext else {
+            logger.error(
+                "[PERSISTENCE] saveContext called before the ModelContainer was configured. "
+                + "CONSEQUENCE: every pending chat change — new messages, edits, timeline blobs — "
+                + "is lost when the app quits."
+            )
+            return false
+        }
         do {
             try context.save()
+            return true
         } catch {
-            logger.error("Failed to save chat context: \(error.localizedDescription)")
+            logger.error(
+                "[PERSISTENCE] Failed to save the chat context: \(error). CONSEQUENCE: everything "
+                + "written since the last successful save — new messages, edits, deletions, timeline "
+                + "blobs — is still only in memory and is LOST when the app quits. The UI will keep "
+                + "showing it until the next relaunch, which is why this reads as data 'disappearing' "
+                + "rather than as a save failure."
+            )
+            return false
         }
     }
 }

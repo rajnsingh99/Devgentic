@@ -215,7 +215,14 @@ enum AgentStreamEvent: Sendable {
 
 /// Classification for `.warning` events — drives UI affordance, negativeConstraints,
 /// and episodic memory retrieval. Codable so timeline warnings persist with category intact.
-enum WarningCategory: String, Sendable, Codable, Equatable, CaseIterable {
+/// ⚠️ Hand-written `RawRepresentable` so an unrecognised category is PRESERVED, not rejected.
+/// Highest growth probability of the six — new warning kinds are added routinely.
+///
+/// ⚠️ `CaseIterable` cannot be synthesized alongside an associated-value case, so `allCases` is
+/// hand-written below and deliberately EXCLUDES `.other` (it is not a fixed member of the
+/// vocabulary). Verified 2026-08-04: no `allCases` consumer exists repo-wide, so nothing changes
+/// meaning; it is kept only so the conformance does not silently disappear from the API.
+enum WarningCategory: RawRepresentable, Sendable, Codable, Equatable, CaseIterable {
     case retry             // transient network / backend blip — retry in progress
     case throttle          // rate limit hit — backing off
     case memoryPressure    // scratchpad budget utilization high
@@ -225,6 +232,44 @@ enum WarningCategory: String, Sendable, Codable, Equatable, CaseIterable {
     case circuitBreaker    // repetitive-action / loop safeguard tripping (imminent or already aborted)
     case resourceUnavailable // an attached/upstream file couldn't be read (report-and-skip)
     case midRunError       // a failure the run survived (failed workflow node / planning subtask) — demoted from an `.error` card when prose streamed after it (ASM-1)
+
+    /// A category written by a newer build, carried verbatim.
+    case other(String)
+
+    static var allCases: [WarningCategory] {
+        [.retry, .throttle, .memoryPressure, .parseFailure, .formatCorrection,
+         .contextPressure, .circuitBreaker, .resourceUnavailable, .midRunError]
+    }
+
+    init?(rawValue: String) {
+        switch rawValue {
+        case "retry": self = .retry
+        case "throttle": self = .throttle
+        case "memoryPressure": self = .memoryPressure
+        case "parseFailure": self = .parseFailure
+        case "formatCorrection": self = .formatCorrection
+        case "contextPressure": self = .contextPressure
+        case "circuitBreaker": self = .circuitBreaker
+        case "resourceUnavailable": self = .resourceUnavailable
+        case "midRunError": self = .midRunError
+        default: self = .other(rawValue)
+        }
+    }
+
+    var rawValue: String {
+        switch self {
+        case .retry: return "retry"
+        case .throttle: return "throttle"
+        case .memoryPressure: return "memoryPressure"
+        case .parseFailure: return "parseFailure"
+        case .formatCorrection: return "formatCorrection"
+        case .contextPressure: return "contextPressure"
+        case .circuitBreaker: return "circuitBreaker"
+        case .resourceUnavailable: return "resourceUnavailable"
+        case .midRunError: return "midRunError"
+        case .other(let raw): return raw
+        }
+    }
 
     var displayName: String {
         switch self {
@@ -237,6 +282,9 @@ enum WarningCategory: String, Sendable, Codable, Equatable, CaseIterable {
         case .circuitBreaker:   return "Loop Guard"
         case .resourceUnavailable: return "Attachment"
         case .midRunError:      return "Error"
+        // The raw value is the only truthful thing this build knows about the category, and
+        // `WarningRow` uppercases whatever it gets — so it reads as a label, not a leak.
+        case .other(let raw):   return raw
         }
     }
 
@@ -252,6 +300,7 @@ enum WarningCategory: String, Sendable, Codable, Equatable, CaseIterable {
         case .circuitBreaker:   return "arrow.triangle.2.circlepath.circle"
         case .resourceUnavailable: return "doc.badge.exclamationmark"
         case .midRunError:      return "exclamationmark.triangle"
+        case .other:            return "exclamationmark.triangle"
         }
     }
 
@@ -266,6 +315,12 @@ enum WarningCategory: String, Sendable, Codable, Equatable, CaseIterable {
         case .circuitBreaker, .contextPressure, .midRunError:
             return true
         case .retry, .throttle, .memoryPressure, .parseFailure, .formatCorrection, .resourceUnavailable:
+            return false
+        // ⚠️ Deliberately `false`. Bubbling to the workflow surface asserts "the whole run is at
+        // risk", and this build cannot know that about a category it does not recognise. The
+        // warning still renders in the node's own timeline, so nothing is hidden — it just does
+        // not get promoted on a guess.
+        case .other:
             return false
         }
     }
@@ -297,7 +352,18 @@ enum ExecutionOutcome: String, Sendable, Codable, Equatable, CaseIterable {
 /// Classification for `.toolFailed` events — drives negativeConstraints policy,
 /// episodic-memory retrieval weight, and UI affordance. Codable so timeline tool events
 /// persist with category intact and survive session re-opens.
-enum ToolFailureCategory: String, Sendable, Codable, Equatable, CaseIterable {
+/// ⚠️ Hand-written `RawRepresentable` so an unrecognised category is PRESERVED, not dropped — the
+/// seventh String-raw enum in this persisted blob to get the treatment, and the one the first pass
+/// missed (G85).
+///
+/// It rides `ChatMessageSD.timelineEventsData` inside `TimelineEvent`. Before this, a category
+/// written by a newer build failed the strict decode of the event carrying it; the total `.unknown`
+/// catch-all preserved the bytes, but the whole tool call rendered as an opaque unrecognised event
+/// instead of a failure with a reason. Carrying the rawValue keeps the event legible.
+///
+/// Stdlib `RawRepresentable where RawValue == String` gives byte-identical `Codable` and
+/// rawValue-based `Equatable`, so no call site changes and the wire format is unchanged.
+enum ToolFailureCategory: RawRepresentable, Sendable, Codable, Equatable, CaseIterable {
     case userDenied          // Ghost Protocol — user explicitly rejected the call
     case permissionRejected  // sandbox / OS-level permission missing
     case executionThrew      // tool's run closure threw (or returned semantic error)
@@ -305,6 +371,41 @@ enum ToolFailureCategory: String, Sendable, Codable, Equatable, CaseIterable {
     case invalidArgs         // preflight argument validation rejected the call
     case notFound            // tool name hallucinated / not in registry
     case cancelled           // user skipped ask_user or task was cancelled mid-flight
+    /// A category written by a newer build, carried verbatim.
+    case other(String)
+
+    init?(rawValue: String) {
+        switch rawValue {
+        case "userDenied":         self = .userDenied
+        case "permissionRejected": self = .permissionRejected
+        case "executionThrew":     self = .executionThrew
+        case "timeout":            self = .timeout
+        case "invalidArgs":        self = .invalidArgs
+        case "notFound":           self = .notFound
+        case "cancelled":          self = .cancelled
+        default:                   self = .other(rawValue)
+        }
+    }
+
+    var rawValue: String {
+        switch self {
+        case .userDenied:         return "userDenied"
+        case .permissionRejected: return "permissionRejected"
+        case .executionThrew:     return "executionThrew"
+        case .timeout:            return "timeout"
+        case .invalidArgs:        return "invalidArgs"
+        case .notFound:           return "notFound"
+        case .cancelled:          return "cancelled"
+        case .other(let raw):     return raw
+        }
+    }
+
+    /// ⚠️ Hand-written: `CaseIterable` synthesis breaks once a case carries an associated value.
+    /// `.other` is excluded because it is unbounded — `allCases` means "the categories this build
+    /// knows", which is what any picker or exhaustiveness check actually wants.
+    static var allCases: [ToolFailureCategory] {
+        [.userDenied, .permissionRejected, .executionThrew, .timeout, .invalidArgs, .notFound, .cancelled]
+    }
 
     var displayName: String {
         switch self {
@@ -315,6 +416,7 @@ enum ToolFailureCategory: String, Sendable, Codable, Equatable, CaseIterable {
         case .invalidArgs:        return "Invalid Args"
         case .notFound:           return "Not Found"
         case .cancelled:          return "Cancelled"
+        case .other:              return "Unknown"
         }
     }
 
@@ -328,16 +430,23 @@ enum ToolFailureCategory: String, Sendable, Codable, Equatable, CaseIterable {
         case .invalidArgs:        return "text.badge.xmark"
         case .notFound:           return "questionmark.circle"
         case .cancelled:          return "xmark.circle"
+        case .other:              return "exclamationmark.circle"
         }
     }
 
     /// Whether failures of this category should produce a hard `negativeConstraint` (Ghost Protocol ban
     /// on the tool name). Soft failures are transient and the agent may retry with different args.
+    ///
+    /// ⚠️ `.other` is SOFT. A hard constraint bans the tool outright, and a check that cannot answer
+    /// must not block the action (§7 invariant 23) — banning a tool because this build does not
+    /// recognise the failure category would turn an unknown into a permanent restriction. The cost of
+    /// being wrong the soft way is one retry; the cost of being wrong the hard way is a capability
+    /// the agent can no longer use for the rest of the run.
     var producesHardConstraint: Bool {
         switch self {
         case .userDenied, .permissionRejected, .notFound:
             return true
-        case .executionThrew, .timeout, .invalidArgs, .cancelled:
+        case .executionThrew, .timeout, .invalidArgs, .cancelled, .other:
             return false
         }
     }
@@ -355,6 +464,9 @@ enum ToolFailureCategory: String, Sendable, Codable, Equatable, CaseIterable {
         case .invalidArgs:        return .invalidArgs
         case .notFound:           return .notFound
         case .cancelled:          return .cancelled
+        // Honest generic: it IS a failure, we just cannot say which kind. `.failed` is the
+        // vocabulary's own catch-all and is what reaches the episodic XML.
+        case .other:              return .failed
         }
     }
 }

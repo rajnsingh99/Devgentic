@@ -17,6 +17,8 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+private let logger = DGLogger(category: "BotConfigDetail")
+
 private let defaultBotPersona = """
 You are a helpful, knowledgeable assistant.
 
@@ -51,8 +53,16 @@ struct BotConfigDetailView: View {
     // Unsaved-changes guard on back navigation.
     @State private var showingBackAlert = false
 
+    /// Advisory findings from the last save, shown until dismissed or the next save (register A34).
+    /// ⚠️ Cleared on every save, so it always describes the CURRENT state of the profile — a stale
+    /// note about a model the user has since changed would be worse than no note.
+    @State private var saveAdvisories: [ProfileValidationError] = []
+
     // File Importer State
     @State private var showingKnowledgeImporter = false
+    /// Why the last "Add File" did nothing, shown inline. Nil when there is nothing to report.
+    /// ⚠️ Register A60: the import result was previously discarded, so a failure was invisible.
+    @State private var knowledgeImportError: String?
 
     /// Inline validation error for the System Instructions field. Set when the
     /// user attempts to Save while the field is empty/whitespace; cleared the
@@ -138,7 +148,7 @@ struct BotConfigDetailView: View {
             // See AgentConfigDetailView for the rationale — `onCancel` swaps
             // the leading chevron for an xmark and routes it to the modal host.
             DynamicIslandBar(
-                onBack: onCancel ?? handleBackTap,
+                onBack: handleBackTap,
                 leadingSymbol: onCancel != nil ? "xmark" : "chevron.left"
             ) {
                 actionButtons
@@ -146,6 +156,14 @@ struct BotConfigDetailView: View {
 
             ScrollView {
                 VStack(spacing: 32) {
+
+                    // ⚠️ Register A34. Sits at the top of the scroll view, where the user's eye already is
+                    // after pressing Save in the island bar above. Dismissible, and replaced on the next
+                    // save — never a permanent fixture, because an advisory describes a choice the user
+                    // already made rather than a fault they must fix.
+                    SaveAdvisoryBanner(advisories: saveAdvisories) {
+                        withAnimation { saveAdvisories = [] }
+                    }
 
                     // 1. Identity Header
                     HStack(alignment: .center, spacing: 16) {
@@ -209,8 +227,15 @@ struct BotConfigDetailView: View {
                             GlassActionButton(title: "Expand", icon: "arrow.up.left.and.arrow.down.right", isAccent: false) {
                                 promptWindowManager.showEditor(
                                     text: instructionsBinding,
-                                    botName: editBuffer.draft.displayName,
-                                    themeManager: themeManager
+                                    // A binding, so renaming the bot retitles the detached
+                                    // window instead of leaving it on the old name (A75).
+                                    botName: profile.displayName,
+                                    themeManager: themeManager,
+                                    // ⚠️ Register A75: this argument existed and NO caller ever
+                                    // passed it, so the editor's "% of context" readout — the
+                                    // thing that tells you a system prompt is eating the window —
+                                    // was dead code. The value is right here on the profile.
+                                    contextWindow: providerConfig.wrappedValue.modelMetadata?.contextWindow
                                 )
                             }
                         }
@@ -295,6 +320,10 @@ struct BotConfigDetailView: View {
             Button("Delete", role: .destructive) {
                 do {
                     try profileService.deleteProfile(withId: editBuffer.draft.id)
+                    // ⚠️ Without this the container re-evaluates, finds no edit buffer, and renders
+                    // "Profile Not Found — this profile may have been deleted": a deliberate,
+                    // confirmed action reported back to the user as an error.
+                    router.returnToChat()
                 } catch {
                     toastManager.show(error.localizedDescription, style: .error)
                 }
@@ -308,14 +337,18 @@ struct BotConfigDetailView: View {
             // initial state for new profiles; the user must type their own
             // before they can Save. Forces a deliberate choice instead of
             // silently shipping with a default the user never read.
-            configManager.load(from: providerConfig.wrappedValue, using: profileService)
+            configManager.load(from: providerConfig.wrappedValue, using: profileService, defaultProfile: .chat)
         }
         .onDisappear {
             // Close the floating prompt editor if the user leaves the panel.
+            // ⚠️ A plain close is correct HERE and only here: this is the Simple editor, whose
+            // `.onChange(of: localText)` pushes every keystroke straight back to the binding, so
+            // there is nothing pending to lose. The Agent view's Advanced editor writes back only
+            // in `saveAndClose()`, which is why it needs `closeWindowCommittingChanges()`.
             promptWindowManager.closeWindow()
         }
         .onChange(of: providerConfig.wrappedValue.apiProvider) { _, _ in
-            configManager.load(from: providerConfig.wrappedValue, using: profileService)
+            configManager.load(from: providerConfig.wrappedValue, using: profileService, defaultProfile: .chat)
         }
         .advancedConfigSync(configManager: configManager, providerConfig: providerConfig, profileService: profileService)
         // NOTE: Auto-applying an Ollama preset on every modelName change was
@@ -325,13 +358,28 @@ struct BotConfigDetailView: View {
         .unsavedChangesBackGuard(
             isDirty: editBuffer.isDirty,
             showingAlert: $showingBackAlert,
-            onDiscard: { editBuffer.revert() }
+            onDiscard: { editBuffer.revert() },
+            onLeave: { leaveEditor() }
         )
     }
 
     private func handleBackTap() {
         if editBuffer.isDirty {
             showingBackAlert = true
+        } else {
+            leaveEditor()
+        }
+    }
+
+    /// The ONE way out of this editor.
+    ///
+    /// ⚠️ Register A28. The leading button used to be wired `onBack: onCancel ?? handleBackTap`,
+    /// so in the workflow sheet the xmark called `dismiss()` directly and never consulted
+    /// `editBuffer.isDirty` — the identical view, routed, prompted correctly. The dirty check now
+    /// happens for both hosts and only the EXIT differs: dismiss the sheet, or pop the router.
+    private func leaveEditor() {
+        if let onCancel {
+            onCancel()
         } else {
             withAnimation(.easeInOut(duration: 0.2)) {
                 router.goBack()
@@ -351,7 +399,7 @@ struct BotConfigDetailView: View {
                     keyboardShortcut: .cancelAction
                 ) {
                     editBuffer.revert()
-                    configManager.load(from: providerConfig.wrappedValue, using: profileService)
+                    configManager.load(from: providerConfig.wrappedValue, using: profileService, defaultProfile: .chat)
                 }
 
                 IslandPillButton(
@@ -364,18 +412,33 @@ struct BotConfigDetailView: View {
                     // and no behavioural guardrails. We don't auto-fill a default
                     // anymore — the user must make a deliberate choice — so block
                     // the save and surface the inline error.
-                    let trimmed = instructionsBinding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if trimmed.isEmpty {
-                        instructionsError = String(localized: "System instructions are required.")
+                    // ⚠️ Register A35: the rule and its wording now come from `ProfileValidator`,
+                    // the single definition. Each editor used to carry its own copy of both, and
+                    // every non-editor save path had neither.
+                    if ProfileValidator.instructionsAreMissing(instructionsBinding.wrappedValue) {
+                        instructionsError = ProfileValidator.missingInstructionsMessage
                         return
                     }
                     instructionsError = nil
 
                     do {
-                        try profileService.saveProfile(editBuffer.draft)
+                        // ⚠️ Register A34: advisories are RETURNED now, not just logged. The
+                        // save succeeded either way — the banner explains what may not work, it
+                        // does not report a failure.
+                        saveAdvisories = try profileService.saveProfile(editBuffer.draft)
                         editBuffer.markSaved()
                         toastManager.show("Profile saved", style: .success)
                     } catch {
+                        // ⚠️ A toast and NOTHING else was the whole record of a failed save on the
+                        // primary user-data write path. It disappears in seconds, so "my bot
+                        // config won't stick" arrived with no profile id, no type and no error to
+                        // correlate against.
+                        logger.error(
+                            "[PROFILE] Save FAILED for '\(editBuffer.draft.displayName)' "
+                            + "(\(editBuffer.draft.id), bot): \(error.localizedDescription). "
+                            + "CONSEQUENCE: the edit buffer stays dirty and the persisted profile is "
+                            + "unchanged; the user's edits are still on screen but not on disk."
+                        )
                         toastManager.show(error.localizedDescription, style: .error)
                     }
                 }
@@ -421,55 +484,29 @@ struct BotConfigDetailView: View {
                         allowedContentTypes: [.item],
                         allowsMultipleSelection: true
                     ) { result in
-                        if case let .success(urls) = result {
-                            for url in urls {
-                                let source = KnowledgeSource(type: .file, location: url.path)
-                                if !knowledgeSourcesBinding.wrappedValue.contains(where: { $0.location == source.location }) {
-                                    knowledgeSourcesBinding.wrappedValue.append(source)
-                                }
-                            }
-                        }
+                        knowledgeImportError = KnowledgeSourceImport.apply(
+                            result, to: knowledgeSourcesBinding, profileKind: "bot")
                     }
+                    }
+
+                    // The reason "Add File" appeared to do nothing (register A60). Cleared as soon as the
+                    // next import succeeds or is cancelled, so it never lingers past the attempt it describes.
+                    if let knowledgeImportError {
+                        Label(knowledgeImportError, systemImage: "exclamationmark.triangle")
+                            .font(theme.fontCaption)
+                            .foregroundColor(theme.warningColor)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(theme.warningColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
                     }
 
                     if !knowledgeSourcesBinding.wrappedValue.isEmpty {
                     VStack(spacing: 8) {
                         ForEach(knowledgeSourcesBinding.wrappedValue) { source in
-                            HStack {
-                                Image(systemName: "doc.text.fill")
-                                    .foregroundColor(source.exists ? .orange : theme.errorColor)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(source.fileName)
-                                        .font(theme.fontCallout)
-                                        .lineLimit(1)
-                                    if !source.exists {
-                                        Text("File not found")
-                                            .font(theme.fontCaption2)
-                                            .foregroundColor(theme.errorColor)
-                                    } else {
-                                        Text(source.location)
-                                            .font(theme.fontCaption2)
-                                            .foregroundColor(theme.secondaryText)
-                                            .lineLimit(1)
-                                            .truncationMode(.middle)
-                                    }
-                                }
-                                Spacer()
-                                Button {
-                                    knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .foregroundColor(theme.secondaryText)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("Remove \(source.fileName)")
+                            KnowledgeSourceRow(source: source, theme: theme) {
+                                knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
                             }
-                            .padding(10)
-                            .background(theme.secondaryBackground.opacity(0.5))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(
-                                source.exists ? theme.dividerColor : theme.errorColor.opacity(0.3), lineWidth: 1
-                            ))
                         }
                     }
                     .padding(.leading, 12)

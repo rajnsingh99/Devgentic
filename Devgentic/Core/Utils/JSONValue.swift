@@ -31,15 +31,24 @@ public enum JSONValue: Sendable, Hashable {
     public init?(_ value: Any) {
         if let string = value as? String {
             self = .string(string)
-        } else if let bool = value as? Bool {
-            self = .bool(bool)
         } else if let number = value as? NSNumber {
-            // Check if it's a boolean packaged as an NSNumber (common in ObjC/JSON)
+            // ⚠️ NSNumber MUST be tested before `as? Bool`. `JSONSerialization` returns NSNumber
+            // for booleans AND for every numeric, and an NSNumber holding 0 or 1 bridges to Swift
+            // `Bool` successfully — so with the Bool branch first, this CFGetTypeID check (which
+            // exists precisely to tell the two apart) was unreachable for exactly those values.
+            //
+            // The consequence was not cosmetic: every provider reads its options with
+            // `if case .number(let val) = config.options?[...]`, so a `1.0` that arrived as
+            // `.bool(true)` failed the pattern match and was DROPPED from the request. That hit
+            // the shipped defaults hardest — Gemini's `topP: 1.0` and Anthropic's
+            // `temperature: 1.0` never reached the wire at all.
             if CFGetTypeID(number) == CFBooleanGetTypeID() {
                 self = .bool(number.boolValue)
             } else {
                 self = .number(number.doubleValue)
             }
+        } else if let bool = value as? Bool {
+            self = .bool(bool)
         } else if let double = value as? Double {
             self = .number(double)
         } else if let int = value as? Int {

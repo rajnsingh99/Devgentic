@@ -269,7 +269,7 @@ enum BundleExporter {
         to dir: URL,
         level: TelemetrySanitizer.Level
     ) async throws {
-        let since = anchor?.addingTimeInterval(-3600) ?? logsSince(for: scope)
+        let since = exportWindowStart(scope: scope, anchor: anchor)
         // Pull full export (persisted + buffer, deduped).
         let entries = await LogRecorder.shared.export(since: since, minLevel: .info)
 
@@ -297,6 +297,36 @@ enum BundleExporter {
     private static func resolveTraceAnchor(for scope: DiagnosticBundle.Scope) -> Date? {
         guard case .trace(let traceID) = scope, let store = TraceStore.shared else { return nil }
         return try? store.fetchTrace(traceID: traceID)?.startedAt
+    }
+
+    /// How far back to look when a `.trace` bundle's anchor cannot be resolved.
+    ///
+    /// Deliberately generous. A support bundle that is quietly EMPTY is worse than one that is large:
+    /// the user has already hit send, and a missing log section is discovered only by whoever reads
+    /// the report, days later, with no way to ask for another.
+    static let unanchoredTraceLookbackDays = 7
+
+    /// Start of the export window — one definition, used by both the logs and crashes sections.
+    ///
+    /// ⚠️ The anchored path (1 h before the RUN) is correct and unchanged. The bug was the FALLBACK:
+    /// `logsSince(.trace)` is 1 h before NOW, so a bundle exported for an incident that happened days
+    /// ago pulled an empty window and produced a bundle with no logs and no crashes in it, silently
+    /// (G49). Both sections had their own copy of the same expression, so both were wrong.
+    private static func exportWindowStart(scope: DiagnosticBundle.Scope, anchor: Date?) -> Date {
+        if let anchor { return anchor.addingTimeInterval(-3600) }
+        if case .trace(let traceID) = scope {
+            logger.warning(
+                """
+                [BUNDLE] Trace \(traceID) could not be located, so its start time is unknown — \
+                widening to \(unanchoredTraceLookbackDays) days instead of the 1-hour default. \
+                CONSEQUENCE: this bundle is larger and less focused, but it still CONTAINS the \
+                incident; the 1-hour default would have exported empty log and crash sections for \
+                anything older than an hour.
+                """
+            )
+            return Date().addingTimeInterval(-Double(unanchoredTraceLookbackDays) * 24 * 3600)
+        }
+        return logsSince(for: scope)
     }
 
     private static func logsSince(for scope: DiagnosticBundle.Scope) -> Date {
@@ -510,7 +540,7 @@ enum BundleExporter {
         to dir: URL,
         level: TelemetrySanitizer.Level
     ) {
-        let since = anchor?.addingTimeInterval(-3600) ?? logsSince(for: scope)
+        let since = exportWindowStart(scope: scope, anchor: anchor)
         let reports = CrashDiagnosticsCollector.harvestCrashReports(since: since)
         guard !reports.isEmpty else { return }
 

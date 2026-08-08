@@ -11,10 +11,17 @@ import os
 private let logger = DGLogger(category: "GeminiService")
 
 class GeminiService {
-    
-    private let userDefaults = UserDefaults.standard
-    private let apiKeykey = "gemini_api_key"
-    
+
+    // ⚠️ register A53. This type used to hold `UserDefaults.standard` and a `gemini_api_key`
+    // constant, and `verifyAndFetchModels` wrote the raw key there on every successful fetch.
+    // Nothing ever read it back — `saveApiKey`/`getApiKey`/`clearApiKey` had zero callers
+    // repo-wide — so it was a pure side effect that deposited a plaintext credential in
+    // ~/Library/Preferences/, outlived the profile that owned it, and could not be cleared from
+    // any UI. Provider keys live in `ProviderKeyStore` (Keychain, keyed on profile id); this type
+    // is a stateless fetcher and must not persist anything.
+    // Keys already written by earlier builds are removed by
+    // `ProviderKeyStore.purgeLegacyPlaintextKeys()` at container configuration.
+
     // Codable struct for parsing the models list from the Gemini API
     private struct GoogleModelsResponse: Codable {
         struct Model: Codable {
@@ -43,20 +50,36 @@ class GeminiService {
     }
 
     // Verify the API key and fetch models from the Gemini API
-    func verifyAndFetchModels(apiKey: String) async throws -> [String] {
+    /// - Parameter baseURL: the profile's configured API Endpoint. ⚠️ Defaulted, never hardcoded:
+    ///   a user on a corporate or self-hosted gateway sets that endpoint and pastes a
+    ///   GATEWAY-SCOPED key. This call used to ignore it and transmit that key to the vendor's
+    ///   public API on every keystroke-debounced fetch — a host they had deliberately routed
+    ///   around, and one their policy may forbid. Same `?? ProviderDefaults.x` shape `AgentConnect`
+    ///   already uses, so listing and chat can never disagree about where a profile talks.
+    func verifyAndFetchModels(apiKey: String, baseURL: URL? = nil) async throws -> [String] {
         logger.info("Validating Google API Key and fetching models...")
-        
-        guard var components = URLComponents(url: ProviderDefaults.geminiBaseURL.appendingPathComponent("models"), resolvingAgainstBaseURL: false) else {
+
+        guard let components = URLComponents(url: (baseURL ?? ProviderDefaults.geminiBaseURL).appendingPathComponent("models"), resolvingAgainstBaseURL: false) else {
             throw ApiError.networkError("Invalid URL")
         }
-        components.queryItems = [URLQueryItem(name: "key", value: apiKey)]
-        
+
         guard let url = components.url else {
             throw ApiError.networkError("Could not construct URL")
         }
-        
+
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
+        // ⚠️ The key goes in the `x-goog-api-key` HEADER, never the query string. As a query
+        // parameter it is written to URLSession's shared on-disk cache in
+        // ~/Library/Caches/<bundle-id>/ keyed by the FULL URL — a second copy of the secret, in a
+        // directory nothing treats as sensitive and no uninstall or reset path clears. It also
+        // lands in any TLS-terminating proxy's access log and in the provider's own request logs,
+        // where a header-borne credential would not. `GeminiLLMProvider.makeRequest` already does
+        // this correctly; these listing calls were missed.
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        // Authenticated listing responses are never worth caching, and caching them is how the
+        // credential reached disk in the first place.
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         
         let (data, response) = try await URLSession.shared.data(for: request)
         
@@ -80,25 +103,9 @@ class GeminiService {
                 .map { $0.name.replacingOccurrences(of: "models/", with: "") }
             
             logger.info("Successfully fetched \(modelNames.count) models from Google.")
-            self.saveApiKey(apiKey: apiKey) // Persist the key on success
             return modelNames
         } catch {
             throw ApiError.invalidResponse
         }
-    }
-    
-    // Save the API key to UserDefaults
-    func saveApiKey(apiKey: String) {
-        userDefaults.set(apiKey, forKey: apiKeykey)
-    }
-    
-    // Retrieve the API key from UserDefaults
-    func getApiKey() -> String? {
-        return userDefaults.string(forKey: apiKeykey)
-    }
-    
-    // Clear the API key from UserDefaults
-    func clearApiKey() {
-        userDefaults.removeObject(forKey: apiKeykey)
     }
 }

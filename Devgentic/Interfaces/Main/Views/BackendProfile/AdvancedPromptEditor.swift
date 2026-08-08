@@ -27,6 +27,9 @@ final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
     var checkChanges: (() -> Bool)?
     var saveChanges: (() -> Void)?
     var discardChanges: (() -> Void)?
+    /// Writes the editor's pending text back to its bindings without closing.
+    /// Used by `closeWindowCommittingChanges()` on navigation teardown.
+    var commitChanges: (() -> Void)?
 
     /// Spawns or brings the editor window to the front.
     func showEditor(
@@ -82,9 +85,31 @@ final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
         newWindow.makeKeyAndOrderFront(nil)
     }
 
+    /// Closes the window WITHOUT committing anything.
+    ///
+    /// ⚠️ Only for callers that have already decided the fate of the text: `saveAndClose()` (which
+    /// wrote it back first) and the "Don't Save" branch of the close prompt. `NSWindow.close()`
+    /// does not consult `windowShouldClose(_:)`, so nothing here will ask the user.
     func closeWindow() {
         window?.close()
         window = nil
+    }
+
+    /// Commits the editor's pending text back to its bindings, then closes.
+    ///
+    /// ⚠️ This is the teardown path for NAVIGATION — `onDisappear` when the user leaves the profile.
+    /// It used to call `closeWindow()` directly, and because `NSWindow.close()` bypasses
+    /// `windowShouldClose(_:)`, the Unsaved Changes prompt never appeared: a 3,000-character system
+    /// prompt typed into the floating window was destroyed by clicking the back chevron, silently,
+    /// with the footer still promising that changes sync to the main window.
+    ///
+    /// Committing rather than prompting is deliberate. `onDisappear` runs inside a SwiftUI update,
+    /// and `NSAlert.runModal()` there spins a nested modal loop mid-navigation. Saving the user's
+    /// text is also simply the better default for an implicit close — nothing is lost, and the
+    /// profile's own Save/Revert pill still governs whether it reaches disk.
+    func closeWindowCommittingChanges() {
+        commitChanges?()
+        closeWindow()
     }
 
     /// Updates the floating window's title without rebuilding the content
@@ -131,6 +156,7 @@ final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
             checkChanges = nil
             saveChanges = nil
             discardChanges = nil
+            commitChanges = nil
         }
     }
 }
@@ -314,7 +340,10 @@ struct AdvancedPromptEditorView: View {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(theme.successColor)
                     .accessibilityHidden(true)
-                Text("Changes sync automatically to the main window.")
+                // ⚠️ Was "Changes sync automatically to the main window." — which was false:
+                // `saveAndClose()` was the ONLY write-back, so navigating away lost everything.
+                // Now accurate for all three exits (Save, navigate away, and the close prompt).
+                Text("Changes apply to the main window when you save or close this window.")
                     .font(theme.fontCaption)
                     .foregroundColor(theme.secondaryText)
 
@@ -360,18 +389,53 @@ struct AdvancedPromptEditorView: View {
             // Wire up unsaved-changes callbacks on the manager that owns
             // THIS editor's window — never the global singleton, so two
             // editors open simultaneously can't trample each other.
-            manager.checkChanges = { hasUnsavedChanges }
-            manager.saveChanges = { saveAndClose() }
+            //
+            // ⚠️ Register A72. These used to be written `{ hasUnsavedChanges }` and
+            // `{ saveAndClose() }`, which capture `self`. This view is a struct, so that is a value
+            // copy — but the copy carries `manager`, a class reference, so the manager ended up
+            // owning a closure that owned the manager. Only `discardChanges` had been written
+            // `[weak manager]`.
+            //
+            // ⚠️ It has not been LEAKING, because `windowWillClose` nils all four callbacks and
+            // breaks the cycle on every close. That is a rescue, not a design: A71 was this same
+            // file's sibling manager missing its window delegate entirely, so "the teardown always
+            // runs" is exactly the assumption that has already failed once here. Capturing
+            // correctly makes it not matter.
+            //
+            // Each closure captures the STATE BINDINGS it needs rather than the view. A binding
+            // from `@State` references the state's storage box, never the view struct — so none of
+            // these closures reaches `manager` except the two that must, and those hold it weakly.
+            manager.checkChanges = { [local = $localText, initial = $initialText,
+                                      localTools = $localTools, initialTools = $initialTools] in
+                local.wrappedValue != initial.wrappedValue
+                    || localTools.wrappedValue != initialTools.wrappedValue
+            }
+            manager.saveChanges = { [weak manager, target = $text, tools = $configuredTools,
+                                     local = $localText, localTools = $localTools] in
+                target.wrappedValue = local.wrappedValue
+                tools.wrappedValue = localTools.wrappedValue
+                manager?.closeWindow()
+            }
             manager.discardChanges = { [weak manager] in manager?.closeWindow() }
+            // Used by `closeWindowCommittingChanges()` on navigation teardown. Kept separate from
+            // `saveChanges` so "Don't Save" still has a path that closes without writing back.
+            manager.commitChanges = { [target = $text, tools = $configuredTools,
+                                       local = $localText, localTools = $localTools] in
+                target.wrappedValue = local.wrappedValue
+                tools.wrappedValue = localTools.wrappedValue
+            }
         }
     }
 
     private func saveAndClose() {
-        // Explicitly sync back to parent bindings
+        commitToBindings()
+        manager.closeWindow()
+    }
+
+    /// The single write-back path from the editor's local state to the profile's bindings.
+    private func commitToBindings() {
         text = localText
         configuredTools = localTools
-
-        manager.closeWindow()
     }
 }
 

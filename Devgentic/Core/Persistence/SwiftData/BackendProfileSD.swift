@@ -16,6 +16,21 @@ import os
 
 private let logger = DGLogger(category: "BackendProfileSD")
 
+/// Why a profile's stored configuration could not be read.
+///
+/// ⚠️ These demand OPPOSITE responses from the user, which is why the distinction has to survive all
+/// the way to the UI rather than dying in a log line (register G18). `.undecodable` means the bytes
+/// are damaged — reconfiguring is the only way forward. `.writtenByNewerBuild` means the bytes are
+/// perfectly intact and merely unreadable by THIS build — reconfiguring is the one action that
+/// destroys them. Presenting both with the same "Discard and Reconfigure" affordance invites the user
+/// to delete recoverable data.
+enum ConfigurationUnreadableReason: Equatable, Sendable {
+    /// The bytes did not decode. Damaged, truncated, or a shape no version understands.
+    case undecodable
+    /// Stamped with a blob version above what this build knows.
+    case writtenByNewerBuild(storedVersion: Int)
+}
+
 // MARK: - SwiftData Model
 
 @Model
@@ -51,6 +66,20 @@ final class BackendProfile {
     @Transient
     private var _cachedDetails: ProfileDetails?
 
+    /// True when `configData` could not be decoded and `_cachedDetails` is therefore a
+    /// PLACEHOLDER rather than the user's real configuration.
+    ///
+    /// ⚠️ This flag is what stops a read failure from becoming a write failure. Without it, an
+    /// undecodable blob decoded to a blank bot, the blank bot was cached, and the next
+    /// `saveProfile` — including the opportunistic ones that fire without any user edit — encoded
+    /// that blank bot straight back over the user's model choice, API key, instructions and
+    /// enabled-tool list. Transient, so it never participates in the schema.
+    @Transient
+    private var _detailsUnreadableReason: ConfigurationUnreadableReason?
+
+    /// Unchanged meaning, now derived — every existing guard reads this and keeps working.
+    private var _detailsDecodeFailed: Bool { _detailsUnreadableReason != nil }
+
     // MARK: - Computed Accessors
 
     /// The strongly-typed profile type, derived from the stored raw value.
@@ -66,16 +95,149 @@ final class BackendProfile {
 
     /// The rich, type-safe configuration envelope.
     /// Reading decodes from `configData` (with caching); writing re-encodes.
+    /// True when `configData` could not be decoded, so `details` is a placeholder and the stored
+    /// bytes are being preserved rather than overwritten. Surface this in the UI instead of
+    /// presenting the placeholder as if it were the user's configuration.
+    var hasUnreadableConfiguration: Bool {
+        primeDecodeState()
+        return _detailsDecodeFailed
+    }
+
+    /// WHY the configuration could not be read — the two cases need opposite responses from the user,
+    /// so collapsing them to a bool was the reason G18's refusal could not reach the UI.
+    var configurationUnreadableReason: ConfigurationUnreadableReason? {
+        primeDecodeState()
+        return _detailsUnreadableReason
+    }
+
+    /// Brings `_cachedDetails` / `_detailsDecodeFailed` into agreement with the CURRENT stored bytes.
+    ///
+    /// ⚠️ Every accessor that consults `_detailsDecodeFailed` must call this first, the setter
+    /// included. The flag is `@Transient` and so defaults to `false` on every freshly materialized
+    /// instance; a guard reading it raw is correct only when something already ran the getter on that
+    /// same instance. Today the opportunistic savers do read `details` before writing it, so the
+    /// refusal happens to work — but it works BY ACCIDENT of access order, and the sibling
+    /// `WorkflowLayoutSD` guard was genuinely bypassed for exactly this reason
+    /// (`WorkflowLayoutStore.save` assigns without reading). Priming makes the refusal a function of
+    /// what is on disk instead.
+    ///
+    /// Idempotent: `_cachedDetails` is non-nil after the first call, after `init`, and after any set.
+    private func primeDecodeState() {
+        guard _cachedDetails == nil else { return }
+        let outcome = Self.decodeDetails(from: configData)
+        // ⚠️ Inject the API key from the Keychain, where it now lives instead of in the blob.
+        // Done HERE rather than in the getter so the Keychain is touched once per decode and the
+        // result is cached — `details` is read on nearly every render.
+        //
+        // The `??` is the migration path: a blob written before this change still carries its key
+        // inline, and must keep working until `BackendProfileStore.migrateAPIKeysToKeychain()`
+        // rewrites it. Keychain wins when both exist — it is the newer of the two by construction.
+        _cachedDetails = outcome.details.settingProviderAPIKey(
+            ProviderKeyStore.load(for: id) ?? outcome.details.providerAPIKey
+        )
+        _detailsUnreadableReason = outcome.reason
+    }
+
+    /// Drops the decode cache so the next `details` read re-primes from `configData`.
+    ///
+    /// ⚠️ TEST SEAM. Production code never needs it — the cache is populated on init and on every
+    /// set — but a test that writes `configData` directly (to reproduce a legacy blob) has no
+    /// other way to make the getter observe those bytes.
+    func resetDecodeCacheForTesting() {
+        _cachedDetails = nil
+        _detailsUnreadableReason = nil
+    }
+
+    /// Whether the STORED BYTES still carry an inline API key — i.e. this row predates the move to
+    /// the Keychain.
+    ///
+    /// ⚠️ Decodes `configData` directly rather than reading `details`, because `details` injects
+    /// the Keychain value and would report `true` for an already-migrated row. This is the only
+    /// thing that distinguishes the two, so the migration sweep keys off it.
+    var hasInlineAPIKeyInStoredBlob: Bool {
+        let decoded = Self.decodeDetails(from: configData).details
+        guard let key = decoded.providerAPIKey else { return false }
+        return !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Explicitly discards an unreadable configuration and replaces it.
+    ///
+    /// The sanctioned way past the refusal, mirroring `WorkflowLayoutSD.replaceUnreadableLayout`.
+    /// Separate and awkwardly named on purpose: today the ONLY way to clear the flag is to assign a
+    /// value that differs from the placeholder — which is exactly what a user idly editing a
+    /// blank-looking profile does, so destruction is currently reachable by accident. This makes it a
+    /// named, logged, deliberate act instead.
+    func discardUnreadableConfiguration(replacingWith newValue: ProfileDetails, reason: String) {
+        logger.warning(
+            "[PERSISTENCE] Discarding unreadable profile blob — '\(displayName)' (id \(id)), reason: "
+            + "\(reason). It was stored as \(profileTypeRaw)/\(providerRaw)/\(modelNameRaw) "
+            + "(\(configData.count) bytes). CONSEQUENCE: the original undecodable bytes are overwritten "
+            + "and are no longer recoverable by any future build."
+        )
+        _detailsUnreadableReason = nil
+        details = newValue
+    }
+
     var details: ProfileDetails {
         get {
-            if let cached = _cachedDetails { return cached }
-            let decoded = Self.decodeDetails(from: configData)
-            _cachedDetails = decoded
-            return decoded
+            primeDecodeState()
+            return _cachedDetails ?? Self.decodeDetails(from: configData).details
         }
         set {
+            // ⚠️ Load-bearing, not defensive — see `primeDecodeState()`.
+            primeDecodeState()
+            // ⚠️ REFUSE to overwrite bytes we could not read.
+            //
+            // When the decode failed we handed the caller a placeholder. If that same placeholder
+            // comes back, this is an opportunistic save (ToolLibraryContainerView,
+            // CodeSessionManager, MLXContextWindowHealer all call saveProfile without the user
+            // editing anything) and writing it would destroy the original configuration
+            // permanently. A genuine user edit produces a DIFFERENT value and is allowed through.
+            if _detailsDecodeFailed, newValue == _cachedDetails {
+                logger.error(
+                    "[PERSISTENCE] Refusing to overwrite unreadable profile blob — profile '\(displayName)' "
+                    + "(id \(id)): the incoming value is the placeholder issued after the failed decode, so "
+                    + "this is an opportunistic save rather than a user edit. CONSEQUENCE: configData is left "
+                    + "byte-intact and the original configuration remains recoverable; this profile will keep "
+                    + "presenting as a blank bot until it is explicitly re-saved with real values."
+                )
+                return
+            }
+            if _detailsDecodeFailed {
+                logger.warning(
+                    "[PERSISTENCE] Replacing unreadable profile blob — profile '\(displayName)' (id \(id)) is "
+                    + "being written with a value that differs from the placeholder, so it is treated as a "
+                    + "deliberate user edit. CONSEQUENCE: the original undecodable bytes are overwritten and "
+                    + "are no longer recoverable."
+                )
+                _detailsUnreadableReason = nil
+            }
+
+            // ⚠️ Move the key to the Keychain BEFORE encoding, and only strip it from the blob
+            // once that write succeeded. Stripping first and failing second would destroy the
+            // user's credential; this way the worst case is the pre-existing behaviour (key stays
+            // in the blob) rather than a key that exists nowhere.
+            let keyForKeychain = newValue.providerAPIKey
+            let storedSecurely = ProviderKeyStore.save(keyForKeychain, for: id)
+            let detailsToEncode = storedSecurely ? newValue.settingProviderAPIKey(nil) : newValue
+
+            guard let encoded = Self.encodeDetails(detailsToEncode) else {
+                // ⚠️ Deliberately leaves `_cachedDetails` and every denormalized column untouched
+                // too. A half-applied write — new provider/model columns beside the OLD blob — would
+                // be worse than no write: the row would describe one profile and contain another,
+                // and nothing downstream could tell.
+                logger.error(
+                    "[PERSISTENCE] Refusing to write profile '\(displayName)' (id \(id)): the new "
+                    + "configuration could not be encoded. CONSEQUENCE: this edit is DISCARDED and the "
+                    + "profile keeps its previously-saved configuration; the UI may show the attempted "
+                    + "value until the next fetch."
+                )
+                return
+            }
+            // `_cachedDetails` keeps the key — it is the in-memory view, and every reader
+            // expects `details.llmConfig.apiKey` to be usable. Only `configData` is stripped.
             _cachedDetails = newValue
-            configData = Self.encodeDetails(newValue)
+            configData = encoded
             // Keep denormalized columns in sync
             switch newValue {
             case .bot:       profileTypeRaw = ProfileType.bot.rawValue
@@ -117,8 +279,29 @@ final class BackendProfile {
         self.providerRaw = provider
         self.modelNameRaw = model
 
-        self.configData = Self.encodeDetails(details)
-        self._cachedDetails = details
+        // ⚠️ Same strip-on-write as the `details` setter — a freshly created profile must not
+        // put its key in the blob either. `_cachedDetails` keeps the key for in-memory readers.
+        let storedSecurely = ProviderKeyStore.save(details.providerAPIKey, for: id)
+        let detailsToEncode = storedSecurely ? details.settingProviderAPIKey(nil) : details
+
+        if let encoded = Self.encodeDetails(detailsToEncode) {
+            self.configData = encoded
+            self._cachedDetails = details
+        } else {
+            // A fresh row has no prior bytes to protect, so refusal is not an option here — but the
+            // stored value must never be mistakable for a valid empty config. `{}` would be: it is
+            // well-formed JSON, and a future `ProfileDetails` with all-optional fields could decode
+            // it cleanly into a blank profile (exactly the shape that made G22 undetectable). These
+            // bytes cannot decode as anything, so the read path flags the row instead of trusting it.
+            self.configData = Data("PROFILE_ENCODE_FAILED".utf8)
+            self._detailsUnreadableReason = .undecodable
+            logger.fault(
+                "[PERSISTENCE] Profile '\(displayName)' (id \(id)) was created but its configuration "
+                + "could not be encoded. CONSEQUENCE: the row is stored UNREADABLE on purpose rather "
+                + "than as a plausible-looking blank, so it presents as needing reconfiguration "
+                + "instead of silently losing settings the user believes they saved."
+            )
+        }
     }
 
     // MARK: - Denormalization Helpers
@@ -136,32 +319,85 @@ final class BackendProfile {
 
     // MARK: - Encode / Decode Helpers
 
-    /// Encodes ProfileDetails to JSON data. Fatally asserts on failure since encoding
-    /// a known-good in-memory value should never fail — a `"{}"` fallback would silently
-    /// destroy the user's profile data on the next read.
-    private static func encodeDetails(_ details: ProfileDetails) -> Data {
+    /// Encodes ProfileDetails to JSON data, or `nil` when it cannot be encoded.
+    ///
+    /// ⚠️ This returned `Data("{}".utf8)` on failure, while its own doc comment warned that such a
+    /// fallback "would silently destroy the user's profile data on the next read" and its log line
+    /// claimed it was "refusing to write corrupt data". It was doing neither: the setter assigns the
+    /// return value straight into `configData`, so an encode failure REPLACED a working profile —
+    /// model, provider, instructions, enabled tools, capabilities — with two bytes. The comment
+    /// described the hazard, the log denied it, and the code performed it.
+    ///
+    /// Now the refusal is real: `nil` means "keep what is on disk". Optional rather than a sentinel
+    /// blob because a sentinel is just another value the caller can write, and this whole class of
+    /// bug comes from a caller writing something it should not have.
+    ///
+    /// ⚠️ `assertionFailure` alone was not a safety net — it is compiled out in release, so the very
+    /// build where this matters got the silent destruction. Paired with a `.fault` log, per the
+    /// project rule that a stripped assert must never be the only record of an invariant.
+    private static func encodeDetails(_ details: ProfileDetails) -> Data? {
         do {
             return try JSONEncoder().encode(details)
         } catch {
-            logger.fault("Failed to encode ProfileDetails — refusing to write corrupt data: \(error.localizedDescription)")
-            // Return the error-marker blob that decodeDetails recognises as "do not overwrite"
-            // This prevents the SwiftData auto-save from persisting a corrupt empty blob.
+            logger.fault(
+                "[PERSISTENCE] Failed to ENCODE ProfileDetails: \(error). CONSEQUENCE: the write is "
+                + "refused and the previously-stored configuration is left byte-intact — the profile "
+                + "keeps working with its saved settings, and this edit is discarded rather than "
+                + "destroying them. Non-conforming floats (infinity/NaN) in a numeric setting are the "
+                + "likely cause."
+            )
             assertionFailure("ProfileDetails encoding should never fail for a valid in-memory value.")
-            return Data("{}".utf8)
+            return nil
         }
     }
 
     /// Decodes ProfileDetails from JSON data, running schema migrations first.
-    /// Falls back to a default bot config only as a last resort to prevent crashes.
-    private static func decodeDetails(from data: Data) -> ProfileDetails {
-        // Run migration pipeline before decoding
-        let migrated = ProfileMigrator.migrateIfNeeded(data)
+    ///
+    /// Returns the decoded value plus whether the decode FAILED. The caller must propagate
+    /// `didFail`: the placeholder returned on failure is safe to display but must never be
+    /// written back over `configData` (see the `details` setter).
+    ///
+    /// ⚠️ The blob is opaque to SwiftData, so a shape change inside `ProfileDetails` — adding a
+    /// non-optional field to `Tool`, say — is invisible to schema migration and lands here at
+    /// READ time, on a store that opened perfectly. That is why this path has to be
+    /// non-destructive rather than merely non-crashing.
+    private static func decodeDetails(from data: Data) -> (details: ProfileDetails, reason: ConfigurationUnreadableReason?) {
+        let placeholder = ProfileDetails.bot(
+            BotConfig(llmConfig: ProviderConfig(apiProvider: .ollama, modelName: ""))
+        )
 
-        do {
-            return try JSONDecoder().decode(ProfileDetails.self, from: migrated)
-        } catch {
-            logger.error("Failed to decode ProfileDetails after migration: \(error.localizedDescription)")
-            return .bot(BotConfig(llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "")))
+        // Run migration pipeline before decoding.
+        switch ProfileMigrator.migrateIfNeeded(data) {
+        case .tooNew(let storedVersion):
+            // ⚠️ Written by a NEWER build (register G18). Distinguished from corruption ON PURPOSE:
+            // the remedies are opposite. Corrupt data invites the user to reconfigure the profile,
+            // which overwrites the blob and makes the loss permanent. This data is INTACT — it just
+            // needs a build that understands it — so the only correct action is to change nothing.
+            //
+            // Refusing here rather than attempting the decode also keeps the reason in the log. The
+            // old code fell through to a generic decode failure, which reported "corrupt" for a file
+            // that was perfectly well-formed.
+            logger.error(
+                "[PERSISTENCE] ProfileDetails blob is schemaVersion \(storedVersion) but this build "
+                + "understands at most \(ProfileMigrator.currentVersion) (\(data.count) bytes) — it was "
+                + "written by a NEWER version of Devgentic. CONSEQUENCE: not decoded and NOT "
+                + "overwritten; a placeholder is shown and the profile is marked unreadable. The data "
+                + "is intact — update Devgentic to read it. ⚠️ Reconfiguring this profile on THIS "
+                + "build would replace the newer configuration permanently."
+            )
+            return (placeholder, .writtenByNewerBuild(storedVersion: storedVersion))
+
+        case .migrated(let migrated):
+            do {
+                return (try JSONDecoder().decode(ProfileDetails.self, from: migrated), nil)
+            } catch {
+                logger.error(
+                    "[PERSISTENCE] Failed to decode ProfileDetails after migration (\(data.count) bytes): "
+                    + "\(error). CONSEQUENCE: a placeholder bot config is returned for display, the stored "
+                    + "bytes are NOT overwritten, and this profile is marked unreadable."
+                )
+                return (placeholder, .undecodable)
+            }
         }
     }
 }
@@ -186,8 +422,24 @@ extension BackendProfile {
 
 /// A `Sendable` value-type copy of a `BackendProfile` for use outside SwiftData contexts
 /// (e.g., passing to `AgentConnect`, `BackendOrchestrationService`, ChatOps bridges).
-struct BackendProfileSnapshot: Codable, Identifiable, Hashable, Sendable {
-    let id: UUID
+///
+/// ⚠️ **Deliberately NOT `Codable` any more** (removed 2026-08-06 with the profile import/export
+/// feature, register G93/G97). It was `Codable` for exactly one reason — it WAS the on-disk export
+/// format that `ProfileExporter` wrote to the user's JSON — and that feature is gone. Both the app
+/// and test targets compile without the conformance, which is how the claim was checked rather than
+/// assumed.
+///
+/// Do not re-add it casually. A `Codable` conformance on a type that reaches disk is a promise about
+/// field names and shapes, and this type is edited freely — it gains and loses properties as the UI
+/// does. Nothing persists a snapshot today: the store writes `ProfileDetails` into
+/// `BackendProfileSD.configData`, a different type with its own versioned codec. `Hashable` DOES
+/// stay load-bearing — `ProfileEditBuffer.isDirty` is `draft != original`.
+struct BackendProfileSnapshot: Identifiable, Hashable, Sendable {
+    /// ⚠️ `var` rather than `let` for exactly ONE reason: `duplicated(as:)` needs to re-stamp
+    /// identity on a whole-value copy, which is what makes duplication carry future properties for
+    /// free (register A31). Treat it as immutable everywhere else — this is the key the store saves
+    /// and deletes by, and reassigning it on a live snapshot retargets that write at another row.
+    var id: UUID
     var displayName: String
     var lastSelected: Date?
     var details: ProfileDetails
@@ -224,5 +476,28 @@ struct BackendProfileSnapshot: Codable, Identifiable, Hashable, Sendable {
         self.lastSelected = lastSelected
         self.details = details
         self.fileContextStrategy = fileContextStrategy
+    }
+
+    /// A copy of this profile under a new identity — everything is carried across except the
+    /// three things that are *about* this particular row: its id, its name, and when it was last
+    /// selected (a copy has never been used).
+    ///
+    /// ⚠️ Exists so duplication is **copy-by-default** rather than list-the-fields (register A31).
+    /// `DuplicateProfileSheet` built its copy by calling the memberwise init with four arguments,
+    /// and every parameter here has a default — so `fileContextStrategy` was quietly omitted and
+    /// the copy came out `nil`. That is not a cosmetic loss: `resolve(nil, for: .agent)` returns
+    /// `.stateless`, so duplicating an agent explicitly set to `.directInjection` produced a copy
+    /// that hands the model file PATHS where the original handed it file CONTENT — the same
+    /// prompt, a different answer, with nothing on screen to explain it.
+    ///
+    /// ⚠️ Any property added to this struct is carried by this method for free. Do not "fix" it
+    /// back into an explicit field list: the next property added would be dropped exactly the same
+    /// way, and it would be just as silent.
+    func duplicated(as newName: String) -> BackendProfileSnapshot {
+        var copy = self
+        copy.id = UUID()
+        copy.displayName = newName
+        copy.lastSelected = nil
+        return copy
     }
 }

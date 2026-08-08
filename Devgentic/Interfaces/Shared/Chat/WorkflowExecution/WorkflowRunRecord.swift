@@ -11,6 +11,9 @@
 //
 
 import Foundation
+import os
+
+private let logger = DGLogger(category: "WorkflowRunRecord")
 
 /// Persistent record of a single workflow execution run.
 struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
@@ -32,11 +35,55 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
 
     // MARK: - Run Status
 
-    enum RunStatus: String, Codable, Sendable, Equatable {
+    /// ⚠️ Hand-written `RawRepresentable` so an unrecognised status is PRESERVED, not reinterpreted —
+    /// the same treatment `WorkflowNodeResultSnapshot.NodeStatus` already has, which this deliberately
+    /// mirrors.
+    ///
+    /// It was `String, Codable`, and `WorkflowRunRecordSD.decodeRecord` resolved it with
+    /// `RunStatus(rawValue: statusRaw) ?? .completed`. That default is the worst possible one: a run
+    /// written by a NEWER build with a status this build does not know — very plausibly a failure
+    /// state — rendered as a green "Completed" with a checkmark. The app asserted success about a run
+    /// it could not classify, and the original rawValue was gone the next time the row was written.
+    ///
+    /// Stdlib `RawRepresentable where RawValue == String` conformances give byte-identical `Codable`
+    /// and rawValue-based `Equatable`, so no call site changes and the wire format is unchanged.
+    enum RunStatus: RawRepresentable, Codable, Sendable, Equatable {
         case running
         case completed
         case failed
         case cancelled
+        /// A status written by a newer build, carried verbatim.
+        case other(String)
+
+        init?(rawValue: String) {
+            switch rawValue {
+            case "running":   self = .running
+            case "completed": self = .completed
+            case "failed":    self = .failed
+            case "cancelled": self = .cancelled
+            default:          self = .other(rawValue)
+            }
+        }
+
+        var rawValue: String {
+            switch self {
+            case .running:        return "running"
+            case .completed:      return "completed"
+            case .failed:         return "failed"
+            case .cancelled:      return "cancelled"
+            case .other(let raw): return raw
+            }
+        }
+
+        /// True when this run is known to have finished, whatever the outcome.
+        /// ⚠️ `.other` is deliberately NOT settled — an unknown status may well be a new in-flight
+        /// state, and claiming it has settled is the same overreach as the old `?? .completed`.
+        var isSettled: Bool {
+            switch self {
+            case .completed, .failed, .cancelled: return true
+            case .running, .other:                return false
+            }
+        }
     }
 
     // MARK: - Node Result Snapshot (Codable-safe)
@@ -60,8 +107,40 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
         /// Optional → old records decode as nil (= no warnings).
         let hasWarnings: Bool?
 
-        enum NodeStatus: String, Codable, Sendable, Equatable {
+        /// ⚠️ Hand-written `RawRepresentable` so an unrecognised status is PRESERVED, not rejected.
+        ///
+        /// This field is decoded STRICTLY (below), and it sits inside the per-node envelope — so
+        /// before this, one unrecognised status rawValue failed the whole snapshot, dropped the node
+        /// to `decodeNodeResultsResiliently`, and that tier DELETED the entire node: its detail, its
+        /// duration, and its whole `nodeTimeline` (up to ~400 events of agent trace, which for a
+        /// FAILED run is the entire debugging evidence). A single new case did that.
+        ///
+        /// Stdlib `RawRepresentable where RawValue == String` conformances give byte-identical
+        /// `Codable` and rawValue-based `Equatable`, so no call site changes.
+        enum NodeStatus: RawRepresentable, Codable, Sendable, Equatable {
             case running, completed, failed, skipped
+            /// A status written by a newer build, carried verbatim.
+            case other(String)
+
+            init?(rawValue: String) {
+                switch rawValue {
+                case "running":   self = .running
+                case "completed": self = .completed
+                case "failed":    self = .failed
+                case "skipped":   self = .skipped
+                default:          self = .other(rawValue)
+                }
+            }
+
+            var rawValue: String {
+                switch self {
+                case .running:        return "running"
+                case .completed:      return "completed"
+                case .failed:         return "failed"
+                case .skipped:        return "skipped"
+                case .other(let raw): return raw
+                }
+            }
         }
 
         // Backward-compatible decoding (old records lack input fields / nodeTimeline)
@@ -75,11 +154,34 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
             duration = try c.decode(TimeInterval.self, forKey: .duration)
             input = try c.decodeIfPresent(String.self, forKey: .input)
             inputSourceLabel = try c.decodeIfPresent(String.self, forKey: .inputSourceLabel)
-            // Lossy on purpose: a future `TimelineEvent` Codable-shape change drops only
-            // this node's trace, not the node itself (its status/detail/duration survive).
-            // Paired with WorkflowRunRecordSD's per-element decode, one bad node can't
-            // erase the whole run.
-            nodeTimeline = (try? c.decodeIfPresent([TimelineEvent].self, forKey: .nodeTimeline)) ?? nil
+            // Lossy on purpose: dropping only this node's trace beats failing the node.
+            //
+            // ⚠️ But it used to be lossy AND SILENT, which meant a node's entire agent trace could
+            // vanish with nothing in the log to say so. It also PRE-EMPTS the resilient tier: the
+            // `try?` swallows the failure here, so the outer `VersionedNodeResults` decode SUCCEEDS
+            // and `decodeNodeResultsResiliently` is never reached for a timeline failure.
+            //
+            // Since `TimelineEvent` gained its total catch-all, an individual event can no longer
+            // throw — so reaching this branch now means the CONTAINER shape changed (the key is
+            // present but is not a JSON array). Rare, and worth a line when it happens.
+            //
+            // Deliberately NOT paired with a write-refusal flag like `ChatMessage.canPersistTimeline`:
+            // that exists because the chat path nulls its blob on a read failure. Here nothing
+            // re-saves a loaded record — every writer builds a fresh record in memory — so the flag
+            // would be permanently false and the plumbing dead. The `record` setter that WOULD have
+            // made it live has been removed instead; see `WorkflowRunRecordSD`.
+            do {
+                nodeTimeline = try c.decodeIfPresent([TimelineEvent].self, forKey: .nodeTimeline)
+            } catch {
+                nodeTimeline = nil
+                logger.error(
+                    "[DECODE] Node \(nodeID.uuidString.prefix(8)) (\(profileName)): nodeTimeline is "
+                    + "present but undecodable — \(error). CONSEQUENCE: this node's agent trace will "
+                    + "not render for this run; its status, detail and duration are unaffected. The "
+                    + "stored bytes are NOT overwritten (nothing re-saves a loaded record), so they "
+                    + "stay recoverable by a build that understands the shape."
+                )
+            }
             hasWarnings = try c.decodeIfPresent(Bool.self, forKey: .hasWarnings)
         }
 

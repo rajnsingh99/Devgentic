@@ -12,6 +12,8 @@
 import SwiftUI
 import Flux2Core
 
+private let logger = DGLogger(category: "ImageGenConfigDetail")
+
 struct ImageGenConfigDetailView: View {
     @Bindable var editBuffer: ProfileEditBuffer
     var onDelete: ((UUID) -> Void)? = nil
@@ -35,6 +37,11 @@ struct ImageGenConfigDetailView: View {
 
     // Unsaved-changes guard on back navigation.
     @State private var showingBackAlert = false
+
+    /// Advisory findings from the last save, shown until dismissed or the next save (register A34).
+    /// ⚠️ Cleared on every save, so it always describes the CURRENT state of the profile — a stale
+    /// note about a model the user has since changed would be worse than no note.
+    @State private var saveAdvisories: [ProfileValidationError] = []
 
 
     // MARK: - Convenience Accessors
@@ -121,7 +128,7 @@ struct ImageGenConfigDetailView: View {
             // See AgentConfigDetailView for the rationale — `onCancel` swaps
             // the leading chevron for an xmark and routes it to the modal host.
             DynamicIslandBar(
-                onBack: onCancel ?? handleBackTap,
+                onBack: handleBackTap,
                 leadingSymbol: onCancel != nil ? "xmark" : "chevron.left"
             ) {
                 actionButtons
@@ -129,6 +136,14 @@ struct ImageGenConfigDetailView: View {
 
             ScrollView {
                 VStack(spacing: 32) {
+
+                // ⚠️ Register A34. Sits at the top of the scroll view, where the user's eye already is
+                // after pressing Save in the island bar above. Dismissible, and replaced on the next
+                // save — never a permanent fixture, because an advisory describes a choice the user
+                // already made rather than a fault they must fix.
+                SaveAdvisoryBanner(advisories: saveAdvisories) {
+                    withAnimation { saveAdvisories = [] }
+                }
 
                 // 1. Identity Header
                 HStack(alignment: .center, spacing: 16) {
@@ -251,13 +266,47 @@ struct ImageGenConfigDetailView: View {
         .unsavedChangesBackGuard(
             isDirty: editBuffer.isDirty,
             showingAlert: $showingBackAlert,
-            onDiscard: { editBuffer.revert() }
+            onDiscard: { editBuffer.revert() },
+            onLeave: { leaveEditor() }
         )
+        // ⚠️ This modifier was MISSING. The trash button set `showingDeleteAlert = true` and
+        // nothing rendered — no alert, no toast, no log, no deletion. `showingDeleteAlert` had
+        // exactly two references in the whole file: its declaration and that assignment. The user
+        // clicks repeatedly and concludes the app is frozen; the only working delete path was the
+        // sidebar row's hover-trash, which is not discoverable from the screen they are on.
+        // Mirrors BotConfigDetailView's alert so the three detail views behave identically.
+        .alert("Delete '\(editBuffer.draft.displayName)'?", isPresented: $showingDeleteAlert) {
+            Button("Delete", role: .destructive) {
+                do {
+                    try profileService.deleteProfile(withId: editBuffer.draft.id)
+                    router.returnToChat()
+                } catch {
+                    toastManager.show(error.localizedDescription, style: .error)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Are you sure you want to delete this image generator? This action cannot be undone.")
+        }
     }
 
     private func handleBackTap() {
         if editBuffer.isDirty {
             showingBackAlert = true
+        } else {
+            leaveEditor()
+        }
+    }
+
+    /// The ONE way out of this editor.
+    ///
+    /// ⚠️ Register A28. The leading button used to be wired `onBack: onCancel ?? handleBackTap`,
+    /// so in the workflow sheet the xmark called `dismiss()` directly and never consulted
+    /// `editBuffer.isDirty` — the identical view, routed, prompted correctly. The dirty check now
+    /// happens for both hosts and only the EXIT differs: dismiss the sheet, or pop the router.
+    private func leaveEditor() {
+        if let onCancel {
+            onCancel()
         } else {
             withAnimation(.easeInOut(duration: 0.2)) {
                 router.goBack()
@@ -418,10 +467,23 @@ struct ImageGenConfigDetailView: View {
                     keyboardShortcut: .defaultAction
                 ) {
                     do {
-                        try profileService.saveProfile(editBuffer.draft)
+                        // ⚠️ Register A34: advisories are RETURNED now, not just logged. The
+                        // save succeeded either way — the banner explains what may not work, it
+                        // does not report a failure.
+                        saveAdvisories = try profileService.saveProfile(editBuffer.draft)
                         editBuffer.markSaved()
                         toastManager.show("Profile saved", style: .success)
                     } catch {
+                        // ⚠️ A toast and NOTHING else was the whole record of a failed save on the
+                        // primary user-data write path. It disappears in seconds, so "my image generator
+                        // config won't stick" arrived with no profile id, no type and no error to
+                        // correlate against.
+                        logger.error(
+                            "[PROFILE] Save FAILED for '\(editBuffer.draft.displayName)' "
+                            + "(\(editBuffer.draft.id), image generator): \(error.localizedDescription). "
+                            + "CONSEQUENCE: the edit buffer stays dirty and the persisted profile is "
+                            + "unchanged; the user's edits are still on screen but not on disk."
+                        )
                         toastManager.show(error.localizedDescription, style: .error)
                     }
                 }

@@ -182,7 +182,52 @@ class BackendOrchestrationService {
                 let profileHasSingleContextWindow = config.profile.profileType == .bot
                     || config.profile.profileType == .agent
                     || config.profile.profileType == .code
-                if profileUsesConversationRAG && !conversationHistory.isEmpty {
+                // ⚠️ Availability is checked BEFORE the progress line below, and with an `if/else`
+                // rather than a `guard … else { return }`: this sits deep inside the streaming
+                // closure, so an early `return` would abort the ENTIRE turn instead of skipping
+                // retrieval — the user would get no answer at all because their search index was down.
+                //
+                // Why it must be checked at all: the progress line is a durable CLAIM, not a spinner.
+                // `ActiveStreamManager` turns `.thought` into a `TimelineEvent` that is APPENDED to
+                // the message and saved, so yielding it unconditionally wrote "Searching conversation
+                // memory…" into the permanent transcript of a run where the vector store never opened.
+                //
+                // Gated strictly on `isAvailable`. NOT on "0 results": `retrieveRAGContext` returns
+                // nil for four reasons and three of them are healthy (no embedding, nothing above
+                // threshold, all hits were history duplicates) — the normal case early in a
+                // conversation. Bannering on those would train the user to dismiss, and a dismissal
+                // suppresses the key for the whole session, disarming the real signal.
+                let knowledgeStoreIsAvailable = VectorStoreService.shared.isAvailable
+                if profileUsesConversationRAG && !conversationHistory.isEmpty && !knowledgeStoreIsAvailable {
+                    logger.error(
+                        "[RAG] Retrieval SKIPPED — the vector store is unavailable (it failed to open "
+                        + "at launch). CONSEQUENCE: this turn is answered with NO knowledge-base or "
+                        + "conversation-memory context, the 'Searching conversation memory' progress "
+                        + "line is suppressed so the saved transcript does not claim otherwise, and an "
+                        + "advisory is shown. (conv: \(conversationID) trace: \(context.traceID))"
+                    )
+                    await MainActor.run {
+                        AdvisoryCenter.shared.post(Advisory(
+                            conversationID: conversationID,
+                            category: .knowledgeUnavailable,
+                            message: "Conversation memory and knowledge-base search are unavailable — "
+                                + "the search index didn't open. Answers won't use your indexed "
+                                + "documents or earlier conversations. Quit and reopen Devgentic to retry.",
+                            actionLabel: "Show Index",
+                            action: .revealInFinder(path: VectorStoreService.storeDirectoryPath),
+                            // No volatile inputs: the condition is process-wide and cannot change
+                            // without a relaunch, so one dismissal per conversation is the right dose.
+                            dedupeKey: "\(conversationID.uuidString)|knowledgeUnavailable"
+                        ))
+                    }
+                }
+
+                if profileUsesConversationRAG && !conversationHistory.isEmpty && knowledgeStoreIsAvailable {
+
+                    // The store is up — self-heal any advisory left from an earlier state.
+                    await MainActor.run {
+                        AdvisoryCenter.shared.clear(category: .knowledgeUnavailable, conversationID: conversationID)
+                    }
 
                     // --- UI Progress: RAG preparation ---
                     continuation.yield(.thought("Searching conversation memory…"))

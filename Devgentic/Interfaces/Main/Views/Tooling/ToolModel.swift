@@ -186,6 +186,18 @@ struct ToolSource: Identifiable, Hashable {
     /// Whether Devgentic may connect to this server. Always `true` for the built-in
     /// catalogue, which has nothing to connect to.
     var isEnabled: Bool = true
+
+    /// True when `mcpConfigData` could not be decoded, so `serverDefinition` is nil because the
+    /// stored bytes are UNREADABLE rather than because this source has no configuration.
+    ///
+    /// ⚠️ The distinction matters and was previously lost (G22): both cases produced a nil
+    /// `serverDefinition`, so a server whose config had become unreadable simply failed to connect
+    /// with nothing to say why. It also changes what the user should DO — deleting an unreadable
+    /// source orphans its Keychain secrets, because the `envKeys` that name them live inside the
+    /// very blob that cannot be read.
+    ///
+    /// Load-scoped: describes this read, not the source. Defaults false for the built-in catalogue.
+    var isConfigurationUnreadable: Bool = false
 }
 
 /// A universal protocol for any tool that the Swift client application can run directly.

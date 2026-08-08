@@ -12,6 +12,9 @@
 //
 
 import Foundation
+import os
+
+private let logger = DGLogger(category: "BackendProfile")
 
 // MARK: - Compatibility Typealias
 //
@@ -479,22 +482,64 @@ enum ProfileSchemaVersion: Int, Codable, Sendable {
     case v4 = 4  // Auto-spawn delegation (subAgents → maxConcurrentAgents + maxIterationsPerAgent)
     case v5 = 5  // Skills support (SkillFolderConfig on AgentConfig)
     case v6 = 6  // Workflow execution config (WorkflowConfig expansion)
+    case v7 = 7  // Repairs execute_shell tools stamped with a random sourceId
 
-    static let current: ProfileSchemaVersion = .v6
+    static let current: ProfileSchemaVersion = .v7
 }
 
 /// Chains versioned transforms to migrate ProfileDetails JSON from older schemas to current.
 /// Each migration step operates on raw JSON dictionaries to avoid coupling to current model types.
 enum ProfileMigrator {
 
-    /// Migrates raw JSON data from any previous schema version to the current version.
-    /// Returns the migrated data ready for decoding, or the original data if already current.
-    static func migrateIfNeeded(_ data: Data) -> Data {
+    /// The blob shape this build writes and understands.
+    ///
+    /// ⚠️ DERIVED from `ProfileSchemaVersion.current`, never written as its own literal. These are
+    /// the two halves of one fact — `current` is what the ENCODER stamps
+    /// (`ProfileDetails.encode`), this is what the REFUSAL compares against — and as separate
+    /// literals they could silently disagree. The failure that creates is unusually nasty: bump one
+    /// and not the other and the app stamps every save with a version it then refuses to read back,
+    /// locking the user out of profiles this very build just wrote. Deriving makes that
+    /// unrepresentable rather than merely tested for.
+    ///
+    /// ⚠️ Add a new case to `ProfileSchemaVersion` ONLY together with a matching `migrateToV<n>` step,
+    /// and only for a change to the PERSISTED shape of `ProfileDetails`. This number is independent
+    /// of the SwiftData schema version (`DevgenticSchemaV1`) and of `MARKETING_VERSION`: SwiftData
+    /// cannot see inside `configData`, so this is the only thing versioning what is actually in there.
+    static var currentVersion: Int { ProfileSchemaVersion.current.rawValue }
+
+    /// What `migrateIfNeeded` concluded about a stored blob.
+    enum MigrationOutcome {
+        /// Ready to decode — either already current, or upgraded in memory.
+        case migrated(Data)
+        /// Written by a NEWER build than this one. Refuse; do not guess.
+        case tooNew(storedVersion: Int)
+    }
+
+    /// Migrates raw JSON data from any previous schema version to the current version, or refuses
+    /// when the data came from a newer build.
+    ///
+    /// ⚠️ The refusal is the point (register G18). The migration steps are shaped
+    /// `if storedVersion < N`, so a blob stamped ABOVE `currentVersion` matched no step, was passed
+    /// through untouched, and was then handed to a decoder that could not read it. The failure
+    /// surfaced as "this profile is corrupt" when the truth was "this profile is from the future" —
+    /// two situations with opposite remedies. Corrupt invites the user to reconfigure, which
+    /// overwrites the blob and makes the loss permanent; from-the-future needs them to update the
+    /// app and change NOTHING.
+    ///
+    /// This is not hypothetical for an unreleased app: the store lives in an unsandboxed shared
+    /// directory, so checking out an earlier commit and running it is enough.
+    static func migrateIfNeeded(_ data: Data) -> MigrationOutcome {
         guard var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return data
+            // Not a JSON object at all. Nothing to migrate and nothing to conclude about its
+            // version — hand it to the decoder, which will report the real error.
+            return .migrated(data)
         }
 
         let storedVersion = (json["schemaVersion"] as? Int) ?? 0
+
+        if storedVersion > currentVersion {
+            return .tooNew(storedVersion: storedVersion)
+        }
 
         // Apply migrations in order
         if storedVersion < 1 {
@@ -515,11 +560,25 @@ enum ProfileMigrator {
         if storedVersion < 6 {
             json = migrateToV6(json)
         }
+        if storedVersion < 7 {
+            json = migrateToV7(json)
+        }
 
         guard let migrated = try? JSONSerialization.data(withJSONObject: json) else {
-            return data
+            // ⚠️ The migration steps ran but the result could not be re-serialized, so what is
+            // returned is the ORIGINAL, UN-migrated blob wearing a `.migrated` label. The decoder's
+            // own legacy tolerance may still carry it, which is why this is a degradation rather
+            // than a failure — but it must not be silent, because the symptom (a profile that
+            // decodes with old-shaped fields) looks nothing like the cause.
+            logger.error(
+                "[PERSISTENCE] Profile blob migration produced JSON that could not be re-serialized "
+                + "(\(data.count) bytes). CONSEQUENCE: the ORIGINAL un-migrated bytes are returned "
+                + "instead; the decode may still succeed via legacy tolerance, or fail and mark the "
+                + "profile unreadable. The stored bytes are not modified either way."
+            )
+            return .migrated(data)
         }
-        return migrated
+        return .migrated(migrated)
     }
 
     // MARK: - Migration Steps
@@ -654,6 +713,69 @@ enum ProfileMigrator {
         result["schemaVersion"] = 6
         return result
     }
+
+    /// v6 → v7: Repairs `execute_shell` tools stamped with a random `sourceId`.
+    ///
+    /// ⚠️ A DATA repair, not a shape change — the only such step in this ladder, and deliberately
+    /// so. `AgentSkillsSection` auto-added `execute_shell` with
+    /// `UUID(uuidString: "00000000-SKIL-AUTO-SHEL-000000000000") ?? UUID()`; that literal is not
+    /// valid hex, so the parse failed on every call and each import minted a fresh random id.
+    /// Tool dispatch and the Tool Library both key off `sourceId == ToolSource.builtInSourceID`,
+    /// so the affected profiles show the tool as OFF while it is live, append a duplicate when the
+    /// user ticks it, and can never remove the auto-added copy from any UI.
+    ///
+    /// Fixing the write site only helps NEW imports; every profile written before it stays broken
+    /// forever, and the damage is precisely that the user cannot repair it by hand. So the stored
+    /// bytes have to be normalized, and this ladder is the mechanism this codebase has for that.
+    ///
+    /// ⚠️ Merges rather than blindly rewrites: a profile can hold BOTH the auto-added copy and a
+    /// user-ticked one, which would collide on `(name, sourceId)` after the rewrite. The
+    /// built-in-sourced entry wins on `requiresConfirmation` and `isEnabled` because that one
+    /// records a deliberate choice the user made in the Tool Library; the auto-added copy records
+    /// only that an import happened. Never silently relax `requiresConfirmation` here.
+    private static func migrateToV7(_ json: [String: Any]) -> [String: Any] {
+        var result = json
+        result["schemaVersion"] = 7
+
+        guard var tools = result["tools"] as? [[String: Any]] else { return result }
+        let builtIn = ToolSource.builtInSourceID.uuidString
+
+        // Case-insensitive: UUID strings round-trip uppercase, but a hand-edited or legacy blob
+        // may hold either casing and a miss here would leave the profile unrepaired.
+        let orphans = tools.filter {
+            ($0["name"] as? String) == "execute_shell"
+                && ($0["sourceId"] as? String)?.caseInsensitiveCompare(builtIn) != .orderedSame
+        }
+        guard !orphans.isEmpty else { return result }
+
+        let canonical = tools.first {
+            ($0["name"] as? String) == "execute_shell"
+                && ($0["sourceId"] as? String)?.caseInsensitiveCompare(builtIn) == .orderedSame
+        }
+
+        // Drop every execute_shell entry, then reinsert exactly one repaired record.
+        tools.removeAll { ($0["name"] as? String) == "execute_shell" }
+
+        var repaired = canonical ?? orphans[0]
+        repaired["sourceId"] = builtIn
+        // The user's Tool Library choice wins where one exists; otherwise keep the auto-added
+        // record's own flags, defaulting `requiresConfirmation` to true for a shell tool whose
+        // blob predates that field.
+        if canonical == nil {
+            repaired["requiresConfirmation"] = (orphans[0]["requiresConfirmation"] as? Bool) ?? true
+        }
+        tools.append(repaired)
+        result["tools"] = tools
+
+        let preserved = canonical == nil ? "" : ", preserving the user's Tool Library settings"
+        logger.notice("""
+            [PERSISTENCE] Repaired \(orphans.count) execute_shell tool record(s) carrying a random \
+            sourceId; collapsed to a single built-in-sourced entry\(preserved). CONSEQUENCE: the \
+            Tool Library now shows the tool's real state and it can finally be removed.
+            """)
+
+        return result
+    }
 }
 
 // MARK: - Profile Details Enum
@@ -685,6 +807,13 @@ enum ProfileDetails: Codable, Hashable, Sendable {
         case defaultNodeTimeout, defaultFailurePolicy, defaultMaxRetries
         case contextBudgetPerNode, totalContextBudget
         case maxNestingDepth
+        // ⚠️ `nodeTimeoutEnabled` was MISSING from all three of CodingKeys / encode / decode until
+        // 2026-08-05, so "disable the node timeout" was silently discarded on every save and came
+        // back nil — which `effectiveNodeTimeout` reads as "enabled", timing nodes out at the 120 s
+        // default the user had explicitly turned off. This coder hand-writes `WorkflowConfig`'s
+        // fields one at a time instead of delegating to its synthesized `Codable`, so nothing
+        // checks the list against the struct. If you add a field to `WorkflowConfig`, add it here.
+        case nodeTimeoutEnabled
         // ImageGen-specific
         case negativePrompt, defaultAspectRatio, advancedSettings
         // Code-specific — folder root scoping for code tools (list_directory, glob_files, etc.)
@@ -754,6 +883,7 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             let ids = try container.decodeIfPresent([UUID].self, forKey: .agentProfileIDs) ?? []
             var config = WorkflowConfig(agentProfileIDs: ids)
             config.defaultNodeTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .defaultNodeTimeout)
+            config.nodeTimeoutEnabled = try container.decodeIfPresent(Bool.self, forKey: .nodeTimeoutEnabled)
             config.defaultFailurePolicy = try container.decodeIfPresent(NodeFailurePolicy.self, forKey: .defaultFailurePolicy)
             config.defaultMaxRetries = try container.decodeIfPresent(Int.self, forKey: .defaultMaxRetries)
             config.contextBudgetPerNode = try container.decodeIfPresent(Int.self, forKey: .contextBudgetPerNode)
@@ -774,23 +904,39 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             ))
 
         case .code:
-            // Code mode reuses AgentConfig — decode identically to .agent plus projectPath.
+            // Code mode reuses AgentConfig — decode identically to `.agent` plus `projectPath`.
+            // ⚠️ That sentence was ASPIRATIONAL until 2026-08-05: six fields were missing here and
+            // in the encode arm, so a code profile's resilience settings never survived a save. See
+            // the encode arm for the consequence. Keep the two arms in lockstep — the round-trip
+            // test `testCodeProfileRoundTripsEverySettingAgentDoes` fails if they drift.
             let llmConfig = try container.decode(ProviderConfig.self, forKey: .llmConfig)
             let tools = (try? container.decode([Tool].self, forKey: .tools)) ?? []
+            let description = try container.decodeIfPresent(String.self, forKey: .description)
             let instructions = try container.decodeIfPresent(String.self, forKey: .instructions)
+            let knowledgeSources = try container.decodeIfPresent([KnowledgeSource].self, forKey: .knowledgeSources)
             let maxIterations = try container.decodeIfPresent(Int.self, forKey: .maxIterations)
             let executionTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .executionTimeout)
+            let retryPolicy = try container.decodeIfPresent(RetryPolicy.self, forKey: .retryPolicy)
+            let errorRecovery = try container.decodeIfPresent(ErrorRecovery.self, forKey: .errorRecovery)
+            let resilienceOverrides = try container.decodeIfPresent(ResilienceOverrides.self, forKey: .resilienceOverrides)
             let capabilities = (try? container.decode(AgentCapabilities.self, forKey: .capabilities)) ?? AgentCapabilities()
             let historyStrategy = try container.decodeIfPresent(HistoryStrategy.self, forKey: .historyStrategy)
+            let skillConfig = try container.decodeIfPresent(SkillFolderConfig.self, forKey: .skillConfig)
             let projectPath = try container.decodeIfPresent(String.self, forKey: .projectPath)
             self = .code(AgentConfig(
                 llmConfig: llmConfig,
                 tools: tools,
+                description: description,
                 instructions: instructions,
+                knowledgeSources: knowledgeSources,
                 maxIterations: maxIterations,
                 executionTimeout: executionTimeout,
+                retryPolicy: retryPolicy,
+                errorRecovery: errorRecovery,
+                resilienceOverrides: resilienceOverrides,
                 capabilities: capabilities,
                 historyStrategy: historyStrategy,
+                skillConfig: skillConfig,
                 projectPath: projectPath
             ))
         }
@@ -832,6 +978,7 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             try container.encode(ProfileType.workflow, forKey: .profileType)
             try container.encode(config.agentProfileIDs, forKey: .agentProfileIDs)
             try container.encodeIfPresent(config.defaultNodeTimeout, forKey: .defaultNodeTimeout)
+            try container.encodeIfPresent(config.nodeTimeoutEnabled, forKey: .nodeTimeoutEnabled)
             try container.encodeIfPresent(config.defaultFailurePolicy, forKey: .defaultFailurePolicy)
             try container.encodeIfPresent(config.defaultMaxRetries, forKey: .defaultMaxRetries)
             try container.encodeIfPresent(config.contextBudgetPerNode, forKey: .contextBudgetPerNode)
@@ -846,14 +993,40 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             try container.encodeIfPresent(config.advancedSettings, forKey: .advancedSettings)
 
         case .code(let config):
+            // ⚠️ MUST mirror `.agent` field-for-field, plus `projectPath`. It did not until
+            // 2026-08-05: it silently dropped description, knowledgeSources, retryPolicy,
+            // errorRecovery, resilienceOverrides and skillConfig, even though its own comment on the
+            // decode arm claimed it decoded "identically to .agent plus projectPath".
+            //
+            // `CodeSessionManager` creates the code profile with
+            // `errorRecovery(onToolFailure: .fallbackPrompt)` and `retryPolicy(maxRetries: 3)`, and
+            // neither survived a save — they came back nil on the next launch.
+            //
+            // ⚠️ HONEST SCOPE: this is a LATENT trap, not a live user-visible bug. `AgentConnect`
+            // reads resilience under `if case .agent(let agentConfig) = profile.details` (:425), and
+            // `.code` falls to the `else` that hardcodes `ErrorRecovery()` anyway — so today the
+            // stored value is not consulted for code profiles and the loss is masked. It goes live
+            // the moment that guard is widened to include `.code` (a one-line change that would look
+            // entirely safe) or a Code-mode settings UI exposes the tool-failure policy. Persisting
+            // what the profile actually says is the cheap half of that; the runtime gate is a
+            // separate question.
             try container.encode(ProfileType.code, forKey: .profileType)
             try container.encode(config.llmConfig, forKey: .llmConfig)
             try container.encode(config.tools, forKey: .tools)
+            try container.encodeIfPresent(config.description, forKey: .description)
             try container.encodeIfPresent(config.instructions, forKey: .instructions)
+            try container.encodeIfPresent(config.knowledgeSources, forKey: .knowledgeSources)
             try container.encodeIfPresent(config.maxIterations, forKey: .maxIterations)
             try container.encodeIfPresent(config.executionTimeout, forKey: .executionTimeout)
+            try container.encodeIfPresent(config.retryPolicy, forKey: .retryPolicy)
+            try container.encodeIfPresent(config.errorRecovery, forKey: .errorRecovery)
+            // Same all-Auto omission as `.agent`, so unchanged profiles stay byte-identical.
+            if let overrides = config.resilienceOverrides, !overrides.isEmpty {
+                try container.encode(overrides, forKey: .resilienceOverrides)
+            }
             try container.encode(config.capabilities, forKey: .capabilities)
             try container.encodeIfPresent(config.historyStrategy, forKey: .historyStrategy)
+            try container.encodeIfPresent(config.skillConfig, forKey: .skillConfig)
             try container.encodeIfPresent(config.projectPath, forKey: .projectPath)
         }
     }
@@ -1042,9 +1215,25 @@ struct ProviderConfig: Codable, Hashable, Sendable {
     var stopSequences: [String] = []
 
     /// Whether extended thinking is active for this model.
-    /// Seeded by Option A (detection) at model-selection time.
-    /// Auto-disabled by Option B when runtime 400 "does not support thinking" fires.
-    /// User-toggleable in advanced config.
+    ///
+    /// ⚠️ This is a USER PREFERENCE with a detected default — not a detected value. Three things
+    /// write it, and only in this order of authority:
+    ///   1. **The user**, via the Extended Thinking switch in Advanced Configuration. Always wins
+    ///      over detection.
+    ///   2. **Detection**, seeding a default *at model-selection time* — when the user picks a
+    ///      DIFFERENT model, whose defaults they have not expressed an opinion about yet.
+    ///   3. **The runtime**, auto-disabling on a 400 "does not support thinking"
+    ///      (`[THINKING_AUTO_HEAL]` in `BackendOrchestrationService`). This outranks the user
+    ///      because it is not a guess — the server refused.
+    ///
+    /// ⚠️ Rule 2 used to run on every REFRESH rather than on selection (register G98).
+    /// `ModelPickerView.updateCapabilityLevel` assigned it unconditionally and is called at the end
+    /// of every `fetchModels()`, which fires on `.onAppear` — so turning the switch off, saving, and
+    /// reopening the editor silently turned it back on. The setting survived exactly until the user
+    /// next looked at it. `updateCapabilityLevel` now takes a `seedUserPreferences` flag with NO
+    /// default value, so every call site has to decide which of the three writers it is.
+    ///
+    /// Do not add a fourth writer without deciding where it sits in that order.
     var thinkingEnabled: Bool = false
 
     /// The model's input/output modalities (e.g. `.visionInput`), seeded by detection
@@ -1160,5 +1349,72 @@ struct ProviderConfig: Codable, Hashable, Sendable {
         if supportedModalities != .textOnly {
             try container.encode(supportedModalities, forKey: .supportedModalities)
         }
+    }
+}
+
+// MARK: - Tolerant Decoders for Blob-Persisted Types
+//
+// ⚠️ WHY THESE EXIST — read before deleting one as "redundant".
+//
+// Everything reachable from `ProfileDetails` is persisted as an opaque JSON blob inside
+// `BackendProfile.configData`. SwiftData's schema does not see inside that blob, so adding a
+// field to any type below is NOT a schema change: lightweight migration reports nothing, the
+// container opens perfectly, and the failure lands at READ time instead.
+//
+// Swift's SYNTHESIZED `init(from:)` calls `decode(_:forKey:)` for every non-optional stored
+// property and does NOT fall back to the property's default value — it throws `keyNotFound`.
+// So `var maxOutputBytes: Int = 4096` on `Tool`, which looks entirely routine and compiles
+// clean, would make every previously-saved profile undecodable.
+//
+// Policy below: fields that carry a DEFAULT decode tolerantly (a missing key uses the default);
+// fields that genuinely identify the value stay REQUIRED, so a truly corrupt blob still fails
+// loudly instead of silently becoming junk.
+//
+// ⚠️ Each `init(from:)` lives in an EXTENSION, not the struct body — declaring it inline would
+// suppress the synthesized memberwise initializer that call sites rely on.
+//
+// See SWIFTDATA_GAP_REGISTER.md G13/G14 and the invariant in architecture_readme.md §7.
+
+extension Tool {
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        // Required: a tool with no name is not addressable, and one with no sourceId or
+        // parameters cannot be dispatched. A blob missing these is corrupt, not merely old.
+        name = try container.decode(String.self, forKey: .name)
+        sourceId = try container.decode(UUID.self, forKey: .sourceId)
+        parameters = try container.decode(ToolParameters.self, forKey: .parameters)
+
+        // Tolerant: every field below has a default, so a blob written before it existed is
+        // still perfectly usable.
+        description = (try? container.decode(String.self, forKey: .description)) ?? ""
+        isEnabled = (try? container.decode(Bool.self, forKey: .isEnabled)) ?? true
+        requiresConfirmation = (try? container.decode(Bool.self, forKey: .requiresConfirmation)) ?? true
+        timeout = (try? container.decodeIfPresent(TimeInterval.self, forKey: .timeout)) ?? nil
+        timeoutMessage = (try? container.decodeIfPresent(String.self, forKey: .timeoutMessage)) ?? nil
+        isFavorite = (try? container.decode(Bool.self, forKey: .isFavorite)) ?? false
+    }
+}
+
+extension SelfReflectionConfig {
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Both fields have defaults; neither identifies the value. Fully tolerant.
+        maxTrials = (try? container.decode(Int.self, forKey: .maxTrials)) ?? 3
+        evaluatorProfileID = (try? container.decodeIfPresent(UUID.self, forKey: .evaluatorProfileID)) ?? nil
+    }
+}
+
+extension KnowledgeSource {
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        // Required: a knowledge source with no location points at nothing.
+        location = try container.decode(String.self, forKey: .location)
+
+        // Tolerant: `id` is generated, and `.file` is the only implemented SourceType, so an
+        // unknown or missing type degrades to it rather than discarding the whole profile.
+        id = (try? container.decode(UUID.self, forKey: .id)) ?? UUID()
+        type = (try? container.decode(SourceType.self, forKey: .type)) ?? .file
     }
 }

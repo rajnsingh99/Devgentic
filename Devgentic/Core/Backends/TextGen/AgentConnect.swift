@@ -503,12 +503,35 @@ class AgentConnect: @unchecked Sendable {
                     
                     try Task.checkCancellation()
 
-                    // Extract execution timeout from agent config
+                    // Extract execution timeout from the profile's agent configuration.
+                    //
+                    // ⚠️ `.code` carries an `AgentConfig` too and MUST be matched here. It used to
+                    // fall into the `else`, so a Code session's persisted `executionTimeout` (300 s,
+                    // set by `CodeSessionManager`) was silently discarded and the run had NO
+                    // wall-clock bound at all — a stalled tool loop streamed forever with nothing in
+                    // the log to say a limit had been configured, let alone dropped.
                     let executionTimeout: TimeInterval?
-                    if case .agent(let agentConfig) = profile.details {
+                    switch profile.details {
+                    case .agent(let agentConfig), .code(let agentConfig):
                         executionTimeout = agentConfig.executionTimeout
-                    } else {
+                    case .bot, .workflow, .imageGen:
                         executionTimeout = nil
+                    }
+
+                    if let executionTimeout {
+                        logger.info("""
+                            [EXEC_LIMITS] Execution timeout \(Int(executionTimeout))s armed for \
+                            conversation \(conversationID.uuidString.prefix(8)) \
+                            (\(profile.profileType.rawValue)). CONSEQUENCE: the run is aborted if it \
+                            exceeds this.
+                            """)
+                    } else {
+                        logger.notice("""
+                            [EXEC_LIMITS] No execution timeout configured for conversation \
+                            \(conversationID.uuidString.prefix(8)) \
+                            (\(profile.profileType.rawValue)). CONSEQUENCE: the run has no \
+                            wall-clock bound — a stalled tool call streams until the user cancels.
+                            """)
                     }
 
                     if case .code = profile.details {
@@ -859,12 +882,41 @@ class AgentConnect: @unchecked Sendable {
             // Primary Routing Dimension: Structural Capability
             switch cognitiveProfile.capability {
             case .none:
-                // Strictly prevent chat-only models from ever executing inside an Agent loop
+                // ⚠️ This used to THROW a 405 and refuse the run outright (register G94). It was the
+                // second of two enforcements of the same heuristic, and it made a promise the app
+                // had already made to the user unkeepable: MLXModelPickerView tells them the check
+                // "is a name-based heuristic and is often wrong for new or re-quantized models — if
+                // you know it supports tools, keep it selected", and that same file states
+                // "Tool-capability is LABELLED, not enforced". Keeping the model selected then
+                // produced a profile that could not be saved (G92) and could not be run (here).
+                //
+                // A capability classification may LABEL, never GATE. The verdict can be wrong in the
+                // permissive direction too — MLX Tier 0 forces `.none` on the model NAME alone
+                // (deepseek-r1, qwq, gpt-oss, magistral) ahead of any tokenizer evidence, so a model
+                // with tool tokens and a tool-aware chat template is refused on its name.
+                //
+                // So: proceed, and let the attempt report the truth. A model that genuinely cannot
+                // call tools fails visibly — the local dialects degrade to text, and a server that
+                // rejects a tools param answers 400, which
+                // `ProviderErrorClassifier.classify(statusCode:rawBody:)` already turns into a named
+                // error. That is the same policy the cloud arms above follow deliberately, and the
+                // same one the Ollama picker documents ("the runtime gate reports the failure
+                // honestly rather than trapping the picker"). User decision, 2026-08-06.
+                //
+                // ⚠️ The refusal CANNOT be made selective today even where it would be justified:
+                // `CognitiveProfile.toolSupportCaveat` distinguishes an authoritative
+                // `.serverRejectsTools` (the Ollama daemon declared no tools — a tools request WILL
+                // 400) from a heuristic `.reasoningFocused`, but `ProviderConfig.cognitiveProfile`
+                // never passes it, so it is always nil on a persisted profile. Persisting it is the
+                // prerequisite for ever reinstating a gate here — do not reinstate one without it.
                 if !isBotFlow {
-                    throw NSError(
-                        domain: "AgentConnect",
-                        code: 405,
-                        userInfo: [NSLocalizedDescriptionKey: "The selected model (\(llmConfig.modelName)) is a conversational model and lacks the cognitive capabilities required for Agent tasks. Please switch to a Bot profile or select a tool-capable model."]
+                    logger.warning(
+                        "[AGENT] Running an AGENT turn on \(llmConfig.apiProvider.rawValue) model "
+                        + "'\(llmConfig.modelName)' whose detected capability is .none — detection "
+                        + "believes it cannot call tools. CONSEQUENCE: proceeding anyway (the verdict "
+                        + "is a heuristic and the user may have overridden it); tool calls may be "
+                        + "emitted as plain text or rejected by the server with a 400. This is no "
+                        + "longer refused up front — see AgentConnect G94."
                     )
                 }
                 return JsonStructuredGenerator()
@@ -1009,6 +1061,30 @@ class AgentConnect: @unchecked Sendable {
             var options: [String: JSONValue]? = nil
             if let advConfig = llmConfig.advancedConfiguration {
                 options = advConfig
+            } else {
+                // [advanced-config default] The Advanced panel DISPLAYS a preset whenever a profile
+                // has no stored configuration — temperature 0.10, seed 42 and the rest for an agent.
+                // Nothing persisted it, so the request carried no options at all and Ollama ran at
+                // its own ~0.8 default with random sampling: the agent produced exactly the loose,
+                // non-deterministic tool calls the preset exists to prevent, while the UI insisted
+                // it was at 0.10. Same shape as the [num_ctx auto-default] below — resolve the
+                // value the user was shown rather than inheriting a server default they never saw.
+                //
+                // ⚠️ `isBotFlow` picks the ladder. `OllamaAdvancedConfig.default()` is the AGENT
+                // preset; handing it to a Bot pins a conversational profile to temperature 0.1 with
+                // a fixed seed, so every repeated prompt returns a byte-identical reply.
+                let profile: OllamaConfigDefaultProfile = isBotFlow ? .chat : .agent
+                let fallback: OllamaAdvancedConfig = llmConfig.modelMetadata.map {
+                    .recommended(for: $0, profile: profile)
+                } ?? (profile == .agent ? .default() : .botPreset(for: .smallMedium))
+
+                options = AdvancedConfigEncoder.encode(fallback)
+                logger.info("""
+                    [PROFILE] No stored advanced configuration for Ollama model \
+                    '\(llmConfig.modelName)' — applying the \(profile == .agent ? "agent" : "chat") \
+                    preset the Advanced panel displays. CONSEQUENCE: the request now matches what \
+                    the UI shows instead of falling back to Ollama's own sampling defaults.
+                    """)
             }
 
             // [num_ctx auto-default] When the user hasn't configured a context
@@ -1115,6 +1191,19 @@ class AgentConnect: @unchecked Sendable {
             var options: [String: JSONValue]? = nil
             if let advConfig = llmConfig.advancedConfiguration {
                 options = advConfig
+            } else {
+                // [advanced-config default] See the Ollama arm. The Gemini panel shows Max Output
+                // Tokens 2048 and a full set of safety thresholds on an unconfigured profile; none
+                // of it was sent, so the model used the account defaults while the UI claimed
+                // otherwise — and for the safety controls specifically, "claimed otherwise" means a
+                // user believed they had loosened or tightened filtering when they had not.
+                options = AdvancedConfigEncoder.encode(GeminiAdvancedConfig.default())
+                logger.info("""
+                    [PROFILE] No stored advanced configuration for Gemini model \
+                    '\(llmConfig.modelName)' — applying the defaults the Advanced panel displays, \
+                    including its safety thresholds. CONSEQUENCE: the request now matches the UI \
+                    instead of silently using account defaults.
+                    """)
             }
             let config = LLMProviderConfig(apiKey: apiKey, baseURL: googleBaseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options, rateLimitKey: rlKey)
             return GeminiLLMProvider(config: config)

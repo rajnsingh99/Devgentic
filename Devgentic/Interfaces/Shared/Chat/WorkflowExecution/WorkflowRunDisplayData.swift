@@ -311,6 +311,11 @@ struct WorkflowRunDisplayData {
         case .completed: return .completed
         case .failed:    return .failed
         case .skipped:   return .skipped
+        // A status written by a newer build. Maps to `.pending` — the display vocabulary's
+        // neutral, non-committal state — rather than guessing at success or failure. The node
+        // itself, its detail, its duration and its whole agent trace still render; before the
+        // preserving `.other` case existed, an unrecognised status deleted all of it.
+        case .other:     return .pending
         }
     }
 }
@@ -321,12 +326,17 @@ struct WorkflowRunDisplayData {
 /// `NodeDisplayData.NodeStatus`. The run history list and the dedicated view's
 /// run picker delegate here instead of each re-deriving the mapping.
 extension WorkflowRunRecord.RunStatus {
+    /// ⚠️ `.other` renders NEUTRALLY — a question mark, secondary colour, "Unknown". Never a
+    /// checkmark and never `successColor`. The whole point of preserving an unrecognised status is
+    /// that we do not know whether the run succeeded; a green tick would be the same false claim the
+    /// old `?? .completed` made, just moved one layer up.
     var icon: String {
         switch self {
         case .running:   return "circle.fill"
         case .completed: return "checkmark.circle.fill"
         case .failed:    return "xmark.circle.fill"
         case .cancelled: return "stop.circle.fill"
+        case .other:     return "questionmark.circle.fill"
         }
     }
 
@@ -336,6 +346,7 @@ extension WorkflowRunRecord.RunStatus {
         case .failed:    return theme.errorColor
         case .cancelled: return theme.warningColor
         case .running:   return theme.accentColor
+        case .other:     return theme.secondaryText
         }
     }
 
@@ -345,6 +356,9 @@ extension WorkflowRunRecord.RunStatus {
         case .completed: return String(localized: "Completed")
         case .failed:    return String(localized: "Failed")
         case .cancelled: return String(localized: "Cancelled")
+        // Not localized with the rawValue interpolated: the rawValue is a wire token from a newer
+        // build, and putting it in front of the user unexplained is worse than saying "Unknown".
+        case .other:     return String(localized: "Unknown")
         }
     }
 }

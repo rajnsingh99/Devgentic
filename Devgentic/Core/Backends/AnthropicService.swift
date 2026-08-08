@@ -22,8 +22,14 @@ struct AnthropicService {
     }
     
     /// Fetches the available models from the Anthropic /v1/models endpoint using the provided API key.
-    func verifyAndFetchModels(apiKey: String) async throws -> [String] {
-        let url = ProviderDefaults.anthropicBaseURL.appendingPathComponent("models")
+    /// - Parameter baseURL: the profile's configured API Endpoint. ⚠️ Defaulted, never hardcoded:
+    ///   a user on a corporate or self-hosted gateway sets that endpoint and pastes a
+    ///   GATEWAY-SCOPED key. This call used to ignore it and transmit that key to the vendor's
+    ///   public API on every keystroke-debounced fetch — a host they had deliberately routed
+    ///   around, and one their policy may forbid. Same `?? ProviderDefaults.x` shape `AgentConnect`
+    ///   already uses, so listing and chat can never disagree about where a profile talks.
+    func verifyAndFetchModels(apiKey: String, baseURL: URL? = nil) async throws -> [String] {
+        let url = (baseURL ?? ProviderDefaults.anthropicBaseURL).appendingPathComponent("models")
         
         var request = URLRequest(url: url, timeoutInterval: 15.0)
         request.httpMethod = "GET"

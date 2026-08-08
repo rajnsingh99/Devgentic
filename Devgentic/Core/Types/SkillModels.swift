@@ -190,11 +190,21 @@ struct SkippedSkillEntry: Sendable {
     enum SkipReason: Sendable {
         case noSkillFile              // No SKILL.md found
         case parseError(String)       // SKILL.md exists but frontmatter is invalid
+        /// A valid skill that was dropped because a skill of the same NAME is already loaded from
+        /// another folder.
+        ///
+        /// ⚠️ Register A40. The importer silently filtered these out. Skills are addressed by name,
+        /// so two folders offering `code-review` is an ordinary situation — and the user got no
+        /// indication which copy won, or that a choice had been made at all. The import simply
+        /// appeared to import fewer skills than the folder contained.
+        case duplicateName(keptFrom: String)
 
         var displayText: String {
             switch self {
             case .noSkillFile: return "No SKILL.md file"
             case .parseError(let detail): return detail
+            case .duplicateName(let keptFrom):
+                return "A skill with this name is already loaded from '\(keptFrom)' — that one is kept"
             }
         }
     }

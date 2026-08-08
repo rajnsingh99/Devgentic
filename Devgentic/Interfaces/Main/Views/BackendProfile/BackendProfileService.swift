@@ -31,6 +31,50 @@ final class BackendProfileService {
     /// Owned by the service so the panel view's navigation guard can check `editBuffer?.isDirty`.
     var editBuffer: ProfileEditBuffer?
 
+    /// Dirty state of a workflow canvas hosted INSIDE the profile editor.
+    ///
+    /// ⚠️ Owned here for the same reason `editBuffer` is: the sidebar's navigation guard has to be
+    /// able to see it. Canvas geometry (nodes, edges, positions) lives in `WorkflowCanvasState` and
+    /// `WorkflowLayoutSD`, never in `editBuffer.draft` — so `editBuffer?.isDirty` is false no matter
+    /// how much the user has drawn, and the sidebar used to switch profiles without a prompt and
+    /// destroy the lot. The canvas registers its save/discard hooks on this guard, which is why
+    /// Discard can now actually revert instead of just navigating away.
+    let canvasEditGuard = WorkflowEditGuard()
+
+    /// Commits a floating prompt editor's pending text back into `editBuffer.draft`.
+    ///
+    /// ⚠️ THE THIRD SOURCE OF UNSAVED WORK, and the reason `hasUnsavedEditorChanges` alone is not
+    /// enough at an exit point. `AdvancedPromptEditorView` holds typing in its own `@State
+    /// localText` and writes back only on an explicit commit — so both the buffer and the canvas
+    /// report clean while the floating window holds thousands of characters the user just typed.
+    /// Navigation already handles this by committing on teardown
+    /// (`AdvancedPromptWindowManager.closeWindowCommittingChanges`, register A27); ⌘Q has no
+    /// teardown to hang that on, so the owner registers the hook here instead.
+    ///
+    /// Registered by `AgentConfigDetailView` while it is on screen, nil otherwise. The bot and
+    /// scheduler editors use `SimplePromptWindowManager`, which pushes every keystroke back to its
+    /// binding and therefore has nothing pending to flush.
+    var commitPendingPromptEdits: (() -> Void)?
+
+    /// Flushes any floating prompt editor's pending text into the draft so the dirty check below
+    /// can see it. Call this BEFORE reading `hasUnsavedEditorChanges` at an exit point.
+    ///
+    /// Deliberately a separate call rather than a side effect of the property: `hasUnsavedEditorChanges`
+    /// is read from view bodies, and a property that mutates the draft on read would fire during a
+    /// SwiftUI update pass.
+    func flushPendingEditorText() {
+        commitPendingPromptEdits?()
+    }
+
+    /// Whether anything in the profile editor has unsaved work — the field edit buffer or a hosted
+    /// workflow canvas. Every navigation guard must use this, never `editBuffer?.isDirty` alone.
+    ///
+    /// ⚠️ Text still sitting in a floating prompt editor is NOT visible here until it has been
+    /// committed; call `flushPendingEditorText()` first at any exit that can destroy it.
+    var hasUnsavedEditorChanges: Bool {
+        editBuffer?.isDirty == true || canvasEditGuard.hasUnsavedChanges
+    }
+
     private let profileStore: BackendProfileStoreProtocol
 
     /// Initializes the service, optionally with a specific store for testing.
@@ -42,20 +86,43 @@ final class BackendProfileService {
 
     // MARK: - Persistence Methods
 
+    /// The last `loadProfiles()` failure, or nil when the list reflects a successful read.
+    ///
+    /// ⚠️ Exists so the sidebar can tell "you have no profiles" apart from "we could not read your
+    /// profiles". Those render identically without it, and the second is far more alarming: at
+    /// launch `loadProfiles()` runs from `init`, where there is no prior list to keep, so a fetch
+    /// failure showed a FIRST-RUN EMPTY STATE to a user with a store full of profiles.
+    private(set) var lastLoadError: String?
+
     /// Fetches all profiles from the persistence layer and updates the published `profiles` array.
     func loadProfiles() {
         do {
             self.profiles = try profileStore.fetchProfiles()
+            self.lastLoadError = nil
         } catch {
-            logger.error("loadProfiles failed: \(error.localizedDescription)")
-            // Keep existing in-memory profiles rather than clearing on transient errors
+            self.lastLoadError = error.localizedDescription
+            // Keep existing in-memory profiles rather than clearing on transient errors.
+            let consequence = profiles.isEmpty
+                ? "the sidebar is EMPTY and reads as a first run — the user's profiles are not gone, "
+                  + "they were not read"
+                : "the sidebar keeps the \(profiles.count) profile(s) already in memory, which may "
+                  + "now be stale"
+            logger.error(
+                "[PERSISTENCE] loadProfiles failed: \(error.localizedDescription). "
+                + "CONSEQUENCE: \(consequence)."
+            )
         }
     }
 
     /// Saves a given profile to the persistence layer and updates the in-memory array in-place.
     /// Throws `ProfileStoreError` on validation or persistence failure so callers can show errors.
-    func saveProfile(_ profile: BackendProfileModel) throws {
-        try profileStore.saveProfile(profile)
+    /// - Returns: advisory findings for the saved profile (register A34). Empty is the common case.
+    ///   ⚠️ `@discardableResult` on purpose: of ~23 call sites, only the profile editors have a
+    ///   place to show these. Forcing the rest to write `_ =` would be noise, and forcing them to
+    ///   render something would put the same warning on screen from four directions.
+    @discardableResult
+    func saveProfile(_ profile: BackendProfileModel) throws -> [ProfileValidationError] {
+        let advisories = try profileStore.saveProfile(profile)
 
         // Update in-place to preserve sidebar ordering
         if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
@@ -68,6 +135,7 @@ final class BackendProfileService {
         // and delivered as the <knowledge_base> prompt layer on every request
         // (2026-07 redesign — the old KnowledgeSourceMonitor vector-indexing path,
         // which stamped a synthetic conversation ID no retrieval could match, is gone).
+        return advisories
     }
 
     /// Deletes a profile using its ID from the persistence layer and reloads the local array.
@@ -86,9 +154,47 @@ final class BackendProfileService {
 
     /// Creates (or replaces) the edit buffer for the given profile ID.
     /// Call when the user selects a profile in the sidebar.
+    ///
+    /// ⚠️ Reads the STORE, not the in-memory `profiles` array. Three writers persist profiles
+    /// without going through this service — `BackendOrchestrationService.disableThinkingOnProfile`
+    /// (auto-healing an unsupported thinking flag), `MLXContextWindowHealer` (backfilling a context
+    /// window) and the composer's capability chips — and none of them refresh `profiles`. Seeding
+    /// the editor from that stale array meant the user saw the pre-heal value, and saving any
+    /// unrelated field wrote it back, undoing the heal: the provider 400 the healer had just fixed
+    /// would return on the very next send, silently, every time.
     func activateEditBuffer(for id: UUID) {
-        guard let profile = profiles.first(where: { $0.id == id }) else { return }
+        let cached = profiles.first(where: { $0.id == id })
+        let fresh: BackendProfileModel?
+        do {
+            fresh = try profileStore.fetchProfile(byId: id)
+        } catch {
+            logger.error(
+                "[PROFILE] Could not re-read profile \(id) from the store when opening the editor: "
+                + "\(error.localizedDescription). CONSEQUENCE: falling back to the in-memory copy, "
+                + "which may predate an out-of-band write (auto-healed thinking flag, backfilled "
+                + "context window) — saving could revert it."
+            )
+            fresh = nil
+        }
+
+        guard let profile = fresh ?? cached else {
+            logger.error(
+                "[PROFILE] activateEditBuffer found no profile \(id) in the store or in memory. "
+                + "CONSEQUENCE: the previous edit buffer is cleared and the detail view renders its "
+                + "not-found state rather than silently editing the wrong profile."
+            )
+            editBuffer = nil
+            return
+        }
+
+        // Keep the list in step with what the editor is about to show, so the sidebar row and the
+        // editor cannot disagree about the same profile.
+        if let index = profiles.firstIndex(where: { $0.id == id }), profiles[index] != profile {
+            profiles[index] = profile
+        }
+
         editBuffer = ProfileEditBuffer(profile: profile)
+        logProfileSelection(profileID: id)
     }
 
     /// Discards the current edit buffer.
@@ -96,64 +202,27 @@ final class BackendProfileService {
         editBuffer = nil
     }
 
+    /// Re-baselines the open edit buffer after a facet of the profile was persisted elsewhere
+    /// (Tool Library, workflow canvas, capability chips).
+    ///
+    /// ⚠️ Call this after EVERY out-of-band `saveProfile` that targets a profile the editor may
+    /// have open. Skipping it leaves `original` describing bytes that are no longer on disk, which
+    /// is what made the editor show a Save/Revert pill for an edit the user never made and made
+    /// Revert restore a superseded state. No-ops when the buffer is for a different profile.
+    func rebaseEditBuffer(to persisted: BackendProfileModel) {
+        guard let buffer = editBuffer, buffer.draft.id == persisted.id else { return }
+        buffer.rebase(onto: persisted)
+    }
+
     // MARK: - Advanced Configuration Logic
 
-    /// The main public method to get a strongly-typed advanced configuration model for a profile.
-    /// It decodes the stored dictionary or returns a default configuration if none exists.
-    func getAdvancedConfig(for profile: BackendProfileModel) -> any Codable {
-        // 1. Extract the ProviderConfig based on the profile's details.
-        let providerConfig: ProviderConfig?
-        switch profile.details {
-        case .bot(let config):
-            providerConfig = config.llmConfig
-        case .agent(let config):
-            providerConfig = config.llmConfig
-        case .imageGen(let config):
-            providerConfig = config.llmConfig
-        case .code(let config):
-            providerConfig = config.llmConfig
-        case .workflow:
-            // Workflows do not have a single provider config.
-            providerConfig = nil
-        }
-
-        // 2. If no config exists (e.g., for a workflow), return a default.
-        guard let config = providerConfig else {
-            return OllamaAdvancedConfig.default()
-        }
-
-        // 3. Determine the provider and decode the specific advanced model.
-        switch config.apiProvider {
-        case .google:
-            return decodeConfig(from: config.advancedConfiguration, as: GeminiAdvancedConfig.self)
-                ?? GeminiAdvancedConfig.default()
-
-        case .ollama:
-            return decodeConfig(from: config.advancedConfiguration, as: OllamaAdvancedConfig.self)
-                ?? OllamaAdvancedConfig.default()
-
-        case .anthropic:
-            return decodeConfig(from: config.advancedConfiguration, as: AnthropicAdvancedConfig.self)
-                ?? AnthropicAdvancedConfig.default()
-
-        case .openAI:
-            return decodeConfig(from: config.advancedConfiguration, as: OpenAIAdvancedConfig.self)
-                ?? OpenAIAdvancedConfig.default()
-
-        case .openRouter:
-            // OpenRouter normalizes to the OpenAI parameter surface.
-            return decodeConfig(from: config.advancedConfiguration, as: OpenAIAdvancedConfig.self)
-                ?? OpenAIAdvancedConfig.default()
-
-        case .openAICompatible:
-            // Custom OpenAI-compatible endpoints share the OpenAI parameter surface.
-            return decodeConfig(from: config.advancedConfiguration, as: OpenAIAdvancedConfig.self)
-                ?? OpenAIAdvancedConfig.default()
-
-        default:
-            return OllamaAdvancedConfig.default()
-        }
-    }
+    // ⚠️ `getAdvancedConfig(for:)` was DELETED here (register A49). It had zero callers — the live
+    // path is `ProviderAdvancedConfigManager.load(from:using:defaultProfile:)` — and it carried a
+    // latent bug that only a reviver would have hit: its `switch config.apiProvider` used a
+    // `default:` clause instead of exhaustive cases, so `.mlx` fell through and returned an OLLAMA
+    // parameter set for an MLX profile. Being `default:` rather than exhaustive, the compiler could
+    // never have flagged it. Deleted rather than fixed: reviving a second source of truth for
+    // advanced config is how the panel and the executor drifted apart in the first place (A24/A25).
 
     /// Encodes a specific `Codable` model into the `[String: JSONValue]` dictionary format.
     /// - Returns: The encoded dictionary, or `nil` if encoding fails.
@@ -173,7 +242,14 @@ final class BackendProfileService {
 
     /// Decodes a `[String: JSONValue]` dictionary back into a specific `Codable` model type.
     /// - Returns: The decoded model, or `nil` if the dictionary is missing or decoding fails.
-    func decodeConfig<T: Codable>(from dictionary: [String: JSONValue]?, as type: T.Type) -> T? {
+    /// - Parameter context: a human-readable identifier for the profile/provider being decoded,
+    ///   used only in the failure log. ⚠️ Defaulted so existing call sites keep compiling, but pass
+    ///   it: without it the log names a TYPE and nothing else, which cannot be tied to a profile.
+    func decodeConfig<T: Codable>(
+        from dictionary: [String: JSONValue]?,
+        as type: T.Type,
+        context: String = "unspecified profile"
+    ) -> T? {
         guard let dictionary = dictionary else { return nil }
 
         let unwrappedDict = dictionary.mapValues { $0.rawValue }
@@ -182,16 +258,57 @@ final class BackendProfileService {
             let data = try JSONSerialization.data(withJSONObject: unwrappedDict)
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
-            logger.error("Failed to decode advanced configuration: \(error.localizedDescription)")
+            // ⚠️ Every caller answers this nil with `?? .default()`, so the user does not lose one
+            // field — they lose the WHOLE advanced panel, and it then presents app defaults as
+            // their own settings. The log must say so, and must name the profile: the previous
+            // line ("Failed to decode advanced configuration: …") identified neither the profile,
+            // the provider, nor the target type, so a burst of them was unattributable.
+            logger.error(
+                "[PROFILE] Advanced configuration for \(context) could not be decoded as "
+                + "\(String(describing: T.self)): \(error.localizedDescription). Stored keys: "
+                + "[\(dictionary.keys.sorted().joined(separator: ", "))]. CONSEQUENCE: the panel "
+                + "falls back to app DEFAULTS and presents them as the user's settings; saving from "
+                + "that state overwrites the stored configuration."
+            )
             return nil
         }
     }
 
     // MARK: - Diagnostics / Logging
 
-    /// Logs the full, detailed configuration of the selected profile to the console.
+    /// Dumps the full resolved configuration of a profile: provider, model, endpoint, capability
+    /// verdict, per-tool enabled/confirm state, knowledge sources and advanced-config keys.
+    ///
+    /// ⚠️ This had ZERO callers (register A50) — 70 lines built to answer exactly the questions a
+    /// support engineer asks ("my agent stopped calling tools", "responses got much shorter") and
+    /// nothing ever invoked it, so no run recorded which settings it used. Now called from
+    /// `activateEditBuffer`, i.e. once per profile activation.
+    ///
+    /// ⚠️ Deliberately NOT called from the send path. It is a multi-line dump and a send happens
+    /// per message; at activation it fires once when the user opens a profile, which is the moment
+    /// that actually needs anchoring in the log. If a per-run record is wanted later, add a
+    /// one-line summary at the send seam rather than moving this.
+    ///
+    /// ⚠️ The API key is masked by `formatLLMConfig`; knowledge-source PATHS are included because
+    /// a missing or moved source is a common cause of "the agent ignored my documents".
     func logProfileSelection(profileID: UUID) {
-        guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
+        guard let logOutput = profileSelectionSummary(profileID: profileID) else {
+            logger.notice(
+                "[PROFILE] Cannot log configuration for \(profileID): not in the loaded list. "
+                + "CONSEQUENCE: this activation has no configuration record in the log."
+            )
+            return
+        }
+
+        logger.info("[PROFILE] \(logOutput)")
+    }
+
+    /// Builds the dump `logProfileSelection` emits, or `nil` when the profile is not loaded.
+    ///
+    /// Split out from the logging call so the CONTENT is assertable: the reason A50 sat dead for so
+    /// long is that nothing — not a caller, not a test — ever looked at what it produced.
+    func profileSelectionSummary(profileID: UUID) -> String? {
+        guard let profile = profiles.first(where: { $0.id == profileID }) else { return nil }
 
         var logOutput = "\n\n==================================================\n"
         logOutput += "PROFILE SELECTED: \(profile.displayName)\n"
@@ -253,12 +370,13 @@ final class BackendProfileService {
             logOutput += "[CODE SESSION CONFIGURATION]\n"
             logOutput += formatLLMConfig(config.llmConfig)
             logOutput += "Tools: \(config.tools.filter({ $0.isEnabled }).count) active\n"
-            logOutput += "Max Iterations: \(config.maxIterations ?? 20)\n"
+            // ⚠️ Register A38: this said `?? 20` while the executor used 15 — the support dump
+            // stated a cap the run never had. One constant now.
+            logOutput += "Max Iterations: \(config.maxIterations ?? AgentExecutionDefaults.maxIterations)\n"
         }
 
         logOutput += "==================================================\n\n"
-
-        logger.info("\(logOutput)")
+        return logOutput
     }
 
     private func formatLLMConfig(_ config: ProviderConfig) -> String {

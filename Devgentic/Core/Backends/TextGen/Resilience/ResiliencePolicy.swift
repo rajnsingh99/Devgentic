@@ -97,6 +97,20 @@ struct ResolvedResiliencePolicy: Sendable, Equatable {
     let cognitive: CognitiveResiliencePolicy
     let loop: LoopResiliencePolicy
 
+    /// The denial cap's fallback. Unlike the parse/tool/repetition caps it is NOT coupled to the
+    /// legacy `RetryPolicy.maxRetries`, so it is a genuine constant — and the UI can safely state it.
+    static let defaultMaxConsecutiveDenials = 2
+
+    /// What `Auto` resolves to for the three caps that DO fall back to the legacy single knob.
+    ///
+    /// ⚠️ Register A70. The Advanced panel hardcoded `Auto (3)` for these, but the fallback is the
+    /// profile's own `retryPolicy.maxRetries` — `3` only for a profile that never set one. A
+    /// migrated profile carrying `maxRetries: 5` was told its cap was 3 while the run used 5. The
+    /// label must be computed from the same value the resolver reads, which is what this exposes.
+    static func autoDefault(legacy: RetryPolicy?) -> Int {
+        (legacy ?? RetryPolicy()).maxRetries
+    }
+
     /// Single resolution point. Per-tier precedence (Phase B):
     ///   explicit user `overrides` field → legacy `RetryPolicy.maxRetries` → provider default.
     /// Keeping `legacy.maxRetries` as the middle fallback means profiles saved before
@@ -157,8 +171,9 @@ struct ResolvedResiliencePolicy: Sendable, Equatable {
                 maxConsecutiveToolFailures: overrides?.maxConsecutiveToolFailures ?? legacy.maxRetries,
                 maxRepetitiveActions: overrides?.maxRepetitiveActions ?? legacy.maxRetries,
                 // Never coupled to the legacy single knob — fixed default (the breaker's
-                // historical hardcoded value).
-                maxConsecutiveDenials: overrides?.maxConsecutiveDenials ?? 2
+                // historical hardcoded value). Named rather than inlined so the "Auto (N)" label
+                // in `LoopSafetySection` reads the same constant instead of restating it (A70).
+                maxConsecutiveDenials: overrides?.maxConsecutiveDenials ?? Self.defaultMaxConsecutiveDenials
             )
         )
     }

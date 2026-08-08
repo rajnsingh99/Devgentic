@@ -73,7 +73,17 @@ struct AgentConfigGuideView: View {
                         ) {
                             guideParagraph("When enabled, the agent **generates a plan** (a list of subtasks) before acting. Each subtask runs its own ReAct loop, then results are synthesised into a final response.")
                             guideSettingRow("Max Subtasks", "Maximum number of subtasks the planner can generate (2-10). Higher values suit complex, multi-faceted tasks.")
-                            guideSettingRow("Parallel Subtasks", "When ON, independent subtasks run concurrently for faster execution. Turn OFF if subtask order matters.")
+                            // ⚠️ Register A74: a "Parallel Subtasks" row sat here describing a
+                            // toggle the user cannot find — the control was removed from
+                            // `AgentCapabilitiesSection` and this guide was not updated with it, so
+                            // the only remaining mention of the setting was an instruction to go and
+                            // change something that isn't there.
+                            //
+                            // ⚠️ Removed rather than reworded: this list documents CONTROLS, and
+                            // there is no control. The stored `parallelSubtasks` field is still read
+                            // by `PlanningCapability` for profiles that persisted `true` — that is
+                            // register A67 and is NOT fixed by this. If A67 restores the toggle,
+                            // restore this row with it.
                             guideSettingRow("Tool Filtering", "When ON, each subtask receives only the tools relevant to it, reducing LLM confusion. Recommended for agents with many tools.")
                             guideTip("Enable Planning for tasks like \"research X, then write a report\" — anything with multiple distinct steps.")
                         }
@@ -196,8 +206,18 @@ struct AgentConfigGuideView: View {
         }
     }
 
+    // ⚠️ Register A62. Every helper below took a `String`, and a `String` reaches `Text` two ways,
+    // both of which lose localization: `Text(someString)` binds to the non-localizing
+    // `StringProtocol` overload, and `Text(LocalizedStringKey(someString))` builds the key at
+    // RUNTIME — invisible to the String Catalog extractor either way. So the guide's chrome
+    // (`guideCard`, which already took a `LocalizedStringKey`) was translated while all 44 strings
+    // of its content rendered in English, and no translator could reach them.
+    //
+    // Taking `LocalizedStringKey` means the literals at the call sites become extractable keys.
+    // ⚠️ Markdown in the paragraphs (`**generates a plan**`) still renders — `Text` parses markdown
+    // from a `LocalizedStringKey`, which is exactly why the old code reached for it.
     @ViewBuilder
-    private func guideSubsection(title: String, icon: String, color: Color, @ViewBuilder content: () -> some View) -> some View {
+    private func guideSubsection(title: LocalizedStringKey, icon: String, color: Color, @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: icon)
@@ -212,8 +232,8 @@ struct AgentConfigGuideView: View {
     }
 
     @ViewBuilder
-    private func guideParagraph(_ text: String) -> some View {
-        Text(LocalizedStringKey(text))
+    private func guideParagraph(_ text: LocalizedStringKey) -> some View {
+        Text(text)
             .font(theme.fontSubheadline)
             .foregroundColor(theme.secondaryText)
             .lineSpacing(3)
@@ -221,12 +241,12 @@ struct AgentConfigGuideView: View {
     }
 
     @ViewBuilder
-    private func guideSettingRow(_ title: String, _ description: String) -> some View {
+    private func guideSettingRow(_ title: LocalizedStringKey, _ description: LocalizedStringKey) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
                 .font(theme.fontSubheadline.weight(.semibold))
                 .foregroundColor(theme.primaryText)
-            Text(LocalizedStringKey(description))
+            Text(description)
                 .font(.system(.caption))
                 .foregroundColor(theme.secondaryText)
                 .lineSpacing(2)
@@ -235,7 +255,7 @@ struct AgentConfigGuideView: View {
     }
 
     @ViewBuilder
-    private func guideTip(_ text: String) -> some View {
+    private func guideTip(_ text: LocalizedStringKey) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "lightbulb.fill")
                 .font(theme.fontCaption)
@@ -259,7 +279,9 @@ struct AgentConfigGuideView: View {
     }
 
     @ViewBuilder
-    private func guideDiagram(_ text: String) -> some View {
+    /// ⚠️ Also a `LocalizedStringKey`: its only content is "Think → Act → Observe → … → Answer",
+    /// which is four translatable words, not ASCII art.
+    private func guideDiagram(_ text: LocalizedStringKey) -> some View {
         Text(text)
             .font(theme.fontCode)
             .foregroundColor(theme.accentColor)
@@ -272,7 +294,7 @@ struct AgentConfigGuideView: View {
     }
 
     @ViewBuilder
-    private func presetRow(name: String, description: String, capabilities: String, iterations: String) -> some View {
+    private func presetRow(name: LocalizedStringKey, description: LocalizedStringKey, capabilities: LocalizedStringKey, iterations: String) -> some View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(name)
@@ -289,6 +311,9 @@ struct AgentConfigGuideView: View {
                 Text(capabilities)
                     .font(.system(.caption, weight: .medium))
                     .foregroundColor(theme.accentColor)
+                // ⚠️ `iterations` stays a plain `String` — it is a numeral, not prose. The
+                // surrounding literal is the key, so a translator can reorder or re-word "iters"
+                // around it.
                 Text("\(iterations) iters")
                     .font(.system(.caption))
                     .foregroundColor(theme.tertiaryText)

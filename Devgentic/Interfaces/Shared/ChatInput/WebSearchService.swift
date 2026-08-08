@@ -43,7 +43,15 @@ struct WebSearchService {
         
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        
+        // ⚠️ The key stays in the query string here, unlike the Gemini calls that were moved to
+        // `x-goog-api-key`: this is the Custom Search discovery endpoint, whose documented auth is
+        // the `key` parameter, and switching it unverified would risk breaking key validation
+        // outright. What IS fixed is the durable half — without this the response is written to
+        // URLSession's shared on-disk cache keyed by the full URL, leaving the secret in
+        // ~/Library/Caches/<bundle-id>/ indefinitely. Revisit if Custom Search is confirmed to
+        // accept a header credential.
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             

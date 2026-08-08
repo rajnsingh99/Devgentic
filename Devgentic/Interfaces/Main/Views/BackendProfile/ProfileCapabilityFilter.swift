@@ -58,38 +58,55 @@ struct ProfileCapabilityFilter {
         }
     }
 
-    // MARK: - Custom Model Picker
+    // MARK: - Model Display
 
-    /// Whether the profile+provider combination requires a custom model picker
-    /// instead of the standard one (e.g., ImageGen + MLX uses Flux2ModelPickerView).
-    static func requiresCustomModelPicker(
-        for profileType: ProfileType,
-        provider: ApiProvider
-    ) -> Bool {
-        profileType == .imageGen && provider == .mlx
-    }
-
-    // MARK: - Model Display Helpers
-
-    /// Display label for a model row in the picker.
-    /// Appends "(Chat Only)" for Agent profiles when the model lacks tool support.
-    static func modelDisplayLabel(
-        modelName: String,
-        cognitiveCapability: ModelCognitiveCapability,
+    /// A short, user-facing note about a model's tool support — or `nil` when there is nothing
+    /// worth saying. Pickers append this to the row; it is the ONLY thing a capability verdict is
+    /// allowed to do to a model row.
+    ///
+    /// ⚠️ This replaced two helpers that had zero callers for months (register G95):
+    /// `modelDisplayLabel`, and `isModelDisabled` — whose own documentation described making a row
+    /// *"visible but not selectable"*. That is a GATE, so adopting it would have spread a violation
+    /// of the project rule (capability metadata may LABEL or GROUP, never gate) into three more
+    /// pickers instead of removing one. It is deleted rather than reused. `requiresCustomModelPicker`
+    /// went with it: the need is real but is met by injecting the custom picker as content
+    /// (`ProviderConfigSection` → `ImageGenConfigDetailView`'s `Flux2ModelPickerView`), not by asking
+    /// a predicate.
+    ///
+    /// ⚠️ **Wording is chosen by the CAVEAT, not by the provider.** How much a `.none` verdict can be
+    /// trusted varies *within* a provider, so per-provider copy would be wrong roughly half the time:
+    /// Ollama produces `.none` from the daemon's capabilities array (authoritative — a tools request
+    /// really will 400), from a reasoning-only NAME match, and from having no capabilities field at
+    /// all. Only the first deserves a flat "No tools"; saying that for a name guess trains the user to
+    /// ignore the note, and hedging on a protocol fact understates a true negative.
+    ///
+    /// A caller with no caveat information at all should pass `.undetected` — that is precisely what
+    /// it means, and it yields the hedged wording. OpenRouter is the case in point: its
+    /// `toolCapable` flag reads `?? false`, so a model with no `supported_parameters` metadata is
+    /// indistinguishable from one that declares no tool support, and only the hedge is honest.
+    ///
+    /// - Returns: `nil` for non-Agent profiles — a Bot never dispatches tools, so the note is noise.
+    static func toolCapabilityNote(
+        capability: ModelCognitiveCapability,
+        caveat: ToolSupportCaveat?,
         profileType: ProfileType
-    ) -> String {
-        if isModelDisabled(cognitiveCapability: cognitiveCapability, profileType: profileType) {
-            return "\(modelName) (Chat Only)"
+    ) -> String? {
+        guard profileType == .agent else { return nil }
+
+        guard capability == .none else {
+            // Tool-capable, but the model is a reasoning fine-tune: the server accepts the tools
+            // param, so this is a RELIABILITY note, not a protocol one. Still worth surfacing.
+            return caveat == .reasoningFocused ? "⚠️ Reasoning-focused" : nil
         }
-        return modelName
-    }
 
-    /// Whether a model row should be disabled (visible but not selectable) in the picker.
-    /// Only Agent profiles disable models that lack tool support.
-    static func isModelDisabled(
-        cognitiveCapability: ModelCognitiveCapability,
-        profileType: ProfileType
-    ) -> Bool {
-        profileType == .agent && cognitiveCapability == .none
+        switch caveat {
+        case .serverRejectsTools:
+            // The only case we actually know: the daemon declared no tool support.
+            return "🚫 No tools"
+        case .reasoningFocused:
+            return "⚠️ Reasoning-focused"
+        case .undetected, nil:
+            return "⚠︎ Tools unconfirmed"
+        }
     }
 }

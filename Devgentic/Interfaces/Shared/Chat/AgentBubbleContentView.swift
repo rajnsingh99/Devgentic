@@ -245,6 +245,23 @@ struct AgentBubbleContentView: View, Equatable {
             .padding(theme.spacingSmall)
             .background(Color.orange.opacity(0.06))
             .cornerRadius(8)
+
+        case .unknown:
+            // Shown, and explicitly reassuring. The bytes ARE preserved — this build simply has no
+            // renderer — so the wording must not read like the message was lost. The payload is not
+            // displayed: it is raw JSON, not something the user wrote.
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "questionmark.square.dashed")
+                    .font(.caption)
+                    .foregroundColor(theme.secondaryText)
+                Text("This message was written by a newer version of Devgentic and can't be shown here. It hasn't been changed or lost.")
+                    .font(themeManager.chatFont)
+                    .foregroundColor(theme.secondaryText)
+                    .textSelection(.enabled)
+            }
+            .padding(theme.spacingSmall)
+            .background(theme.secondaryBackground.opacity(0.5))
+            .cornerRadius(8)
         }
     }
 

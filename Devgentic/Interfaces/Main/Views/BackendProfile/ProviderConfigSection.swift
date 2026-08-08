@@ -330,13 +330,30 @@ struct ProviderConfigSection: View {
 
     // MARK: - Model Picker (per provider)
 
+    /// The profile's configured API Endpoint as a URL, or nil when unset/unparseable.
+    ///
+    /// ⚠️ Returns nil rather than a fallback so each service applies its OWN `ProviderDefaults`
+    /// value — one resolver here would have to know four vendor defaults and would drift from them.
+    /// An unparseable string also resolves to nil: `ProfileValidator` Rule 5 already blocks saving
+    /// one, and silently routing a typo'd endpoint to the vendor is exactly this finding.
+    private var configuredBaseURL: URL? {
+        guard let raw = providerConfig.baseURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return nil }
+        return URL(string: raw)
+    }
+
+    /// ⚠️ Every picker below receives `configuredBaseURL`. The endpoint field is rendered directly
+    /// ABOVE these pickers, so "all traffic for this profile goes there" is the only reasonable
+    /// reading — and it was false: the pickers hardcoded the vendor host and sent the user's
+    /// gateway-scoped key to it.
     @ViewBuilder
     private func modelPicker(apiKey: String) -> some View {
         switch providerConfig.apiProvider {
         case .google:
             GeminiModelPickerView(
                 selectedModel: $providerConfig.modelName,
-                apiKey: apiKey
+                apiKey: apiKey,
+                baseURL: configuredBaseURL
             )
             .labelsHidden()
             .frame(maxWidth: 350, alignment: .trailing)
@@ -344,7 +361,8 @@ struct ProviderConfigSection: View {
         case .anthropic:
             AnthropicModelPickerView(
                 selectedModel: $providerConfig.modelName,
-                apiKey: apiKey
+                apiKey: apiKey,
+                baseURL: configuredBaseURL
             )
             .labelsHidden()
             .frame(maxWidth: 350, alignment: .trailing)
@@ -352,7 +370,8 @@ struct ProviderConfigSection: View {
         case .openAI:
             OpenAIModelPickerView(
                 selectedModel: $providerConfig.modelName,
-                apiKey: apiKey
+                apiKey: apiKey,
+                baseURL: configuredBaseURL
             )
             .labelsHidden()
             .frame(maxWidth: 350, alignment: .trailing)
@@ -373,6 +392,7 @@ struct ProviderConfigSection: View {
                     set: { providerConfig.supportedModalities = $0 }
                 ),
                 apiKey: apiKey,
+                baseURL: configuredBaseURL,
                 filterForTools: ProfileCapabilityFilter.filterForTools(for: profileType)
             )
             .frame(maxWidth: 350, alignment: .trailing)
@@ -386,7 +406,40 @@ struct ProviderConfigSection: View {
 
     // MARK: - Endpoint Field
 
+    /// Plain-HTTP warning for the configured endpoint, or nil when there is nothing to say
+    /// (register A52). Recomputed per render — it has to follow the key being typed as well as the
+    /// URL, since attaching a credential is what turns "readable traffic" into "readable key".
+    private var transportWarning: String? {
+        EndpointTransportSecurity.warning(
+            for: EndpointTransportSecurity.evaluate(
+                baseURL: providerConfig.baseURL,
+                apiKey: providerConfig.apiKey
+            )
+        )
+    }
+
     private var endpointField: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            endpointRow
+
+            // ⚠️ Register A52. The app would send `Authorization: Bearer <key>` over unencrypted
+            // HTTP with nothing said about it. Warning, not a block: `http://localhost` is how the
+            // local providers work, and the classifier exempts loopback for exactly that reason.
+            if let transportWarning {
+                Label(transportWarning, systemImage: "lock.open.trianglebadge.exclamationmark")
+                    .font(theme.fontCaption)
+                    .foregroundColor(theme.warningColor)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(theme.warningColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+                    .accessibilityLabel("Insecure endpoint warning")
+                    .accessibilityValue(transportWarning)
+            }
+        }
+    }
+
+    private var endpointRow: some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("API Endpoint")

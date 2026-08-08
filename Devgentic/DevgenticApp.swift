@@ -22,60 +22,129 @@ struct DevgenticApp: App {
     /// Unified SwiftData container for all subsystems (profiles, chat, scheduling, etc.).
     private let swiftDataContainer: ModelContainer = {
         do {
-            let schema = Schema([
-                BackendProfile.self,
-                MCPToolItem.self,
-                MCPToolDefinitionModel.self,
-                PromptModel.self,
-                ScheduledTaskModel.self,
-                // Chat persistence (migrated from CoreData)
-                ConversationSD.self,
-                ChatMessageSD.self,
-                AttachedTextFileSD.self,
-                AttachedImageFileSD.self,
-                // Cross-launch download history (Ollama / MLX / Whisper)
-                DownloadRecord.self,
-                // Workflow persistence (migrated from UserDefaults)
-                WorkflowLayoutSD.self,
-                WorkflowRunRecordSD.self,
-                // Code Viewer per-conversation tab sessions
-                CodeViewerSessionSD.self,
-            ])
-            let appSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            let storeURL = appSupportURL.appendingPathComponent("DevgenticSD.store")
-            let config = ModelConfiguration("DevgenticSD", schema: schema, url: storeURL)
-            let container = try ModelContainer(for: schema, configurations: [config])
+            // The entity list lives in `DevgenticSchema` so the migration tests reference the
+            // SAME list the app opens, rather than a copy that can drift (see G54). Hash-neutral
+            // vs. the previous inline literal: `Schema(models)` defaults to Version(1, 0, 0).
+            let schema = DevgenticSchema.schema
+            let storeURL = try DevgenticSchema.defaultStoreURL()
+            let config = ModelConfiguration(DevgenticSchema.configurationName, schema: schema, url: storeURL)
+            // A migration plan gives every future schema change a NAMED source version to stage
+            // from. Today it declares one version and zero stages, which behaves identically to
+            // `migrationPlan: nil` — the point is that the scaffolding exists before the first
+            // change that needs it. See DevgenticSchemaVersions.swift.
+            let container = try ModelContainer(
+                for: schema,
+                migrationPlan: DevgenticSchema.migrationPlan,
+                configurations: config
+            )
             // Success counterpart to the fatal path below — the first launch after a schema
             // change is exactly when someone needs to see that the store opened cleanly.
             DGLogger(category: "DevgenticApp").info(
                 "[STARTUP] SwiftData container opened — \(schema.entities.count) entities, store: \(storeURL.path)"
             )
+            // ⚠️ Decide ONCE, here, before anything destructive can run — and reuse the same value
+            // below. `MCPToolStore.configureContainer` carries a blob-rewriting secrets migration and
+            // is called synchronously on this line, i.e. before the `Task` block could have evaluated
+            // anything, so the decision has to exist by now or that migration is ungated (G44).
+            // Evaluating once also removes a second hazard: `recordSuccessfulOpen()` writes the
+            // fingerprint later in that same block, so a second evaluation would not agree with this
+            // one.
+            let launchSweepDecision = DevgenticSchema.evaluateLaunchSweep()
+
             // Inject into singleton stores so non-SwiftUI code can access the container.
             BackendProfileStore.shared.configureContainer(container)
-            MCPToolStore.shared.configureContainer(container)
+            MCPToolStore.shared.configureContainer(
+                container,
+                migrateLegacySecrets: launchSweepDecision == .run
+            )
             PromptStore.shared.configureContainer(container)
             ChatPersistenceStore.shared.configureContainer(container)
             WorkflowLayoutStore.shared.configureContainer(container)
             WorkflowRunHistoryStore.shared.configureContainer(container)
-            CodeViewerSessionStore.shared.configureContainer(container)
             // Download-history store is configured on the main actor; do it
             // eagerly via Task so reconcileOrphans runs as soon as possible.
             Task { @MainActor in
                 DownloadHistoryStore.shared.configureContainer(container)
-                DownloadHistoryStore.shared.reconcileOrphans()
-                // Only now can the manager count active downloads — priming it in its own
-                // init read an unconfigured container and always answered 0.
+
+                // Everything below MUTATES OR DELETES rows, so it runs only when the schema is
+                // unchanged since the last clean open. A lightweight migration can succeed
+                // STRUCTURALLY while dropping a renamed column's data or defaulting a new
+                // non-optional; sweeping such a store writes the degraded state back as
+                // authoritative before anyone can look at it (G44).
+                let startupLogger = DGLogger(category: "DevgenticApp")
+                switch launchSweepDecision {
+                case .run:
+                    // Counts BEFORE the mutations, so a support log shows what was at stake even if
+                    // the app dies mid-sweep. The sweeps themselves log what they actually changed.
+                    let historyCount = DownloadHistoryStore.shared.totalRecordCount()
+                    startupLogger.info(
+                        "[STARTUP] Launch sweep RUNNING — schema unchanged since last clean open. "
+                        + "Before: \(historyCount) download-history row(s). Will reconcile download "
+                        + "orphans, prune history, reconcile workflow-run orphans."
+                    )
+                    DownloadHistoryStore.shared.reconcileOrphans()
+                    // Retention: history is otherwise monotonic for the life of the install, and
+                    // every row is scanned on each bridge reconcile and sidebar render.
+                    DownloadHistoryStore.shared.pruneOldRecords()
+                    // Any workflow run still in .running at launch is from a prior
+                    // session that ended before the run could finalize. Flip to
+                    // .cancelled with "Interrupted" so the history list doesn't
+                    // show a phantom spinning record forever.
+                    WorkflowRunHistoryStore.shared.reconcileOrphans()
+                    // The Code Viewer purge that used to run here is gone: `CodeViewerSessionSD`
+                    // was retired 2026-08-04, so lightweight migration drops the whole table on
+                    // the first launch after the update — no row-by-row sweep needed.
+
+                case .deferSchemaChanged(let previous, let current):
+                    startupLogger.notice(
+                        "[STARTUP] Launch sweep DEFERRED — the schema changed since the last clean "
+                        + "open (was \(previous?.prefix(12) ?? "never recorded"), now \(current.prefix(12))). "
+                        + "CONSEQUENCE: nothing is pruned, reconciled or purged this launch, so a "
+                        + "migration that silently degraded data can still be inspected and recovered. "
+                        + "Download history is not trimmed and interrupted downloads keep their "
+                        + "'running' status until the next launch, which will sweep normally."
+                    )
+
+                case .skippedByEnvironment:
+                    // CONSEQUENCE: download-history retention and workflow-run orphan
+                    // reconciliation are skipped for this launch. Phantom "running" workflow rows
+                    // and unbounded download history are expected until the next launch without
+                    // the override.
+                    startupLogger.warning(
+                        "[STARTUP] Launch sweep SKIPPED — \(DevgenticSchema.skipLaunchSweepEnvKey) is set. "
+                        + "No rows will be pruned, reconciled or purged this launch."
+                    )
+                }
+
+                // ⚠️ AFTER the sweep, never before. `reconcileOrphans()` is what flips last session's
+                // abandoned `.downloading` rows to `.interrupted`; priming first counts those dead
+                // rows as in-flight and the badge shows a phantom download for the whole session,
+                // because nothing recomputes `activeCount` afterwards. (It regressed to first when
+                // `reconcileOrphans` moved inside the gate — it used to run before the prime.)
+                //
+                // On a deferred/skipped launch the reconcile has NOT run, so the count is knowingly
+                // optimistic for one launch; that is the stated cost of the deferral.
                 DownloadManager.shared.primeActiveCount()
-                // Retention: history is otherwise monotonic for the life of the install, and
-                // every row is scanned on each bridge reconcile and sidebar render.
-                DownloadHistoryStore.shared.pruneOldRecords()
-                // Any workflow run still in .running at launch is from a prior
-                // session that ended before the run could finalize. Flip to
-                // .cancelled with "Interrupted" so the history list doesn't
-                // show a phantom spinning record forever.
-                WorkflowRunHistoryStore.shared.reconcileOrphans()
-                // Retired Code Viewer session rows — tabs are in-memory only now.
-                CodeViewerSessionStore.shared.purgePersistedSessions()
+
+                // Record AFTER the decision, and regardless of it, so a deferral lasts exactly one
+                // launch instead of becoming permanent.
+                //
+                // ⚠️ EXCEPT under the DEBUG environment override. The test host is the real app and
+                // `UserDefaults.standard` is the real `com.dev.devgentic` domain — only the STORE is
+                // redirected by `DEVGENTIC_STORE_URL`, not the defaults. Recording here would stamp
+                // the current schema's fingerprint on behalf of a temporary store the real app has
+                // never opened, so the developer's next real launch would see "unchanged" and sweep a
+                // freshly-migrated store — disarming the gate for the one person doing schema work.
+                if launchSweepDecision == .skippedByEnvironment {
+                    startupLogger.warning(
+                        "[STARTUP] Schema fingerprint NOT recorded — \(DevgenticSchema.skipLaunchSweepEnvKey) "
+                        + "is set, so this launch does not speak for the real store. CONSEQUENCE: the "
+                        + "gate's stored fingerprint is left as-is and the next unsuppressed launch "
+                        + "decides on its own merits."
+                    )
+                } else {
+                    DevgenticSchema.recordSuccessfulOpen()
+                }
 
                 // Partial-download residue from cancelled/interrupted MLX pulls.
                 // READ-ONLY on purpose: these folders are multi-gigabyte user data, a
@@ -102,38 +171,379 @@ struct DevgenticApp: App {
             // Deliberately NOT recovering by deleting or moving the store: the file holds
             // every conversation the user has, and silently starting fresh would look
             // exactly like "the app ate my data". Tell them where it is and stop.
-            let storeURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-                .first?.appendingPathComponent("DevgenticSD.store")
-            let path = storeURL?.path ?? "Application Support/DevgenticSD.store"
-            DGLogger(category: "DevgenticApp").error(
-                "[STARTUP] FATAL: SwiftData ModelContainer could not be opened at \(path) — \(error). "
-                + "Most likely a schema migration failure after an update. The store was left untouched; "
-                + "the app cannot continue without it."
+            let storeURL = try? DevgenticSchema.defaultStoreURL()
+            let path = storeURL?.path ?? "Application Support/\(DevgenticSchema.storeFilename)"
+
+            // Correlation id: the user sees it in the alert, support sees it in the log line, and
+            // the two can be tied together from a screenshot alone.
+            let incidentID = String(UUID().uuidString.prefix(8))
+            let logger = DGLogger(category: "DevgenticApp")
+
+            // ── Side channel 1: classify from the store's own metadata ──────────────────────
+            // The thrown error is useless — every distinct cause arrives as SwiftDataError code 1
+            // with empty userInfo. Core Data's raw metadata API still returns real information.
+            let diagnosis = storeURL.map {
+                StoreOpenDiagnostics.classify(
+                    storeURL: $0,
+                    expectedEntityNames: Set(DevgenticSchema.schema.entities.map(\.name))
+                )
+            } ?? .indeterminate
+
+            // ── Side channel 2: recover Core Data's stderr-only reason ─────────────────────
+            // Deliberately re-attempts the open with stderr captured. Safe: the first attempt
+            // already failed without mutating anything, and a failed open is side-effect free.
+            var detailLines: [String] = []
+            var primaryReason: String?
+            if let storeURL {
+                let captured = StoreOpenDiagnostics.captureStandardError {
+                    let retryConfig = ModelConfiguration(
+                        DevgenticSchema.configurationName,
+                        schema: DevgenticSchema.schema,
+                        url: storeURL
+                    )
+                    _ = try? ModelContainer(
+                        for: DevgenticSchema.schema,
+                        migrationPlan: DevgenticSchema.migrationPlan,
+                        configurations: retryConfig
+                    )
+                }
+                if let captured {
+                    detailLines = StoreOpenDiagnostics.migrationDetailLines(in: captured)
+                    primaryReason = StoreOpenDiagnostics.primaryFailureReason(in: captured)
+                }
+            }
+
+            // ⚠️ The stderr reason OUTRANKS the metadata classification when both exist: metadata
+            // reports whatever DIFFERS, which is not always what BLOCKED the open. A store can
+            // carry a retired entity harmlessly while the real blocker is an attribute elsewhere.
+            let headline = primaryReason ?? diagnosis.summary
+            let detailBlock = detailLines.isEmpty
+                ? "(no further detail — Core Data printed nothing identifiable)"
+                : detailLines.joined(separator: "\n")
+
+            // Pass the error as `error:` so DGLogger stamps ns_domain/ns_code, rather than
+            // interpolating it into the message where that metadata is lost.
+            logger.error(
+                "[STARTUP] FATAL incident=\(incidentID) cause=\(diagnosis.tag): SwiftData "
+                + "ModelContainer could not be opened at \(path). BLOCKER: \(headline). "
+                + "Store metadata says: \(diagnosis.summary) "
+                + "CONSEQUENCE: the store was left byte-intact and untouched; the app cannot "
+                + "continue without it and is exiting now.",
+                error: error,
+                metadata: [
+                    "incident_id": incidentID,
+                    "store_path": path,
+                    "diagnosis": diagnosis.tag,
+                    "captured_detail_lines": "\(detailLines.count)",
+                ]
             )
+
+            // A bricked launch is not a crash. Without this the sentinel stays false and the NEXT
+            // launch reports a phantom crash for a session that exited deliberately.
+            CrashDiagnosticsCollector.markCleanExit()
+
+            // ⚠️ DO NOT FLUSH HERE. The flush must be the LAST thing before every `exit()` below,
+            // never before the alert.
+            //
+            // `LogRecorder.prepareForTermination()` cancels the periodic flush task and nils it out,
+            // so nothing flushes again afterwards. Flushing at this point therefore threw away every
+            // `[RECOVERY]` line the modal loop goes on to emit — including "the store is SPLIT
+            // between its original location and the quarantine name — do not create a new store until
+            // this is resolved by hand", the single most important sentence the app can produce. The
+            // one code path that exists for a catastrophic failure was the one that left no record.
+            //
+            // Deferring loses nothing: `exit()` is gated behind the blocking `runModal()`, and the
+            // recorder's 5 s periodic flush keeps running throughout the modal, so the FATAL line
+            // above reaches disk on its own well before any of these exits.
+
             #if canImport(AppKit)
+            guard DevgenticSchema.shouldPresentFatalAlert else {
+                // CONSEQUENCE: no user-facing explanation this launch — the diagnosis above is the
+                // only record. DEBUG-only, and the process still exits non-zero.
+                logger.warning(
+                    "[STARTUP] incident=\(incidentID): fatal alert SUPPRESSED — "
+                    + "\(DevgenticSchema.suppressFatalAlertEnvKey) is set."
+                )
+                Self.flushDiagnosticsBeforeExit(logger: logger, incidentID: incidentID)
+                exit(EXIT_FAILURE)
+            }
+
+            let supportPayload = """
+                Devgentic database failure
+                Incident: \(incidentID)
+                Cause: \(diagnosis.tag) — \(diagnosis.summary)
+                Blocker: \(headline)
+                Store: \(path)
+                Error: \(error)
+                CoreData detail:
+                \(detailBlock)
+                """
+
+            // This alert runs from the App struct's stored-property initializer — BEFORE
+            // NSApp.run() and before the app has been activated. Without this, the only failure UI
+            // the app has can appear BEHIND whatever the user was looking at, and reads as a hang.
+            NSApplication.shared.activate()
+
+            // `-> Never`: every branch of the alert loop exits, each flushing immediately before it.
+            Self.presentFatalStoreAlert(
+                storeURL: storeURL,
+                path: path,
+                headline: headline,
+                supportPayload: supportPayload,
+                incidentID: incidentID,
+                logger: logger
+            )
+            #else
+            // No AppKit: no alert to present, so exit here — flushing last, as on every other exit
+            // from this path. (In the AppKit build this is unreachable, which is why it lives in the
+            // `#else` rather than after the `#endif` where it was dead code the compiler warned on.)
+            Self.flushDiagnosticsBeforeExit(logger: logger, incidentID: incidentID)
+            exit(EXIT_FAILURE)
+            #endif
+        }
+    }()
+
+    #if canImport(AppKit)
+    /// Presents the fatal-database alert and services the recovery affordances until the user picks
+    /// a terminal action. Always exits.
+    ///
+    /// Loops on purpose: `NSAlert` dismisses on ANY button, but "Reveal in Finder" and
+    /// "Export a Copy…" are not decisions — a user who exports a backup still needs the dialog
+    /// afterwards to decide what to do next.
+    ///
+    /// ⚠️ Every panel here uses `runModal()`, never `begin { }`. This runs before `NSApp.run()`, so
+    /// a completion-handler-based panel would never fire its handler — the app would appear to hang
+    /// and then exit with nothing done (G42).
+    private static func presentFatalStoreAlert(
+        storeURL: URL?,
+        path: String,
+        headline: String,
+        supportPayload: String,
+        incidentID: String,
+        logger: DGLogger
+    ) -> Never {
+        // Button order: first added is the RIGHTMOST/default. "Quit" is the default and the
+        // destructive action sits furthest from it.
+        enum Choice: Int { case quit = 1000, copyDetails, reveal, export, startFresh }
+
+        while true {
             let alert = NSAlert()
             alert.alertStyle = .critical
             alert.messageText = String(localized: "Devgentic can't open its database")
             alert.informativeText = String(localized: """
-                This usually means the data store couldn't be upgraded after an update.
+                \(headline)
 
                 Your data has NOT been modified. It's at:
                 \(path)
 
-                Please report this with the details below.
-
-                \(error.localizedDescription)
+                Include incident \(incidentID) in any report.
                 """)
-            alert.addButton(withTitle: String(localized: "Copy Details & Quit"))
             alert.addButton(withTitle: String(localized: "Quit"))
-            if alert.runModal() == .alertFirstButtonReturn {
+            alert.addButton(withTitle: String(localized: "Copy Details"))
+            alert.addButton(withTitle: String(localized: "Reveal in Finder"))
+            alert.addButton(withTitle: String(localized: "Export a Copy…"))
+            alert.addButton(withTitle: String(localized: "Start Fresh…"))
+
+            switch Choice(rawValue: alert.runModal().rawValue) {
+            case .copyDetails:
                 NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString("Store: \(path)\nError: \(error)", forType: .string)
+                NSPasteboard.general.setString(supportPayload, forType: .string)
+                logger.info("[RECOVERY] incident=\(incidentID): support details copied to the clipboard.")
+
+            case .reveal:
+                if let storeURL {
+                    NSWorkspace.shared.activateFileViewerSelecting([storeURL])
+                    logger.info("[RECOVERY] incident=\(incidentID): revealed \(storeURL.path) in Finder.")
+                }
+
+            case .export:
+                exportCopy(storeURL: storeURL, incidentID: incidentID, logger: logger)
+
+            case .startFresh:
+                if startFresh(storeURL: storeURL, incidentID: incidentID, logger: logger) {
+                    // ⚠️ Flush LAST — `startFresh` has just logged which artifacts moved where, or
+                    // that the move failed and the store is split. Those lines are the only record of
+                    // what happened to the user's database, and `exit` drops anything unflushed.
+                    flushDiagnosticsBeforeExit(logger: logger, incidentID: incidentID)
+                    exit(0)  // Recovered deliberately; the relaunch (if any) is already under way.
+                }
+
+            case .quit, .none:
+                logger.info("[RECOVERY] incident=\(incidentID): user quit without recovering.")
+                flushDiagnosticsBeforeExit(logger: logger, incidentID: incidentID)
+                exit(EXIT_FAILURE)
             }
-            #endif
-            exit(EXIT_FAILURE)
         }
-    }()
+    }
+
+    /// Copies the COMPLETE four-artifact set to a location the user picks.
+    private static func exportCopy(storeURL: URL?, incidentID: String, logger: DGLogger) {
+        guard let storeURL else { return }
+
+        let panel = NSSavePanel()
+        panel.title = String(localized: "Export a copy of the database")
+        panel.message = String(localized: "The database is several files. They will be saved together in one folder.")
+        panel.nameFieldStringValue = "Devgentic-database-\(incidentID)"
+        panel.canCreateDirectories = true
+
+        guard panel.runModal() == .OK, let chosen = panel.url else { return }
+
+        do {
+            let folder = try StoreRecovery.exportCopy(
+                of: storeURL,
+                into: chosen.deletingLastPathComponent(),
+                folderName: chosen.lastPathComponent
+            )
+            NSWorkspace.shared.activateFileViewerSelecting([folder])
+            showInformation(
+                String(localized: "Copy saved"),
+                String(localized: "The complete database — including its write-ahead log and stored images — was copied to:\n\n\(folder.path)")
+            )
+        } catch {
+            logger.error(
+                "[RECOVERY] incident=\(incidentID): export failed — \(error.localizedDescription). "
+                + "CONSEQUENCE: no usable backup was produced; the original store is untouched."
+            )
+            showWarning(
+                String(localized: "Couldn't export a copy"),
+                error.localizedDescription
+            )
+        }
+    }
+
+    /// Moves the current database aside so the next launch starts clean. Returns whether it happened.
+    ///
+    /// ⚠️ Deliberately explicit and reversible — the opposite of the silent wipe the launch path has
+    /// always refused to do. Nothing is deleted; the old database keeps its data under a new name.
+    private static func startFresh(storeURL: URL?, incidentID: String, logger: DGLogger) -> Bool {
+        guard let storeURL else { return false }
+
+        let artifactCount = StoreRecovery.existingArtifacts(for: storeURL).count
+        let sizeText = ByteCountFormatter.string(
+            fromByteCount: StoreRecovery.totalSize(for: storeURL), countStyle: .file
+        )
+        // Be honest that a SwiftData reset is not a full reset (G32).
+        let companions = StoreRecovery.companionStores(bundleIdentifier: Bundle.main.bundleIdentifier)
+        let companionNote = companions.isEmpty ? "" : """
+
+
+            These are NOT reset and may still reference the old conversations:
+            \(companions.map { "• \($0.label)" }.joined(separator: "\n"))
+            """
+
+        let confirm = NSAlert()
+        confirm.alertStyle = .warning
+        confirm.messageText = String(localized: "Start with an empty database?")
+        confirm.informativeText = String(localized: """
+            Your current database (\(artifactCount) files, \(sizeText)) will be MOVED ASIDE, not deleted. \
+            It stays in the same folder under a new name, so it can be restored by renaming it back.
+
+            Devgentic will then start with no conversations, profiles or prompts.\(companionNote)
+            """)
+        confirm.addButton(withTitle: String(localized: "Cancel"))
+        confirm.addButton(withTitle: String(localized: "Move Aside and Restart"))
+
+        guard confirm.runModal() == .alertSecondButtonReturn else { return false }
+
+        // Deterministic, human-readable, and sortable — the user has to recognise this folder later.
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        formatter.timeZone = .current
+
+        do {
+            let result = try StoreRecovery.quarantine(
+                storeURL: storeURL, suffix: formatter.string(from: Date())
+            )
+            logger.info(
+                "[RECOVERY] incident=\(incidentID): moved \(result.movedArtifacts.count) artifact(s) "
+                + "aside to \(result.quarantinedStoreURL.lastPathComponent). CONSEQUENCE: the next "
+                + "launch creates an EMPTY store; the previous data is intact under the new name."
+            )
+
+            let relaunched = relaunch()
+            showInformation(
+                String(localized: "Database moved aside"),
+                String(localized: """
+                    Your old database is safe at:
+                    \(result.quarantinedStoreURL.path)
+
+                    \(relaunched ? "Devgentic is restarting with an empty database." : "Please open Devgentic again to start with an empty database.")
+                    """)
+            )
+            return true
+        } catch {
+            logger.error(
+                "[RECOVERY] incident=\(incidentID): move-aside FAILED — \(error.localizedDescription)"
+            )
+            showWarning(String(localized: "Couldn't move the database aside"), error.localizedDescription)
+            return false
+        }
+    }
+
+    /// Launches a fresh instance. `-n` forces a new one even though this process is still alive for
+    /// the moment it takes to exit.
+    private static func relaunch() -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-n", Bundle.main.bundleURL.path]
+        do {
+            try process.run()
+            return true
+        } catch {
+            // Non-fatal: the message tells the user to reopen manually.
+            return false
+        }
+    }
+
+    private static func showInformation(_ title: String, _ body: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = title
+        alert.informativeText = body
+        alert.addButton(withTitle: String(localized: "OK"))
+        alert.runModal()
+    }
+
+    private static func showWarning(_ title: String, _ body: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = body
+        alert.addButton(withTitle: String(localized: "OK"))
+        alert.runModal()
+    }
+    #endif
+
+    /// Forces the observability buffers to disk before an `exit()` that bypasses normal teardown.
+    ///
+    /// `exit(EXIT_FAILURE)` never reaches `applicationShouldTerminate`, which is the only place
+    /// `LogRecorder.prepareForTermination()` is normally called. Left alone, the fatal log line
+    /// depends on `LogRecorder`'s 5-second flush loop happening to fire while the modal alert is
+    /// up — so a user who dismisses the alert quickly loses the one record of what happened.
+    ///
+    /// ⚠️ Blocks the calling thread on purpose. `LogRecorder` and `TraceRecorder` are plain actors
+    /// (not `@MainActor`), so they run on the cooperative pool and cannot be starved by this wait.
+    /// The timeout is a hard bound: a wedged recorder must never hold the failure alert hostage,
+    /// because the alert is the only thing the user actually sees.
+    private static func flushDiagnosticsBeforeExit(logger: DGLogger, incidentID: String) {
+        let timeout = DispatchTime.now() + .seconds(3)
+        let finished = DispatchSemaphore(value: 0)
+
+        Task.detached(priority: .userInitiated) {
+            await LogRecorder.shared.prepareForTermination()
+            await TraceRecorder.shared.prepareForTermination()
+            finished.signal()
+        }
+
+        if finished.wait(timeout: timeout) == .timedOut {
+            // Best effort only — os_log already has the line even if the SQLite sink does not.
+            logger.error(
+                "[STARTUP] incident=\(incidentID): diagnostics flush timed out after 3s. "
+                + "CONSEQUENCE: the FATAL entry may be missing from traces.sqlite and therefore "
+                + "from any exported support bundle; it is still present in os_log."
+            )
+        }
+    }
 
     @State private var themeManager = ThemeManager()
 
@@ -202,6 +612,16 @@ struct DevgenticApp: App {
             SchedulerService.shared.mainViewModel = mainVM
             SchedulerService.shared.loadAllTasks()
             SchedulerService.shared.rescheduleAll()
+            // ⚠️ Catch up HERE, not only on `didBecomeActive` (G52).
+            //
+            // `rescheduleAll` arms timers for FUTURE dates only — a cron task gets its next
+            // occurrence and a past `scheduledAt` gets no timer at all — so anything already overdue
+            // depends entirely on this evaluation. The activation hook that used to be its only
+            // trigger fires during cold launch and can beat this Task, in which case it iterated an
+            // empty list and the overdue task was silently skipped until the user happened to switch
+            // away and back. Calling it here makes the catch-up a property of startup rather than of
+            // scheduling luck; a duplicate call is harmless (`runningTaskIDs` de-dupes).
+            SchedulerService.shared.evaluateAndFireDueTasks()
         }
     }
 
@@ -233,6 +653,11 @@ struct DevgenticApp: App {
                         mainAppViewModel: mainApplicationViewModel,
                         themeManager: themeManager
                     )
+                    // ⚠️ Register A29: until this runs, `applicationShouldTerminate` has no view of
+                    // the profile editor and ⌘Q discards unsaved edits silently. Injected here for
+                    // the same reason the QuickAccess graph is — AppDelegate lives outside the
+                    // SwiftUI environment.
+                    appDelegate.configureTerminationGuard(profileService: backendProfileService)
                 }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                     // Catch up any scheduled tasks that fired while the app was in the background.
@@ -262,10 +687,23 @@ struct DevgenticApp: App {
                 .keyboardShortcut(",", modifiers: .command)
 
                 Button("Backend Profiles...") {
-                    mainViewRouter.navigateToProfile(
-                        backendProfileService.profiles.first?.id ?? UUID(),
-                        activatingBufferOn: backendProfileService
-                    )
+                    // ⚠️ Register A33. This was `profiles.first?.id ?? UUID()` — on a first run, with
+                    // no profiles yet, it invented an ID that had never existed and navigated to it,
+                    // landing the user on "Profile Not Found" for a profile they never created. The
+                    // one state where the menu item most needs to help was the one it broke.
+                    if let firstProfile = backendProfileService.profiles.first {
+                        mainViewRouter.navigateToProfile(
+                            firstProfile.id,
+                            activatingBufferOn: backendProfileService
+                        )
+                    } else {
+                        // Show the Profiles sidebar instead, where the empty state offers
+                        // "New Profile" — or, if the read FAILED rather than came back empty,
+                        // the "Couldn't Load Profiles" state with Retry (register A47).
+                        UserDefaults.standard.set(
+                            SidebarTab.backendProfiles.rawValue, forKey: SidebarTab.storageKey)
+                        mainViewRouter.returnToChat()
+                    }
                 }
                 .keyboardShortcut("p", modifiers: [.command, .shift])
 
@@ -304,13 +742,17 @@ struct DevgenticApp: App {
         .windowResizability(.contentSize)
     }
 
-    /// Removes legacy CoreData SQLite files (DevgenticDB) from Application Support.
-    /// Safe to call multiple times — no-ops if files are already gone.
-    private static func cleanupLegacyCoreDataStore() {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        for suffix in ["", "-wal", "-shm"] {
-            let file = appSupport.appendingPathComponent("DevgenticDB.sqlite\(suffix)")
-            try? FileManager.default.removeItem(at: file)
-        }
-    }
+    // DELETED 2026-08-04: `cleanupLegacyCoreDataStore()`.
+    //
+    // It was never called in any revision, and it would not have worked if it had been: it looked
+    // for `Application Support/DevgenticDB.sqlite` while the legacy CoreData store actually lives
+    // one level down, in `Application Support/Devgentic/DevgenticDB.sqlite` — still present and
+    // ~9.9 MB on a real install. It also force-unwrapped the directory lookup and swallowed every
+    // error with `try?`, so a failure would have been indistinguishable from success.
+    //
+    // Not replaced with a working version: silently deleting a user's old database at launch is
+    // exactly the behaviour the container-failure path deliberately refuses to do. If that store is
+    // ever to be reclaimed it belongs behind an explicit, reversible user action of the kind
+    // `StoreRecovery` now provides — not a launch-time sweep. Tracked in SWIFTDATA_GAP_REGISTER.md
+    // as G35.
 }

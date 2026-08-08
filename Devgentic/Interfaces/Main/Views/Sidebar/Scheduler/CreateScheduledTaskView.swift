@@ -216,7 +216,8 @@ struct CreateScheduledTaskView: View {
         .onDisappear {
             // Close any detached prompt editor windows so they don't outlive
             // the form (mirrors AgentConfigDetailView's cleanup).
-            advancedPromptManager.closeWindow()
+            // Same navigation teardown as the profile editors — commit before closing.
+            advancedPromptManager.closeWindowCommittingChanges()
             simplePromptManager.closeWindow()
         }
     }
@@ -514,7 +515,10 @@ struct CreateScheduledTaskView: View {
         } else {
             simplePromptManager.showEditor(
                 text: $promptTemplate,
-                botName: titleName,
+                // ⚠️ `.constant` deliberately: `titleName` is derived per call from the task name,
+                // and a scheduled task has no single model, so there is no context window to
+                // report either. Both are honest "not applicable" here rather than oversights.
+                botName: .constant(titleName),
                 themeManager: themeManager
             )
         }

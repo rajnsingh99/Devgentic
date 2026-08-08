@@ -8,6 +8,8 @@
 
 import SwiftUI
 
+private let logger = DGLogger(category: "AdvancedConfigSync")
+
 // MARK: - Config Manager
 
 /// Holds the 5 provider-specific local configs and manages the load/sync lifecycle.
@@ -26,18 +28,36 @@ final class ProviderAdvancedConfigManager {
     var localOpenAICompatibleConfig: OpenAIAdvancedConfig = .default()
     var localMlxConfig: MLXAdvancedConfig = .default()
 
-    /// Guard flag: prevents onChange handlers from writing back during initial load.
-    var isLoading = false
+    /// The exact dictionary `load` most recently produced, per provider.
+    ///
+    /// ⚠️ This replaces an `isLoading` boolean that could NEVER fire. `load` set it true, assigned
+    /// the local config and set it false — all synchronously, in one MainActor turn. SwiftUI runs
+    /// `.onChange` on the *next* update pass, by which point the flag was already false, so the
+    /// write-back it existed to suppress happened on every profile open: the buffer went dirty
+    /// (phantom Save pill), and switching from a profile with custom settings to one whose blob
+    /// failed to decode overwrote the second profile's stored config with `.default()`.
+    ///
+    /// A value baseline survives the deferral because it is compared, not raced.
+    @ObservationIgnored private var loadedBaselines: [ApiProvider: [String: JSONValue]] = [:]
 
     /// Decodes the provider config's `advancedConfiguration` dictionary into the correct local config.
-    func load(from providerConfig: ProviderConfig, using profileService: BackendProfileService) {
-        isLoading = true
+    ///
+    /// - Parameter defaultProfile: whether this panel is hosted in an Agent or a Bot config.
+    ///   ⚠️ Load-bearing for Ollama: `default()` is the AGENT ladder (temperature 0.1, fixed
+    ///   seed 42), so a Bot profile with no stored config used to display — and, on the first
+    ///   edit, persist — settings that make a conversational bot answer every prompt identically.
+    ///   The parameter existed on the settings VIEW but never reached the load path.
+    func load(
+        from providerConfig: ProviderConfig,
+        using profileService: BackendProfileService,
+        defaultProfile: OllamaConfigDefaultProfile = .agent
+    ) {
         switch providerConfig.apiProvider {
         case .ollama:
             localOllamaConfig = profileService.decodeConfig(
                 from: providerConfig.advancedConfiguration,
                 as: OllamaAdvancedConfig.self
-            ) ?? .default()
+            ) ?? Self.ollamaFallback(for: providerConfig, defaultProfile: defaultProfile)
         case .google:
             localGeminiConfig = profileService.decodeConfig(
                 from: providerConfig.advancedConfiguration,
@@ -74,13 +94,41 @@ final class ProviderAdvancedConfigManager {
                 return .default()
             }()
         }
-        isLoading = false
+
+        // Record what this load produced so a deferred `.onChange` can tell "SwiftUI is echoing
+        // the value I just assigned" from "the user moved a slider".
+        loadedBaselines[providerConfig.apiProvider] = encodeCurrent(
+            for: providerConfig.apiProvider, using: profileService)
+    }
+
+    /// The Ollama preset shown when a profile has no stored advanced configuration.
+    /// Uses the selected model's tier when known, matching `OllamaSettingsView`'s own presets.
+    private static func ollamaFallback(
+        for providerConfig: ProviderConfig,
+        defaultProfile: OllamaConfigDefaultProfile
+    ) -> OllamaAdvancedConfig {
+        if let metadata = providerConfig.modelMetadata {
+            return .recommended(for: metadata, profile: defaultProfile)
+        }
+        return defaultProfile == .agent ? .default() : .botPreset(for: .smallMedium)
     }
 
     /// Encodes the current local config for the given provider back to the profile dictionary.
-    /// Returns `nil` when `isLoading` is true (callers should skip the write).
+    ///
+    /// Returns `nil` when the value is byte-identical to what `load` last produced — i.e. when the
+    /// change SwiftUI is reporting is the load itself echoing back, not a user edit. Callers skip
+    /// the write on nil.
     func encode(for provider: ApiProvider, using profileService: BackendProfileService) -> [String: JSONValue]? {
-        guard !isLoading else { return nil }
+        guard let encoded = encodeCurrent(for: provider, using: profileService) else { return nil }
+        if let baseline = loadedBaselines[provider], baseline == encoded { return nil }
+        // From here on this provider's panel is user-owned; a later echo of the same value is a
+        // real (if redundant) edit, not the load.
+        loadedBaselines[provider] = encoded
+        return encoded
+    }
+
+    /// Encodes whichever local config belongs to `provider`, with no baseline comparison.
+    private func encodeCurrent(for provider: ApiProvider, using profileService: BackendProfileService) -> [String: JSONValue]? {
         switch provider {
         case .ollama:   return profileService.encodeConfig(from: localOllamaConfig)
         case .google:   return profileService.encodeConfig(from: localGeminiConfig)
@@ -103,41 +151,50 @@ struct AdvancedConfigSyncModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .onChange(of: configManager.localOllamaConfig) { _, _ in
-                guard let encoded = configManager.encode(for: .ollama, using: profileService),
-                      providerConfig.wrappedValue.apiProvider == .ollama else { return }
-                providerConfig.wrappedValue.advancedConfiguration = encoded
-            }
-            .onChange(of: configManager.localGeminiConfig) { _, _ in
-                guard let encoded = configManager.encode(for: .google, using: profileService),
-                      providerConfig.wrappedValue.apiProvider == .google else { return }
-                providerConfig.wrappedValue.advancedConfiguration = encoded
-            }
-            .onChange(of: configManager.localAnthropicConfig) { _, _ in
-                guard let encoded = configManager.encode(for: .anthropic, using: profileService),
-                      providerConfig.wrappedValue.apiProvider == .anthropic else { return }
-                providerConfig.wrappedValue.advancedConfiguration = encoded
-            }
-            .onChange(of: configManager.localOpenAIConfig) { _, _ in
-                guard let encoded = configManager.encode(for: .openAI, using: profileService),
-                      providerConfig.wrappedValue.apiProvider == .openAI else { return }
-                providerConfig.wrappedValue.advancedConfiguration = encoded
-            }
-            .onChange(of: configManager.localOpenRouterConfig) { _, _ in
-                guard let encoded = configManager.encode(for: .openRouter, using: profileService),
-                      providerConfig.wrappedValue.apiProvider == .openRouter else { return }
-                providerConfig.wrappedValue.advancedConfiguration = encoded
-            }
-            .onChange(of: configManager.localOpenAICompatibleConfig) { _, _ in
-                guard let encoded = configManager.encode(for: .openAICompatible, using: profileService),
-                      providerConfig.wrappedValue.apiProvider == .openAICompatible else { return }
-                providerConfig.wrappedValue.advancedConfiguration = encoded
-            }
-            .onChange(of: configManager.localMlxConfig) { _, _ in
-                guard let encoded = configManager.encode(for: .mlx, using: profileService),
-                      providerConfig.wrappedValue.apiProvider == .mlx else { return }
-                providerConfig.wrappedValue.advancedConfiguration = encoded
-            }
+            .onChange(of: configManager.localOllamaConfig) { _, _ in sync(.ollama) }
+            .onChange(of: configManager.localGeminiConfig) { _, _ in sync(.google) }
+            .onChange(of: configManager.localAnthropicConfig) { _, _ in sync(.anthropic) }
+            .onChange(of: configManager.localOpenAIConfig) { _, _ in sync(.openAI) }
+            .onChange(of: configManager.localOpenRouterConfig) { _, _ in sync(.openRouter) }
+            .onChange(of: configManager.localOpenAICompatibleConfig) { _, _ in sync(.openAICompatible) }
+            .onChange(of: configManager.localMlxConfig) { _, _ in sync(.mlx) }
+    }
+
+    /// Writes one provider panel's edit back to the profile, or says why it did not.
+    ///
+    /// ⚠️ Register A57. This was seven copies of the same two-clause `guard`, and BOTH clauses
+    /// dropped the user's edit in silence — no log, no toast, no trace. The provider-mismatch arm is
+    /// the one that costs something real: edit the Ollama temperature, switch provider in the same
+    /// view pass, and the pending `.onChange` fires against the new provider, fails the check, and
+    /// the edit is gone. Switching back reloads from the profile and overwrites the local value, so
+    /// there is nothing left to recover.
+    ///
+    /// Discarding is still correct — writing an Ollama parameter set into a profile now configured
+    /// for Anthropic would corrupt the advanced blob, and `advancedConfiguration` holds only the
+    /// ACTIVE provider's dictionary. The defect was never the discard; it was the silence.
+    private func sync(_ provider: ApiProvider) {
+        let activeProvider = providerConfig.wrappedValue.apiProvider
+
+        // ⚠️ Checked BEFORE `encode`, which the original did not do — and `encode` has a side
+        // effect: it advances `loadedBaselines[provider]` when it returns a value. So a mismatched
+        // edit used to move the baseline for a write that never happened, after which returning the
+        // panel to that same value read as "unchanged" and was skipped a second time.
+        guard activeProvider == provider else {
+            logger.notice(
+                "[PROFILE] Advanced-config edit for \(provider.rawValue) arrived while the profile "
+                + "is set to \(activeProvider.rawValue). CONSEQUENCE: the edit is DISCARDED — a "
+                + "profile stores only the active provider's parameters — and switching back "
+                + "reloads from disk, so it cannot be recovered."
+            )
+            return
+        }
+
+        // nil here is the ordinary case: the change is `load()` echoing its own assignment back, so
+        // there is nothing to write. A genuine encode FAILURE is logged inside
+        // `BackendProfileService.encodeConfig`, which is the only other way this is nil.
+        guard let encoded = configManager.encode(for: provider, using: profileService) else { return }
+
+        providerConfig.wrappedValue.advancedConfiguration = encoded
     }
 }
 
@@ -210,13 +267,15 @@ struct ProviderAdvancedSettingsView: View {
         case .google:
             GeminiSettingsView(config: $configManager.localGeminiConfig)
         case .anthropic:
-            AnthropicSettingsView(config: $configManager.localAnthropicConfig)
+            // `modelName` is load-bearing here, not decorative: it selects which controls the
+            // panel may show at all (see `AnthropicModelGeneration`).
+            AnthropicSettingsView(config: $configManager.localAnthropicConfig, modelName: modelName)
         case .openAI:
-            OpenAISettingsView(config: $configManager.localOpenAIConfig)
+            OpenAISettingsView(config: $configManager.localOpenAIConfig, modelName: modelName ?? "")
         case .openRouter:
-            OpenAISettingsView(config: $configManager.localOpenRouterConfig)
+            OpenAISettingsView(config: $configManager.localOpenRouterConfig, modelName: modelName ?? "")
         case .openAICompatible:
-            OpenAISettingsView(config: $configManager.localOpenAICompatibleConfig)
+            OpenAISettingsView(config: $configManager.localOpenAICompatibleConfig, modelName: modelName ?? "")
         case .mlx:
             MLXSettingsView(
                 config: $configManager.localMlxConfig,

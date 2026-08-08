@@ -8,6 +8,8 @@
 import Foundation
 import SwiftUI
 
+private let logger = DGLogger(category: "OllamaModelStore")
+
 @Observable @MainActor
 class OllamaModelStoreViewModel {
 
@@ -28,6 +30,15 @@ class OllamaModelStoreViewModel {
     var downloadProgress: Double = 0.0
     var currentDownloadName: String = ""
     var downloadErrorMessage: String? = nil
+
+    // Deletion State
+    //
+    // ⚠️ `OllamaService.modelRemoveError` had ZERO readers anywhere in the app: `removeModel`
+    // writes a reason into it on five separate guard arms and every one of them was invisible.
+    // Confirming "Delete Model?" on the active model, or while a pull was in flight, simply did
+    // nothing — the card stayed on screen with no message, no toast and (for one arm) no log.
+    var isDeleting: Bool = false
+    var deleteErrorMessage: String? = nil
 
     // MARK: - Dependencies
     @ObservationIgnored private let service = OllamaService.shared
@@ -100,6 +111,8 @@ class OllamaModelStoreViewModel {
                 _ = self.service.pullProgress
                 _ = self.service.modelToPull
                 _ = self.service.modelPullError
+                _ = self.service.isRemovingModel
+                _ = self.service.modelRemoveError
             },
             onChange: { [weak self] in
                 guard let self else { return }
@@ -109,6 +122,8 @@ class OllamaModelStoreViewModel {
                 self.downloadProgress = self.service.pullProgress
                 self.currentDownloadName = self.service.modelToPull
                 self.downloadErrorMessage = self.service.modelPullError
+                self.isDeleting = self.service.isRemovingModel
+                self.deleteErrorMessage = self.service.modelRemoveError
             }
         )
     }
@@ -158,7 +173,26 @@ class OllamaModelStoreViewModel {
     func deleteModel(_ model: LocalModel) {
         Task {
             await service.removeModel(name: model.name, baseURL: service.ollamaBaseURL)
+            // The service reports refusals through `modelRemoveError` rather than throwing, so the
+            // outcome has to be read back — the previous fire-and-forget call discarded it.
+            if let reason = service.modelRemoveError {
+                logger.error("""
+                    [DOWNLOAD] Delete refused for Ollama model '\(model.name)': \(reason). \
+                    CONSEQUENCE: the model is still installed and the card stays on screen; the \
+                    reason is now shown in the store's error banner.
+                    """)
+            } else {
+                logger.info("[DOWNLOAD] Removed Ollama model '\(model.name)'.")
+            }
         }
+    }
+
+    /// Clears whichever error banner the store is showing.
+    func dismissErrors() {
+        deleteErrorMessage = nil
+        downloadErrorMessage = nil
+        service.modelRemoveError = nil
+        service.modelPullError = nil
     }
     
     func cancelDownload() {

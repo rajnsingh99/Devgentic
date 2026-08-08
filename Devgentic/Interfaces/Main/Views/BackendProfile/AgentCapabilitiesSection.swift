@@ -8,6 +8,8 @@
 
 import SwiftUI
 
+private let logger = DGLogger(category: "AgentCapabilities")
+
 struct AgentCapabilitiesSection: View {
     @Binding var capabilities: AgentCapabilities
     @Environment(\.appTheme) private var theme
@@ -51,7 +53,16 @@ struct AgentCapabilitiesSection: View {
                     // local models, rate-limited for cloud). The parallelism is illusory and
                     // adds complexity without throughput gain. The config field is preserved
                     // for future use when batch inference or multi-model routing makes true
-                    // parallelism viable. Default is forced to false below.
+                    // parallelism viable.
+                    //
+                    // ⚠️ Register A67. This comment used to end "Default is forced to false
+                    // below" — and nothing below forced anything. The tolerant decoder defaults
+                    // the field only when the key is ABSENT, so a profile saved while the toggle
+                    // still existed decoded `true` and took the parallel branch, uncontrollably.
+                    // Enforcement now lives at the consumption point, in
+                    // `PlanningCapability.parallelSubtasksSupported` — one constant to flip when
+                    // parallelism becomes real. A stored `true` is logged and ignored, not
+                    // rewritten, so the preference survives for that day.
 
                     Divider().background(theme.dividerColor)
 
@@ -143,7 +154,7 @@ struct AgentCapabilitiesSection: View {
                 }
             }
 
-            // MARK: - Agent Delegation — HIDDEN from UI
+            // MARK: - Agent Delegation — HIDDEN from UI, except as an OFF switch
             // Agent delegation spawns concurrent sub-agents that all share the same LLM.
             // On local models (MLX/Ollama) this serializes at the GPU actor, and on cloud
             // providers it competes with the parent for rate-limit tokens. The result is
@@ -151,6 +162,36 @@ struct AgentCapabilitiesSection: View {
             // (batch, multi-model, or dedicated cloud concurrency) is supported.
             // The backend code (CallAgentTool, ConcurrencyLimiter, AgentConnect injection)
             // is fully implemented and preserved — only the UI toggle is removed.
+            //
+            // ⚠️ Register A66. Removing the toggle removed the OFF switch too, and the gate in
+            // `AgentConnect.resolveTools` is the mere PRESENCE of `capabilities.agentDelegation`
+            // — there is no `isEnabled` flag. `ProfileMigrator` created that config for legacy
+            // "Supervisor" profiles, so those agents inject `call_agent` on every single run,
+            // permanently, with nothing on screen to say so and no way to stop it.
+            //
+            // ⚠️ This row appears ONLY when the profile already has delegation, and turning it
+            // off nils the config so the row disappears for good. That gives existing profiles
+            // control without re-offering the capability to new ones — which is what the hide
+            // decision above is about. It is not a toggle; it is an exit.
+            if capabilities.agentDelegation != nil {
+                Divider().background(theme.dividerColor)
+
+                settingsRow(
+                    title: "Agent Delegation",
+                    description: "This agent can spawn sub-agents (call_agent). Devgentic no longer offers this — sub-agents share one model, so they queue rather than run in parallel. Turning it off removes the tool; it can't be turned back on."
+                ) {
+                    Button("Turn Off") {
+                        logger.notice(
+                            "[PROFILE] User turned OFF agent delegation for this profile. "
+                            + "CONSEQUENCE: `call_agent` will no longer be injected on runs, and the "
+                            + "capability cannot be re-enabled from the UI — it is hidden by design."
+                        )
+                        capabilities.agentDelegation = nil
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Turn off agent delegation")
+                }
+            }
         }
     }
 

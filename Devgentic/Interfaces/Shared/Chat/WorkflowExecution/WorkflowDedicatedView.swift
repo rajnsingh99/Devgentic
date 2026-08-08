@@ -175,13 +175,40 @@ struct WorkflowDedicatedView: View {
     }
 
     /// Resolved profile binding for canvas view.
+    ///
+    /// ⚠️ Keyed on the profile ID, resolved on every access — NEVER on a captured array index.
+    /// `BackendProfileStore.fetchProfiles` sorts by `lastSelected` descending and `saveProfile`
+    /// stamps `lastSelected` on every write, so creating or saving any profile re-sorts the array
+    /// and shifts every index. A binding holding the old index then reads and writes a DIFFERENT
+    /// profile — or goes out of range. The worst case is the workflow settings panel, hosted in an
+    /// AppKit panel created once (`NodeInspectorPanelManager.shared.show { … }`), whose captured
+    /// binding SwiftUI never refreshes: editing node timeout or context budgets there wrote them
+    /// into whichever profile had drifted into that slot.
     private var profileBinding: Binding<BackendProfileModel>? {
-        guard let idx = profileService.profiles.firstIndex(where: { $0.id == workflowProfileID }) else {
+        guard profileService.profiles.contains(where: { $0.id == workflowProfileID }) else {
             return nil
         }
+        let id = workflowProfileID
         return Binding(
-            get: { profileService.profiles[idx] },
-            set: { profileService.profiles[idx] = $0 }
+            get: {
+                profileService.profiles.first(where: { $0.id == id })
+                    // The getter cannot fail a binding, so a profile deleted mid-edit falls back to
+                    // an empty shell rather than trapping. The `.onChange` below tears the canvas
+                    // down on the next update; this only has to survive until then.
+                    ?? BackendProfileModel(id: id, displayName: "", details: .workflow(WorkflowConfig(agentProfileIDs: [])))
+            },
+            set: { newValue in
+                guard let index = profileService.profiles.firstIndex(where: { $0.id == id }) else {
+                    DGLogger(category: "WorkflowDedicated").notice(
+                        "[PROFILE] Dropped a canvas write for profile \(id) — it is no longer in "
+                        + "the profile list. CONSEQUENCE: the edit is not applied to any profile; "
+                        + "previously an index-keyed binding would have written it into whichever "
+                        + "profile now occupied that slot."
+                    )
+                    return
+                }
+                profileService.profiles[index] = newValue
+            }
         )
     }
 

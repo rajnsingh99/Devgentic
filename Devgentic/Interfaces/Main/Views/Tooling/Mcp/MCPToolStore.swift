@@ -35,11 +35,51 @@ final class MCPToolStore {
     /// one-time legacy-secrets migration (lifts inline `env` / `authentication`
     /// blobs into Keychain so they're no longer in plaintext on disk) and
     /// kicks off a proactive OAuth-token refresh for any near-expiry bundles.
-    func configureContainer(_ container: ModelContainer) {
+    /// - Parameter migrateLegacySecrets: whether the one-shot legacy-secrets migration may run this
+    ///   launch. Pass the launch-sweep decision — this migration REWRITES `mcpConfigData` blobs and
+    ///   moves values into the Keychain, so it belongs to the same destructive class as
+    ///   `pruneOldRecords` and the two `reconcileOrphans` sweeps and must be gated identically.
+    ///
+    ///   ⚠️ It used to run unconditionally from here, which is called synchronously in the App
+    ///   struct's initializer — i.e. BEFORE `evaluateLaunchSweep()`. So on the first launch after a
+    ///   schema change, the gate correctly deferred the other three sweeps while this one had already
+    ///   rewritten secrets against possibly-degraded rows. That defeated the gate for one of the five
+    ///   operations it was created to cover (SWIFTDATA_GAP_REGISTER.md G44).
+    ///
+    ///   Skipping only postpones it: the `mcp.secrets.migrated.v1` flag stays unset, so the next
+    ///   launch runs it normally.
+    func configureContainer(_ container: ModelContainer, migrateLegacySecrets: Bool) {
         self.modelContainer = container
-        migrateLegacySecretsIfNeeded()
+        if migrateLegacySecrets {
+            migrateLegacySecretsIfNeeded()
+        } else {
+            logger.notice(
+                "[STARTUP] MCP legacy-secrets migration DEFERRED — the launch sweep is not running "
+                + "this launch. CONSEQUENCE: any pre-Keychain inline secrets stay inline for now and "
+                + "are migrated on the next launch; MCP servers still connect normally meanwhile."
+            )
+        }
         fetchTools()
         refreshNearExpiryOAuthBundles()
+    }
+
+
+    /// Resolves the model context, LOGGING the user-visible consequence when it is missing.
+    ///
+    /// ⚠️ Every caller used a bare `guard let context = mainContext else { return }` — eight of them
+    /// (G53). `mainContext` is nil only when `configureContainer` has not run, which should not
+    /// happen after launch; but if it ever does, the user's action vanished with no error, no
+    /// message and nothing in the log. "Should not happen" is exactly when a log matters, because
+    /// there is nothing else left to diagnose from.
+    private func requireContext(_ operation: String, consequence: String) -> ModelContext? {
+        guard let context = mainContext else {
+            logger.error(
+                "[MCP-STORE] \(operation) called before the ModelContainer was configured. "
+                + "CONSEQUENCE: \(consequence)"
+            )
+            return nil
+        }
+        return context
     }
 
     /// Private initializer to enforce singleton pattern.
@@ -58,13 +98,19 @@ final class MCPToolStore {
         secrets: MCPRuntimeSecrets,
         newTools: [ToolDefinition]
     ) -> UUID? {
-        guard let context = mainContext else { return nil }
+        guard let context = requireContext(
+            "addTool(serverName: \(serverName))",
+            consequence: "the new MCP server was NOT saved and no Keychain secrets were written; the "
+                + "form will look as though it succeeded."
+        ) else { return nil }
 
         let newID = UUID()
         let item = MCPToolItem(
             id: newID,
             serverName: serverName,
-            mcpConfigData: try? JSONEncoder().encode(serverDefinition)
+            // Stamped (G19) so a future reader can ask what shape this is instead of guessing.
+            mcpConfigData: (try? JSONEncoder().encode(serverDefinition))
+                .map { BlobVersioning.stamped($0, version: MCPToolItem.configBlobVersion) }
         )
 
         for tool in newTools {
@@ -156,7 +202,7 @@ final class MCPToolStore {
         secrets: MCPRuntimeSecrets,
         newTools: [ToolDefinition]
     ) {
-        guard let context = mainContext else { return }
+        guard let context = requireContext("updateTool(id:)", consequence: "the edit to this MCP server was DISCARDED — its configuration, tools and Keychain secrets are unchanged on disk.") else { return }
 
         let targetID = id
         let predicate = #Predicate<MCPToolItem> { $0.id == targetID }
@@ -179,7 +225,21 @@ final class MCPToolStore {
             }()
 
             item.serverName = serverName
-            item.mcpConfigData = try? JSONEncoder().encode(serverDefinition)
+            // ⚠️ Assign only on success. `try?` here nulled the column on an encoder throw, replacing
+            // a WORKING saved configuration — command, args, envKeys, url, auth, transport — with
+            // nothing, silently and with no log. The server then failed to connect with no
+            // indication that its configuration had been erased rather than misconfigured (G90).
+            do {
+                item.mcpConfigData = BlobVersioning.stamped(
+                    try JSONEncoder().encode(serverDefinition), version: MCPToolItem.configBlobVersion)
+            } catch {
+                logger.error(
+                    "[PERSISTENCE] Failed to encode ServerDefinition for MCP source '\(serverName)' "
+                    + "(id \(id)): \(error). CONSEQUENCE: mcpConfigData is left exactly as it was, so "
+                    + "the previously-saved server configuration still works; this edit did NOT "
+                    + "reach disk and must be re-applied."
+                )
+            }
 
             // Cascade-delete child tool defs and rebuild from `newTools`.
             for existingTool in item.tools {
@@ -211,7 +271,7 @@ final class MCPToolStore {
     /// before removing the SwiftData record so we never leave orphaned secrets
     /// in the user's Keychain.
     func deleteTool(toolSource: ToolSource) {
-        guard let context = mainContext else { return }
+        guard let context = requireContext("deleteTool", consequence: "the MCP source was NOT deleted; its row, tools and Keychain secrets all remain.") else { return }
 
         let targetID = toolSource.id
         let predicate = #Predicate<MCPToolItem> { $0.id == targetID }
@@ -220,11 +280,24 @@ final class MCPToolStore {
 
         do {
             if let item = try context.fetch(descriptor).first {
+                // ⚠️ These keys NAME the Keychain entries to purge, and they live INSIDE the blob
+                // being deleted. If the blob cannot be decoded we cannot know what to purge, and the
+                // secrets outlive the source with nothing left pointing at them (G22). Silent before;
+                // the row still gets deleted (the user asked for that), but the orphaning is stated.
                 let envKeys: Set<String> = {
-                    guard let data = item.mcpConfigData,
-                          let def = try? JSONDecoder().decode(ServerDefinition.self, from: data),
-                          let keys = def.envKeys else { return [] }
-                    return Set(keys)
+                    guard let data = item.mcpConfigData else { return [] }
+                    do {
+                        return Set(try JSONDecoder().decode(ServerDefinition.self, from: data).envKeys ?? [])
+                    } catch {
+                        logger.error(
+                            "[PERSISTENCE] Deleting MCP source '\(item.serverName)' (\(targetID)) whose "
+                            + "mcpConfigData is UNDECODABLE (\(data.count) bytes) — \(error). "
+                            + "CONSEQUENCE: its env-var secrets CANNOT be identified and are left in the "
+                            + "Keychain with nothing referencing them. Purge them by hand from Keychain "
+                            + "Access if this source held credentials."
+                        )
+                        return []
+                    }
                 }()
                 // Tear the live session down BEFORE dropping the record. Deleting only the
                 // SwiftData row left the MCP client and its child process running with no
@@ -260,7 +333,7 @@ final class MCPToolStore {
     /// `tools/list_changed` listener — the underlying ServerDefinition,
     /// auth, and env keys are unchanged; only the tools themselves moved.
     func replaceTools(forSourceID sourceID: UUID, with newTools: [ToolDefinition]) {
-        guard let context = mainContext else { return }
+        guard let context = requireContext("replaceTools(forSourceID:)", consequence: "the freshly-discovered tool list was DISCARDED — this server keeps its previous tools, which may no longer match what it actually offers.") else { return }
 
         let predicate = #Predicate<MCPToolItem> { $0.id == sourceID }
         var descriptor = FetchDescriptor<MCPToolItem>(predicate: predicate)
@@ -349,7 +422,7 @@ final class MCPToolStore {
     /// failure here just means the next tool call will hit the reactive
     /// refresh path in `DynamicMCPTool` instead.
     private func refreshNearExpiryOAuthBundles() {
-        guard let context = mainContext else { return }
+        guard let context = requireContext("refreshNearExpiryOAuthBundles", consequence: "no near-expiry OAuth token is refreshed this launch; affected servers will fail on their next call until re-authenticated.") else { return }
         let descriptor = FetchDescriptor<MCPToolItem>()
         guard let items = try? context.fetch(descriptor) else { return }
 
@@ -380,7 +453,7 @@ final class MCPToolStore {
     /// into Keychain, and re-encode the blob in the new shape. Idempotent —
     /// keyed by a UserDefaults flag so it never runs twice.
     private func migrateLegacySecretsIfNeeded() {
-        guard let context = mainContext else { return }
+        guard let context = requireContext("migrateLegacySecretsIfNeeded", consequence: "the one-shot legacy-secrets migration did not run; inline secrets stay in plaintext on disk and it retries next launch.") else { return }
 
         let migrationKey = "mcp.secrets.migrated.v1"
         if UserDefaults.standard.bool(forKey: migrationKey) {
@@ -391,6 +464,7 @@ final class MCPToolStore {
             let descriptor = FetchDescriptor<MCPToolItem>()
             let items = try context.fetch(descriptor)
             var migratedCount = 0
+            var migrationFailures = 0
             for item in items {
                 guard let data = item.mcpConfigData,
                       let legacy = try? JSONDecoder().decode(LegacyServerDefinition.self, from: data) else {
@@ -428,15 +502,43 @@ final class MCPToolStore {
                     url: legacy.url,
                     auth: auth
                 )
-                item.mcpConfigData = try? JSONEncoder().encode(migrated)
-                migratedCount += 1
+                // ⚠️ Same rule as `updateTool`, and it matters more here: this runs unattended at
+                // launch over EVERY source. A `try?` would have nulled a working configuration while
+                // the secrets had already been moved to the Keychain, leaving the source unusable
+                // and unrecoverable. Don't count it as migrated if it did not persist, or the
+                // `mcp.secrets.migrated.v1` flag would be set for a source that still needs it.
+                do {
+                    item.mcpConfigData = BlobVersioning.stamped(
+                        try JSONEncoder().encode(migrated), version: MCPToolItem.configBlobVersion)
+                    migratedCount += 1
+                } catch {
+                    migrationFailures += 1
+                    logger.error(
+                        "[PERSISTENCE] Failed to encode migrated ServerDefinition for MCP source "
+                        + "'\(item.serverName)' (id \(item.id)): \(error). CONSEQUENCE: this source's "
+                        + "mcpConfigData is left at its legacy shape and still works; it is retried "
+                        + "on the next launch because the migration flag is not set below."
+                    )
+                }
             }
 
             if migratedCount > 0 {
                 try context.save()
                 logger.info("Migrated \(migratedCount) MCP source(s) to Keychain-backed secrets.")
             }
-            UserDefaults.standard.set(true, forKey: migrationKey)
+            // ⚠️ Only claim the migration is done if nothing was left behind. Setting the flag with
+            // failures outstanding would strand those sources at their legacy shape forever, with
+            // their secrets already moved to the Keychain and nothing left to retry the move.
+            if migrationFailures == 0 {
+                UserDefaults.standard.set(true, forKey: migrationKey)
+            } else {
+                logger.error(
+                    "[PERSISTENCE] Legacy-secrets migration INCOMPLETE — \(migratedCount) source(s) "
+                    + "migrated, \(migrationFailures) failed to encode. CONSEQUENCE: the migration "
+                    + "flag is NOT set, so the whole pass retries on the next launch; already-migrated "
+                    + "sources are idempotent and will simply be skipped."
+                )
+            }
         } catch {
             // Don't set the migrated flag — we'll retry on next launch.
             logger.error("Legacy-secrets migration failed: \(error.localizedDescription)")
@@ -450,7 +552,8 @@ final class MCPToolStore {
             name: tool.name,
             toolDescription: tool.description,
             requiresConfirmation: tool.requiresConfirmation,
-            parametersData: try? JSONEncoder().encode(tool.parameters),
+            parametersData: (try? JSONEncoder().encode(tool.parameters))
+                .map { BlobVersioning.stamped($0, version: MCPToolDefinitionModel.parametersBlobVersion) },
             title: tool.title,
             iconsData: tool.icons.flatMap { try? JSONEncoder().encode($0) },
             annotationsData: tool.annotations.flatMap { try? JSONEncoder().encode($0) }
@@ -459,7 +562,7 @@ final class MCPToolStore {
 
     /// Fetches all tool items and updates the published `sources` array.
     private func fetchTools() {
-        guard let context = mainContext else { return }
+        guard let context = requireContext("fetchTools", consequence: "the tool-source list is left EMPTY, so every MCP server disappears from the UI and none of their tools resolve.") else { return }
 
         do {
             let descriptor = FetchDescriptor<MCPToolItem>(
@@ -474,7 +577,7 @@ final class MCPToolStore {
     }
 
     private func saveContext() {
-        guard let context = mainContext else { return }
+        guard let context = requireContext("saveContext", consequence: "pending MCP changes were NOT written to disk and are lost when the app quits.") else { return }
         do {
             try context.save()
         } catch {

@@ -10,6 +10,8 @@
 
 import SwiftUI
 
+private let logger = DGLogger(category: "AddBackendProfile")
+
 /// A view that allows the user to choose a type and name for a new Backend Profile.
 struct AddBackendProfileView: View {
     @Environment(\.dismiss) var dismiss
@@ -19,11 +21,21 @@ struct AddBackendProfileView: View {
     @State private var displayName: String = ""
     @State private var selectedType: ProfileType = .bot
 
+    /// The reason the last Create attempt was refused, shown inline. Nil when nothing has failed.
+    @State private var creationError: String?
+
     /// Existing profile names used for duplicate detection.
     var existingProfileNames: [String] = []
 
-    /// The callback now passes the concrete `BackendProfileModel` back.
-    var onContinue: (BackendProfileModel) -> Void
+    /// Creates the profile, THROWING if it is refused.
+    ///
+    /// ⚠️ Register A64: this used to be non-throwing, and the sheet dismissed unconditionally right
+    /// after calling it — so a save rejected by `ProfileValidator` (an over-length name is the easy
+    /// one) surfaced as a toast over a sheet that had already gone, taking the name and type the
+    /// user chose with it. There was nothing to correct and nothing to return to; the only way
+    /// forward was to type it all again and guess what was wrong. Throwing lets the sheet stay open
+    /// and show the reason next to the field that caused it.
+    var onContinue: (BackendProfileModel) throws -> Void
 
     private var trimmedName: String {
         displayName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -64,8 +76,26 @@ struct AddBackendProfileView: View {
                             .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
                             .overlay(
                                 RoundedRectangle(cornerRadius: theme.cornerRadiusMedium)
-                                    .stroke(isDuplicateName ? theme.warningColor : theme.dividerColor, lineWidth: 1)
+                                    .stroke(creationError != nil ? theme.errorColor
+                                            : (isDuplicateName ? theme.warningColor : theme.dividerColor),
+                                            lineWidth: 1)
                             )
+                            // A stale rejection sitting under a field the user is actively fixing
+                            // reads as "still wrong". It applied to the old value, not this one.
+                            .onChange(of: displayName) { _, _ in creationError = nil }
+
+                        // The refusal reason, next to the field that caused it (register A64).
+                        if let creationError {
+                            HStack(spacing: 4) {
+                                Image(systemName: "exclamationmark.octagon.fill")
+                                    .font(theme.fontCaption)
+                                Text(creationError)
+                                    .font(theme.fontCaption)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .foregroundColor(theme.errorColor)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
 
                         if isDuplicateName {
                             HStack(spacing: 4) {
@@ -143,8 +173,18 @@ struct AddBackendProfileView: View {
     
     private func handleContinue() {
         let newProfile = createDefaultProfile()
-        onContinue(newProfile)
-        dismiss()
+        do {
+            try onContinue(newProfile)
+            // ⚠️ Only on success. Dismissing first is what made a rejected create unrecoverable.
+            dismiss()
+        } catch {
+            logger.warning(
+                "[PROFILE] Create REFUSED for '\(newProfile.displayName)' (\(selectedType.rawValue)): "
+                + "\(error.localizedDescription). CONSEQUENCE: the sheet stays open with the user's "
+                + "name and type intact so they can correct it."
+            )
+            creationError = error.localizedDescription
+        }
     }
     
     /// Creates the appropriate default `BackendProfileModel` with the correct `ProfileDetails` case.
@@ -178,7 +218,13 @@ struct AddBackendProfileView: View {
             details = .agent(AgentConfig(llmConfig: defaultLLMConfig, tools: []))
         }
         
-        return BackendProfileModel(displayName: displayName, details: details)
+        // ⚠️ Register A76: this saved the RAW `displayName` while every check around it —
+        // `isDuplicateName`, `isContinueButtonDisabled`, the validator's emptiness and length rules
+        // — compares `trimmedName`. So " Research " passed the duplicate check against an existing
+        // "Research", saved as a distinct profile, and the warning never fired again for either of
+        // them: the sidebar showed two entries that read identically and could not be told apart.
+        // Persist what was validated.
+        return BackendProfileModel(displayName: trimmedName, details: details)
     }
     
     // MARK: - Subviews

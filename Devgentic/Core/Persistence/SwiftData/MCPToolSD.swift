@@ -42,6 +42,11 @@ final class MCPToolItem {
     @Relationship(deleteRule: .cascade, inverse: \MCPToolDefinitionModel.toolItem)
     var tools: [MCPToolDefinitionModel]
 
+    /// Current persisted shape of `mcpConfigData` (`ServerDefinition` → object root, inline key).
+    /// ⚠️ Bump when `ServerDefinition`'s persisted shape changes — a dropped field here means a
+    /// server silently loses its command/args/auth configuration (G19).
+    static let configBlobVersion = 1
+
     init(
         id: UUID = UUID(),
         serverName: String,
@@ -77,6 +82,9 @@ final class MCPToolDefinitionModel {
     var annotationsData: Data?
 
     var toolItem: MCPToolItem?
+
+    /// Current persisted shape of `parametersData` (`ToolParameters` → object root, inline key).
+    static let parametersBlobVersion = 1
 
     init(
         name: String,
@@ -138,9 +146,46 @@ extension MCPToolItem {
             )
         }.sorted { $0.name < $1.name }
 
+        // ⚠️ A bare `try?` here made an unreadable configuration indistinguishable from an absent
+        // one: both produced `serverDefinition == nil`, the server then failed to connect with no
+        // command/args/url, and NOTHING in the log said the stored config was the problem rather
+        // than the server (G22). The two cases need different responses, so they get different logs.
         var serverDefinition: ServerDefinition?
+        var configurationUnreadable = false
         if let data = mcpConfigData {
-            serverDefinition = try? JSONDecoder().decode(ServerDefinition.self, from: data)
+            do {
+                let decoded = try JSONDecoder().decode(ServerDefinition.self, from: data)
+                serverDefinition = decoded
+
+                // ⚠️ EVERY property of `ServerDefinition` is optional or defaulted, so JSON of an
+                // entirely wrong shape decodes CLEANLY into an all-nil definition. The decode guard
+                // above cannot catch that — there is no error to catch. Such a server has neither a
+                // command nor a URL, so `MCPClientService.connect` throws
+                // `.invalidJSONConfiguration` (MCPClientService.swift:214) the moment it is used.
+                //
+                // That error is only reached when the user tries to connect. Naming it here means
+                // the condition is in the log from load, alongside the row it belongs to, instead of
+                // surfacing later as a connect failure with no history.
+                if decoded.command == nil && decoded.url == nil {
+                    logger.warning(
+                        "[PERSISTENCE] MCP source '\(serverName)' (\(id)): mcpConfigData decoded but "
+                        + "specifies NEITHER a command nor a url (\(data.count) bytes) — the stored "
+                        + "shape does not match ServerDefinition, or the entry was never finished. "
+                        + "CONSEQUENCE: no transport can be built, so connecting fails with "
+                        + "invalidJSONConfiguration and this server contributes no tools."
+                    )
+                }
+            } catch {
+                configurationUnreadable = true
+                logger.error(
+                    "[PERSISTENCE] MCP source '\(serverName)' (\(id)): mcpConfigData UNDECODABLE "
+                    + "(\(data.count) bytes) — \(error). CONSEQUENCE: this server has no command, URL "
+                    + "or auth scheme, so it cannot connect and its tools will not resolve; the stored "
+                    + "bytes are untouched and stay readable by a build that understands them. "
+                    + "⚠️ Do NOT delete this source to 'fix' it — its Keychain secrets are keyed off "
+                    + "envKeys inside this blob and would be orphaned."
+                )
+            }
         }
 
         return ToolSource(
@@ -149,7 +194,8 @@ extension MCPToolItem {
             serverName: serverName,
             tools: mappedTools,
             serverDefinition: serverDefinition,
-            isEnabled: isEnabled
+            isEnabled: isEnabled,
+            isConfigurationUnreadable: configurationUnreadable
         )
     }
 }

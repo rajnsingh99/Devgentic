@@ -468,6 +468,9 @@ extension Theme {
         case .reflection: return .purple
         case .delegation: return .green
         case .compaction: return .orange
+        // A milestone from a newer build claims no capability family, so it takes the theme's
+        // neutral secondary text colour rather than borrowing one of the four hues.
+        case .unrecognised: return secondaryText
         }
     }
 

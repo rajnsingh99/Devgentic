@@ -49,6 +49,25 @@ struct RetryPolicySnapshot: Codable, Sendable {
     let backoffStrategy: String         // "fixed" / "exponential"
 }
 
+/// The per-tier caps that can terminate a run, as RESOLVED for the run.
+///
+/// ⚠️ Register A38. `TraceConfigSnapshot` recorded none of these, so when a run was stopped by the
+/// parse-failure, tool-failure, repetition or denial breaker, the limit that stopped it was
+/// unrecoverable from telemetry — only the breaker's own log line survived, and that is not in the
+/// trace. Reconstructing it after the fact was impossible: `Auto` resolves through the profile's
+/// legacy `retryPolicy.maxRetries` (register A70), which may since have changed.
+///
+/// ⚠️ Stores the RESOLVED values, not the overrides. A stored `nil` means "Auto", and Auto is
+/// exactly the thing you cannot look up later.
+struct ResilienceSnapshot: Codable, Sendable {
+    let maxParseFailures: Int
+    let maxConsecutiveToolFailures: Int
+    let maxRepetitiveActions: Int
+    let maxConsecutiveDenials: Int
+    /// Whether the user set any of these explicitly, or all four came from Auto.
+    let hasUserOverrides: Bool
+}
+
 /// Error-recovery policy summary.
 struct ErrorRecoverySnapshot: Codable, Sendable {
     let onToolFailure: String           // "abort" / "skipAndContinue" / "fallbackPrompt"
@@ -97,10 +116,17 @@ struct TraceConfigSnapshot: Codable, Sendable {
     let instructions: String?           // full text per product decision Q3
     let instructionsLength: Int
     let instructionsHash: String?       // SHA256, truncated — fast equality checks
+    /// ⚠️ Register A38: the RESOLVED cap, never nil for a profile type that has one. It used to
+    /// store the raw optional, so a profile on the default recorded `nil` — and "the run stopped at
+    /// its iteration limit" could not be checked against a number that was not written down.
     let maxIterations: Int?
+    /// Whether `maxIterations` came from the profile or from the app default.
+    let maxIterationsIsDefault: Bool
     let executionTimeoutSec: Double?
     let retryPolicy: RetryPolicySnapshot?
     let errorRecovery: ErrorRecoverySnapshot?
+    /// Resolved per-tier breaker caps (register A38).
+    let resilience: ResilienceSnapshot?
     let historyStrategy: String?        // recentHistory / fullHistory / pointer / hybrid
 
     // --- Code-mode-specific (nil otherwise) ---
@@ -152,9 +178,11 @@ struct TraceConfigSnapshot: Codable, Sendable {
         let capabilitiesEnabled: [String]
         let instructions: String?
         let maxIterations: Int?
+        let maxIterationsIsDefault: Bool
         let executionTimeoutSec: Double?
         let retryPolicy: RetryPolicySnapshot?
         let errorRecovery: ErrorRecoverySnapshot?
+        let resilience: ResilienceSnapshot?
         let historyStrategy: String?
         let codeProjectPath: String?
 
@@ -166,9 +194,11 @@ struct TraceConfigSnapshot: Codable, Sendable {
             capabilitiesEnabled = []
             instructions = cfg.instructions
             maxIterations = nil
+            maxIterationsIsDefault = false
             executionTimeoutSec = nil
             retryPolicy = nil
             errorRecovery = nil
+            resilience = nil
             historyStrategy = nil
             codeProjectPath = nil
 
@@ -182,7 +212,12 @@ struct TraceConfigSnapshot: Codable, Sendable {
             if cfg.capabilities.agentDelegation != nil { caps.append("agentDelegation") }
             capabilitiesEnabled = caps
             instructions = cfg.instructions
-            maxIterations = cfg.maxIterations
+            // ⚠️ Register A38: the RESOLVED value. `cfg.maxIterations` is nil for a profile on the
+            // default, and a trace saying "nil" cannot answer "what stopped this run?". The
+            // fallback is the same constant the executor uses, so the number written here is the
+            // number that actually bounded the loop.
+            maxIterations = cfg.maxIterations ?? AgentExecutionDefaults.maxIterations
+            maxIterationsIsDefault = cfg.maxIterations == nil
             executionTimeoutSec = cfg.executionTimeout
             retryPolicy = cfg.retryPolicy.map {
                 RetryPolicySnapshot(maxRetries: $0.maxRetries, backoffStrategy: $0.backoffStrategy.rawValue)
@@ -194,6 +229,23 @@ struct TraceConfigSnapshot: Codable, Sendable {
                     hasCustomFallbackMessage: $0.fallbackMessage != nil
                 )
             }
+            // ⚠️ Register A38. Resolved through the SAME function the runtime uses, so a trace
+            // records the caps that were actually in force — including when they came from `Auto`,
+            // which resolves via the profile's legacy `retryPolicy.maxRetries` (register A70) and
+            // is therefore not reconstructable after the profile changes.
+            let resolvedPolicy = ResolvedResiliencePolicy.resolved(
+                for: ProviderClass(apiProvider: cfg.llmConfig.apiProvider),
+                overrides: cfg.resilienceOverrides,
+                legacy: cfg.retryPolicy ?? RetryPolicy()
+            )
+            resilience = ResilienceSnapshot(
+                maxParseFailures: resolvedPolicy.cognitive.maxParseFailures,
+                maxConsecutiveToolFailures: resolvedPolicy.loop.maxConsecutiveToolFailures,
+                maxRepetitiveActions: resolvedPolicy.loop.maxRepetitiveActions,
+                maxConsecutiveDenials: resolvedPolicy.loop.maxConsecutiveDenials,
+                hasUserOverrides: cfg.resilienceOverrides?.isEmpty == false
+            )
+
             historyStrategy = cfg.historyStrategy?.rawValue
             codeProjectPath = cfg.projectPath.map {
                 TelemetrySanitizer.sanitizeFull($0, level: .standard)
@@ -206,9 +258,11 @@ struct TraceConfigSnapshot: Codable, Sendable {
             capabilitiesEnabled = []
             instructions = nil
             maxIterations = nil
+            maxIterationsIsDefault = false
             executionTimeoutSec = nil
             retryPolicy = nil
             errorRecovery = nil
+            resilience = nil
             historyStrategy = nil
             codeProjectPath = nil
 
@@ -219,9 +273,11 @@ struct TraceConfigSnapshot: Codable, Sendable {
             capabilitiesEnabled = []
             instructions = nil
             maxIterations = nil
+            maxIterationsIsDefault = false
             executionTimeoutSec = nil
             retryPolicy = nil
             errorRecovery = nil
+            resilience = nil
             historyStrategy = nil
             codeProjectPath = nil
         }
@@ -323,9 +379,11 @@ struct TraceConfigSnapshot: Codable, Sendable {
             instructionsLength: instructionsLength,
             instructionsHash: instructionsHash,
             maxIterations: maxIterations,
+            maxIterationsIsDefault: maxIterationsIsDefault,
             executionTimeoutSec: executionTimeoutSec,
             retryPolicy: retryPolicy,
             errorRecovery: errorRecovery,
+            resilience: resilience,
             historyStrategy: historyStrategy,
 
             codeProjectPath: codeProjectPath,

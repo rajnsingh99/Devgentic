@@ -20,7 +20,7 @@ struct VSCodifiedSidebarContainerView: View {
 
     /// Persists across launches — previously `@State` reset the tab to
     /// `.conversations` every cold start.
-    @AppStorage("sidebar.selectedTab") private var selectedTabRawValue: String = SidebarTab.conversations.rawValue
+    @AppStorage(SidebarTab.storageKey) private var selectedTabRawValue: String = SidebarTab.conversations.rawValue
 
     @Binding var isSidebarVisible: Bool
     @Binding var sidebarWidth: CGFloat

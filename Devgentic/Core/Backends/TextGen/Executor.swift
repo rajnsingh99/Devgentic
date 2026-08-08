@@ -49,7 +49,7 @@ enum ExecutorFactory {
 
             // Core executor — always ReAct
             var executor: any Executor = ReActAgentExecutor(
-                maxIterations: config.maxIterations ?? 15
+                maxIterations: config.maxIterations ?? AgentExecutionDefaults.maxIterations
             )
 
             // Stack capabilities as decorators
@@ -76,7 +76,7 @@ enum ExecutorFactory {
             guard case .code(let config) = profile.details else {
                 return ReActAgentExecutor()
             }
-            return ReActAgentExecutor(maxIterations: config.maxIterations ?? 15)
+            return ReActAgentExecutor(maxIterations: config.maxIterations ?? AgentExecutionDefaults.maxIterations)
 
         case .workflow:
             return WorkflowExecutor()

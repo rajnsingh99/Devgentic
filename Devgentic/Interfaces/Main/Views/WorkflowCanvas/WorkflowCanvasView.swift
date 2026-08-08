@@ -31,6 +31,35 @@ struct WorkflowCanvasView: View {
     @State private var canvasState: WorkflowCanvasState
     @State private var showingProfilePicker = false
     @State private var showingClearAlert = false
+
+    /// Set when this profile's stored canvas could not be decoded, with the denormalized counts the
+    /// row still carries so the overlay can say what was lost.
+    ///
+    /// ⚠️ Held in `@State` and refreshed only in `loadLayout()` — NEVER read from `body`.
+    /// `WorkflowLayoutStore.isLayoutUnreadable(for:)` runs a SwiftData fetch and primes a JSON decode,
+    /// and `WorkflowDedicatedView`'s own header documents a prior regression from doing exactly that
+    /// inside `body`: "an UNCACHED SwiftData fetch + JSON blob decode at streaming frequency, on the
+    /// main thread, for the whole run."
+    @State private var unreadableLayout: UnreadableLayoutInfo?
+    @State private var showingDiscardUnreadableAlert = false
+
+    struct UnreadableLayoutInfo: Equatable {
+        let nodeCount: Int
+        let edgeCount: Int
+        let annotationCount: Int
+
+        /// True when the counts prove the row once held content — out-of-blob evidence, so it is
+        /// trustworthy even though the blob itself is not.
+        var heldContent: Bool { nodeCount > 0 || edgeCount > 0 || annotationCount > 0 }
+
+        var summary: String {
+            var parts: [String] = []
+            if nodeCount > 0 { parts.append("\(nodeCount) node\(nodeCount == 1 ? "" : "s")") }
+            if edgeCount > 0 { parts.append("\(edgeCount) connection\(edgeCount == 1 ? "" : "s")") }
+            if annotationCount > 0 { parts.append("\(annotationCount) note\(annotationCount == 1 ? "" : "s")") }
+            return parts.joined(separator: ", ")
+        }
+    }
     @State private var showingWorkflowConfig = false
 
     #if canImport(AppKit) && !targetEnvironment(macCatalyst)
@@ -78,7 +107,14 @@ struct WorkflowCanvasView: View {
             .background(theme.primaryBackground)
 
             // Empty State Overlay (when no nodes exist)
-            if canvasState.nodes.isEmpty {
+            //
+            // ⚠️ The unreadable case must win. An undecodable canvas ALSO renders as zero nodes, so
+            // without this branch it got the identical "Workflow Canvas / Add profiles to build your
+            // workflow pipeline" invitation a brand-new workflow gets — byte-for-byte the same view,
+            // inviting the user to rebuild a canvas whose every save is being refused.
+            if let unreadableLayout {
+                unreadableLayoutOverlay(unreadableLayout)
+            } else if canvasState.nodes.isEmpty {
                 emptyStateOverlay
             }
 
@@ -159,6 +195,19 @@ struct WorkflowCanvasView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will remove all nodes and connections from the canvas. This cannot be undone.")
+        }
+        // ⚠️ Confirmation is not ceremony here. Everything up to this point is NON-destructive: the
+        // original bytes survive precisely because writes are refused. This button is the only thing
+        // in the app that deliberately throws them away, so it names what is being lost first.
+        .alert("Discard the unreadable canvas?", isPresented: $showingDiscardUnreadableAlert) {
+            Button("Discard and Start Over", role: .destructive) { discardUnreadableLayout() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                unreadableLayout?.heldContent == true
+                ? "The saved layout held \(unreadableLayout?.summary ?? "content") that this version cannot read. Discarding replaces it with an empty canvas and the original data is gone for good — a future version will no longer be able to recover it.\n\nIf you might want it back, quit instead and export a copy of the database first."
+                : "Discarding replaces the unreadable layout with an empty canvas. The original data is gone for good — a future version will no longer be able to recover it."
+            )
         }
         .onChange(of: canvasState.targetConfigNode) { _, node in
             if let node = node {
@@ -429,9 +478,69 @@ struct WorkflowCanvasView: View {
         .padding(40)
     }
 
+    /// Shown INSTEAD of the empty-state invitation when the stored canvas could not be decoded.
+    ///
+    /// Tone follows `MCPStatusBanner`: silent when healthy, explicit only when something is actually
+    /// down. It states three things the user cannot otherwise learn — that this is a read failure and
+    /// not an empty canvas, what the canvas used to hold, and that the original bytes are still there.
+    @ViewBuilder
+    private func unreadableLayoutOverlay(_ info: UnreadableLayoutInfo) -> some View {
+        VStack(spacing: 16) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 48)) // Fixed size: matches the empty-state glyph it replaces
+                .foregroundColor(theme.warningColor)
+
+            Text("This canvas could not be read")
+                .font(.title2)
+                .fontWeight(.bold)
+                .foregroundColor(theme.primaryText)
+
+            Text(
+                info.heldContent
+                // The counts live OUTSIDE the blob, written by the last successful save, so they are
+                // still trustworthy — which is what makes this message specific instead of vague.
+                ? "It last held \(info.summary), but the saved layout can't be decoded by this version.\n\nYour data has not been deleted — edits are being refused so it stays recoverable by a future build."
+                : "The saved layout can't be decoded by this version.\n\nYour data has not been deleted — edits are being refused so it stays recoverable by a future build."
+            )
+            .font(.subheadline)
+            .foregroundColor(theme.secondaryText)
+            .multilineTextAlignment(.center)
+            .lineSpacing(4)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: 420)
+
+            Button(role: .destructive) {
+                showingDiscardUnreadableAlert = true
+            } label: {
+                Label("Discard and Start Over", systemImage: "trash")
+                    .font(theme.fontBody.weight(.medium))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
+        }
+        .padding(40)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            info.heldContent
+            ? "This workflow canvas could not be read. It last held \(info.summary). The data is preserved and edits are refused."
+            : "This workflow canvas could not be read. The data is preserved and edits are refused."
+        )
+    }
+
     // MARK: - Persistence
 
     private func loadLayout() {
+        // Ask BEFORE loading — `load(for:)` returns `.empty` on failure and discards the reason, so
+        // by the time we hold the layout the two cases are indistinguishable.
+        if WorkflowLayoutStore.shared.isLayoutUnreadable(for: profile.id) {
+            let counts = WorkflowLayoutStore.shared.storedCounts(for: profile.id)
+            unreadableLayout = UnreadableLayoutInfo(
+                nodeCount: counts.nodes, edgeCount: counts.edges, annotationCount: counts.annotations
+            )
+        } else {
+            unreadableLayout = nil
+        }
+
         let layout = WorkflowLayoutStore.shared.load(for: profile.id)
         // Set profile map BEFORE load — load() calls revalidate() which needs the map
         canvasState.resolvedProfileMap = Dictionary(
@@ -439,6 +548,32 @@ struct WorkflowCanvasView: View {
             uniquingKeysWith: { first, _ in first }
         )
         canvasState.load(from: layout)
+    }
+
+    /// Deliberately throws away an unreadable canvas so the profile becomes editable again.
+    ///
+    /// Routes through `repairUnreadableLayout(_:for:reason:)` rather than `save(_:for:)` — that is
+    /// the whole point of the two being separate. `save` is refused while the blob is unreadable;
+    /// repair is the explicit, logged, user-authorized exception, and the `reason` it takes exists so
+    /// the log records WHO authorized it rather than just that it happened.
+    private func discardUnreadableLayout() {
+        let replacement = WorkflowLayout.empty
+        let outcome = WorkflowLayoutStore.shared.repairUnreadableLayout(
+            replacement, for: profile.id, reason: "user chose Discard and Start Over on the canvas"
+        )
+        guard outcome.didPersist else {
+            // Leave the overlay up: the canvas is still unreadable, and clearing it here would tell
+            // the user the problem was resolved when it was not.
+            logger.error(
+                "[PERSISTENCE] Discard FAILED for profile \(profile.id) — \(String(describing: outcome)). "
+                + "CONSEQUENCE: the canvas remains unreadable and every save stays refused; the "
+                + "overlay is left in place rather than falsely reporting success."
+            )
+            return
+        }
+        unreadableLayout = nil
+        canvasState.load(from: replacement)
+        canvasState.markSaved()
     }
 
     /// Installs (or refreshes) this canvas's hooks into the nav guard so Save/Discard
@@ -455,7 +590,27 @@ struct WorkflowCanvasView: View {
 
     private func saveLayout() {
         let layout = canvasState.currentLayout()
-        WorkflowLayoutStore.shared.save(layout, for: profile.id)
+        let outcome = WorkflowLayoutStore.shared.save(layout, for: profile.id)
+
+        // ⚠️ BAIL on a refusal, before touching the profile.
+        //
+        // Two bugs lived here. The layout write is refused when the stored canvas is unreadable, and
+        // this method (a) ignored the outcome and (b) called `markSaved()` unconditionally at the
+        // end — so the dirty indicator CLEARED and the user was actively told their edit was saved
+        // when it had been discarded. Worse, the `agentProfileIDs` write below still went through,
+        // leaving the profile's agent list describing a canvas that was never persisted.
+        if case .refusedUnreadable(let nodes, let edges, let annotations) = outcome {
+            unreadableLayout = UnreadableLayoutInfo(
+                nodeCount: nodes, edgeCount: edges, annotationCount: annotations
+            )
+            logger.error(
+                "[PERSISTENCE] Canvas edit NOT saved for profile \(profile.id) — the stored layout is "
+                + "unreadable so the write was refused. CONSEQUENCE: the unsaved-changes indicator is "
+                + "left LIT and the overlay now tells the user; agentProfileIDs is deliberately not "
+                + "updated either, so the profile does not describe a canvas that was never written."
+            )
+            return
+        }
 
         // Sync the agents array in ProfileDetails while preserving execution config
         let referencedProfiles = profileService.profiles.filter { p in
@@ -470,11 +625,20 @@ struct WorkflowCanvasView: View {
         }
         do {
             try profileService.saveProfile(profile)
+            // ⚠️ The profile editor binds `profile` straight to `editBuffer.draft`, so this write
+            // IS the draft going to disk — but nothing re-baselined `original`, leaving a
+            // just-saved workflow permanently dirty. Switching profiles then demanded "discard
+            // unsaved changes?" for work that had been saved seconds earlier, and the canvas has
+            // no Save/Revert pill that could clear it: the only exits were a phantom discard or a
+            // relaunch. No-ops when the canvas is hosted outside the editor.
+            profileService.rebaseEditBuffer(to: profile)
         } catch {
             // Workflow save failures are logged; the layout is already persisted locally
             logger.error("Failed to save workflow profile: \(error.localizedDescription)")
         }
 
+        // Only now — `markSaved()` is a claim, and it must only be made when the bytes are on disk.
+        guard outcome.didPersist else { return }
         canvasState.markSaved()
     }
 }

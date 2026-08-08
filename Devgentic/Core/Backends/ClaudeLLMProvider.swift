@@ -65,20 +65,199 @@ struct ClaudeLLMProvider: LLMProvider {
     }
 
     /// Budget tokens for thinking. Defaults to 10000.
+    /// ⚠️ Only consulted on `.legacyBudget` models — Opus 4.7+ / Sonnet 5 / Fable 5 reject
+    /// `budget_tokens` outright, and use `thinkingEffort` instead.
     private var thinkingBudget: Int {
         if case .number(let val) = config.options?["thinkingBudgetTokens"] { return Int(val) }
         return 10000
     }
 
-    /// Applies common generation parameters to the request body.
+    /// Thinking depth for adaptive-era models: `low` | `medium` | `high` | `xhigh` | `max`.
+    /// Nil omits `output_config`, which the API reads as its own default (`high`).
+    private var thinkingEffort: String? {
+        if case .string(let val) = config.options?["thinkingEffort"], !val.isEmpty { return val }
+        return nil
+    }
+
+    /// The request contract the selected model accepts. See `AnthropicModelGeneration`.
+    private var generation: AnthropicModelGeneration {
+        AnthropicModelGeneration.classify(modelName: config.modelName)
+    }
+
+    /// Max output tokens actually sent.
+    ///
+    /// ⚠️ On the legacy thinking path the API requires `max_tokens` to be strictly greater than
+    /// `budget_tokens`, so a profile configured with 4096/10000 would be rejected on arrival —
+    /// hence the floor. Adaptive-era models carry no budget, so the user's value is sent
+    /// verbatim rather than silently inflated (that would change what they are billed).
+    private var effectiveMaxTokens: Int {
+        guard extendedThinking, !generation.usesAdaptiveThinking else { return maxTokens }
+        return max(maxTokens, thinkingBudget + 1024)
+    }
+
+    /// Applies sampling parameters, gated on what the selected model actually accepts.
+    ///
+    /// ⚠️ Three separate contracts collide here, and getting any of them wrong is a 400 rather
+    /// than a degraded response:
+    ///   1. `temperature`/`top_p`/`top_k` are REMOVED on Opus 4.7+ / Sonnet 5 / Fable 5.
+    ///   2. Every Claude 4+ model rejects `temperature` and `top_p` sent together.
+    ///   3. Extended thinking does not permit sampling parameters on the models that still
+    ///      accept them otherwise.
+    /// `stop_sequences` is unaffected by all three and is always forwarded.
     private func applyGenerationParams(to body: inout [String: Any]) {
-        // When extended thinking is enabled, temperature must be omitted or 1.0
-        if !extendedThinking, let temp = temperature {
-            body["temperature"] = temp
+        defer {
+            if let stops = stopSequences, !stops.isEmpty { body["stop_sequences"] = stops }
         }
-        if let topP = topP { body["top_p"] = topP }
+
+        guard generation.acceptsSamplingParams else {
+            if temperature != nil || topP != nil || topK != nil {
+                logger.notice("""
+                    [ANTHROPIC] Dropped temperature/top_p/top_k for model '\(config.modelName)' \
+                    (generation: \(generation.rawValue)) — these parameters are removed on this \
+                    model and sending them returns 400. CONSEQUENCE: the request uses the model's \
+                    own sampling defaults; the Advanced panel's values have no effect here.
+                    """)
+            }
+            return
+        }
+
+        guard !extendedThinking else {
+            if temperature != nil || topP != nil || topK != nil {
+                logger.notice("""
+                    [ANTHROPIC] Dropped temperature/top_p/top_k for model '\(config.modelName)' \
+                    because Extended Thinking is enabled — thinking does not permit sampling \
+                    parameters. CONSEQUENCE: sampling falls back to the model default for this \
+                    request; turn thinking off to steer it.
+                    """)
+            }
+            return
+        }
+
+        // Claude 4+ rejects temperature and top_p together. Temperature wins: it is the control
+        // the panel presents first and the one a user is most likely to have set deliberately.
+        if let temp = temperature {
+            body["temperature"] = temp
+            if topP != nil {
+                logger.notice("""
+                    [ANTHROPIC] Dropped top_p for model '\(config.modelName)' — temperature and \
+                    top_p cannot both be sent to a Claude 4+ model. CONSEQUENCE: temperature \
+                    \(temp) is in effect and the configured top_p is ignored for this request.
+                    """)
+            }
+        } else if let topP = topP {
+            body["top_p"] = topP
+        }
+
         if let topK = topK { body["top_k"] = topK }
-        if let stops = stopSequences, !stops.isEmpty { body["stop_sequences"] = stops }
+    }
+
+    /// Applies the thinking configuration in whichever shape the selected model accepts.
+    ///
+    /// ⚠️ Applied by EVERY request builder, not just the cognitive step. The toggle used to be
+    /// wired only into `generateCognitiveStep`, so a Bot profile with Extended Thinking on got no
+    /// thinking at all while still losing its temperature control — the toggle removed a setting
+    /// and delivered nothing.
+    ///
+    /// - Parameter requestSummary: whether to ask for readable reasoning via
+    ///   `display: "summarized"`. ⚠️ Adaptive-era models default to `"omitted"`, which streams
+    ///   thinking blocks with EMPTY text — so the cognitive-step builders, whose `thought` field
+    ///   the UI renders, must opt in or they would show a blank trace where the legacy shape
+    ///   showed reasoning. Builders that never read thinking leave it omitted so the summary is
+    ///   not generated into a response nobody displays.
+    private func applyThinking(to body: inout [String: Any], requestSummary: Bool = false) {
+        guard generation.usesAdaptiveThinking else {
+            // Legacy tier: thinking is opt-in via budget_tokens, and omitting the key means off.
+            if extendedThinking {
+                body["thinking"] = ["type": "enabled", "budget_tokens": thinkingBudget]
+            }
+            return
+        }
+
+        if !extendedThinking && generation.acceptsDisabledThinking {
+            // ⚠️ Explicit disable, not omission. Thinking is ON BY DEFAULT on Opus 5 and
+            // Sonnet 5, so omitting the key would silently give the user thinking they just
+            // switched off. `output_config` is deliberately left unset here: the API's default
+            // effort (`high`) is accepted alongside disabled thinking, whereas `xhigh`/`max` are
+            // not — so sending nothing is the only value that cannot 400.
+            body["thinking"] = ["type": "disabled"]
+            return
+        }
+
+        // ⚠️ Falling through with thinking OFF is deliberate and only happens on
+        // `.adaptiveAlwaysOn` (Fable 5 / Mythos 5), where thinking cannot be turned off at all
+        // and `{"type": "disabled"}` is rejected with a 400 at every effort level. Adaptive is
+        // documented as equivalent to omitting the key, so it is the honest shape to send. The
+        // panel hides the toggle for these models; this log covers a profile that was configured
+        // on another model and then re-pointed, where the stored `false` survives.
+        if !extendedThinking {
+            logger.notice("""
+                [ANTHROPIC] Extended Thinking is OFF in the profile but cannot be honoured for \
+                model '\(config.modelName)' (generation: \(generation.rawValue)) — thinking is \
+                always on for this model and sending {"type": "disabled"} returns 400. \
+                CONSEQUENCE: the request runs WITH thinking; the toggle has no effect here, and \
+                `max_tokens` (\(effectiveMaxTokens)) caps thinking and reply text together.
+                """)
+        }
+
+        var thinking: [String: Any] = ["type": "adaptive"]
+        if requestSummary { thinking["display"] = "summarized" }
+        body["thinking"] = thinking
+
+        guard generation.acceptsEffort, let effort = thinkingEffort else { return }
+        guard generation.supportedEffortLevels.contains(effort) else {
+            logger.notice("""
+                [ANTHROPIC] Dropped effort '\(effort)' for model '\(config.modelName)' \
+                (generation: \(generation.rawValue)) — supported levels are \
+                \(generation.supportedEffortLevels.joined(separator: ", ")). CONSEQUENCE: the \
+                request runs at the API default effort (high) instead of the configured level.
+                """)
+            return
+        }
+        body["output_config"] = ["effort": effort]
+    }
+
+    // MARK: - Request Body Builders
+
+    // ⚠️ These exist so the shape assertions in `AnthropicRequestShapeTests` exercise the SAME
+    // code the shipped builders run. A test that rebuilds the body itself only ever proves the
+    // test's copy is right — exactly how four contract defects (register A20–A23) reached users
+    // with a green suite.
+
+    /// Body for the agent/cognitive-step path. Requests a thinking summary because this path
+    /// parses thinking blocks into `ModernCognitiveStep.thought`.
+    private func cognitiveStepBody(
+        anthropicMessages: [[String: Any]],
+        systemPrompt: String?,
+        tools: [[String: Any]]?
+    ) -> [String: Any] {
+        var body: [String: Any] = [
+            "model": config.modelName,
+            "messages": anthropicMessages,
+            "max_tokens": effectiveMaxTokens
+        ]
+        applyGenerationParams(to: &body)
+        applyThinking(to: &body, requestSummary: true)
+        if let systemPrompt = systemPrompt { body["system"] = systemPrompt }
+        if let tools = tools, !tools.isEmpty { body["tools"] = tools }
+        return body
+    }
+
+    /// Body for the bot/streaming path. No thinking summary: this stream is the visible reply
+    /// and has no second sink for reasoning (see the `thinking_delta` note in the SSE decode).
+    private func streamingBody(
+        anthropicMessages: [[String: Any]],
+        systemPrompt: String?
+    ) -> [String: Any] {
+        var body: [String: Any] = [
+            "model": config.modelName,
+            "messages": anthropicMessages,
+            "max_tokens": effectiveMaxTokens,
+            "stream": true
+        ]
+        applyGenerationParams(to: &body)
+        applyThinking(to: &body)
+        if let systemPrompt = systemPrompt { body["system"] = systemPrompt }
+        return body
     }
 
     /// Creates a standard Anthropic URLRequest with proper headers.
@@ -88,9 +267,13 @@ struct ClaudeLLMProvider: LLMProvider {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        // Use newer API version when extended thinking is enabled
-        let apiVersion = extendedThinking ? "2025-04-14" : "2023-06-01"
-        request.setValue(apiVersion, forHTTPHeaderField: "anthropic-version")
+        // ⚠️ `anthropic-version` has exactly two valid values (2023-06-01, 2023-01-01) and is NOT
+        // a feature switch — every dated capability since ships behind `anthropic-beta`. This
+        // used to send "2025-04-14" whenever Extended Thinking was on, which is not a version the
+        // API recognises, so enabling the toggle rejected every request from the profile with an
+        // invalid_request_error — not just the thinking ones. Turning it back off "fixed" it,
+        // which made the cause near-impossible to attribute from the symptom.
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
 
         if let apiKey = config.apiKey {
             request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
@@ -110,10 +293,11 @@ struct ClaudeLLMProvider: LLMProvider {
         var body: [String: Any] = [
             "model": config.modelName,
             "messages": anthropicMessages,
-            "max_tokens": maxTokens
+            "max_tokens": effectiveMaxTokens
         ]
 
         applyGenerationParams(to: &body)
+        applyThinking(to: &body)
 
         if let systemPrompt = systemPrompt {
             body["system"] = systemPrompt
@@ -219,9 +403,10 @@ struct ClaudeLLMProvider: LLMProvider {
         var body: [String: Any] = [
             "model": config.modelName,
             "messages": anthropicMessages,
-            "max_tokens": maxTokens
+            "max_tokens": effectiveMaxTokens
         ]
         applyGenerationParams(to: &body)
+        applyThinking(to: &body)
         if let systemPrompt = systemPrompt { body["system"] = systemPrompt }
         if let tools = tools, !tools.isEmpty { body["tools"] = tools }
 
@@ -265,30 +450,8 @@ struct ClaudeLLMProvider: LLMProvider {
     func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
         let (systemPrompt, anthropicMessages) = translateMessages(messages)
 
-        // When thinking is enabled, max_tokens must be strictly greater than budget_tokens
-        let effectiveMaxTokens = extendedThinking ? max(maxTokens, thinkingBudget + 1024) : maxTokens
-
-        var body: [String: Any] = [
-            "model": config.modelName,
-            "messages": anthropicMessages,
-            "max_tokens": effectiveMaxTokens
-        ]
-
-        applyGenerationParams(to: &body)
-
-        // --- EXTENDED THINKING CONFIGURATION ---
-        // Driven by user's advanced config, not model name string matching.
-        if extendedThinking {
-            body["thinking"] = ["type": "enabled", "budget_tokens": thinkingBudget]
-        }
-
-        if let systemPrompt = systemPrompt {
-            body["system"] = systemPrompt
-        }
-
-        if let tools = tools, !tools.isEmpty {
-            body["tools"] = tools
-        }
+        let body = cognitiveStepBody(
+            anthropicMessages: anthropicMessages, systemPrompt: systemPrompt, tools: tools)
 
         var request = makeRequest()
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -297,10 +460,17 @@ struct ClaudeLLMProvider: LLMProvider {
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
 
-        // Defensive check: warn if response was truncated by max_tokens limit
-        let effectiveLimit = extendedThinking ? max(maxTokens, thinkingBudget + 1024) : maxTokens
+        // Defensive check: warn if response was truncated by max_tokens limit.
+        // ⚠️ On the adaptive tier `max_tokens` caps thinking AND response text together, so a
+        // profile tuned before thinking was enabled can truncate without any budget being set.
         if let stopReason = json?["stop_reason"] as? String, stopReason == "max_tokens" {
-            logger.warning("⚠️ Anthropic cognitive step truncated (stop_reason: max_tokens). Effective max_tokens: \(effectiveLimit) (thinking: \(self.extendedThinking), budget: \(self.thinkingBudget)). Tool calls may have been cut off — consider increasing maxTokens in advanced config.")
+            logger.warning("""
+                [ANTHROPIC] ⚠️ Cognitive step truncated (stop_reason: max_tokens) for model \
+                '\(self.config.modelName)'. Effective max_tokens: \(self.effectiveMaxTokens) \
+                (thinking: \(self.extendedThinking), shape: \(self.generation.rawValue)). \
+                CONSEQUENCE: tool calls may have been cut off — raise Max Output Tokens in the \
+                Advanced panel.
+                """)
         }
 
         guard let contentBlocks = json?["content"] as? [[String: Any]] else {
@@ -358,17 +528,15 @@ struct ClaudeLLMProvider: LLMProvider {
             }
         }
 
-        let effectiveMaxTokens = extendedThinking ? max(maxTokens, thinkingBudget + 1024) : maxTokens
         var body: [String: Any] = [
             "model": config.modelName,
             "messages": anthropicMessages,
             "max_tokens": effectiveMaxTokens
         ]
         applyGenerationParams(to: &body)
+        // `requestSummary: true` because this builder parses thinking blocks into `thought`.
+        applyThinking(to: &body, requestSummary: true)
 
-        if extendedThinking {
-            body["thinking"] = ["type": "enabled", "budget_tokens": thinkingBudget]
-        }
         if !systemPrompt.isEmpty {
             body["system"] = systemPrompt
         }
@@ -384,7 +552,13 @@ struct ClaudeLLMProvider: LLMProvider {
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
 
         if let stopReason = json?["stop_reason"] as? String, stopReason == "max_tokens" {
-            logger.warning("⚠️ Anthropic cognitive step truncated (stop_reason: max_tokens). Effective max_tokens: \(effectiveMaxTokens).")
+            logger.warning("""
+                [ANTHROPIC] ⚠️ Cognitive step truncated (stop_reason: max_tokens) for model \
+                '\(self.config.modelName)'. Effective max_tokens: \(self.effectiveMaxTokens) \
+                (thinking: \(self.extendedThinking), shape: \(self.generation.rawValue)). \
+                CONSEQUENCE: tool calls may have been cut off — raise Max Output Tokens in the \
+                Advanced panel.
+                """)
         }
 
         guard let contentBlocks = json?["content"] as? [[String: Any]] else {
@@ -430,16 +604,8 @@ struct ClaudeLLMProvider: LLMProvider {
             openBytes: {
                 let (systemPrompt, anthropicMessages) = self.translateMessages(messages)
 
-                var body: [String: Any] = [
-                    "model": self.config.modelName,
-                    "messages": anthropicMessages,
-                    "max_tokens": self.maxTokens,
-                    "stream": true
-                ]
-                self.applyGenerationParams(to: &body)
-                if let systemPrompt = systemPrompt {
-                    body["system"] = systemPrompt
-                }
+                let body = self.streamingBody(
+                    anthropicMessages: anthropicMessages, systemPrompt: systemPrompt)
 
                 var request = self.makeRequest(streaming: true)
                 request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -489,9 +655,15 @@ struct ClaudeLLMProvider: LLMProvider {
                     let deltaType = delta["type"] as? String ?? ""
                     if deltaType == "text_delta", let text = delta["text"] as? String {
                         return .emit(text)
-                    } else if deltaType == "thinking_delta", let thinking = delta["thinking"] as? String {
-                        return .emit(thinking)
                     }
+                    // ⚠️ `thinking_delta` is deliberately NOT emitted. This branch was unreachable
+                    // until thinking was wired into the streaming builder, because that builder
+                    // never set `body["thinking"]` — so emitting it was a latent bug, not a
+                    // feature: this stream is the bot's visible reply and has no second sink, so
+                    // reasoning would splice straight into the answer text with no separation.
+                    // The agent path keeps its reasoning: `generateCognitiveStep` parses
+                    // `thinking` blocks into `ModernCognitiveStep.thought`, which the UI renders
+                    // apart from the response.
                     // input_json_delta (tool-call argument streaming) is ignored in bot mode.
                     return .skip
                 case "message_stop":
@@ -539,4 +711,27 @@ struct ClaudeLLMProvider: LLMProvider {
 
         return (systemPrompt.isEmpty ? nil : systemPrompt, anthropicMessages)
     }
+}
+
+// MARK: - Test Seam
+
+// ⚠️ Thin pass-throughs to the private builders above — they add NO logic of their own, which is
+// the only reason asserting on them is equivalent to asserting on a live request.
+extension ClaudeLLMProvider {
+
+    /// Renders the agent/cognitive-step request body without issuing a request.
+    func debugRequestBody(messages: [[String: String]], tools: [[String: Any]]?) -> [String: Any] {
+        let (systemPrompt, anthropicMessages) = translateMessages(messages)
+        return cognitiveStepBody(
+            anthropicMessages: anthropicMessages, systemPrompt: systemPrompt, tools: tools)
+    }
+
+    /// Renders the bot/streaming request body without opening a stream.
+    func debugStreamingRequestBody(messages: [[String: String]]) -> [String: Any] {
+        let (systemPrompt, anthropicMessages) = translateMessages(messages)
+        return streamingBody(anthropicMessages: anthropicMessages, systemPrompt: systemPrompt)
+    }
+
+    /// Builds the request (headers only matter) without issuing it.
+    func debugMakeRequest() -> URLRequest { makeRequest() }
 }

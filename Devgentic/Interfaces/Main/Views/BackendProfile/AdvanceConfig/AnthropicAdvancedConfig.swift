@@ -32,13 +32,26 @@ struct AnthropicAdvancedConfig: Codable, Hashable {
 
     // MARK: - Extended Thinking
 
-    /// When enabled, Claude will use internal chain-of-thought reasoning before responding.
-    /// Requires `anthropic-version: 2025-04-14` or later.
+    /// When enabled, Claude reasons internally before responding.
+    ///
+    /// ⚠️ Carried by `anthropic-version: 2023-06-01` like every other request — thinking is NOT
+    /// gated behind an API version. A previous comment here claimed it required `2025-04-14`,
+    /// which is not a value the API recognises; the provider acted on that claim and rejected
+    /// every request from a thinking-enabled profile. See `AnthropicModelGeneration` for what
+    /// actually varies by model.
     var extendedThinking: Bool
 
     /// The maximum number of tokens Claude can use for internal thinking.
-    /// Only relevant when `extendedThinking` is true. Must be less than `maxTokens`.
+    ///
+    /// ⚠️ LEGACY MODELS ONLY (Opus 4.5 and older, Sonnet 4.5/4.0, Haiku 4.5). `budget_tokens` was
+    /// removed on Opus 4.7+ / Sonnet 5 / Fable 5 and returns 400 there — those models take
+    /// `thinkingEffort` instead. Must be less than `maxTokens` where it does apply.
     var thinkingBudgetTokens: Int?
+
+    /// Thinking depth on adaptive-era models: `low` | `medium` | `high` | `xhigh` | `max`.
+    /// Nil means "API default" (`high`). Replaces `thinkingBudgetTokens` on those models.
+    /// ⚠️ `xhigh` arrived with Opus 4.7 and is rejected by Opus 4.6 / Sonnet 4.6.
+    var thinkingEffort: String?
 
     /// Creates a default configuration for Anthropic Claude.
     static func `default`() -> AnthropicAdvancedConfig {
@@ -49,7 +62,8 @@ struct AnthropicAdvancedConfig: Codable, Hashable {
             topK: nil,
             stopSequences: nil,
             extendedThinking: false,
-            thinkingBudgetTokens: 10000
+            thinkingBudgetTokens: 10000,
+            thinkingEffort: nil
         )
     }
 
@@ -57,12 +71,13 @@ struct AnthropicAdvancedConfig: Codable, Hashable {
 
     private enum CodingKeys: String, CodingKey {
         case maxTokens, temperature, topP, topK, stopSequences
-        case extendedThinking, thinkingBudgetTokens
+        case extendedThinking, thinkingBudgetTokens, thinkingEffort
     }
 
     // Memberwise initializer required due to custom decoder.
     init(maxTokens: Int, temperature: Double?, topP: Double?, topK: Int?,
-         stopSequences: [String]?, extendedThinking: Bool, thinkingBudgetTokens: Int?) {
+         stopSequences: [String]?, extendedThinking: Bool, thinkingBudgetTokens: Int?,
+         thinkingEffort: String? = nil) {
         self.maxTokens = maxTokens
         self.temperature = temperature
         self.topP = topP
@@ -70,6 +85,7 @@ struct AnthropicAdvancedConfig: Codable, Hashable {
         self.stopSequences = stopSequences
         self.extendedThinking = extendedThinking
         self.thinkingBudgetTokens = thinkingBudgetTokens
+        self.thinkingEffort = thinkingEffort
     }
 
     /// Custom decoder to handle cases where numeric types were incorrectly saved as Bools
@@ -127,5 +143,9 @@ struct AnthropicAdvancedConfig: Codable, Hashable {
         } else {
             self.thinkingBudgetTokens = try container.decodeIfPresent(Int.self, forKey: .thinkingBudgetTokens)
         }
+
+        // thinkingEffort — absent on every profile written before the adaptive-thinking fix,
+        // so decoding must tolerate the missing key rather than fail the whole blob.
+        self.thinkingEffort = try container.decodeIfPresent(String.self, forKey: .thinkingEffort)
     }
 }

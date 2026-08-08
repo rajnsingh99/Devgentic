@@ -40,8 +40,14 @@ struct PlanProgressCard: View {
 
     private var isCardExpanded: Bool { cardExpandedOverride ?? (data.phase != .finished) }
 
+    /// ⚠️ `.other` is deliberately NOT settled. Under the old `!= .pending && != .running` test an
+    /// unrecognised status counted as done, so a newer build's in-flight state would have shown the
+    /// progress capsule as complete while the step was still running. Under-reporting progress on a
+    /// finished plan is the safer error.
     private var settledCount: Int {
-        data.steps.filter { $0.status != .pending && $0.status != .running }.count
+        data.steps.filter {
+            $0.status != .pending && $0.status != .running && !$0.status.isUnrecognised
+        }.count
     }
 
     /// True for a plan that finished cancelled before any step ran (review rejection).
@@ -547,6 +553,9 @@ struct ReflectionAttemptsCard: View {
         case .failed:     return ("failed", theme.errorColor)
         case .cancelled:  return ("cancelled", theme.tertiaryText)
         case .running, .completed: return nil
+        // No verdict to show for a status this build does not know — the attempt row itself,
+        // its critique and its nested tool calls all still render.
+        case .other:      return nil
         }
     }
 
@@ -571,6 +580,9 @@ private extension ReflectionAttemptStatus {
         case .rejected:             return .warning
         case .failed:               return .failed
         case .cancelled:            return .cancelled
+        // Carry the unrecognised value across rather than collapsing it onto a known status,
+        // so the glyph is honestly "unknown" instead of silently claiming success or failure.
+        case .other(let raw):       return .other(raw)
         }
     }
 }
@@ -618,6 +630,12 @@ private struct CapabilityStatusIcon: View {
                 .foregroundColor(theme.errorColor.opacity(0.9))
         case .cancelled:
             Image(systemName: "slash.circle")
+                .font(.system(size: 12))
+                .foregroundColor(theme.tertiaryText)
+        case .other:
+            // A status written by a newer build. A neutral glyph is the honest rendering — the
+            // step's title, summary and nested tool calls are all still present and correct.
+            Image(systemName: "questionmark.circle")
                 .font(.system(size: 12))
                 .foregroundColor(theme.tertiaryText)
         }
@@ -783,6 +801,9 @@ extension PlanStepStatus {
         case .warning:   return "Completed with warnings"
         case .failed:    return "Failed"
         case .cancelled: return "Cancelled"
+        // Show the raw value rather than an invented label — it is the only truthful thing
+        // this build knows about the status, and it is more useful than "Unknown".
+        case .other(let raw): return LocalizedStringKey(raw)
         }
     }
 }
@@ -797,6 +818,7 @@ extension ReflectionAttemptStatus {
         case .completed:  return "Completed"
         case .failed:     return "Failed"
         case .cancelled:  return "Cancelled"
+        case .other(let raw): return LocalizedStringKey(raw)
         }
     }
 }

@@ -57,23 +57,70 @@ struct CapabilityToolbarButtons: View {
     }
 
     /// A binding into the profile's `AgentCapabilities`. Reads derive from the current
-    /// profile; writes mutate the profile in place, push it back to the composer's
-    /// state, and persist — so a change is reflected instantly and effective next send.
+    /// profile; writes apply the capability delta to a FRESHLY READ row and persist — so a change
+    /// is reflected instantly and effective next send, without carrying stale fields to disk.
+    ///
+    /// ⚠️ This used to write `profile` — the composer's cached snapshot — back wholesale. That
+    /// snapshot is refreshed only when `selectedProfileID` changes, and the chat view is never torn
+    /// down ("always alive, visibility toggled via opacity"), so it goes stale the moment the user
+    /// edits the same profile in the editor. Toggling a chip then reverted their instructions,
+    /// model and tool edits on disk — silently, with the editor still showing the newer values.
+    /// A whole-snapshot write also resurrected a profile the user had just deleted.
     private var capabilitiesBinding: Binding<AgentCapabilities> {
         Binding(
             get: { agentConfig?.capabilities ?? AgentCapabilities() },
             set: { newCaps in
-                guard var updated = profile, case .agent(var cfg) = updated.details else { return }
+                guard let cached = profile else { return }
+                let logger = DGLogger(category: "CapabilityToolbar")
+
+                // Re-read the row so the delta lands on current bytes, not on this view's cache.
+                let stored: BackendProfileModel?
+                do {
+                    stored = try BackendProfileStore.shared.fetchProfile(byId: cached.id)
+                } catch {
+                    logger.error(
+                        "[PROFILE] Could not re-read profile \(cached.id) before applying a "
+                        + "capability change: \(error.localizedDescription). CONSEQUENCE: the "
+                        + "toggle is not persisted — refusing to write a possibly stale snapshot "
+                        + "over newer edits."
+                    )
+                    return
+                }
+
+                // Deleted out from under the composer. Writing here would recreate it.
+                guard var updated = stored else {
+                    logger.notice(
+                        "[PROFILE] Capability change ignored — profile \(cached.id) no longer "
+                        + "exists. CONSEQUENCE: the chip does not persist and the deleted profile "
+                        + "is not resurrected; the composer still shows its cached name until a "
+                        + "profile is reselected."
+                    )
+                    return
+                }
+                guard case .agent(var cfg) = updated.details else {
+                    logger.notice(
+                        "[PROFILE] Capability change ignored — stored profile \(cached.id) is no "
+                        + "longer an agent. CONSEQUENCE: the toggle does not persist."
+                    )
+                    return
+                }
+
                 cfg.capabilities = newCaps
                 updated.details = .agent(cfg)
-                profile = updated
+
                 do {
                     try BackendProfileStore.shared.saveProfile(updated)
+                    // Refresh the composer's cache from what was actually written, so the chip
+                    // reflects disk and the next toggle starts from current bytes.
+                    profile = updated
                 } catch {
-                    // Non-fatal: the in-memory toggle still took effect for this session;
-                    // it just didn't persist (e.g. a transient validation/store error).
-                    DGLogger(category: "CapabilityToolbar").warning(
-                        "Failed to persist capability change: \(error.localizedDescription)")
+                    // Non-fatal, but the cache is deliberately NOT updated: the chip must not
+                    // claim a state that is not on disk.
+                    logger.warning(
+                        "[PROFILE] Failed to persist capability change for \(cached.id): "
+                        + "\(error.localizedDescription). CONSEQUENCE: the chip stays in its "
+                        + "previous state and the change is not effective on the next send."
+                    )
                 }
             }
         )

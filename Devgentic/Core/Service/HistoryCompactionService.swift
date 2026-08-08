@@ -409,6 +409,10 @@ actor HistoryCompactionService {
             case .error(let title, let details, _, _): text = "\(title ?? "Error"): \(details)"
             case .mediaArtifact(let a): text = "[Media: \(a.label ?? a.kind.rawValue)]"
             case .checkpoint: continue // Already handled above
+            // ⚠️ SKIP, do not summarize. This build cannot read the content, so any text it
+            // produced would be invented — and a compaction summary is fed back to the model as
+            // fact. Skipping loses the turn from the summary; fabricating would poison it.
+            case .unknown: continue
             }
             let truncated = text.count > 500 ? String(text.prefix(500)) + "..." : text
 

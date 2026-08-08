@@ -94,6 +94,11 @@ struct AdvisoryBannerView: View {
         switch action {
         case .openProfileSettings(let profileID):
             router.navigate(to: .profileDetail(profileID: profileID))
+        case .revealInFinder(let path):
+            // Same affordance the store-recovery path uses. Reveal rather than open: the target is a
+            // database directory, and selecting it lets the user inspect or move it aside without the
+            // app pretending it can repair something it has no re-open path for.
+            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
         }
     }
 }

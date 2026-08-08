@@ -33,13 +33,16 @@ struct GeminiImageGenService: ImageGenProvider, Sendable {
         conversationID: UUID,
         progressHandler: (@Sendable (Int, Int) -> Void)?
     ) async throws -> MediaArtifact {
-        var urlComponents = URLComponents(url: ProviderDefaults.geminiBaseURL.appendingPathComponent("models/\(modelName):generateContent"), resolvingAgainstBaseURL: false)!
-        urlComponents.queryItems = [URLQueryItem(name: "key", value: apiKey)]
+        let urlComponents = URLComponents(url: ProviderDefaults.geminiBaseURL.appendingPathComponent("models/\(modelName):generateContent"), resolvingAgainstBaseURL: false)!
         let url = urlComponents.url!
 
         var request = URLRequest(url: url, timeoutInterval: 120)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // ⚠️ Header, never the query string — see the note in `GeminiService.verifyAndFetchModels`.
+        // A key in the URL is written to URLSession's on-disk cache and to every proxy access log
+        // on the path.
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
 
         let fullPrompt: String
         if let neg = negativePrompt, !neg.isEmpty {
@@ -93,13 +96,16 @@ struct GeminiImageGenService: ImageGenProvider, Sendable {
         conversationID: UUID,
         progressHandler: (@Sendable (Int, Int) -> Void)?
     ) async throws -> MediaArtifact {
-        var urlComponents = URLComponents(url: ProviderDefaults.geminiBaseURL.appendingPathComponent("models/\(modelName):generateContent"), resolvingAgainstBaseURL: false)!
-        urlComponents.queryItems = [URLQueryItem(name: "key", value: apiKey)]
+        let urlComponents = URLComponents(url: ProviderDefaults.geminiBaseURL.appendingPathComponent("models/\(modelName):generateContent"), resolvingAgainstBaseURL: false)!
         let url = urlComponents.url!
 
         var request = URLRequest(url: url, timeoutInterval: 120)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // ⚠️ Header, never the query string — see the note in `GeminiService.verifyAndFetchModels`.
+        // A key in the URL is written to URLSession's on-disk cache and to every proxy access log
+        // on the path.
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
 
         let fullPrompt: String
         if let neg = negativePrompt, !neg.isEmpty {

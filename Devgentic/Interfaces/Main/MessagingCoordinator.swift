@@ -493,6 +493,29 @@ final class MessagingCoordinator {
             return
         }
 
+        // ⚠️ The timeline must be a FAITHFUL record before it can drive a resume. Resuming rebuilds
+        // the model's view of what already happened, so an event this build could not read is not a
+        // cosmetic gap — a completed `.toolExecution` that survived only as `.unknown` is invisible
+        // to the reconstructor, so the model has no record it already ran that tool and will run it
+        // AGAIN. For a side-effectful tool (a shell command, a file write) that is a real-world
+        // repeat, not a display glitch.
+        //
+        // Refusing costs some runs that would in fact have resumed fine — an unrecognised
+        // warning-class event is harmless. That trade is deliberate: the alternative is silently
+        // repeating work, and the refusal gives the user a full sentence instead of a dead end.
+        if agentMessage.timelineIsDegraded {
+            logger.error(
+                "[resumeRun] Refusing resume for message \(agentMessage.id.uuidString.prefix(8)): the "
+                + "timeline is not a faithful record (decodeFailed=\(agentMessage.timelineDecodeFailed), "
+                + "unreadableEvents=\(agentMessage.flattenedTimelineEvents.filter(\.isUnknown).count)). "
+                + "CONSEQUENCE: the reconstructed prefix would omit completed tool calls, so resuming "
+                + "could re-run side-effectful tools that already ran. The run is finalized instead."
+            )
+            finalizeUnresumable(agentMessage,
+                reason: "Part of this run's record can't be read by this version, so resuming might repeat work that already happened — send the request again.")
+            return
+        }
+
         // Rebuild the in-flight state from the persisted timeline. Streaming resume DROPS the dangling
         // tool; parked resume keeps it to re-raise.
         // Flattened: a run parked inside a plan subtask / reflection trial keeps its tool

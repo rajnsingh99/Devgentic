@@ -29,6 +29,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     weak var quickAccessMainViewModel: MainApplicationViewModel?
     weak var quickAccessThemeManager: ThemeManager?
 
+    /// The profile editor's unsaved state, consulted by `applicationShouldTerminate`.
+    ///
+    /// ⚠️ Register A29: ⌘Q ran straight into async teardown, so a profile editor holding a
+    /// 2,000-character unsaved system prompt was destroyed with no prompt and — contrary to the
+    /// project logging standard — no log line either, leaving the loss invisible in a support
+    /// bundle. Weak, for the same reason as the QuickAccess graph above: DevgenticApp's `@State`
+    /// owns it for the app's lifetime.
+    ///
+    /// ⚠️ Nil until `configureTerminationGuard` runs, and a nil guard means quit is NOT gated. That
+    /// is deliberate — failing open on quit is right, and the window between launch and injection
+    /// is before the user can have opened an editor — but it is logged so a quit that skipped the
+    /// check is distinguishable from one that ran and found nothing.
+    weak var profileService: BackendProfileService?
+
     /// [C6] True when the QuickAccess panel is the KEY window — i.e. the user is actively
     /// looking at it. Because the panel is non-activating it can be key while `NSApp.isActive`
     /// is false, so notification suppression must consult this in addition to app-active.
@@ -183,6 +197,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     /// exited with NO flush/disconnect having run (audit finding #1). `.terminateLater`
     /// keeps the main actor processing while we tear down, then `reply` resumes quitting.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // ⚠️ Before ANY teardown (register A29). Once `.terminateLater` is returned the app is
+        // going away, so this is the last point at which unsaved editor work can be rescued.
+        if case .cancel = handleUnsavedProfileEditsBeforeQuit() {
+            Self.logger.info("[PROFILE] Quit CANCELLED by the user at the unsaved-changes prompt. "
+                             + "CONSEQUENCE: the app stays open with the editor untouched.")
+            return .terminateCancel
+        }
+
         Self.logger.info("Application requested to terminate — running async teardown.")
 
         // Synchronous, cheap teardown first: kill shell child processes.
@@ -206,6 +228,137 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
+    }
+
+    // MARK: - Quit-time unsaved-changes guard (register A29)
+
+    /// Arms the quit-time guard. Separate from `configureQuickAccess` because it has nothing to do
+    /// with the panel — until this runs, `applicationShouldTerminate` cannot see the editor.
+    func configureTerminationGuard(profileService: BackendProfileService) {
+        self.profileService = profileService
+        Self.logger.info("[PROFILE] AppDelegate: quit-time unsaved-changes guard armed.")
+    }
+
+    enum QuitDecision { case proceed, cancel }
+
+    /// Offers Save / Discard / Cancel when the profile editor holds unsaved work, and reports
+    /// whether quitting may continue.
+    ///
+    /// ⚠️ `NSAlert.runModal()` is correct HERE and wrong in `onDisappear`: this is an AppKit
+    /// delegate callback on the main thread, not a SwiftUI update pass, so it is not spinning a
+    /// nested modal loop inside a view update.
+    ///
+    /// ⚠️ Uses `hasUnsavedEditorChanges`, never `editBuffer?.isDirty` — a workflow canvas keeps its
+    /// dirt in `WorkflowCanvasState`, so the buffer check alone reports "clean" for a canvas full
+    /// of unsaved nodes.
+    @MainActor
+    private func handleUnsavedProfileEditsBeforeQuit() -> QuitDecision {
+        guard let profileService else {
+            Self.logger.notice(
+                "[PROFILE] Quit is NOT gated on unsaved editor changes: the profile service was "
+                + "never injected into AppDelegate. CONSEQUENCE: if an editor is open with unsaved "
+                + "work, it is being discarded silently — the failure this guard exists to prevent."
+            )
+            return .proceed
+        }
+        // ⚠️ Flush FIRST. A floating prompt editor keeps typing in its own `@State` and writes back
+        // only on an explicit commit, so it is a third source of unsaved work that neither the
+        // buffer nor the canvas reports. Navigation commits it on teardown (register A27); ⌘Q has
+        // no teardown, so without this a 2,000-character system prompt typed into the Expand window
+        // is discarded here silently — the exact loss this guard exists to prevent.
+        profileService.flushPendingEditorText()
+
+        guard profileService.hasUnsavedEditorChanges else { return .proceed }
+
+        let bufferDirty = profileService.editBuffer?.isDirty == true
+        let canvasDirty = profileService.canvasEditGuard.hasUnsavedChanges
+        Self.logger.notice(
+            "[PROFILE] Quit requested with unsaved editor changes (buffer dirty: \(bufferDirty), "
+            + "canvas dirty: \(canvasDirty)) for '\(profileService.editBuffer?.draft.displayName ?? "no open profile")'. "
+            + "CONSEQUENCE: prompting before teardown; quit is blocked until the user answers."
+        )
+
+        let alert = NSAlert()
+        alert.messageText = String(localized: "You have unsaved changes")
+        alert.informativeText = String(
+            localized: "Your profile edits haven't been saved yet. Quitting now discards them.")
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: String(localized: "Save and Quit"))
+        alert.addButton(withTitle: String(localized: "Discard and Quit"))
+        alert.addButton(withTitle: String(localized: "Cancel"))
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return saveOpenProfileEdits(on: profileService)
+
+        case .alertSecondButtonReturn:
+            Self.logger.notice(
+                "[PROFILE] User chose DISCARD at the quit prompt. CONSEQUENCE: the unsaved edits to "
+                + "'\(profileService.editBuffer?.draft.displayName ?? "the open profile")' are gone; "
+                + "the persisted profile is unchanged."
+            )
+            return .proceed
+
+        default:
+            return .cancel
+        }
+    }
+
+    /// Persists whatever is dirty, and REFUSES to quit if any part of it fails.
+    ///
+    /// ⚠️ Quitting after a failed save would be the worst outcome available: the user explicitly
+    /// asked to keep the work, and it would be destroyed anyway with only a toast that no longer
+    /// has a window to appear in. A failure here cancels the quit and says why.
+    @MainActor
+    private func saveOpenProfileEdits(on profileService: BackendProfileService) -> QuitDecision {
+        if profileService.canvasEditGuard.hasUnsavedChanges {
+            guard let saveHook = profileService.canvasEditGuard.saveHook else {
+                Self.logger.error(
+                    "[PROFILE] Quit-time save requested but the workflow canvas registered NO save "
+                    + "hook. CONSEQUENCE: the canvas layout cannot be persisted from here; quit is "
+                    + "cancelled so the user can save it from the canvas itself."
+                )
+                presentQuitSaveFailure(String(
+                    localized: "The workflow canvas couldn't be saved automatically. Save it from the canvas, then quit."))
+                return .cancel
+            }
+            saveHook()
+            Self.logger.info("[PROFILE] Quit-time save: workflow canvas layout persisted.")
+        }
+
+        if let buffer = profileService.editBuffer, buffer.isDirty {
+            do {
+                try profileService.saveProfile(buffer.draft)
+                buffer.markSaved()
+                Self.logger.info(
+                    "[PROFILE] Quit-time save: profile '\(buffer.draft.displayName)' "
+                    + "(\(buffer.draft.id)) persisted; proceeding with quit."
+                )
+            } catch {
+                // ⚠️ Reachable in ordinary use: `ProfileValidator` rejects e.g. an over-length name,
+                // and the agent editor's own "system instructions are required" pre-flight lives in
+                // the VIEW (register A35), so a save routed from here never ran it.
+                Self.logger.error(
+                    "[PROFILE] Quit-time save FAILED for '\(buffer.draft.displayName)' "
+                    + "(\(buffer.draft.id)): \(error.localizedDescription). CONSEQUENCE: quit is "
+                    + "CANCELLED rather than discarding the edits the user asked to keep."
+                )
+                presentQuitSaveFailure(error.localizedDescription)
+                return .cancel
+            }
+        }
+
+        return .proceed
+    }
+
+    @MainActor
+    private func presentQuitSaveFailure(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = String(localized: "Couldn't save your changes")
+        alert.informativeText = message
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: String(localized: "OK"))
+        alert.runModal()
     }
 
     /// Everything that needs `await` before quitting. Runs while the run loop is alive

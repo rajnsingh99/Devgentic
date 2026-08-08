@@ -26,11 +26,26 @@ struct Advisory: Identifiable, Equatable {
     enum Category: String {
         /// Assembled prompt exceeds the model's effective context window.
         case contextOverflow
+        /// The vector store did not open, so retrieval is returning nothing for this conversation.
+        /// ⚠️ Post this ONLY on `!VectorStoreService.shared.isAvailable` — never on "0 results".
+        /// `retrieveRAGContext` returns nil for four different reasons, three of them healthy (no
+        /// embedding, nothing above threshold, all hits were history duplicates), and those are the
+        /// COMMON case early in a conversation. Bannering on nil would fire constantly, train the
+        /// user to dismiss, and `dismiss` suppresses the key for the whole session — one reflexive
+        /// dismissal would then disarm the real signal permanently.
+        case knowledgeUnavailable
+        /// The selected profile's stored configuration could not be decoded, so the app is showing a
+        /// placeholder rather than what the user configured.
+        case profileUnreadable
     }
 
     enum Action: Equatable {
         /// Deep-link to the profile editor (router `.profileDetail`).
         case openProfileSettings(profileID: UUID)
+        /// Reveal a path in Finder — for states the app cannot fix in-process and the user may want
+        /// to inspect or move aside (the vector store has no re-open path: `static let shared` with a
+        /// `private init`, so recovery is quit-and-relaunch).
+        case revealInFinder(path: String)
     }
 
     let id = UUID()

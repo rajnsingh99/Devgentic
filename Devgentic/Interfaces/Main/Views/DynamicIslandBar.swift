@@ -296,21 +296,34 @@ extension DynamicIslandBar where CenterContent == IslandTitleLabel, TrailingCont
 ///     .unsavedChangesBackGuard(
 ///         isDirty: editBuffer.isDirty,
 ///         showingAlert: $showingBackAlert,
-///         onDiscard: { editBuffer.revert() }
+///         onDiscard: { editBuffer.revert() },
+///         onLeave: { leave() }
 ///     )
 /// }
 ///
 /// private func handleBack() {
 ///     if editBuffer.isDirty { showingBackAlert = true }
-///     else { router.goBack() }
+///     else { leave() }
 /// }
 /// ```
+///
+/// ⚠️ `handleBack` and the guard's `onLeave` must call the SAME exit. Wiring a second exit path
+/// around the guard is register A28: the workflow sheet's xmark went straight to `dismiss()`, so
+/// closing it destroyed every edit with no prompt while the identical view, routed, prompted
+/// correctly.
 struct UnsavedChangesBackGuardModifier: ViewModifier {
     let isDirty: Bool
     @Binding var showingAlert: Bool
     var onDiscard: () -> Void = {}
 
-    @Environment(MainViewRouter.self) private var router
+    /// How to actually LEAVE once the user has confirmed the discard.
+    ///
+    /// ⚠️ This used to be a hardcoded `router.goBack()` (register A28). The three detail views are
+    /// each hosted two ways — as a routed screen, and as a sheet inside the workflow canvas — and
+    /// `router.goBack()` is meaningless in the sheet. That is *why* the sheet's xmark was wired
+    /// straight to `dismiss()`, bypassing this guard entirely: the guard could not have dismissed
+    /// it. Parameterising the exit is what lets both hosts share one guard.
+    var onLeave: () -> Void
 
     func body(content: Content) -> some View {
         content.confirmationDialog(
@@ -320,9 +333,7 @@ struct UnsavedChangesBackGuardModifier: ViewModifier {
         ) {
             Button("Discard Changes", role: .destructive) {
                 onDiscard()
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    router.goBack()
-                }
+                onLeave()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -335,12 +346,14 @@ extension View {
     func unsavedChangesBackGuard(
         isDirty: Bool,
         showingAlert: Binding<Bool>,
-        onDiscard: @escaping () -> Void = {}
+        onDiscard: @escaping () -> Void = {},
+        onLeave: @escaping () -> Void
     ) -> some View {
         modifier(UnsavedChangesBackGuardModifier(
             isDirty: isDirty,
             showingAlert: showingAlert,
-            onDiscard: onDiscard
+            onDiscard: onDiscard,
+            onLeave: onLeave
         ))
     }
 }

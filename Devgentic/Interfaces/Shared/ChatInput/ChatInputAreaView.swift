@@ -45,6 +45,9 @@ struct ChatInputAreaView: View {
     /// Used only to resolve a profile for the MCP banner's Tool Library navigation, which is
     /// per-profile even though MCP health is not.
     @Environment(BackendProfileService.self) private var profileService
+    /// A refused send has to say so somewhere the user is already looking (register A32).
+    /// Injected at the `WindowGroup`, which is this view's only call site.
+    @Environment(ToastManager.self) private var toastManager
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -441,41 +444,7 @@ struct ChatInputAreaView: View {
                     // Same gate the send button uses — Enter must not bypass the
                     // voice-busy check (see `isVoiceBusy`).
                     guard isInputEnabled, !isVoiceBusy else { return }
-                    // Code mode: intercept if model or folder not configured,
-                    // then point selectedProfileID at the code profile so getRequestConfig resolves.
-                    if mainViewModel.interfaceMode == .code {
-                        if codeSessionManager.modelName.isEmpty {
-                            logger.info("[CODE] Send intercepted — model not selected, opening model picker")
-                            codeSessionManager.showModelPicker = true
-                            return
-                        }
-                        if codeSessionManager.projectPath == nil {
-                            logger.info("[CODE] Send intercepted — folder not selected, opening folder picker")
-                            openCodeFolderPicker()
-                            return
-                        }
-                        if let codeID = codeSessionManager.codeProfileID {
-                            backendConfiguration.selectedProfileID = codeID
-                        }
-                    }
-                    // Chat / Workflow modes: intercept if no backend profile is
-                    // selected so the user isn't silently stuck (previously the
-                    // send just logged a warning and nothing happened). Mirrors
-                    // the code-mode model/folder picker pattern.
-                    if mainViewModel.interfaceMode == .chat || mainViewModel.interfaceMode == .workflow {
-                        if backendConfiguration.selectedProfileID == nil {
-                            logger.info("[\(mainViewModel.interfaceMode.rawValue)] Send intercepted — no backend selected, opening picker")
-                            showingBackendSelectorPopup = true
-                            return
-                        }
-                    }
-                    if let config = backendConfiguration.getRequestConfig() {
-                        self.onSendMessage(attributedString, config)
-                        self.inputViewModel.userInput = ""
-                    } else {
-                        logger.warning("Commit triggered but no backend profile is selected.")
-                        showingBackendSelectorPopup = true
-                    }
+                    attemptSend(attributedString)
                 },
                 minHeight: textEditorMinHeight,
                 maxHeight: textEditorMaxHeight,
@@ -703,8 +672,8 @@ struct ChatInputAreaView: View {
     }
 
     /// Send from the toolbar button — pulls the ATTRIBUTED text from the editor (preserves
-    /// rich content, exactly as the old morphing button's send action did), runs the code-mode
-    /// intercepts, and hands off to onSendMessage.
+    /// rich content, exactly as the old morphing button's send action did) and hands off to the
+    /// shared send path.
     private func sendViaActionButton() {
         let attributedString: NSAttributedString
         if let textView = editorTextView {
@@ -713,17 +682,30 @@ struct ChatInputAreaView: View {
             attributedString = NSAttributedString(string: inputViewModel.userInput, attributes: defaultTypingAttributes)
         }
         guard !attributedString.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        attemptSend(attributedString)
+    }
 
-        // Code mode: intercept if model or folder not configured,
-        // then point selectedProfileID at the code profile so getRequestConfig resolves.
+    /// The ONE send path — pre-send intercepts, profile resolution, hand-off.
+    ///
+    /// ⚠️ Enter and the send button used to implement this separately, and they had drifted
+    /// (register A32): Enter intercepted an unselected or deleted profile by opening the backend
+    /// picker, while the button's `guard let config = … else { logger.error(…); return }` did
+    /// nothing a user could see. Clicking send on a profile deleted from the sidebar looked like a
+    /// dead button — the composer still showed the profile's name, because `selectedProfile` is a
+    /// stale snapshot that nothing invalidated. `isVoiceBusy` above carries the same warning about
+    /// the same two callers; this is that lesson applied to the action instead of the gate. Keep
+    /// both entry points routed through here.
+    private func attemptSend(_ attributedString: NSAttributedString) {
+        // Code mode: intercept if model or folder not configured, then point selectedProfileID at
+        // the code profile so resolution succeeds.
         if mainViewModel.interfaceMode == .code {
             if codeSessionManager.modelName.isEmpty {
-                logger.info("[CODE] Send button intercepted — model not selected, opening model picker")
+                logger.info("[CODE] Send intercepted — model not selected, opening model picker")
                 codeSessionManager.showModelPicker = true
                 return
             }
             if codeSessionManager.projectPath == nil {
-                logger.info("[CODE] Send button intercepted — folder not selected, opening folder picker")
+                logger.info("[CODE] Send intercepted — folder not selected, opening folder picker")
                 openCodeFolderPicker()
                 return
             }
@@ -731,11 +713,48 @@ struct ChatInputAreaView: View {
                 backendConfiguration.selectedProfileID = codeID
             }
         }
-        guard let config = backendConfiguration.getRequestConfig() else {
-            logger.error("Send button: Could not get backend config."); return
+
+        switch backendConfiguration.resolveRequestConfig() {
+        case .success(let config):
+            onSendMessage(attributedString, config)
+            inputViewModel.userInput = ""
+
+        case .failure(let reason):
+            handleUnsendableProfile(reason)
         }
-        onSendMessage(attributedString, config)
-        inputViewModel.userInput = ""
+    }
+
+    /// Turns a resolution failure into something the user can act on. Every arm leaves the typed
+    /// message in the composer — the text is the one thing that must survive a refused send.
+    private func handleUnsendableProfile(_ reason: BackendConfigUnavailability) {
+        switch reason {
+        case .noProfileSelected:
+            showingBackendSelectorPopup = true
+
+        case .profileDeleted(let id):
+            // ⚠️ Clear the dangling selection as well as opening the picker. Leaving it set is what
+            // kept the composer showing a deleted profile's name and the send button enabled, so
+            // every subsequent click failed the same silent way. Only this arm clears it: a store
+            // read that THREW says nothing about whether the profile exists.
+            logger.notice(
+                "[PROFILE] Clearing the composer's selection of deleted profile \(id). "
+                + "CONSEQUENCE: the send button disables and the picker opens; the typed message is kept."
+            )
+            backendConfiguration.selectedProfileID = nil
+            selectedProfile = nil
+            toastManager.show(
+                String(localized: "That profile was deleted. Choose another to send this message."),
+                style: .error
+            )
+            showingBackendSelectorPopup = true
+
+        case .storeUnavailable(_, let description):
+            // The selection is deliberately KEPT — retrying is the right next action.
+            toastManager.show(
+                String(localized: "Couldn't read the selected profile: \(description)"),
+                style: .error
+            )
+        }
     }
     
     // MARK: - Handlers

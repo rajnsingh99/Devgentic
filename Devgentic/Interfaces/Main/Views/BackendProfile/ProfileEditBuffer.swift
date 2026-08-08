@@ -59,6 +59,24 @@ final class ProfileEditBuffer {
         original = draft
     }
 
+    /// Re-baselines `original` onto a snapshot that was persisted by someone OTHER than this
+    /// buffer, leaving `draft` — and therefore the user's other in-progress edits — untouched.
+    ///
+    /// ⚠️ This is not `markSaved()` and the difference is load-bearing. Several surfaces write a
+    /// profile to disk while a detail editor is open on it: the Tool Library, the workflow canvas,
+    /// the composer's capability chips. What they persist is that ONE facet, not the whole draft.
+    /// `markSaved()` would declare the entire draft saved and quietly swallow every other pending
+    /// edit; `load()` would overwrite the draft and destroy them outright. Re-basing `original`
+    /// alone is the only operation that keeps `isDirty` honest afterwards — it stays true if and
+    /// only if the user still has unsaved work.
+    ///
+    /// ⚠️ Not calling this at all is what made **Revert lie**: `original` kept a tool list that no
+    /// longer existed on disk, so Revert restored the editor to a state the save path had already
+    /// replaced, and told the user their change was discarded when it was not.
+    func rebase(onto persisted: BackendProfileModel) {
+        original = persisted
+    }
+
     /// Replaces both original and draft with a freshly-loaded profile.
     /// Used when switching profiles or after an external reload.
     func load(_ profile: BackendProfileModel) {

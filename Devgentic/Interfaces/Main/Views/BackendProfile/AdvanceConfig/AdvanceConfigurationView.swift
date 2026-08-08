@@ -21,10 +21,16 @@ import SwiftUI
 struct AdvancedConfigNumericField: View {
     @Binding var value: Int
     let width: CGFloat
+    /// Spoken name for the field. ⚠️ Register A61: the `TextField` label is `""` so the control
+    /// announces as a bare, nameless text field — the parameter name lives in a sibling `Text` that
+    /// VoiceOver reads as unrelated static text. Required rather than defaulted, so a new caller
+    /// cannot add another unlabeled field by omission.
+    let accessibilityName: LocalizedStringKey
     @Environment(\.appTheme) private var theme
 
     var body: some View {
         TextField("", value: $value, format: .number)
+            .accessibilityLabel(accessibilityName)
             .textFieldStyle(.plain)
             .multilineTextAlignment(.trailing)
             .monospacedDigit()
@@ -51,12 +57,20 @@ struct GeminiSettingsView: View {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Temperature").fontWeight(.medium)
-                    Text("Controls the randomness of the generated response.").font(.caption).foregroundColor(theme.secondaryText)
+                    Text("Controls the randomness of the generated response. Gemini accepts 0.0–2.0; above 1.0 is markedly more divergent.")
+                        .font(.caption).foregroundColor(theme.secondaryText)
                 }
                 Spacer(minLength: 16)
                 HStack {
-                    Slider(value: $config.temperature.toNonOptional(defaultValue: 0.9), in: 0.0...1.0, step: 0.05)
+                    // ⚠️ Register A73: capped at 1.0, while `generationConfig.temperature` accepts
+                    // 0.0–2.0. The upper half of the model's range was simply unreachable, and
+                    // silently so — the slider bottomed out at its own maximum with no indication
+                    // it was the UI's limit rather than the API's. The OpenAI panel below already
+                    // uses 0.0...2.0 for the same parameter.
+                    Slider(value: $config.temperature.toNonOptional(defaultValue: 0.9), in: 0.0...2.0, step: 0.05)
                         .frame(width: 150)
+                        .accessibilityLabel("Temperature")
+                        .accessibilityValue(String(format: "%.2f", config.temperature ?? 0.9))
                     Text("\(config.temperature ?? 0.9, specifier: "%.2f")")
                         .monospacedDigit()
                         .frame(width: 40, alignment: .trailing)
@@ -75,6 +89,8 @@ struct GeminiSettingsView: View {
                 HStack {
                     Slider(value: $config.topP.toNonOptional(defaultValue: 1.0), in: 0.0...1.0, step: 0.05)
                         .frame(width: 150)
+                        .accessibilityLabel("Top P")
+                        .accessibilityValue(String(format: "%.2f", config.topP ?? 1.0))
                     Text("\(config.topP ?? 1.0, specifier: "%.2f")")
                         .monospacedDigit()
                         .frame(width: 40, alignment: .trailing)
@@ -91,11 +107,30 @@ struct GeminiSettingsView: View {
                 }
                 Spacer(minLength: 16)
                 HStack {
-                    Text("\(config.topK ?? 1)").monospacedDigit()
-                    Stepper("", value: $config.topK.toNonOptional(defaultValue: 1), in: 1...100).labelsHidden()
+                    // ⚠️ register A54 — the nil fallback was `1`, so merely touching the stepper
+                    // persisted greedy decoding. Google's own default is 64; 40 is the value the
+                    // stepper lands on when the user starts adjusting from an unset config.
+                    Text(config.topK.map(String.init) ?? "Default").monospacedDigit()
+                    Stepper("", value: $config.topK.toNonOptional(defaultValue: 40), in: 1...100).labelsHidden()
+                        .accessibilityLabel("Top K")
+                        .accessibilityValue(config.topK.map(String.init) ?? "Default")
                 }
             }
-            
+
+            // ⚠️ Warn rather than clamp — the same choice the Ollama panel makes for num_ctx.
+            // Top K 1 is legitimate if you actually want greedy decoding, so the floor stays at 1;
+            // what was wrong was arriving there by accident and silently losing two other controls.
+            if config.topK == 1 {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(theme.warningColor)
+                    Text("Top K 1 selects only the single most likely token, so Temperature and Top P above have no effect and responses repeat verbatim. Raise Top K to let them apply.")
+                        .font(.caption)
+                        .foregroundColor(theme.secondaryText)
+                }
+                .accessibilityElement(children: .combine)
+            }
+
             Divider()
             
             // Max Output Tokens
@@ -108,6 +143,8 @@ struct GeminiSettingsView: View {
                 HStack {
                     Text("\(config.maxOutputTokens ?? 2048)").monospacedDigit()
                     Stepper("", value: $config.maxOutputTokens.toNonOptional(defaultValue: 2048), in: 256...8192, step: 256).labelsHidden()
+                        .accessibilityLabel("Max output tokens")
+                        .accessibilityValue("\(config.maxOutputTokens ?? 2048)")
                 }
             }
             
@@ -135,6 +172,8 @@ struct GeminiSettingsView: View {
                     }
                     .labelsHidden()
                     .fixedSize()
+                    // The category name is the only thing distinguishing these four pickers.
+                    .accessibilityLabel(setting.category.localizedTitle)
                 }
                 Divider()
             }
@@ -271,6 +310,8 @@ struct OllamaSettingsView: View {
                 Spacer(minLength: 16)
                 HStack {
                     Slider(value: $config.temperature.toNonOptional(defaultValue: 0.8), in: 0.0...2.0, step: 0.05)
+                        .accessibilityLabel("Temperature")
+                        .accessibilityValue(String(format: "%.2f", config.temperature ?? 0.8))
                         .frame(width: 150)
                     Text("\(config.temperature ?? 0.8, specifier: "%.2f")")
                         .monospacedDigit()
@@ -292,6 +333,8 @@ struct OllamaSettingsView: View {
                 Spacer(minLength: 16)
                 HStack {
                     Slider(value: $config.topP.toNonOptional(defaultValue: 0.9), in: 0.0...1.0, step: 0.05)
+                        .accessibilityLabel("Top P")
+                        .accessibilityValue(String(format: "%.2f", config.topP ?? 0.9))
                         .frame(width: 150)
                     Text("\(config.topP ?? 0.9, specifier: "%.2f")")
                         .monospacedDigit()
@@ -315,8 +358,10 @@ struct OllamaSettingsView: View {
                 }
                 Spacer(minLength: 16)
                 HStack(spacing: 6) {
-                    AdvancedConfigNumericField(value: $config.topK.toNonOptional(defaultValue: 40), width: 70)
+                    AdvancedConfigNumericField(value: $config.topK.toNonOptional(defaultValue: 40), width: 70, accessibilityName: "Top K")
                     Stepper("", value: $config.topK.toNonOptional(defaultValue: 40), in: 0...1000, step: 5)
+                        .accessibilityLabel("Top K stepper")
+                        .accessibilityValue("\(config.topK ?? 40)")
                         .labelsHidden()
                 }
             }
@@ -358,8 +403,10 @@ struct OllamaSettingsView: View {
                 }
                 Spacer(minLength: 16)
                 HStack(spacing: 6) {
-                    AdvancedConfigNumericField(value: $config.numCtx.toNonOptional(defaultValue: 2048), width: 90)
+                    AdvancedConfigNumericField(value: $config.numCtx.toNonOptional(defaultValue: 2048), width: 90, accessibilityName: "Context window size")
                     Stepper("", value: $config.numCtx.toNonOptional(defaultValue: 2048), in: 256...numCtxCap, step: 256)
+                        .accessibilityLabel("Context window size stepper")
+                        .accessibilityValue("\(config.numCtx ?? 2048)")
                         .labelsHidden()
                 }
             }
@@ -400,6 +447,7 @@ struct OllamaSettingsView: View {
                 }
                 Spacer(minLength: 16)
                 TextField("Optional", value: $config.seed, format: .number)
+                    .accessibilityLabel("Random seed")
                     .textFieldStyle(.plain)
                     .multilineTextAlignment(.trailing)
                     .monospacedDigit()
@@ -428,6 +476,8 @@ struct OllamaSettingsView: View {
                 Spacer(minLength: 16)
                 HStack {
                     Slider(value: $config.repeatPenalty.toNonOptional(defaultValue: 1.1), in: 1.0...2.0, step: 0.05)
+                        .accessibilityLabel("Repeat penalty")
+                        .accessibilityValue(String(format: "%.2f", config.repeatPenalty ?? 1.1))
                         .frame(width: 150)
                     Text("\(config.repeatPenalty ?? 1.1, specifier: "%.2f")")
                         .monospacedDigit()
@@ -448,6 +498,7 @@ struct OllamaSettingsView: View {
                 }
                 Spacer(minLength: 16)
                 Toggle("", isOn: $thinkingEnabled)
+                    .accessibilityLabel("Extended thinking")
                     .labelsHidden()
                     .toggleStyle(.switch)
             }
@@ -553,7 +604,16 @@ struct OllamaSettingsView: View {
 
 struct AnthropicSettingsView: View {
     @Binding var config: AnthropicAdvancedConfig
+    /// Selected model id. Drives which controls are shown — the Anthropic request contract
+    /// differs by model generation, and a control the model rejects is worse than no control:
+    /// it 400s the request instead of being ignored. Nil is treated as newest (see
+    /// `AnthropicModelGeneration`).
+    var modelName: String?
     @Environment(\.appTheme) private var theme
+
+    private var generation: AnthropicModelGeneration {
+        AnthropicModelGeneration.classify(modelName: modelName ?? "")
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -568,64 +628,101 @@ struct AnthropicSettingsView: View {
                 HStack {
                     Text("\(config.maxTokens)").monospacedDigit()
                     Stepper("", value: $config.maxTokens, in: 256...128000, step: 256).labelsHidden()
+                        .accessibilityLabel("Max tokens")
+                        .accessibilityValue("\(config.maxTokens)")
                 }
             }
 
             Divider()
 
-            // Temperature
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Temperature").fontWeight(.medium)
-                    if config.extendedThinking {
-                        Text("Locked to 1.0 when Extended Thinking is enabled.").font(.caption).foregroundColor(.orange)
-                    } else {
-                        Text("Controls the randomness of the generated response.").font(.caption).foregroundColor(theme.secondaryText)
+            // --- SAMPLING ---
+            // ⚠️ Hidden entirely, not disabled, on models that removed these parameters. A
+            // disabled-but-visible control still implies the value is stored and honoured
+            // somewhere; on Opus 4.7+ / Sonnet 5 / Fable 5 it is neither — sending any of the
+            // three returns 400. The note below says so rather than leaving dead sliders.
+            if generation.acceptsSamplingParams {
+                // Temperature
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Temperature").fontWeight(.medium)
+                        if config.extendedThinking {
+                            Text("Not sent while Extended Thinking is on — thinking does not permit sampling parameters.")
+                                .font(.caption).foregroundColor(.orange)
+                        } else {
+                            Text("Controls the randomness of the generated response.").font(.caption).foregroundColor(theme.secondaryText)
+                        }
                     }
+                    Spacer(minLength: 16)
+                    HStack {
+                        Slider(value: $config.temperature.toNonOptional(defaultValue: 1.0), in: 0.0...1.0, step: 0.05)
+                            .frame(width: 150)
+                            .disabled(config.extendedThinking)
+                            .accessibilityLabel("Temperature")
+                            .accessibilityValue(String(format: "%.2f", config.temperature ?? 1.0))
+                        Text("\(config.temperature ?? 1.0, specifier: "%.2f")")
+                            .monospacedDigit()
+                            .frame(width: 40, alignment: .trailing)
+                    }
+                    .opacity(config.extendedThinking ? 0.5 : 1.0)
                 }
-                Spacer(minLength: 16)
-                HStack {
-                    Slider(value: $config.temperature.toNonOptional(defaultValue: 1.0), in: 0.0...1.0, step: 0.05)
-                        .frame(width: 150)
-                        .disabled(config.extendedThinking)
-                    Text("\(config.temperature ?? 1.0, specifier: "%.2f")")
-                        .monospacedDigit()
-                        .frame(width: 40, alignment: .trailing)
-                }
-                .opacity(config.extendedThinking ? 0.5 : 1.0)
-            }
 
-            Divider()
+                Divider()
 
-            // Top P
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Top P").fontWeight(.medium)
-                    Text("Cumulative probability of tokens to consider.").font(.caption).foregroundColor(theme.secondaryText)
+                // Top P
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Top P").fontWeight(.medium)
+                        if config.extendedThinking {
+                            Text("Not sent while Extended Thinking is on.").font(.caption).foregroundColor(.orange)
+                        } else if config.temperature != nil {
+                            Text("Not sent while Temperature is set — Claude accepts one or the other, never both.")
+                                .font(.caption).foregroundColor(.orange)
+                        } else {
+                            Text("Cumulative probability of tokens to consider.").font(.caption).foregroundColor(theme.secondaryText)
+                        }
+                    }
+                    Spacer(minLength: 16)
+                    HStack {
+                        Slider(value: $config.topP.toNonOptional(defaultValue: 1.0), in: 0.0...1.0, step: 0.05)
+                            .frame(width: 150)
+                            .disabled(config.extendedThinking)
+                            .accessibilityLabel("Top P")
+                            .accessibilityValue(String(format: "%.2f", config.topP ?? 1.0))
+                        Text("\(config.topP ?? 1.0, specifier: "%.2f")")
+                            .monospacedDigit()
+                            .frame(width: 40, alignment: .trailing)
+                    }
+                    .opacity((config.extendedThinking || config.temperature != nil) ? 0.5 : 1.0)
                 }
-                Spacer(minLength: 16)
-                HStack {
-                    Slider(value: $config.topP.toNonOptional(defaultValue: 1.0), in: 0.0...1.0, step: 0.05)
-                        .frame(width: 150)
-                    Text("\(config.topP ?? 1.0, specifier: "%.2f")")
-                        .monospacedDigit()
-                        .frame(width: 40, alignment: .trailing)
-                }
-            }
 
-            Divider()
+                Divider()
 
-            // Top K
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Top K").fontWeight(.medium)
-                    Text("Maximum number of tokens to consider when sampling.").font(.caption).foregroundColor(theme.secondaryText)
+                // Top K
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Top K").fontWeight(.medium)
+                        Text("Maximum number of tokens to consider when sampling.").font(.caption).foregroundColor(theme.secondaryText)
+                    }
+                    Spacer(minLength: 16)
+                    HStack {
+                        Text("\(config.topK ?? 250)").monospacedDigit()
+                        Stepper("", value: $config.topK.toNonOptional(defaultValue: 250), in: 1...500)
+                            .labelsHidden()
+                            .disabled(config.extendedThinking)
+                            .accessibilityLabel("Top K")
+                            .accessibilityValue("\(config.topK ?? 250)")
+                    }
+                    .opacity(config.extendedThinking ? 0.5 : 1.0)
                 }
-                Spacer(minLength: 16)
-                HStack {
-                    Text("\(config.topK ?? 250)").monospacedDigit()
-                    Stepper("", value: $config.topK.toNonOptional(defaultValue: 250), in: 1...500).labelsHidden()
+            } else {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "info.circle")
+                        .foregroundColor(theme.secondaryText)
+                    Text("Temperature, Top P and Top K are not available on this model — Anthropic removed them for this generation. Steer the response with your system instructions and the Thinking Effort setting instead.")
+                        .font(.caption)
+                        .foregroundColor(theme.secondaryText)
                 }
+                .accessibilityElement(children: .combine)
             }
 
             Divider()
@@ -636,29 +733,81 @@ struct AnthropicSettingsView: View {
                 .fontWeight(.semibold)
                 .padding(.top, 8)
 
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Enable Thinking").fontWeight(.medium)
-                    Text("Claude will reason internally before responding. Improves complex task performance.").font(.caption).foregroundColor(theme.secondaryText)
-                }
-                Spacer(minLength: 16)
-                Toggle("", isOn: $config.extendedThinking)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-            }
-
-            if config.extendedThinking {
-                Divider()
-
+            // ⚠️ HIDDEN, not disabled, on models where thinking is always on (Fable 5 / Mythos 5).
+            // A greyed-out switch still implies the value is stored and honoured somewhere, and
+            // here it is neither: the request ignores it, and the "off" shape the provider used to
+            // send — `{"type": "disabled"}` — is rejected with a 400 by those models at every
+            // effort level. Same rule as the ImageGen Quality gate (register A56).
+            if generation.acceptsDisabledThinking {
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Thinking Budget").fontWeight(.medium)
-                        Text("Max tokens for internal reasoning. Must be less than Max Output Tokens.").font(.caption).foregroundColor(theme.secondaryText)
+                        Text("Enable Thinking").fontWeight(.medium)
+                        Text("Claude will reason internally before responding. Improves complex task performance.").font(.caption).foregroundColor(theme.secondaryText)
                     }
                     Spacer(minLength: 16)
-                    HStack {
-                        Text("\(config.thinkingBudgetTokens ?? 10000)").monospacedDigit()
-                        Stepper("", value: $config.thinkingBudgetTokens.toNonOptional(defaultValue: 10000), in: 1024...100000, step: 1024).labelsHidden()
+                    Toggle("", isOn: $config.extendedThinking)
+                        .accessibilityLabel("Extended thinking")
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+            } else {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "info.circle")
+                        .foregroundColor(theme.secondaryText)
+                    Text("Thinking is always on for this model and cannot be switched off. Use Thinking Effort below to control how much reasoning Claude spends before answering.")
+                        .font(.caption)
+                        .foregroundColor(theme.secondaryText)
+                }
+                .accessibilityElement(children: .combine)
+            }
+
+            // Effort is the only depth control on an always-on model, so it must stay reachable
+            // there even though the toggle above is gone.
+            if config.extendedThinking || !generation.acceptsDisabledThinking {
+                Divider()
+
+                // ⚠️ Two different controls for the same concept, because the API contract
+                // differs by model. `budget_tokens` (a token count) was replaced by
+                // `output_config.effort` (a ladder) on Opus 4.7+ / Sonnet 5 / Fable 5, where the
+                // old shape now returns 400. Showing the stepper there would steer a parameter
+                // the model rejects.
+                if generation.acceptsEffort {
+                    HStack(alignment: .center) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Thinking Effort").fontWeight(.medium)
+                            Text("How much reasoning Claude spends before answering. Higher costs more tokens and latency.")
+                                .font(.caption).foregroundColor(theme.secondaryText)
+                        }
+                        Spacer(minLength: 16)
+                        Picker("", selection: $config.thinkingEffort.toNonOptional(defaultValue: "")) {
+                            Text("Default (high)").tag("")
+                            ForEach(generation.supportedEffortLevels, id: \.self) { level in
+                                Text(level.capitalized).tag(level)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 160)
+                        .accessibilityLabel("Thinking effort")
+                        .accessibilityValue(config.thinkingEffort?.capitalized ?? "Default, high")
+                    }
+                } else {
+                    HStack(alignment: .center) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Thinking Budget").fontWeight(.medium)
+                            Text("Max tokens for internal reasoning. Must be less than Max Output Tokens.").font(.caption).foregroundColor(theme.secondaryText)
+                            if (config.thinkingBudgetTokens ?? 10000) >= config.maxTokens {
+                                Text("Exceeds Max Output Tokens (\(config.maxTokens)) — the request will be sent with a raised limit of \((config.thinkingBudgetTokens ?? 10000) + 1024).")
+                                    .font(.caption).foregroundColor(.orange)
+                            }
+                        }
+                        Spacer(minLength: 16)
+                        HStack {
+                            Text("\(config.thinkingBudgetTokens ?? 10000)").monospacedDigit()
+                            Stepper("", value: $config.thinkingBudgetTokens.toNonOptional(defaultValue: 10000), in: 1024...100000, step: 1024)
+                                .labelsHidden()
+                                .accessibilityLabel("Thinking budget tokens")
+                                .accessibilityValue("\(config.thinkingBudgetTokens ?? 10000)")
+                        }
                     }
                 }
             }
@@ -670,7 +819,15 @@ struct AnthropicSettingsView: View {
 
 struct OpenAISettingsView: View {
     @Binding var config: OpenAIAdvancedConfig
+    /// The selected model, so the panel can hide controls it would reject (register A55).
+    /// Empty when nothing is selected yet — treated as `.standard`, the permissive shape.
+    var modelName: String = ""
     @Environment(\.appTheme) private var theme
+
+    /// ⚠️ Register A55. **Hide, don't disable** (the rule A56 established): a greyed-out control
+    /// still implies the value is stored and honoured. Reasoning Effort was shown for every model
+    /// and sent to every endpoint, so setting it on a normal model failed the whole request.
+    private var family: OpenAIModelFamily { OpenAIModelFamily.classify(modelName: modelName) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -685,6 +842,8 @@ struct OpenAISettingsView: View {
                 HStack {
                     Text("\(config.maxTokens ?? 0)").monospacedDigit()
                     Stepper("", value: $config.maxTokens.toNonOptional(defaultValue: 0), in: 0...128000, step: 256).labelsHidden()
+                        .accessibilityLabel("Max tokens")
+                        .accessibilityValue(config.maxTokens ?? 0 == 0 ? "Model decides" : "\(config.maxTokens ?? 0)")
                 }
             }
 
@@ -699,6 +858,8 @@ struct OpenAISettingsView: View {
                 Spacer(minLength: 16)
                 HStack {
                     Slider(value: $config.temperature.toNonOptional(defaultValue: 1.0), in: 0.0...2.0, step: 0.1)
+                        .accessibilityLabel("Temperature")
+                        .accessibilityValue(String(format: "%.2f", config.temperature ?? 1.0))
                         .frame(width: 150)
                     Text("\(config.temperature ?? 1.0, specifier: "%.2f")")
                         .monospacedDigit()
@@ -718,34 +879,39 @@ struct OpenAISettingsView: View {
                 HStack {
                     Slider(value: $config.topP.toNonOptional(defaultValue: 1.0), in: 0.0...1.0, step: 0.05)
                         .frame(width: 150)
+                        .accessibilityLabel("Top P")
+                        .accessibilityValue(String(format: "%.2f", config.topP ?? 1.0))
                     Text("\(config.topP ?? 1.0, specifier: "%.2f")")
                         .monospacedDigit()
                         .frame(width: 40, alignment: .trailing)
                 }
             }
 
-            Divider()
+            if family.acceptsReasoningEffort {
+                Divider()
 
-            // Reasoning Effort (for o-series models)
-            Text("Reasoning")
-                .font(.subheadline)
-                .fontWeight(.semibold)
-                .padding(.top, 8)
+                // Reasoning Effort — o-series and GPT-5 only; other models reject the parameter.
+                Text("Reasoning")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .padding(.top, 8)
 
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Reasoning Effort").fontWeight(.medium)
-                    Text("Controls thinking depth for o-series models (o1, o3). Leave as Auto for other models.").font(.caption).foregroundColor(theme.secondaryText)
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Reasoning Effort").fontWeight(.medium)
+                        Text("Controls how much the model thinks before answering.").font(.caption).foregroundColor(theme.secondaryText)
+                    }
+                    Spacer(minLength: 16)
+                    Picker("Reasoning Effort", selection: $config.reasoningEffort.toNonOptional(defaultValue: "")) {
+                        Text("Auto").tag("")
+                        Text("Low").tag("low")
+                        Text("Medium").tag("medium")
+                        Text("High").tag("high")
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .accessibilityLabel("Reasoning effort")
                 }
-                Spacer(minLength: 16)
-                Picker("", selection: $config.reasoningEffort.toNonOptional(defaultValue: "")) {
-                    Text("Auto").tag("")
-                    Text("Low").tag("low")
-                    Text("Medium").tag("medium")
-                    Text("High").tag("high")
-                }
-                .labelsHidden()
-                .fixedSize()
             }
         }
     }
