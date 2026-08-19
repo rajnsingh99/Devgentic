@@ -827,6 +827,10 @@ private struct GateInteractionBanner: View {
                 }
             }
 
+            if let input = gate.inputText, !input.isEmpty {
+                highlightedInput(input)
+            }
+
             ScrollView(.vertical, showsIndicators: true) {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 8)], alignment: .leading, spacing: 8) {
                     ForEach(Array(gate.options.enumerated()), id: \.offset) { _, option in
@@ -863,6 +867,55 @@ private struct GateInteractionBanner: View {
         )
     }
 
+    /// One hue per option, shared by the button border and that rule's highlighted spans — the
+    /// colour IS the association, so it must be derived from the option list identically in both
+    /// places. Index-based rather than hashed so the pairing is stable and predictable.
+    private static let optionHues: [Color] = [.green, .yellow, .cyan, .orange, .purple]
+
+    private func hue(for option: String) -> Color {
+        guard let idx = gate.options.firstIndex(of: option) else { return theme.warningColor }
+        return Self.optionHues[idx % Self.optionHues.count]
+    }
+
+    /// The input the decision is about, with each rule's matched text painted in that rule's colour.
+    ///
+    /// ⚠️ Reuses `SearchHighlighter.applyHighlights` verbatim — a proven forward-cursor pass — by
+    /// calling it ONCE PER RULE with only that rule's spans and that rule's hue. It takes a single
+    /// base colour per call, so per-rule colouring is N passes rather than one. Where two rules
+    /// matched overlapping text the later pass wins; the association is still legible because each
+    /// rule's other spans keep its own colour.
+    ///
+    /// ⚠️ Offsets are CHARACTER offsets against `gate.inputText` exactly as the executor measured
+    /// them. Nothing here re-derives the string.
+    @ViewBuilder
+    private func highlightedInput(_ input: String) -> some View {
+        let attributed: AttributedString = {
+            var attr = AttributedString(input)
+            for option in gate.options {
+                let offsets = gate.highlights
+                    .filter { $0.label == option }
+                    .map { SearchHighlighter.MatchOffset(start: $0.start, end: $0.end) }
+                guard !offsets.isEmpty else { continue }
+                let colour = hue(for: option).opacity(0.35)
+                SearchHighlighter.applyHighlights(
+                    to: &attr, offsets: offsets, activeIndex: nil, base: colour, active: colour)
+            }
+            return attr
+        }()
+
+        ScrollView(.vertical, showsIndicators: true) {
+            Text(attributed)
+                .font(.system(.caption))
+                .foregroundColor(theme.primaryText)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+        }
+        .frame(maxHeight: 120)
+        .background(RoundedRectangle(cornerRadius: 10).fill(theme.surfaceOverlay.opacity(0.35)))
+        .accessibilityLabel("Input being routed: \(input)")
+    }
+
     private func gateButton(_ option: String) -> some View {
         Button { choose(option) } label: {
             Text(option)
@@ -874,7 +927,7 @@ private struct GateInteractionBanner: View {
                 .padding(.vertical, 8)
                 .frame(maxWidth: .infinity)
                 .background(RoundedRectangle(cornerRadius: 8).fill(theme.surfaceOverlay.opacity(0.6)))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.warningColor.opacity(0.45), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke((gate.highlights.isEmpty ? theme.warningColor : hue(for: option)).opacity(0.75), lineWidth: 1))
         }
         .buttonStyle(.plain)
         .disabled(isSubmitting)

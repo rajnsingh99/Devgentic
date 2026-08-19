@@ -123,6 +123,56 @@ final class AdvancedConfigCodableTests: XCTestCase {
     // build persisted as Bools. That tolerance is load-bearing and easy to lose in a refactor,
     // so it is pinned here rather than left to the comment that describes it.
 
+    // MARK: - A39: MLX parameter bounds
+    //
+    // ⚠️ These were `private var`s on `MLXSettingsView`, so the bounds that silently rewrote a
+    // persisted user setting could not be asserted at all. Extracted onto the config for the same
+    // reason `ModelSelectionPolicy` was lifted out of the pickers.
+
+    func testMaxTokensCapIsHalfTheContextWindowWithAFloor() {
+        XCTAssertEqual(MLXAdvancedConfig.maxTokensCap(forContextWindow: 8192), 4096)
+        XCTAssertEqual(MLXAdvancedConfig.maxTokensCap(forContextWindow: 32768), 16384)
+        XCTAssertEqual(MLXAdvancedConfig.maxTokensCap(forContextWindow: 512), 512,
+                       "a pathologically small window must not make the field unusable")
+    }
+
+    func testRepetitionContextCapIsQuarteredAndBoundedBothWays() {
+        XCTAssertEqual(MLXAdvancedConfig.repetitionContextCap(forContextWindow: 4096), 1024)
+        XCTAssertEqual(MLXAdvancedConfig.repetitionContextCap(forContextWindow: 131072), 2048,
+                       "past ~2K the sampler's scan cost outweighs the benefit")
+        XCTAssertEqual(MLXAdvancedConfig.repetitionContextCap(forContextWindow: 128), 64)
+    }
+
+    /// ⚠️ The invariant that makes floor-only clamping safe: the floor can never sit above the
+    /// cap. If it could, a value would be simultaneously below the floor (so clamped up) and above
+    /// the cap (so warned about), and the panel would fight the user on every open.
+    func testTheFloorNeverExceedsTheCapForAnyContextWindow() {
+        for window in [0, 1, 64, 128, 512, 2048, 4096, 8192, 32768, 131072, 1_000_000] {
+            XCTAssertLessThanOrEqual(
+                MLXAdvancedConfig.maxTokensFloor,
+                MLXAdvancedConfig.maxTokensCap(forContextWindow: window), "window \(window)")
+            XCTAssertLessThanOrEqual(
+                MLXAdvancedConfig.repetitionContextFloor,
+                MLXAdvancedConfig.repetitionContextCap(forContextWindow: window), "window \(window)")
+        }
+    }
+
+    /// ⚠️ The persistence half of A39. The panel no longer rewrites an over-cap value, so nothing
+    /// downstream may quietly "repair" it either — `AgentConnect` hands the decoded blob straight
+    /// to `MLXLLMProvider`, and a value the user deliberately kept must survive the round trip.
+    func testAnOverCapMaxTokensSurvivesTheRoundTrip() throws {
+        let tuned = MLXAdvancedConfig(temperature: 0.7, topP: 0.9, repetitionPenalty: 1.1,
+                                      repetitionContextSize: 20, maxTokens: 8192)
+        let decoded = try decode(MLXAdvancedConfig.self,
+                                 String(data: try JSONEncoder().encode(tuned), encoding: .utf8)!)
+
+        XCTAssertEqual(decoded.maxTokens, 8192,
+                       "a value tuned for a larger-context model must not be silently reduced")
+        XCTAssertGreaterThan(decoded.maxTokens,
+                             MLXAdvancedConfig.maxTokensCap(forContextWindow: 4096),
+                             "precondition: this value really is over the cap for a small model")
+    }
+
     // MARK: - A54: the greedy-decoding default is repaired on read
 
     /// ⚠️ Changing `GeminiAdvancedConfig.default()` fixes new profiles only. Every profile that

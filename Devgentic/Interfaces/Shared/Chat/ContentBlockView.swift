@@ -116,7 +116,18 @@ struct ContentBlockView: View, Equatable {
     let message: ChatMessage
     var isLastBlock: Bool = false
     var searchQuery: String = ""
-    var activeHighlightIndex: Int? = nil
+    /// The active match's location within the MESSAGE, resolved locally against this block's
+    /// own id. Previously this was a bare `Int` counted across the whole message and handed
+    /// to every block, which then compared it against its own offsets — so the active
+    /// highlight painted a different occurrence than the one being navigated to, or nothing.
+    var activeMatch: ActiveSearchMatch? = nil
+
+    /// This block's own active index, or nil when the active match belongs elsewhere.
+    /// Mismatch degrades to "paint nothing", never to "paint the wrong run".
+    private var activeHighlightIndex: Int? {
+        guard let activeMatch, activeMatch.blockID == block.id else { return nil }
+        return activeMatch.indexInBlock
+    }
 
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
     @Environment(ThemeManager.self) private var themeManager
@@ -148,7 +159,7 @@ struct ContentBlockView: View, Equatable {
                lhs.message.id == rhs.message.id &&
                lhs.message.isStreaming == rhs.message.isStreaming &&
                lhs.searchQuery == rhs.searchQuery &&
-               lhs.activeHighlightIndex == rhs.activeHighlightIndex
+               lhs.activeMatch == rhs.activeMatch
     }
 
     var body: some View {
@@ -268,7 +279,9 @@ struct ContentBlockView: View, Equatable {
                             }
                             Spacer()
                         }
-                        .frame(height: 150)
+                        // Was a bare `150` — the same number the constant holds, written twice
+                        // in one switch (the `.failure` case two branches up already used it).
+                        .frame(height: ChatUIConstants.imagePlaceholderMinHeight)
                         .background(theme.controlBackground)
                         .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
                     @unknown default: EmptyView()
@@ -294,7 +307,10 @@ struct ContentBlockView: View, Equatable {
             message: message,
             isLastBlock: isLastBlock && child.id == lastChildID,
             searchQuery: searchQuery,
-            activeHighlightIndex: activeHighlightIndex
+            // Forwarded verbatim: the child resolves it against its own `block.id`, which is
+            // the entire nesting fix — a nested paragraph used to receive the message-global
+            // integer and compare it against its own local offsets.
+            activeMatch: activeMatch
         )
         .equatable()
     }

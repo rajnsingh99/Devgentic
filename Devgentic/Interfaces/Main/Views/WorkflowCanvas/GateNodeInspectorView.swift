@@ -21,7 +21,6 @@ struct GateNodeInspectorView: View {
     @State private var options: [String] = ["Approve", "Reject"]
     @State private var hasTimeout: Bool = false
     @State private var timeoutSeconds: Double = 300
-    @State private var joinMode: JoinMode = .all
     @State private var showGuide: Bool = false
 
     var body: some View {
@@ -34,7 +33,6 @@ struct GateNodeInspectorView: View {
                     approvalPromptCard
                     optionsCard
                     timeoutCard
-                    JoinModeCard(joinMode: $joinMode)
                 }
                 .padding(24)
             }
@@ -95,25 +93,32 @@ struct GateNodeInspectorView: View {
                         number: "1",
                         title: "Approval Prompt",
                         subtitle: "user-facing",
-                        description: "The text shown to the user when the workflow pauses for review.",
+                        description: "The question shown when the workflow pauses here for your decision.",
                         color: .red
                     )
                     guideStep(
                         number: "2",
                         title: "Options",
-                        subtitle: "actions",
-                        description: "Buttons presented to the user. The first option approves, others reject.",
+                        subtitle: "one port each",
+                        description: "Every option is its own output port — the branch wired to the option you choose is the one that runs. Wire each option to what should happen next.",
                         color: .blue
                     )
                     guideStep(
                         number: "3",
                         title: "Timeout",
                         subtitle: "optional",
-                        description: "Optionally auto-reject if the user doesn't respond in time.",
+                        description: "If nobody answers in time, the node FAILS onto its error port (wire it to handle the no-answer case). Without a timeout the gate waits indefinitely.",
                         color: .orange
                     )
+                    guideStep(
+                        number: "4",
+                        title: "Unattended Runs",
+                        subtitle: "scheduled / bridge",
+                        description: "A scheduled run shows no banner — an unanswered gate waits until the run's overall deadline cancels the WHOLE run, so always set a timeout on gates in scheduled workflows. Chat-bridge runs can be answered remotely via buttons but have no automatic deadline.",
+                        color: .purple
+                    )
 
-                    guideTip("The gate suspends the entire workflow execution until the user responds. Other parallel branches continue running.")
+                    guideTip("Only this branch pauses — parallel branches keep running, and time spent waiting never counts against any node timeout. Pressing Stop cancels the gate without firing its error branch.")
                 }
                 .padding(.top, 10)
             } label: {
@@ -301,7 +306,6 @@ struct GateNodeInspectorView: View {
     // MARK: - Helpers
 
     private func loadFromNode() {
-        joinMode = node.nodeConfig?.joinMode ?? .all
         guard case .gate(let config) = node.kind else { return }
         prompt = config.prompt
         options = config.options
@@ -321,7 +325,6 @@ struct GateNodeInspectorView: View {
 
         // Persist fan-in behaviour on the shared per-node config.
         if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }
-        node.nodeConfig?.joinMode = joinMode
 
         closeInspector()
     }

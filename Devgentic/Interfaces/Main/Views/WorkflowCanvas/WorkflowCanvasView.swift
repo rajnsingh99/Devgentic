@@ -25,12 +25,58 @@ struct WorkflowCanvasView: View {
     /// Save/Discard/Cancel. Nil in the profile-editor context, which uses its own
     /// `ProfileEditBuffer` discard guard instead.
     let editGuard: WorkflowEditGuard?
-    @Environment(BackendProfileService.self) var profileService
-    @Environment(\.appTheme) private var theme
 
-    @State private var canvasState: WorkflowCanvasState
+    /// The most recent run's outcome, projected onto the graph. Nil when there is no run to show,
+    /// in which case the canvas renders exactly as it did before run status existed.
+    let runOverlay: WorkflowCanvasRunOverlay?
+
+    @Environment(BackendProfileService.self) var profileService
+    @Environment(ToastManager.self) private var toastManager
+    @Environment(MainViewRouter.self) private var router
+    @Environment(ThemeManager.self) private var themeManager
+    @Environment(\.appTheme) private var theme
+    /// Backing scale for the grid tile bitmap — a 1x tile on a Retina display draws soft dots.
+    @Environment(\.displayScale) private var displayScale
+
+    /// ⚠️ OPTIONAL on purpose. Both production mounts sit under the app root that injects it, but a
+    /// non-optional `@Environment(MainApplicationViewModel.self)` traps at runtime when the object is
+    /// absent — which would make this view unconstructible in a preview or a future host that has no
+    /// view model. The only thing it is used for is pushing the dirty mirror, which is a UI
+    /// convenience; degrading to "no badge" is the correct failure mode, not a crash.
+    @Environment(MainApplicationViewModel.self) private var mainViewModel: MainApplicationViewModel?
+
+    /// The caller-owned canvas state. ⚠️ NEVER read this directly — read `canvasState`.
+    ///
+    /// ⚠️ EVERY production caller now injects, and must (WF-PE1): both mount sites resolve it from
+    /// `MainApplicationViewModel.workflowCanvasState(for:)`, so a workflow has exactly ONE state
+    /// object no matter how many surfaces show it.
+    private let injectedCanvasState: WorkflowCanvasState?
+
+    /// Fallback state for a caller that supplies none. ⚠️ NEVER read this directly — read
+    /// `canvasState`.
+    ///
+    /// ⚠️ NO PRODUCTION CALLER SHOULD REACH THIS — it exists for previews and tests. Reaching it in
+    /// the app means a second, independent graph for a profile that another surface may also be
+    /// editing, and the layout store has no compare-and-swap to catch the resulting overwrite. It is
+    /// kept (rather than made non-optional) so the view stays constructible in isolation, and
+    /// `loadLayout()` logs an error naming the consequence whenever it is used.
+    @State private var ownedCanvasState: WorkflowCanvasState
+
+    /// The state this canvas edits — resolved PER RENDER, never frozen.
+    ///
+    /// ⚠️ The injected state MUST NOT be captured into `@State`. `State(wrappedValue:)` is honoured
+    /// only on the first materialisation of a view identity, and this view's identity outlives a
+    /// profile change: `chatArea` is always mounted (opacity-toggled, `MainApplicationView`), and
+    /// `WorkflowDedicatedView` re-renders in place when `selectedProfileID` changes rather than
+    /// being rebuilt. Freezing it meant the canvas kept workflow A's state after `profile` became
+    /// B — so the canvas SHOWED A's graph under B's name, `loadLayout()` skipped B (A's state was
+    /// dirty, so `acceptsDiskReload` was false), and Save wrote A's nodes to B's layout,
+    /// destroying B's saved graph with no undo and no confirmation.
+    private var canvasState: WorkflowCanvasState { injectedCanvasState ?? ownedCanvasState }
+
     @State private var showingProfilePicker = false
     @State private var showingClearAlert = false
+    @State private var showingGuideline = false
 
     /// Set when this profile's stored canvas could not be decoded, with the denormalized counts the
     /// row still carries so the overlay can say what was lost.
@@ -41,6 +87,10 @@ struct WorkflowCanvasView: View {
     /// inside `body`: "an UNCACHED SwiftData fetch + JSON blob decode at streaming frequency, on the
     /// main thread, for the whole run."
     @State private var unreadableLayout: UnreadableLayoutInfo?
+
+    /// Set when a save is refused because the stored layout was written by a NEWER build (WF-PE2).
+    /// A notice, not the corruption overlay: the graph is intact and runnable, just read-only here.
+    @State private var newerVersionNotice: String?
     @State private var showingDiscardUnreadableAlert = false
 
     struct UnreadableLayoutInfo: Equatable {
@@ -60,17 +110,38 @@ struct WorkflowCanvasView: View {
             return parts.joined(separator: ", ")
         }
     }
-    @State private var showingWorkflowConfig = false
 
     #if canImport(AppKit) && !targetEnvironment(macCatalyst)
     @State private var scrollMonitor: Any?
     #endif
 
-    init(profile: Binding<BackendProfileModel>, onDelete: ((UUID) -> Void)? = nil, editGuard: WorkflowEditGuard? = nil) {
+    /// `canvasState` is INJECTED by callers whose view is torn down and rebuilt around a live edit —
+    /// `WorkflowDedicatedView` flips between Canvas and Execution, and a run starting flips it
+    /// automatically. Owning the state in `@State` there meant the flip destroyed every unsaved
+    /// edit.
+    ///
+    /// ⚠️ `canvasState` is nominally optional but is REQUIRED of every production caller (WF-PE1).
+    /// The profile editor used to keep the default and get its own state; because `chatArea` stays
+    /// mounted under a non-chat destination, that gave one workflow TWO independent graphs, and the
+    /// quit path wrote both to the same row — the second silently destroying the first. Pass
+    /// `MainApplicationViewModel.workflowCanvasState(for:)`; do not add a caller that omits it.
+    ///
+    /// ⚠️ An injected state is stored in a `let`, NOT in `@State` — see `canvasState`. The `@State`
+    /// fallback is seeded with it only so the non-injected path keeps one object for the view's
+    /// lifetime; once `injectedCanvasState` is non-nil the fallback is never read again.
+    init(
+        profile: Binding<BackendProfileModel>,
+        onDelete: ((UUID) -> Void)? = nil,
+        editGuard: WorkflowEditGuard? = nil,
+        canvasState: WorkflowCanvasState? = nil,
+        runOverlay: WorkflowCanvasRunOverlay? = nil
+    ) {
         self._profile = profile
         self.onDelete = onDelete
         self.editGuard = editGuard
-        self._canvasState = State(wrappedValue: WorkflowCanvasState(profileID: profile.wrappedValue.id))
+        self.runOverlay = runOverlay
+        self.injectedCanvasState = canvasState
+        self._ownedCanvasState = State(wrappedValue: canvasState ?? WorkflowCanvasState(profileID: profile.wrappedValue.id))
     }
 
     var body: some View {
@@ -102,6 +173,13 @@ struct WorkflowCanvasView: View {
                 }
                 .onTapGesture {
                     canvasState.clearSelection()
+                }
+                // Push the pane size into the state so `nextAvailablePosition()` can centre new
+                // nodes in the visible viewport — the toolbar and picker sheet that trigger adds
+                // live OUTSIDE this GeometryReader and cannot ask a proxy themselves.
+                .onAppear { canvasState.viewportSize = geometry.size }
+                .onChange(of: geometry.size) { _, newSize in
+                    canvasState.viewportSize = newSize
                 }
             }
             .background(theme.primaryBackground)
@@ -142,6 +220,76 @@ struct WorkflowCanvasView: View {
                 .animation(.spring(response: 0.3, dampingFraction: 0.7), value: canvasState.showValidationPanel)
             }
 
+            // Newer-version read-only notice (WF-PE2). Persistent while set — unlike the edge
+            // refusal it is not transient: every save will refuse until the app updates.
+            if let notice = newerVersionNotice {
+                VStack {
+                    Label(notice, systemImage: "arrow.up.circle.fill")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(theme.primaryText)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(
+                            Capsule().fill(theme.surfaceOverlayStrong)
+                                .overlay(Capsule().stroke(theme.accentColor.opacity(0.5), lineWidth: 1))
+                        )
+                        .padding(.top, 90)
+                    Spacer()
+                }
+                .allowsHitTesting(false)
+            }
+
+            // Refused-connection notice.
+            //
+            // ⚠️ The one thing this MUST do is stop the refusal being invisible. A drag that ended
+            // in a cycle, a duplicate, or a miss simply made the preview line vanish — three
+            // different causes, one indistinguishable non-event, and nothing in the log either.
+            if let refusal = canvasState.lastEdgeRefusal {
+                VStack {
+                    Spacer()
+                    Label(refusal.userMessage, systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(theme.primaryText)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(
+                            Capsule().fill(theme.surfaceOverlayStrong)
+                                .overlay(Capsule().stroke(theme.warningColor.opacity(0.5), lineWidth: 1))
+                        )
+                        .padding(.bottom, 120)
+                        .accessibilityAddTraits(.isStaticText)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .allowsHitTesting(false)
+                .task(id: refusal) {
+                    // Self-clearing so it cannot become permanent chrome. Cancellation-safe: a new
+                    // refusal restarts the task and the old sleep is cancelled, so the message never
+                    // clears the newer one out from under the user.
+                    try? await Task.sleep(for: .seconds(3))
+                    guard !Task.isCancelled else { return }
+                    canvasState.lastEdgeRefusal = nil
+                }
+            }
+
+            // ⌘Z, hosted on a hidden Button rather than `.onKeyPress`/`.keyboardShortcut` on the
+            // canvas itself.
+            //
+            // ⚠️ The canvas's ONLY focus stop is the `.focusable()` on this view's root ZStack
+            // (below), added purely so `.onDeleteCommand` can fire. There is no PER-NODE focus and
+            // no key handler to hang ⌘Z on, so a `keyboardShortcut` on a Button is still the right
+            // vehicle: it participates in the menu-key path and fires without needing focus.
+            //
+            // ⚠️ An earlier version of this comment claimed the directory had "no `.focusable()`,
+            // no `@FocusState`". Both are false — see the `.focusable()` below and
+            // `StickyNoteView`'s `@FocusState private var isTextFocused`. Corrected 2026-08-17;
+            // the absence that actually matters is per-node focus (WF-CU11), not focus as such.
+            Button("Undo") { canvasState.undo() }
+                .keyboardShortcut("z", modifiers: .command)
+                .disabled(!canvasState.canUndo)
+                .opacity(0)
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
+
             // Floating Controls Overlay
             WorkflowToolbarView(
                 canvasState: canvasState,
@@ -150,10 +298,13 @@ struct WorkflowCanvasView: View {
                     canvasState.addStructuralNode(kind: kind, displayName: name)
                 },
                 onClearCanvas: { showingClearAlert = true },
+                onShowGuideline: { showingGuideline = true },
                 onSave: saveLayout,
-                onRevert: { canvasState.revert() },
-                onOpenSettings: { showingWorkflowConfig = true }
+                onRevert: { canvasState.revert() }
             )
+        }
+        .sheet(isPresented: $showingGuideline) {
+            WorkflowGuidelineView()
         }
         .onAppear {
             loadLayout()
@@ -163,20 +314,45 @@ struct WorkflowCanvasView: View {
             #endif
         }
         .onChange(of: canvasState.hasUnsavedChanges) { _, dirty in
-            // Mirror the canvas dirty-state into the nav guard (drives the tab dot +
-            // whether navigation defers behind the Save/Discard/Cancel prompt).
+            // Mirror the canvas dirty-state into the nav guard (drives whether navigation defers
+            // behind the Save/Discard/Cancel prompt) AND into the view model's mirror, which is what
+            // keeps the badge lit after this view goes away.
             editGuard?.hasUnsavedChanges = dirty
+            mainViewModel?.setWorkflowCanvasDirty(dirty, for: profile.id)
         }
         .onDisappear {
             editGuard?.unregister()
             #if canImport(AppKit) && !targetEnvironment(macCatalyst)
             removeScrollMonitor()
             #endif
+            dismissInspectorForTeardown()
         }
         .onChange(of: profile.id) {
             loadLayout()
             registerEditGuard()
         }
+        // ⚠️ `.onDeleteCommand` NEEDS a focusable ancestor to fire, and before THIS LINE there was
+        // none, so the Delete key was very likely dead for EVERY user, not only keyboard-only ones
+        // — the toolbar pill was the only route to deleting anything. This is the one change here
+        // that a test cannot settle; it needs a manual check with a node selected.
+        //
+        // ⚠️ The earlier wording — "this whole directory contains no `.focusable()` and no
+        // `@FocusState`" — was left in place after this very line was added, so it described the
+        // state BEFORE the fix as though it were still true, and `StickyNoteView` has carried a
+        // `@FocusState` all along. Corrected 2026-08-17.
+        //
+        // Deliberately on the canvas ZStack rather than per node: focus here restores the Delete
+        // key without introducing a focus model that would compete with the pan, zoom, node-drag
+        // and background-tap gestures. Keyboard traversal between nodes is a separate design.
+        .focusable()
+        // ⚠️ Suppresses the VISUAL only — focus itself remains, so `.onDeleteCommand` still fires.
+        // Without this, macOS drew its blue focus ring around the entire canvas pane on every
+        // click of the grid or a node: technically correct focus feedback, but a ring around the
+        // whole working surface reads as a stray border, and the canvas communicates selection
+        // through its own node/edge highlights. The trade-off: a keyboard user loses the one cue
+        // that the canvas has focus — acceptable while the canvas has no internal keyboard
+        // navigation for the ring to orient; revisit if a real focus model ever lands.
+        .focusEffectDisabled()
         .onDeleteCommand {
             canvasState.deleteSelected()
         }
@@ -216,16 +392,33 @@ struct WorkflowCanvasView: View {
                 NodeInspectorPanelManager.shared.close()
             }
         }
-        .onChange(of: showingWorkflowConfig) { _, isShowing in
-            if isShowing {
-                showWorkflowConfigPanel()
-            } else {
-                NodeInspectorPanelManager.shared.close()
-            }
-        }
     }
 
     // MARK: - Custom Inspector Panels
+
+    /// Takes the node inspector down with the canvas (WF-CU9).
+    ///
+    /// ⚠️ The inspector is a SEPARATE always-on-top `NSWindow`, not part of this view's hierarchy,
+    /// so nothing carries it away when the canvas is destroyed. Reached from every teardown: the
+    /// auto-flip to `.execution` when a run starts, the user clicking the Execution segment, an
+    /// interface-mode switch away from Workflow, and the workflow profile being deleted.
+    ///
+    /// ⚠️ Closed DIRECTLY rather than by nilling `targetConfigNode` and letting the `.onChange` at
+    /// the bottom of `body` do it. That observer is a modifier on THIS view, and this view is being
+    /// removed inside an animated transition, so the update carrying the change may never be
+    /// delivered. Both actions are taken and both are idempotent — `close()` no-ops on a nil
+    /// `activePanel`, a second nil write is a no-op — so it does not matter whether the observer
+    /// also fires.
+    ///
+    /// ⚠️ `firingCallback: false`, then clear the state SYNCHRONOUSLY here. The default callback is
+    /// `{ canvasState.targetConfigNode = nil }` run from the fade's 0.15 s completion handler, and
+    /// `NodeInspectorPanelManager.close()`'s own doc comment records what deferring a shared-state
+    /// clear cost last time — an undismissable window.
+    private func dismissInspectorForTeardown() {
+        let panelWasOnScreen = NodeInspectorPanelManager.shared.isPresented
+        NodeInspectorPanelManager.shared.close(firingCallback: false)
+        canvasState.canvasDidDisappear(panelWasOnScreen: panelWasOnScreen)
+    }
 
     private func showInspectorPanel(for node: WorkflowNode) {
         NodeInspectorPanelManager.shared.show(
@@ -236,12 +429,6 @@ struct WorkflowCanvasView: View {
             switch node.kind {
             case .condition:
                 ConditionNodeInspectorView(node: bindingForNode(node.id))
-            case .loop:
-                LoopNodeInspectorView(
-                    node: bindingForNode(node.id),
-                    parentWorkflowID: profile.id,
-                    availableWorkflows: profileService.profiles
-                )
             case .code:
                 CodeNodeInspectorView(node: bindingForNode(node.id))
             case .gate:
@@ -257,36 +444,29 @@ struct WorkflowCanvasView: View {
                     profile: profileService.profiles.first(where: { $0.id == node.profileID })
                 )
                 .environment(profileService)
+                .environment(toastManager)
+                .environment(router)
+                .environment(themeManager)
             default:
                 EmptyView()
             }
         }
     }
 
-    private func showWorkflowConfigPanel() {
-        NodeInspectorPanelManager.shared.show(
-            minSize: NSSize(width: 800, height: 560),
-            theme: theme,
-            onClose: { showingWorkflowConfig = false }
-        ) {
-            WorkflowConfigSheet(profile: $profile) {
-                canvasState.markDirty()
-            }
-        }
-    }
 
     /// Creates a two-way binding into `canvasState.nodes` for a specific node ID.
     private func bindingForNode(_ nodeID: UUID) -> Binding<WorkflowNode> {
         Binding(
             get: {
                 canvasState.nodes.first(where: { $0.id == nodeID })
-                    ?? WorkflowNode(kind: .loop(LoopNodeConfig()), position: .zero, displayName: "Loop")
+                    ?? WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Missing Node")
             },
             set: { newValue in
-                if let idx = canvasState.nodes.firstIndex(where: { $0.id == nodeID }) {
-                    canvasState.nodes[idx] = newValue
-                    canvasState.markDirty()
-                }
+                // ⚠️ Through `replaceNode`, never `nodes[idx] = newValue`. Inspectors edit port
+                // LABELS (Condition rules, Gate options) and edges address ports by label, so a
+                // direct write strands every edge on a renamed port — the branch stops running
+                // while the canvas still draws it connected.
+                canvasState.replaceNode(id: nodeID, with: newValue)
             }
         )
     }
@@ -306,7 +486,8 @@ struct WorkflowCanvasView: View {
                         isSelected: canvasState.selectedEdgeID == edge.id,
                         onTap: { canvasState.select(edgeID: edge.id) },
                         onDelete: { canvasState.removeEdge(edge.id) },
-                        canvasState: canvasState
+                        canvasState: canvasState,
+                        runState: runOverlay?.edgeState(from: edge.sourceNodeID, to: edge.targetNodeID) ?? .undetermined
                     )
                 }
             }
@@ -334,7 +515,9 @@ struct WorkflowCanvasView: View {
                 WorkflowNodeView(
                     node: node,
                     isSelected: canvasState.selectedNodeID == node.id,
-                    canvasState: canvasState
+                    canvasState: canvasState,
+                    runStatus: runOverlay?.status(for: node.id),
+                    runIsLive: runOverlay?.isLive ?? false
                 )
             }
         }
@@ -352,43 +535,49 @@ struct WorkflowCanvasView: View {
             )
             .ignoresSafeArea()
 
-            Canvas { context, canvasSize in
-                let gridSpacing: CGFloat = 20
-                let dotSize: CGFloat = 1.5
-                let dotColor = theme.surfaceOverlay
-                let majorDotColor = theme.secondaryText.opacity(0.2)
+            // Dot grid as one GPU-tiled bitmap (WF-CV9). This was a `Canvas` filling one `Path`
+            // PER DOT on every pan/zoom frame — ~47,600 dots and 64.3 ms/frame at minimum zoom on a
+            // large display, capping panning below 20 fps exactly when the user zooms out to survey
+            // a big graph.
+            //
+            // ⚠️ Measured dead ends, do not resurrect (numbers in `WorkflowGridTile`'s header):
+            // batching the dots into one path is 100× SLOWER, and re-blitting a cached tile through
+            // `Canvas` per frame stays ~8 ms — CPU compositing is bandwidth-bound however few draw
+            // calls issue it. `ImagePaint` tiles on the GPU: panning is now a layer transform with
+            // zero per-frame grid CPU, and the only remaining CPU cost is tile REGENERATION
+            // (1.19 ms worst case), paid only when zoom or theme changes.
+            gridTileFill(in: size)
+        }
+    }
 
-                // Account for current pan offset and scale
-                let offsetX = canvasState.canvasOffset.width.truncatingRemainder(dividingBy: gridSpacing * canvasState.canvasScale)
-                let offsetY = canvasState.canvasOffset.height.truncatingRemainder(dividingBy: gridSpacing * canvasState.canvasScale)
-                let scaledSpacing = gridSpacing * canvasState.canvasScale
-
-                var x = offsetX
-                while x < canvasSize.width {
-                    var y = offsetY
-                    while y < canvasSize.height {
-                        let absoluteX = x - canvasState.canvasOffset.width
-                        let absoluteY = y - canvasState.canvasOffset.height
-                        let indexX = Int(round(absoluteX / scaledSpacing))
-                        let indexY = Int(round(absoluteY / scaledSpacing))
-                        let isMajor = indexX % 5 == 0 && indexY % 5 == 0
-
-                        let size = isMajor ? dotSize * 2.0 : dotSize
-                        let rect = CGRect(
-                            x: x - size / 2,
-                            y: y - size / 2,
-                            width: size,
-                            height: size
-                        )
-                        context.fill(
-                            Path(ellipseIn: rect),
-                            with: .color(isMajor ? majorDotColor : dotColor)
-                        )
-                        y += scaledSpacing
-                    }
-                    x += scaledSpacing
-                }
-            }
+    /// The tiled grid layer. Oversized by one tile on every edge and offset by the pan phase, so
+    /// the pattern moves with the canvas; `ImagePaint` anchors its tiling to the shape's own
+    /// origin, which is exactly what makes the offset carry the phase.
+    @ViewBuilder
+    private func gridTileFill(in size: CGSize) -> some View {
+        let scaledSpacing = WorkflowGridTile.gridSpacing * canvasState.canvasScale
+        if scaledSpacing >= 3,  // below ~3pt the dots are moiré soup; the gradient alone is calmer
+           let tile = WorkflowGridTile.image(
+               scaledSpacing: scaledSpacing,
+               dotColor: theme.surfaceOverlay,
+               majorDotColor: theme.secondaryText.opacity(0.2),
+               displayScale: displayScale
+           ) {
+            let side = WorkflowGridTile.sideLength(scaledSpacing: scaledSpacing)
+            let phaseX = WorkflowGridTile.phase(offset: canvasState.canvasOffset.width, side: side)
+            let phaseY = WorkflowGridTile.phase(offset: canvasState.canvasOffset.height, side: side)
+            Rectangle()
+                .fill(ImagePaint(image: Image(decorative: tile, scale: displayScale > 0 ? displayScale : 2)))
+                .frame(width: size.width + 2 * side, height: size.height + 2 * side)
+                // ⚠️ `.position` (of the CENTER), not `.offset`: offset composes with the enclosing
+                // ZStack's alignment, and under the default center alignment a NEGATIVE phase —
+                // i.e. panning left/up — left a grid-free strip up to one tile wide on the
+                // trailing/bottom edges. Position is alignment-independent: the rect's origin lands
+                // at exactly (phase − side), covering both phase signs, and ImagePaint anchors its
+                // tiling to that origin, which is what carries the pan phase.
+                .position(x: phaseX + size.width / 2, y: phaseY + size.height / 2)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
         }
     }
 
@@ -530,6 +719,67 @@ struct WorkflowCanvasView: View {
     // MARK: - Persistence
 
     private func loadLayout() {
+        // ⚠️ INVARIANT: this canvas edits the state belonging to the profile it is displaying.
+        //
+        // Everything below assumes it. If they diverge, the dirty-edits guard immediately after
+        // reads the WRONG canvas's dirty flag, the user is shown one workflow's graph under
+        // another's name, and `saveLayout()` writes those nodes to `profile.id` — silently
+        // replacing that profile's stored graph, with no undo. That is exactly what happened while
+        // an injected `WorkflowCanvasState` was frozen into `@State`; `canvasState` is now resolved
+        // per render, so a mismatch here means a NEW way for the two to drift.
+        //
+        // `assert` is stripped in release, so it is paired with an error log that names the
+        // consequence — a support bundle has to be able to show this.
+        if canvasState.profileID != profile.id {
+            logger.error(
+                "[WF_CANVAS] STATE MISMATCH: the canvas is displaying profile \(profile.id) but holds "
+                + "the state for profile \(canvasState.profileID). CONSEQUENCE: the graph on screen "
+                + "belongs to a different workflow, and saving would overwrite \(profile.id)'s stored "
+                + "layout with it. The load is ABORTED so nothing is written; the canvas keeps showing "
+                + "the other workflow until it is remounted."
+            )
+            assertionFailure("WorkflowCanvasView is editing \(canvasState.profileID) while displaying \(profile.id)")
+            return
+        }
+
+        // ⚠️ WF-PE1 tripwire. Every production mount injects a state from
+        // `MainApplicationViewModel.workflowCanvasState(for:)` so a workflow has exactly ONE state
+        // object; falling back to `ownedCanvasState` means a second, independent graph now exists
+        // for this profile. That is invisible until quit, when both are written to the same
+        // `WorkflowLayoutSD` row and the later write destroys the earlier one — so it is reported
+        // HERE, at the moment it becomes true, rather than after the data is gone.
+        //
+        // `assert` is stripped in release, so it is paired with an error log naming the consequence.
+        if injectedCanvasState == nil {
+            logger.error(
+                "[WF_CANVAS] Canvas for profile \(profile.id) mounted with NO injected state, so it "
+                + "created its own. CONSEQUENCE: if any other surface is editing this same workflow, "
+                + "two independent graphs now exist for one stored layout and the quit-time save will "
+                + "write both to the same row — the second silently overwriting the first. Pass "
+                + "`MainApplicationViewModel.workflowCanvasState(for:)` at this mount site."
+            )
+            assertionFailure("WorkflowCanvasView mounted without an injected WorkflowCanvasState for \(profile.id)")
+        }
+
+        // ⚠️ NEVER reload over unsaved edits.
+        //
+        // The canvas state can outlive this view (it is injected by `WorkflowDedicatedView` so
+        // edits survive the Canvas↔Execution flip), so `.onAppear` fires again on a state that is
+        // already mid-edit. Reloading from disk there would silently replace the user's work with
+        // the last-saved layout AND clear the dirty flag — reintroducing, on the way back, exactly
+        // the loss that keeping the state alive was meant to prevent.
+        //
+        // Correct for a freshly-created state too: it starts clean, so the first load runs.
+        guard canvasState.acceptsDiskReload else {
+            logger.info(
+                "[WF_CANVAS] Skipped reloading the layout for profile \(profile.id) — the canvas has "
+                + "unsaved edits in memory. CONSEQUENCE: the on-disk layout is deliberately NOT read; "
+                + "the user's in-progress edits stay on screen and the dirty state is preserved."
+            )
+            registerEditGuardDirtyState()
+            return
+        }
+
         // Ask BEFORE loading — `load(for:)` returns `.empty` on failure and discards the reason, so
         // by the time we hold the layout the two cases are indistinguishable.
         if WorkflowLayoutStore.shared.isLayoutUnreadable(for: profile.id) {
@@ -577,19 +827,51 @@ struct WorkflowCanvasView: View {
     }
 
     /// Installs (or refreshes) this canvas's hooks into the nav guard so Save/Discard
-    /// from the navigation prompt operate on THIS canvas's layout. No-op outside the
-    /// main interface (editGuard is nil in the profile editor, which has its own guard).
+    /// from the navigation prompt operate on THIS canvas's layout.
+    ///
+    /// ⚠️ BOTH mount sites pass an `editGuard`, and they pass DIFFERENT instances by design: the
+    /// main Workflow interface registers into `MainApplicationViewModel.workflowEditGuard`, the
+    /// profile editor into `BackendProfileService.canvasEditGuard`. Two guards are required because
+    /// both canvases can be mounted at once (`chatArea` stays alive, opacity-toggled, under a
+    /// non-chat destination), so a single shared guard would let whichever registered last clear the
+    /// other's hooks and dirty flag. (An earlier comment here claimed the profile editor passed no
+    /// guard at all — it always did.)
+    ///
+    /// The profile ID travels with the hooks so an exit point can tell WHICH workflow the installed
+    /// `saveHook` writes — see `WorkflowEditGuard.registeredProfileID`.
     private func registerEditGuard() {
         guard let editGuard else { return }
-        editGuard.hasUnsavedChanges = canvasState.hasUnsavedChanges
+        registerEditGuardDirtyState()
         editGuard.register(
+            profileID: profile.id,
             save: { saveLayout() },
             discard: { canvasState.revert() }
         )
     }
 
+    /// Pushes the canvas's current dirty state into the guard.
+    ///
+    /// Split out because it must also run on the early return in `loadLayout()`: a canvas coming
+    /// back with unsaved edits has to re-arm the tab dot and the navigation prompt, which
+    /// `unregister()` cleared when the view went away.
+    private func registerEditGuardDirtyState() {
+        editGuard?.hasUnsavedChanges = canvasState.hasUnsavedChanges
+        // ⚠️ Also push the view-model mirror, which is what survives this view's teardown. The guard
+        // above is cleared by `unregister()` on `onDisappear`, so it alone cannot keep the dirty
+        // badge lit once the canvas is unmounted — which is precisely when the user needs telling.
+        mainViewModel?.setWorkflowCanvasDirty(canvasState.hasUnsavedChanges, for: profile.id)
+    }
+
     private func saveLayout() {
-        let layout = canvasState.currentLayout()
+        // ⚠️ REFUSE to write one workflow's graph over another's — the guard lives on the state
+        // itself (`layout(forProfile:)`), which owns the id being compared. Checked here as well as
+        // in `loadLayout()` because this is the call that actually destroys data, and it is
+        // reachable from the nav guard's `saveHook` without a load in between.
+        guard let layout = canvasState.layout(forProfile: profile.id) else {
+            assertionFailure("saveLayout would write \(canvasState.profileID)'s graph to \(profile.id)")
+            return
+        }
+
         let outcome = WorkflowLayoutStore.shared.save(layout, for: profile.id)
 
         // ⚠️ BAIL on a refusal, before touching the profile.
@@ -599,6 +881,22 @@ struct WorkflowCanvasView: View {
         // end — so the dirty indicator CLEARED and the user was actively told their edit was saved
         // when it had been discarded. Worse, the `agentProfileIDs` write below still went through,
         // leaving the profile's agent list describing a canvas that was never persisted.
+        // A layout saved by a NEWER build is read-only here (WF-PE2): re-encoding on this build
+        // would permanently strip every field it does not understand. Distinct from the corruption
+        // overlay on purpose — nothing is broken, and steering the user toward the destructive
+        // repair would invite exactly the loss the refusal prevents. Dirty stays lit; the notice
+        // names the remedy (update the app).
+        if case .refusedNewerVersion(let blobVersion, let appVersion) = outcome {
+            newerVersionNotice = String(localized: "This workflow was saved by a newer version of Devgentic (v\(blobVersion) format; this build writes v\(appVersion)). It's read-only here — update Devgentic to edit it.")
+            logger.error(
+                "[PERSISTENCE] Canvas edit NOT saved for profile \(profile.id) — the stored layout is "
+                + "from a newer build, so the write was refused. CONSEQUENCE: the unsaved-changes "
+                + "indicator stays LIT, agentProfileIDs is not updated, and the on-canvas notice "
+                + "tells the user to update the app."
+            )
+            return
+        }
+
         if case .refusedUnreadable(let nodes, let edges, let annotations) = outcome {
             unreadableLayout = UnreadableLayoutInfo(
                 nodeCount: nodes, edgeCount: edges, annotationCount: annotations

@@ -167,8 +167,8 @@ struct AgentBubbleContentView: View, Equatable {
                 // evaluation — O(n) per keystroke. Now O(1) when text hasn't changed.
                 // The cache is invalidated by ActiveStreamManager when content updates.
                 let blocks = message.getOrCreateMarkdownBlocks(from: text)
-                let query = searchViewModel.isSearchActive ? searchViewModel.searchQuery : ""
-                let activeLocalIdx = searchViewModel.activeMatchLocalIndex(for: message.id)
+                let query = searchViewModel.isSearchActive ? searchViewModel.effectiveQuery : ""
+                let activeMatch = searchViewModel.activeMatch(in: message.id)
 
                 ForEach(blocks) { block in
                     ContentBlockView(
@@ -176,7 +176,7 @@ struct AgentBubbleContentView: View, Equatable {
                         message: message,
                         isLastBlock: block.id == blocks.last?.id,
                         searchQuery: query,
-                        activeHighlightIndex: activeLocalIdx
+                        activeMatch: activeMatch
                     )
                     .equatable()
                 }
@@ -268,8 +268,10 @@ struct AgentBubbleContentView: View, Equatable {
     // MARK: - Search Highlighting
 
     private func highlightPlainText(_ text: String) -> AttributedString {
-        let query = searchViewModel.isSearchActive ? searchViewModel.searchQuery : ""
-        let activeLocalIdx = searchViewModel.activeMatchLocalIndex(for: message.id)
+        let query = searchViewModel.isSearchActive ? searchViewModel.effectiveQuery : ""
+        // `.plainText` renders as ONE Text over the raw string — a single unit, so it carries
+        // no block id.
+        let activeLocalIdx = searchViewModel.activeMatchIndex(in: message.id, blockID: nil)
         // Live UI path: highlight with the theme's tokens (the static wrapper below
         // is theme-less and only exists for the test suite).
         return SearchHighlighter.highlight(

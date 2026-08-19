@@ -34,7 +34,17 @@ enum ProviderKeyStore {
     /// looked up by (service, account) and nothing migrates them.
     static let service = "com.devgentic.provider"
 
-    private static let storage = SecureKeyStorage()
+    /// ⚠️ TEST SEAM (registers B2 / UNTESTED-12). This was `private static let SecureKeyStorage()`,
+    /// which meant the failure branches — a Keychain write that fails, and a READ that fails —
+    /// could not be exercised at all, so the load-bearing "strip only if the write succeeded" and
+    /// "never delete on a failed read" rules were asserted by comment alone. Mutated only by
+    /// `setStorageForTesting`; production never reassigns it.
+    nonisolated(unsafe) private static var storage: KeychainAccessing = SecureKeyStorage()
+
+    /// Swaps the Keychain backend. Test-only — pass nil to restore the real one.
+    static func setStorageForTesting(_ replacement: KeychainAccessing?) {
+        storage = replacement ?? SecureKeyStorage()
+    }
 
     // MARK: - API
 
@@ -45,8 +55,13 @@ enum ProviderKeyStore {
     static func save(_ key: String?, for profileID: UUID) -> Bool {
         let trimmed = key?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let trimmed, !trimmed.isEmpty else {
-            delete(for: profileID)
-            return true
+            // ⚠️ register B19 — this used to `delete(for:)` and hardcode `return true`, because
+            // `delete` was `Void` and swallowed its own `OSStatus`. So a FAILED delete was
+            // reported to the caller as a successful clear: the blob was written with no key, the
+            // Keychain item survived, and `primeDecodeState` re-injected the supposedly-removed
+            // credential on the very next read. A user who cleared a revoked key watched it come
+            // back and get sent on every request.
+            return delete(for: profileID, reason: .keyCleared)
         }
 
         let status = storage.save(value: trimmed, service: service, account: profileID.uuidString)
@@ -61,22 +76,68 @@ enum ProviderKeyStore {
         return true
     }
 
-    /// Reads the API key for a profile, or nil when none is stored.
+    /// Reads the API key for a profile, or nil when none is stored **or the read failed**.
+    ///
+    /// ⚠️ Only for callers that merely need a value to send. Anything that WRITES based on the
+    /// answer must use `read(for:)` — see register B2.
     static func load(for profileID: UUID) -> String? {
-        storage.retrieve(service: service, account: profileID.uuidString)
+        guard case .found(let key) = storage.read(service: service, account: profileID.uuidString) else {
+            return nil
+        }
+        return key
+    }
+
+    /// Reads the API key, distinguishing "none stored" from "the read failed".
+    static func read(for profileID: UUID) -> KeychainReadOutcome {
+        let outcome = storage.read(service: service, account: profileID.uuidString)
+        if case .failed(let status) = outcome {
+            logger.error(
+                "[SECRETS] Could not read the Keychain API key for profile \(profileID) "
+                + "(OSStatus \(status)) — this is NOT the same as the profile having no key. "
+                + "CONSEQUENCE: the credential is left untouched and will not be stripped or "
+                + "deleted by this session's saves; the profile will behave as unconfigured until "
+                + "the Keychain is readable again (typically: unlock it, or re-grant access after "
+                + "an app update changed the code signature)."
+            )
+        }
+        return outcome
+    }
+
+    /// Why a key is being removed. Drives the log line's CONSEQUENCE, which is genuinely different
+    /// per caller — the same message served both and was wrong for one of them.
+    enum DeletionReason {
+        /// The owning profile is being deleted.
+        case profileDeleted
+        /// The user cleared the API key field on a profile that still exists.
+        case keyCleared
     }
 
     /// Removes a profile's key. Called when the profile is deleted, so a key cannot outlive the
-    /// thing that owned it.
-    static func delete(for profileID: UUID) {
+    /// thing that owned it — and when the user clears the field.
+    ///
+    /// - Returns: whether the Keychain no longer holds the item (`errSecItemNotFound` counts as
+    ///   success — the desired end state is "gone", not "we did the deleting").
+    @discardableResult
+    static func delete(for profileID: UUID, reason: DeletionReason = .profileDeleted) -> Bool {
         let status = storage.delete(service: service, account: profileID.uuidString)
-        if status != errSecSuccess && status != errSecItemNotFound {
+        guard status != errSecSuccess && status != errSecItemNotFound else { return true }
+
+        switch reason {
+        case .profileDeleted:
             logger.error(
                 "[SECRETS] Failed to delete the Keychain API key for profile \(profileID) "
                 + "(OSStatus \(status)). CONSEQUENCE: an orphaned credential remains in the "
                 + "Keychain after the profile was removed."
             )
+        case .keyCleared:
+            logger.error(
+                "[SECRETS] Failed to remove the Keychain API key for profile \(profileID) after "
+                + "the user cleared it (OSStatus \(status)). CONSEQUENCE: the profile blob will be "
+                + "written with no key but the OLD credential is still in the Keychain, so the "
+                + "next read RE-INJECTS it and it keeps being sent — the clear did not take."
+            )
         }
+        return false
     }
 
     // MARK: - Legacy plaintext cleanup (register A53)
@@ -116,6 +177,29 @@ enum ProviderKeyStore {
 // MARK: - ProfileDetails key access
 
 extension ProfileDetails {
+
+    /// Whether this profile type has a system-instructions field at all. Register B14.
+    ///
+    /// ⚠️ Distinct from "the field is empty", and the difference decides whether an advisory is
+    /// truthful: `.imageGen` and `.workflow` have no instructions to be missing, so treating their
+    /// `nil` as "no guidance configured" would banner on every image-generation send. Matches the
+    /// two arms `ProfileValidator` actually enforces the rule on.
+    var supportsSystemInstructions: Bool {
+        switch self {
+        case .bot, .agent:              return true
+        case .code, .imageGen, .workflow: return false
+        }
+    }
+
+    /// The configured system instructions, or nil when unset or unsupported.
+    var systemInstructions: String? {
+        switch self {
+        case .bot(let c):   return c.instructions
+        case .agent(let c): return c.instructions
+        case .code(let c):  return c.instructions
+        case .imageGen, .workflow: return nil
+        }
+    }
 
     /// The provider API key carried by this configuration, if the profile type has one.
     /// `.workflow` has no `llmConfig` — it composes other profiles, each with their own.

@@ -197,44 +197,16 @@ final class MessagingCoordinator {
             await self.persistenceService.addMessage(userMessage, toConversation: conversationIDToUse)
             self.logger.debug("User message persisted successfully (awaited before stream start).")
 
-            // Prepare workflow execution state if this is a workflow profile.
-            //
-            // We also insert a `.running` run history record immediately so the
-            // run is discoverable from the history list / run picker from frame 1
-            // — important for the very first run in a fresh conversation, where
-            // there's otherwise no on-disk handle on the in-flight execution.
-            // The same `record.id` is upserted with the finalized payload in the
-            // `onComplete` block below.
-            let workflowState: WorkflowExecutionState? = {
-                guard config.profile.profileType == .workflow else { return nil }
-                let state = WorkflowExecutionState()
-                state.userInput = plainUserQueryFromEditor
-                state.workflowProfileID = config.profile.id
-                state.startedAt = Date()
-
-                let initialRecord = WorkflowRunRecord(
-                    id: UUID(),
-                    conversationID: conversationIDToUse,
-                    workflowProfileID: config.profile.id,
-                    workflowName: config.profile.displayName,
-                    timestamp: state.startedAt,
-                    userInput: plainUserQueryFromEditor,
-                    nodeResults: [],
-                    finalOutput: "",
-                    variables: [:],
-                    status: .running,
-                    duration: 0,
-                    error: nil
-                )
-                state.runRecordID = initialRecord.id
-                vm.workflowExecutionStates[conversationIDToUse] = state
-                vm.workflowRunHistory[conversationIDToUse, default: []].insert(initialRecord, at: 0)
-                if vm.workflowRunHistory[conversationIDToUse]!.count > 20 {
-                    vm.workflowRunHistory[conversationIDToUse] = Array(vm.workflowRunHistory[conversationIDToUse]!.prefix(20))
-                }
-                WorkflowRunHistoryStore.shared.upsert(initialRecord, forConversation: conversationIDToUse)
-                return state
-            }()
+            // Workflow bookkeeping (no-op for every other profile type). See
+            // `WorkflowRunBootstrap` for what this buys and what breaks without it — it was
+            // inline here and missing from every other `startMessageStream` caller.
+            let workflowTicket = WorkflowRunBootstrap.begin(
+                config: config,
+                conversationID: conversationIDToUse,
+                userInput: plainUserQueryFromEditor,
+                registry: vm,
+                origin: .chat
+            )
 
             let backendHistory = await self.resolveBackendHistory(conversationID: conversationIDToUse)
 
@@ -247,67 +219,14 @@ final class MessagingCoordinator {
                 history: backendHistory,
                 files: filesForBackend,
                 updating: nil,
-                workflowExecutionState: workflowState,
+                workflowExecutionState: workflowTicket?.state,
                 onComplete: { [weak self] in
                     DispatchQueue.main.async {
                         guard let self, let vm = self.viewModel else { return }
                         vm.streamingMessageID = nil
                         vm.streamingMessage = nil
                         self.logger.info("Stream completed. Resetting streamingMessageID.")
-
-                        // Finalize the workflow run record. The `.running` row was
-                        // already inserted at run start (see above); we reuse the
-                        // same `id` so `upsert` rewrites that row in place rather
-                        // than creating a duplicate.
-                        if let wfState = workflowState, config.profile.profileType == .workflow {
-                            let layout = WorkflowLayoutStore.shared.load(for: config.profile.id)
-                            let frozen = WorkflowRunRecord.freeze(
-                                from: wfState,
-                                conversationID: conversationIDToUse,
-                                workflowProfileID: config.profile.id,
-                                workflowName: config.profile.displayName,
-                                userInput: plainUserQueryFromEditor,
-                                timestamp: wfState.startedAt,
-                                layout: layout
-                            )
-                            // Stamp the finalized record with the in-flight ID so
-                            // the upsert targets the existing row.
-                            var record = frozen
-                            if let existingID = wfState.runRecordID {
-                                record = WorkflowRunRecord(
-                                    id: existingID,
-                                    conversationID: frozen.conversationID,
-                                    workflowProfileID: frozen.workflowProfileID,
-                                    workflowName: frozen.workflowName,
-                                    timestamp: frozen.timestamp,
-                                    userInput: frozen.userInput,
-                                    nodeResults: frozen.nodeResults,
-                                    finalOutput: frozen.finalOutput,
-                                    variables: frozen.variables,
-                                    status: frozen.status,
-                                    duration: frozen.duration,
-                                    error: frozen.error
-                                )
-                            }
-
-                            // In-memory: replace the matching row if present, else insert.
-                            if let idx = vm.workflowRunHistory[conversationIDToUse]?.firstIndex(where: { $0.id == record.id }) {
-                                vm.workflowRunHistory[conversationIDToUse]?[idx] = record
-                            } else {
-                                vm.workflowRunHistory[conversationIDToUse, default: []].insert(record, at: 0)
-                                if vm.workflowRunHistory[conversationIDToUse]!.count > 20 {
-                                    vm.workflowRunHistory[conversationIDToUse] = Array(vm.workflowRunHistory[conversationIDToUse]!.prefix(20))
-                                }
-                            }
-                            // Finalized blobs are large (up to 400 timeline events per
-                            // node); `upsertFinalized` encodes them off-main and hops
-                            // back for the SwiftData write, so completing a big run
-                            // doesn't hitch the UI at the "completed" transition.
-                            Task { @MainActor in
-                                await WorkflowRunHistoryStore.shared.upsertFinalized(record, forConversation: conversationIDToUse)
-                                self.logger.info("Workflow run record finalized: \(record.id) — \(record.status.rawValue)")
-                            }
-                        }
+                        workflowTicket?.finalize()
                     }
                 }
             )
@@ -376,6 +295,18 @@ final class MessagingCoordinator {
             return
         }
 
+        // Workflow bookkeeping (no-op for other profile types). Regenerating a workflow answer
+        // RE-EXECUTES the whole DAG with real side effects, so it is a genuinely new run and gets
+        // its own record — without this the transcript showed a second execution that run history
+        // had no trace of.
+        let workflowTicket = WorkflowRunBootstrap.begin(
+            config: config,
+            conversationID: agentMessage.conversationId,
+            userInput: userQuery,
+            registry: vm,
+            origin: .regenerate
+        )
+
         let newStreamingMessage = activeStreamManager.startMessageStream(
             withConfig: config,
             conversationID: agentMessage.conversationId,
@@ -383,12 +314,14 @@ final class MessagingCoordinator {
             history: historyForRegeneration,
             files: filesForBackend,
             updating: agentMessage,
+            workflowExecutionState: workflowTicket?.state,
             onComplete: { [weak self] in
                 DispatchQueue.main.async {
                     guard let self, let vm = self.viewModel else { return }
                     vm.streamingMessageID = nil
                     vm.streamingMessage = nil
                     self.logger.info("Regeneration stream completed for message \(agentMessage.id.uuidString).")
+                    workflowTicket?.finalize()
                 }
             }
         )
@@ -572,6 +505,10 @@ final class MessagingCoordinator {
             Task { await TraceRecorder.shared.recordHITLResumed(operationID: opID.uuidString) }
         }
 
+        // ⚠️ No `WorkflowRunBootstrap` here, deliberately: resume REFUSES workflow profiles up
+        // front ("Workflow runs can't be resumed after an interruption yet", :399-400), so this
+        // path is unreachable for them. If workflow resume is ever implemented, bootstrap here
+        // too — `ActiveStreamManager`'s [WF_RUN] guard-rail will say so loudly in the meantime.
         let streaming = activeStreamManager.startMessageStream(
             withConfig: BackendRequestConfig(profile: profile),
             conversationID: agentMessage.conversationId,
@@ -714,22 +651,40 @@ final class MessagingCoordinator {
             // smaller view of the conversation than the desktop UI would give it.
             let history = await self.resolveBackendHistory(conversationID: conversationID)
 
-            let agentMessage = self.activeStreamManager.startMessageStream(
+            // Workflow bookkeeping (no-op for other profile types) — a remote-triggered workflow
+            // run must leave the same reviewable record a desktop one does, and its HITL must
+            // reach the workflow interface rather than chat.
+            let workflowTicket = WorkflowRunBootstrap.begin(
+                config: config,
+                conversationID: conversationID,
+                userInput: prompt,
+                registry: vm,
+                origin: .chatOps
+            )
+
+            // ⚠️ UNATTENDED — same binding as the scheduler's, for the same reason: a Router's
+            // ambiguity arbitration must take first-match instead of parking, because a bridge
+            // run has NO container deadline at all and an unanswered park is forever.
+            let agentMessage = WorkflowRunAttendance.$isAttended.withValue(false) {
+                self.activeStreamManager.startMessageStream(
                 withConfig: config,
                 conversationID: conversationID,
                 userQuery: prompt,
                 history: history,
                 files: [],
                 updating: nil,
+                workflowExecutionState: workflowTicket?.state,
                 onComplete: { [weak self] in
                     DispatchQueue.main.async {
                         guard let self, let vm = self.viewModel else { return }
                         vm.streamingMessageID = nil
                         vm.streamingMessage = nil
                         self.logger.info("[ChatOps] Remote stream completed for conversation \(conversationID).")
+                        workflowTicket?.finalize()
                     }
                 }
-            )
+                )
+            }
 
             agentMessage.messageSource = source
             vm.streamingMessageID = agentMessage.id

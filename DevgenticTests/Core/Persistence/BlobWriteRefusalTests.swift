@@ -66,6 +66,156 @@ final class BlobWriteRefusalTests: XCTestCase {
         return (reloaded, fresh)
     }
 
+    // MARK: - WF-PE2: newer-version blobs are read-only, never downgraded
+
+    /// Persists a VALID layout whose blob is then re-stamped as a newer version, re-materialized
+    /// cold so `primeDecodeState` actually runs.
+    private func makeNewerVersionLayoutRow(
+        in container: ModelContainer
+    ) throws -> (row: WorkflowLayoutSD, context: ModelContext, originalBytes: Data) {
+        let seed = ModelContext(container)
+        let row = WorkflowLayoutSD(workflowProfileID: UUID(), layout: makeLayout(noteCount: 3))
+        seed.insert(row)
+        // Simulate the newer build's write: same payload, higher stamp.
+        let restamped = String(data: row.layoutData, encoding: .utf8)!
+            .replacingOccurrences(of: "\"schemaVersion\":\(WorkflowLayoutSD.layoutBlobVersion)",
+                                  with: "\"schemaVersion\":\(WorkflowLayoutSD.layoutBlobVersion + 1)")
+        XCTAssertNotEqual(restamped, String(data: row.layoutData, encoding: .utf8)!,
+                          "precondition: the restamp must actually change the version")
+        row.layoutData = Data(restamped.utf8)
+        try seed.save()
+
+        let fresh = ModelContext(container)
+        let reloaded = try XCTUnwrap(try fresh.fetch(FetchDescriptor<WorkflowLayoutSD>()).first)
+        return (reloaded, fresh, Data(restamped.utf8))
+    }
+
+    /// The stamp was WRITE-ONLY: a newer blob decoded cleanly, and the next save re-encoded the
+    /// in-memory struct freshly stamped at this build's version — permanently stripping every
+    /// newer-version field with no error and no log. The blob must now be readable but REFUSE writes.
+    func testNewerVersionLayoutIsViewableButRefusesWrites() throws {
+        let container = try makeContainer(for: WorkflowLayoutSD.self)
+        let (row, context, originalBytes) = try makeNewerVersionLayoutRow(in: container)
+
+        // Viewable and runnable: the decode genuinely succeeded.
+        XCTAssertTrue(row.hasNewerVersionLayout)
+        XCTAssertFalse(row.hasUnreadableLayout,
+                       "newer-version is NOT corruption — conflating them steers the user to the destructive repair")
+        XCTAssertEqual(row.layout.annotations.count, 3, "the graph itself must stay readable")
+
+        // …but a save on this build must be refused with the bytes left intact.
+        row.layout = makeLayout(noteCount: 0)
+        try context.save()
+        XCTAssertEqual(row.layoutData, originalBytes,
+                       "the refused write must leave the newer build's bytes byte-for-byte intact")
+    }
+
+    /// The control: this build's own stamp saves normally — the refusal must not catch v-current.
+    func testCurrentVersionLayoutStillSaves() throws {
+        let container = try makeContainer(for: WorkflowLayoutSD.self)
+        let seed = ModelContext(container)
+        let row = WorkflowLayoutSD(workflowProfileID: UUID(), layout: makeLayout(noteCount: 3))
+        seed.insert(row)
+        try seed.save()
+
+        let fresh = ModelContext(container)
+        let reloaded = try XCTUnwrap(try fresh.fetch(FetchDescriptor<WorkflowLayoutSD>()).first)
+        XCTAssertFalse(reloaded.hasNewerVersionLayout)
+
+        reloaded.layout = makeLayout(noteCount: 5)
+        try fresh.save()
+        XCTAssertEqual(reloaded.layout.annotations.count, 5, "an ordinary save must still work")
+    }
+
+    // MARK: - WF-TS5: what the version stamp is actually protecting
+
+    /// The JSON key a FUTURE build would have added. Injected by string surgery on purpose: the
+    /// point is a key no `CodingKeys` in THIS build knows, which by definition cannot be produced
+    /// by encoding a current-build value.
+    private static let futureNodeKey = "concurrencyLimit"
+
+    private func makeLayoutWithConfiguredNode() -> WorkflowLayout {
+        var node = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Worker")
+        node.nodeConfig = WorkflowNodeConfig(maxNodeRetries: 2)
+        return WorkflowLayout(nodes: [node], edges: [], annotations: [])
+    }
+
+    /// v(current+1) bytes carrying `futureNodeKey` inside `nodeConfig`. The replacement is
+    /// position-independent — `"maxNodeRetries":` may be first, middle or last in the encoded
+    /// object and the spliced result is valid JSON either way.
+    private func makeFutureBuildLayoutBytes() throws -> Data {
+        let encoded = try JSONEncoder().encode(makeLayoutWithConfiguredNode())
+        let withFutureKey = String(data: encoded, encoding: .utf8)!
+            .replacingOccurrences(of: "\"maxNodeRetries\":",
+                                  with: "\"\(Self.futureNodeKey)\":4,\"maxNodeRetries\":")
+        XCTAssertTrue(withFutureKey.contains(Self.futureNodeKey), "precondition: the injection must land")
+        return BlobVersioning.stamped(Data(withFutureKey.utf8),
+                                      version: WorkflowLayoutSD.layoutBlobVersion + 1)
+    }
+
+    /// ⚠️ THE ASSERTION THE FORWARD-COMPAT SUITE NEVER MAKES (WF-TS5). Every test in
+    /// `WorkflowLayoutForwardCompatTests` mutates an enum RAW VALUE; none adds a FIELD. Unknown
+    /// keys are NOT preserved by any Codable in `WorkflowModels.swift` — there is no extras bag —
+    /// so the version stamp is the ONLY thing standing between a newer build's added field and its
+    /// permanent loss.
+    ///
+    /// ⚠️ Uses the ON-DISK two-container pattern, not an in-memory container: in-memory hands
+    /// `WorkflowLayoutStore.shared.mainContext` back the same registered instance whose `@Transient`
+    /// cache `init` already populated, so the decode path never runs and the test proves nothing.
+    @MainActor
+    func testNewerVersionBlobKeepsAFutureFieldTheDecoderCannotSee() throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("layout-futurekey-\(UUID().uuidString).store")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let profileID = UUID()
+        let futureBytes = try makeFutureBuildLayoutBytes()
+
+        // Launch 1: the newer build's write.
+        do {
+            let seeding = try ModelContainer(for: Schema([WorkflowLayoutSD.self]),
+                                             configurations: ModelConfiguration(url: storeURL))
+            let context = ModelContext(seeding)
+            let row = WorkflowLayoutSD(workflowProfileID: profileID, layout: makeLayoutWithConfiguredNode())
+            context.insert(row)
+            row.layoutData = futureBytes
+            try context.save()
+        }
+
+        // Launch 2 — the ROLLED-BACK build. Nothing is cached.
+        let container = try ModelContainer(for: Schema([WorkflowLayoutSD.self]),
+                                           configurations: ModelConfiguration(url: storeURL))
+        WorkflowLayoutStore.shared.configureContainer(container)
+
+        // It decodes and runs: unknown keys never throw, which is exactly what made the loss silent.
+        let loaded = WorkflowLayoutStore.shared.load(for: profileID)
+        XCTAssertEqual(loaded.nodes.count, 1, "the graph must stay readable and runnable")
+        XCTAssertEqual(loaded.nodes[0].nodeConfig?.maxNodeRetries, 2)
+
+        // The save must be REFUSED, and the store must SAY SO — this outcome had no test at all.
+        let outcome = WorkflowLayoutStore.shared.save(makeLayoutWithConfiguredNode(), for: profileID)
+        XCTAssertEqual(outcome,
+                       .refusedNewerVersion(blobVersion: WorkflowLayoutSD.layoutBlobVersion + 1,
+                                            appVersion: WorkflowLayoutSD.layoutBlobVersion))
+        XCTAssertFalse(outcome.didPersist)
+
+        // …and the future field is still on disk, byte-for-byte.
+        //
+        // ⚠️ MUTATION NOTE (measured, not assumed): these two halves are guarded by DIFFERENT
+        // code. Disabling `WorkflowLayoutStore.save`'s `hasNewerVersionLayout` check flips the
+        // outcome above to `.saved` but leaves these bytes intact, because `WorkflowLayoutSD`'s
+        // `layout` setter refuses a second time. So the store guard is what makes the refusal
+        // OBSERVABLE to the caller; the setter is what makes it SAFE. Both are pinned here, and
+        // neither assertion can stand in for the other.
+        let stored = try XCTUnwrap(
+            try container.mainContext.fetch(FetchDescriptor<WorkflowLayoutSD>()).first)
+        XCTAssertEqual(stored.layoutData, futureBytes,
+                       "the refused write must leave the newer build's bytes intact")
+        XCTAssertTrue(String(data: stored.layoutData, encoding: .utf8)!.contains(Self.futureNodeKey),
+                      "WF-TS5: the field a newer build added was laundered out of the blob by an "
+                      + "older build's save. No Codable in WorkflowModels.swift preserves unknown "
+                      + "keys, so the version refusal is the only thing that can prevent this.")
+    }
+
     func testUnreadableLayoutIsReportedAndCorroboratedByTheCounts() throws {
         let container = try makeContainer(for: WorkflowLayoutSD.self)
         let (row, _) = try makeUnreadableLayoutRow(in: container, previousNoteCount: 3)

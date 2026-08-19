@@ -168,8 +168,18 @@ struct WorkflowMarkdownView: View {
                     // the workflow timeline must render the same markdown identically.
                     attributedString[run.range].foregroundColor = inlineCodeHighlight
                     attributedString[run.range].font = font.weight(weight).monospaced()
+                } else if intent.contains(.stronglyEmphasized), intent.contains(.emphasized) {
+                    attributedString[run.range].font = font.weight(.semibold).italic()
+                    attributedString[run.range].foregroundColor = textColor
                 } else if intent.contains(.stronglyEmphasized) {
                     attributedString[run.range].font = font.weight(.semibold)
+                    attributedString[run.range].foregroundColor = textColor
+                } else if intent.contains(.emphasized) {
+                    // Was missing entirely, so italic runs fell into the generic `else` and had
+                    // a NON-italic font assigned over them — silently destroying the emphasis.
+                    // The comment above states the contract this broke: chat and the workflow
+                    // timeline must render the same markdown identically.
+                    attributedString[run.range].font = font.weight(weight).italic()
                     attributedString[run.range].foregroundColor = textColor
                 } else {
                     attributedString[run.range].font = font.weight(weight)

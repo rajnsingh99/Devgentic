@@ -83,7 +83,7 @@ enum AgentLiveWriteEvent {
         }
         return Began(
             conversationID: conversationID,
-            path: (path as NSString).expandingTildeInPath,
+            path: FilePathResolver.resolve(path),
             fileName: (path as NSString).lastPathComponent,
             proposedContent: content
         )
@@ -98,7 +98,7 @@ enum AgentLiveWriteEvent {
               !(toolName == "write_file" && isAppendMode(arguments)) else { return nil }
         return Completed(
             conversationID: conversationID,
-            path: (path as NSString).expandingTildeInPath,
+            path: FilePathResolver.resolve(path),
             fileName: (path as NSString).lastPathComponent,
             isSuccess: isSuccess,
             preWriteContent: preWriteContent

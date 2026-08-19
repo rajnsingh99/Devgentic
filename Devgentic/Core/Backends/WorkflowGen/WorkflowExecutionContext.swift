@@ -33,7 +33,7 @@ struct WorkflowExecutionContext: Sendable {
     /// by `WorkflowExecutor.executeNode()` so there is a single directive.
     let taskDescription: String
 
-    /// Clean compiled upstream text from `ContextCompressor.compileForWorkflow()`.
+    /// Clean compiled upstream text from `WorkflowInputAssembler.compileForWorkflow()`.
     /// Contains raw output from completed predecessor nodes, separated by `---`.
     /// Empty string when there are no upstream results (first node).
     let upstreamInput: String
@@ -97,7 +97,7 @@ struct WorkflowExecutionContext: Sendable {
             sections.append(wrapping.section("input", content: upstreamInput))
         }
 
-        let manifest = ContextCompressor.renderArtifactManifest(upstreamArtifacts)
+        let manifest = WorkflowInputAssembler.renderArtifactManifest(upstreamArtifacts)
         if !manifest.isEmpty {
             sections.append(wrapping.section("attached_files", content: manifest))
         }

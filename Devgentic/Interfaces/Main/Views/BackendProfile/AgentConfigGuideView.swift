@@ -101,18 +101,15 @@ struct AgentConfigGuideView: View {
                             guideTip("Enable Self-Reflection for quality-critical tasks — code generation, writing, analysis where accuracy matters more than speed.")
                         }
 
-                        Divider().background(theme.dividerColor).padding(.vertical, 4)
-
-                        // Agent Delegation
-                        guideSubsection(
-                            title: "Agent Delegation",
-                            icon: "person.2.fill",
-                            color: .green
-                        ) {
-                            guideParagraph("When enabled, the agent can **delegate subtasks to specialist sub-agents** that you define. The LLM autonomously decides when and what to delegate based on the task requirements.")
-                            guideParagraph("Sub-agents are lightweight specialists with their own model, instructions, and tools. They run independently and return results to the parent agent. Multiple delegations in one turn run in parallel.")
-                            guideTip("Create sub-agents for distinct expertise areas — a \"SecurityReviewer\" for code audits, a \"DataAnalyst\" for number crunching, a \"Researcher\" for web lookups.")
-                        }
+                        // ⚠️ register B15 — the "Agent Delegation" subsection was REMOVED, not
+                        // reworded. It documented sub-agents "that you define" running "in
+                        // parallel": there has been no UI to define them since the toggle was
+                        // withdrawn, the parallel claim contradicted A66's own note that sub-agents
+                        // share one model and therefore queue, and as of B15 the runtime does not
+                        // inject `call_agent` at all (`AgentConnect.agentDelegationSupported`).
+                        // A74 removed the sibling "Parallel Subtasks" row for the same reason: this
+                        // list documents CONTROLS, and there is no control here to document.
+                        // Restore this section if `agentDelegationSupported` is ever flipped back.
                     }
 
                     // 3. Execution Limits

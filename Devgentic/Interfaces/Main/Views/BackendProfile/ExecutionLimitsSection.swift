@@ -190,7 +190,7 @@ struct ErrorRecoverySection: View {
                     }
                 )) {
                     ForEach(ToolFailurePolicy.allCases) { policy in
-                        Text(policy.displayName).tag(policy)
+                        Text(policy.localizedTitle).tag(policy)
                     }
                 }
                 .labelsHidden()
@@ -264,7 +264,7 @@ struct ErrorRecoverySection: View {
                     }
                 )) {
                     ForEach(ExhaustionPolicy.allCases) { policy in
-                        Text(policy.displayName).tag(policy)
+                        Text(policy.localizedTitle).tag(policy)
                     }
                 }
                 .labelsHidden()

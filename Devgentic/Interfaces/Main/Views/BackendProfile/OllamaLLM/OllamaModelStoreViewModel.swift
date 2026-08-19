@@ -26,9 +26,13 @@ class OllamaModelStoreViewModel {
     var isLoading: Bool = false
 
     // Download State
+    //
+    // ⚠️ register A42 — `downloadProgress` and `currentDownloadName` were removed with the
+    // `pullProgress` tracking that fed them. Their only reader was a `downloadBanner` in
+    // `OllamaModelStoreView` that was declared and never called, so mirroring them cost a full
+    // re-filter and re-sort of the grid per NDJSON line of a multi-GB pull and rendered nothing.
+    // Live per-row progress comes from `DownloadManager` via `ModelDownloadStatusView`.
     var isDownloading: Bool = false
-    var downloadProgress: Double = 0.0
-    var currentDownloadName: String = ""
     var downloadErrorMessage: String? = nil
 
     // Deletion State
@@ -105,11 +109,18 @@ class OllamaModelStoreViewModel {
         serviceObserver = ObservationStream(
             track: { [weak self] in
                 guard let self else { return }
+                // ⚠️ register A42 — `pullProgress` and `modelToPull` are deliberately NOT tracked.
+                // `pullProgress` ticks once per NDJSON line for the whole of a multi-GB pull, and
+                // this observer's `onChange` runs `applyFilterAndSort` — a full re-filter and
+                // re-sort of the grid, plus a write to every mirrored property — per tick. The
+                // per-row progress UI reads `DownloadManager`'s own state directly
+                // (`ModelDownloadStatusView`), so nothing here needs the value.
+                //
+                // This is the same rule `MLXModelStoreViewModel` records having adopted; the two
+                // view models now document it identically so neither drifts back.
                 _ = self.service.localModels
                 _ = self.service.isLoadingModels
                 _ = self.service.isPullingModel
-                _ = self.service.pullProgress
-                _ = self.service.modelToPull
                 _ = self.service.modelPullError
                 _ = self.service.isRemovingModel
                 _ = self.service.modelRemoveError
@@ -119,8 +130,6 @@ class OllamaModelStoreViewModel {
                 self.applyFilterAndSort(models: self.service.localModels, query: self.searchText, sort: self.sortOption)
                 self.isLoading = self.service.isLoadingModels
                 self.isDownloading = self.service.isPullingModel
-                self.downloadProgress = self.service.pullProgress
-                self.currentDownloadName = self.service.modelToPull
                 self.downloadErrorMessage = self.service.modelPullError
                 self.isDeleting = self.service.isRemovingModel
                 self.deleteErrorMessage = self.service.modelRemoveError

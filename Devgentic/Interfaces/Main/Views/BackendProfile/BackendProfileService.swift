@@ -41,6 +41,14 @@ final class BackendProfileService {
     /// Discard can now actually revert instead of just navigating away.
     let canvasEditGuard = WorkflowEditGuard()
 
+    /// Called after a profile is deleted, with its ID, so owners of per-profile caches can prune.
+    ///
+    /// ⚠️ Exists for exactly one cascade today — dropping the deleted workflow's cached
+    /// `WorkflowCanvasState` so the quit-time drain cannot resurrect its layout row — but it is the
+    /// seam any future per-profile cache should hang off. `@ObservationIgnored`: it is plumbing set
+    /// once at launch, not observable UI state.
+    @ObservationIgnored var onProfileDeleted: ((UUID) -> Void)?
+
     /// Commits a floating prompt editor's pending text back into `editBuffer.draft`.
     ///
     /// ⚠️ THE THIRD SOURCE OF UNSAVED WORK, and the reason `hasUnsavedEditorChanges` alone is not
@@ -144,6 +152,17 @@ final class BackendProfileService {
     func deleteProfile(withId id: UUID) throws {
         try profileStore.deleteProfile(withId: id)
         WorkflowLayoutStore.shared.delete(for: id)
+        // ⚠️ THIRD cascade, and it must live here with the other two. The canvas STATE for this
+        // profile is cached in `MainApplicationViewModel.workflowCanvasStates`, which is App-scoped
+        // and pruned by nothing. Deleting a workflow whose canvas was dirty therefore left a live
+        // dirty state behind, and the quit-time drain (`persistDirtyWorkflowCanvases`) then
+        // RE-INSERTED a `WorkflowLayoutSD` row for a profile that no longer exists — resurrecting
+        // the layout we just deleted, as a permanently orphaned row.
+        //
+        // Routed through a callback because this service cannot reach the view model (and must not:
+        // the dependency runs the other way). Putting it at the sidebar's delete button instead
+        // would leave every future delete path to rediscover the cascade.
+        onProfileDeleted?(id)
         if editBuffer?.draft.id == id {
             editBuffer = nil
         }

@@ -187,6 +187,66 @@ final class WorkflowRunRecordSD {
 
     // MARK: - Helpers
 
+    // MARK: - Off-main decode (WF-UI6 ≡ WF-PE7)
+
+    /// A Sendable copy of everything decode needs, taken on the main actor so the DECODE itself
+    /// can leave it.
+    ///
+    /// ⚠️ Why this exists: `load(forConversation:)` decoded every run's full node-timeline blob —
+    /// up to 400 events per node, tool events carrying whole outputs — synchronously on
+    /// `@MainActor`, on first visit to a conversation, for a list that shows only headline fields.
+    /// SwiftData rows cannot cross actors, but their VALUE fields can; the write path
+    /// (`upsertFinalized`) already moves its encode off-main for exactly this reason, and this is
+    /// its mirror image.
+    struct RowSnapshot: Sendable {
+        let cached: WorkflowRunRecord?
+        let id: UUID
+        let conversationID: UUID
+        let workflowProfileID: UUID
+        let workflowName: String
+        let timestamp: Date
+        let userInput: String
+        let finalOutput: String
+        let statusRaw: String
+        let duration: TimeInterval
+        let errorMessage: String?
+        let nodeResultsData: Data
+        let variablesData: Data
+    }
+
+    /// Cheap on-main copy — references only; no decoding happens here. Rows written THIS session
+    /// carry `_cachedRecord` and decode for free.
+    var rowSnapshot: RowSnapshot {
+        RowSnapshot(
+            cached: _cachedRecord,
+            id: id, conversationID: conversationID, workflowProfileID: workflowProfileID,
+            workflowName: workflowName, timestamp: timestamp, userInput: userInput,
+            finalOutput: finalOutput, statusRaw: statusRaw, duration: duration,
+            errorMessage: errorMessage, nodeResultsData: nodeResultsData,
+            variablesData: variablesData
+        )
+    }
+
+    /// The same decode `decodeRecord()` performs, runnable off the main actor.
+    nonisolated static func decodeRecord(from snapshot: RowSnapshot) -> WorkflowRunRecord {
+        if let cached = snapshot.cached { return cached }
+        let status = WorkflowRunRecord.RunStatus(rawValue: snapshot.statusRaw) ?? .other(snapshot.statusRaw)
+        return WorkflowRunRecord(
+            id: snapshot.id,
+            conversationID: snapshot.conversationID,
+            workflowProfileID: snapshot.workflowProfileID,
+            workflowName: snapshot.workflowName,
+            timestamp: snapshot.timestamp,
+            userInput: snapshot.userInput,
+            nodeResults: decodeNodeResults(from: snapshot.nodeResultsData),
+            finalOutput: snapshot.finalOutput,
+            variables: decodeVariables(from: snapshot.variablesData),
+            status: status,
+            duration: snapshot.duration,
+            error: snapshot.errorMessage
+        )
+    }
+
     private func decodeRecord() -> WorkflowRunRecord {
         let nodeResults = Self.decodeNodeResults(from: nodeResultsData)
         let variables = Self.decodeVariables(from: variablesData)

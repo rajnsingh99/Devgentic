@@ -21,11 +21,10 @@ struct OpenAIImageGenService: ImageGenProvider, Sendable {
     let modelName: String
     let baseURL: String?
 
+    /// ⚠️ register B21 — this was `URL(string: base)!` on a free-text endpoint field, i.e. a
+    /// force-unwrap crash on the first generate for any value that isn't a parseable URL.
     private var apiBaseURL: URL {
-        if let base = baseURL, !base.isEmpty {
-            return URL(string: base)!
-        }
-        return ProviderDefaults.openAIBaseURL
+        ProviderDefaults.resolvedBaseURL(configured: baseURL, fallback: ProviderDefaults.openAIBaseURL)
     }
 
     init(apiKey: String, modelName: String, baseURL: String? = nil) {

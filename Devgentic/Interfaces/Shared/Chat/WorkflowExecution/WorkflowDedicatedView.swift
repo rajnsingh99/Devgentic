@@ -19,6 +19,9 @@
 //
 
 import SwiftUI
+import os
+
+private let logger = DGLogger(category: "WorkflowDedicated")
 
 struct WorkflowDedicatedView: View {
     let workflowProfileID: UUID
@@ -48,6 +51,17 @@ struct WorkflowDedicatedView: View {
     /// `nil` until the first load; the display adapter treats a nil layout as
     /// "started nodes only", which is its documented fallback.
     @State private var cachedLayout: WorkflowLayout?
+
+    /// Set when Re-run is refused because the selected profile is not this run's workflow.
+    /// Named so the alert can say which two workflows were involved — "it didn't work" is not
+    /// actionable when the whole point is that two workflows were confused.
+    @State private var rerunMismatch: RerunMismatch?
+
+    struct RerunMismatch: Identifiable {
+        let id = UUID()
+        let intended: String
+        let actual: String
+    }
 
     enum ViewMode {
         case canvas
@@ -83,13 +97,36 @@ struct WorkflowDedicatedView: View {
             profileService.profiles.map { ($0.id, $0) },
             uniquingKeysWith: { first, _ in first }
         )
-        validationIssues = WorkflowValidator.validate(layout: layout, profileMap: profileMap)
+        // ⚠️ FULL context, matching what pre-flight will actually use to BLOCK the run. This used
+        // to pass only layout+profileMap, so the nesting cycle/depth rules — error severity — went
+        // dark on this screen: the panel said "Workflow Ready" for a graph the executor would
+        // refuse at pre-flight with the very same summary. Safe to resolve here, unlike on the
+        // canvas keystroke path: this method runs only on appear / mode switch / profile change.
+        let nested = WorkflowLayoutStore.shared.resolveNestedLayouts(from: layout)
+        validationIssues = WorkflowValidator.validate(
+            layout: layout,
+            profileMap: profileMap,
+            subWorkflowLayouts: nested,
+            rootProfileID: workflowProfileID
+        )
     }
 
-    /// Run history for this conversation.
+    /// Run history for THIS workflow in this conversation.
+    ///
+    /// ⚠️ Filtered by `workflowProfileID`, not just conversation. The store is keyed by
+    /// conversation alone, so a conversation whose profile was switched accumulated several
+    /// workflows' runs in one list — rendered identically, with no name on the card and no way to
+    /// tell them apart. Opening one showed a different workflow's nodes under this workflow's
+    /// header (every node-id lookup missing, logged only at `.info`), and the "N of M" badge
+    /// counted runs this workflow never performed.
+    ///
+    /// Filtering rather than labelling: a run belonging to another workflow has nothing useful to
+    /// say on this screen — its nodes cannot be resolved against this layout — and the Re-run
+    /// button below would offer to replay it through the wrong pipeline.
     private var runHistory: [WorkflowRunRecord] {
         guard let cid = conversationID else { return [] }
-        return viewModel.workflowRunHistory[cid] ?? []
+        return (viewModel.workflowRunHistory[cid] ?? [])
+            .filter { $0.workflowProfileID == workflowProfileID }
     }
 
     /// Unified display data — every visible run, live or historical, is
@@ -221,7 +258,20 @@ struct WorkflowDedicatedView: View {
             case .canvas:
                 ZStack {
                     if let binding = profileBinding {
-                        WorkflowCanvasView(profile: binding, editGuard: viewModel.workflowEditGuard)
+                        // ⚠️ The canvas state is owned by the view model, not this view's `@State`.
+                        // `viewMode` flips to `.execution` automatically when a run starts, which
+                        // tears this subtree down — and while the state lived in the canvas view,
+                        // that flip destroyed every unsaved edit silently.
+                        // ⚠️ `runOverlay` is derived from the ALREADY-COMPUTED `displayData`, never
+                        // from a fresh fetch. `displayData` is read during `body`, and `body`
+                        // re-evaluates on every streamed event — the header on `cachedLayout`
+                        // records what an uncached load here cost last time.
+                        WorkflowCanvasView(
+                            profile: binding,
+                            editGuard: viewModel.workflowEditGuard,
+                            canvasState: viewModel.workflowCanvasState(for: binding.wrappedValue.id),
+                            runOverlay: WorkflowCanvasRunOverlay(displayData: displayData)
+                        )
                     } else {
                         Text("Workflow profile not found")
                             .foregroundColor(theme.secondaryText)
@@ -315,7 +365,7 @@ struct WorkflowDedicatedView: View {
                   let record = runHistory.first(where: { $0.id == newID }),
                   record.status == .failed else { return }
             let firstFailed = record.nodeResults.first {
-                $0.status == .failed && !$0.detail.hasPrefix("Upstream dependency")
+                $0.isGenuineFailure
             } ?? record.nodeResults.first { $0.status == .failed }
             if let firstFailed {
                 selectedNodeID = firstFailed.nodeID
@@ -346,12 +396,41 @@ struct WorkflowDedicatedView: View {
                         // Re-run: resend this run's original input through the normal send path
                         // (same as retyping it). Terminal runs only.
                         onRerun: (!data.isRunning && !data.userInput.isEmpty) ? {
-                            guard let config = viewModel.backendConfiguration.getRequestConfig() else { return }
-                            viewModel.sendMessage(
-                                attributedString: NSAttributedString(string: data.userInput),
-                                withConfig: config
-                            )
-                        } : nil
+                            // Was a bare `guard … else { return }`: the button rendered enabled,
+                            // the click was swallowed, and nothing was logged or shown. Use the
+                            // resolving variant, which says WHY — this is a user-initiated path.
+                            switch viewModel.backendConfiguration.resolveRequestConfig() {
+                            case .failure(let reason):
+                                logger.error("[WORKFLOW] Re-run of workflow \(self.workflowProfileID.uuidString.prefix(8)) REFUSED — no request config could be resolved (\(String(describing: reason))). CONSEQUENCE: the click did nothing; nothing was re-run and no banner was shown.")
+                            case .success(let config):
+                                // ⚠️ `resolveRequestConfig` resolves the CURRENTLY selected
+                                // profile, not the one this run belongs to, and there is no API to
+                                // build a config for an arbitrary profile id.
+                                //
+                                // This used to log the mismatch and RUN ANYWAY. Re-run is a real,
+                                // side-effecting execution — tools, file writes, HTTP calls — and
+                                // the header above the button names this workflow, so a mismatch
+                                // means the user clicked "re-run THIS" and something else ran. The
+                                // log line was honest and invisible. Now it refuses and says so.
+                                let selected = viewModel.backendConfiguration.selectedProfileID
+                                if let selected, selected != self.workflowProfileID {
+                                    let intended = profileService.profiles.first { $0.id == self.workflowProfileID }?.displayName
+                                        ?? String(localized: "this workflow")
+                                    let actual = profileService.profiles.first { $0.id == selected }?.displayName
+                                        ?? String(localized: "the selected profile")
+                                    logger.error("[WORKFLOW] Re-run REFUSED — this run belongs to workflow \(self.workflowProfileID.uuidString.prefix(8)) ('\(intended)') but the selected profile is \(selected.uuidString.prefix(8)) ('\(actual)'). CONSEQUENCE: nothing was executed; re-running would have performed a real, side-effecting run of a DIFFERENT workflow than the one named on screen.")
+                                    rerunMismatch = RerunMismatch(intended: intended, actual: actual)
+                                    return
+                                }
+                                viewModel.sendMessage(
+                                    attributedString: NSAttributedString(string: data.userInput),
+                                    withConfig: config
+                                )
+                            }
+                        } : nil,
+                        // WF-UI4: the pill disables itself while a send/stream is in flight instead
+                        // of rendering enabled and dropping the click downstream.
+                        rerunBlocked: viewModel.isSendInProgress
                     )
 
             } else {
@@ -361,6 +440,13 @@ struct WorkflowDedicatedView: View {
         .frame(maxWidth: ViewLayout.maxContentWidth)
         .frame(maxWidth: .infinity)
         .background(Color.clear)
+        .alert(item: $rerunMismatch) { mismatch in
+            Alert(
+                title: Text("Can't re-run \(mismatch.intended)"),
+                message: Text("This run belongs to \"\(mismatch.intended)\", but \"\(mismatch.actual)\" is currently selected. Re-running would execute \"\(mismatch.actual)\" instead — which may call tools or write files. Select \"\(mismatch.intended)\" and try again."),
+                dismissButton: .default(Text("OK"))
+            )
+        }
     }
 
     // MARK: - Title Bar

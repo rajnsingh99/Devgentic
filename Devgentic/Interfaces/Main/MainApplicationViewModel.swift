@@ -32,6 +32,13 @@ final class MainApplicationViewModel {
     @ObservationIgnored private let fileProcessorService: FileProcessorService
     @ObservationIgnored private let chatHistoryViewModel: ChatHistoryViewModel
 
+    /// Whether a send/stream is in flight — exposed because `chatHistoryViewModel` is private and
+    /// views must not reach it. Reading through this computed property still registers observation
+    /// (`ChatHistoryViewModel` is `@Observable`), so a view that reads it re-renders when the
+    /// stream starts and ends — which is exactly what lets the Re-run pill disable itself live
+    /// (WF-UI4: it used to stay fully enabled during a stream and silently drop the click).
+    var isSendInProgress: Bool { chatHistoryViewModel.isSending }
+
     @ObservationIgnored private var useStreamingResponseObserver: AnyCancellable?
     @ObservationIgnored private var intelligenceCoreObserver: AnyCancellable?
 
@@ -196,6 +203,187 @@ final class MainApplicationViewModel {
 
     /// Persistent run history keyed by conversation ID.
     var workflowRunHistory: [UUID: [WorkflowRunRecord]] = [:]
+
+    /// Live canvas editing state keyed by WORKFLOW PROFILE ID (not conversation).
+    ///
+    /// ⚠️ Owned here, not by `WorkflowCanvasView`, because the view is torn down and rebuilt
+    /// whenever the dedicated view flips between Canvas and Execution — and a run STARTING flips
+    /// it automatically. While this lived in the view's `@State`, that flip destroyed every
+    /// unsaved node, edge and task description with no prompt and no dirty indicator, on the most
+    /// natural action there is: running the workflow you were just editing.
+    ///
+    /// Keyed by profile so the edits also survive a conversation switch. ⚠️ In-memory only — the
+    /// ONLY thing that writes them to disk is an explicit Save (there is no autosave), so the quit
+    /// path must drain them: see `unsavedWorkflowCanvasProfileIDs` / `persistDirtyWorkflowCanvases`.
+    @ObservationIgnored private var workflowCanvasStates: [UUID: WorkflowCanvasState] = [:]
+
+    /// Profiles whose cached canvas holds unsaved edits — the OBSERVABLE mirror of that fact.
+    ///
+    /// ⚠️ Exists because `workflowCanvasStates` is `@ObservationIgnored` (deliberately — body-time
+    /// `workflowCanvasState(for:)` mutates it, and observing that would reintroduce "Modifying state
+    /// during view update"). So nothing could drive UI from it, and the only dirty signal reaching
+    /// the chrome was `WorkflowEditGuard.hasUnsavedChanges` — which mirrors ONLY the canvas currently
+    /// on screen and is cleared by `unregister()` on teardown. Consequence: edit a graph, navigate
+    /// away, and the unsaved work became invisible until ⌘Q asked about it.
+    ///
+    /// ⚠️ A MIRROR, NEVER THE AUTHORITY. The quit gate must keep reading
+    /// `unsavedWorkflowCanvasProfileIDs`, which pulls from the live state objects; this set is
+    /// pushed from views and would silently under-report if a push were ever missed. Do not swap the
+    /// quit decision onto it.
+    private(set) var dirtyWorkflowCanvasIDs: Set<UUID> = []
+
+    /// Pushed by `WorkflowCanvasView` whenever its canvas's dirty flag changes, and on mount.
+    func setWorkflowCanvasDirty(_ dirty: Bool, for profileID: UUID) {
+        if dirty {
+            dirtyWorkflowCanvasIDs.insert(profileID)
+        } else {
+            dirtyWorkflowCanvasIDs.remove(profileID)
+        }
+    }
+
+    /// The canvas state for a workflow profile, created on first use and reused thereafter.
+    func workflowCanvasState(for profileID: UUID) -> WorkflowCanvasState {
+        if let existing = workflowCanvasStates[profileID] { return existing }
+        let created = WorkflowCanvasState(profileID: profileID)
+        workflowCanvasStates[profileID] = created
+        return created
+    }
+
+    /// Profiles whose cached canvas holds edits that are not on disk.
+    ///
+    /// ⚠️ This is deliberately NOT `workflowEditGuard.hasUnsavedChanges`. That guard mirrors only
+    /// the canvas currently ON SCREEN, and these states outlive the view: edit workflow A, switch
+    /// to workflow B, and A's dirty state stays cached while the guard now reports B's. An exit
+    /// point that consults the guard alone therefore cannot see A's work at all.
+    var unsavedWorkflowCanvasProfileIDs: [UUID] {
+        workflowCanvasStates.filter { $0.value.hasUnsavedChanges }.map(\.key)
+    }
+
+    /// What a bulk canvas drain actually did, per profile.
+    ///
+    /// ⚠️ Two fields rather than just the failures, because an exit point needs BOTH questions
+    /// answered: "must I cancel the quit?" (`failed`) and "has this profile's row already been
+    /// written, so an on-screen `saveHook` for it would be a second write to the same row?"
+    /// (`persisted`). See WF-PE1.
+    struct CanvasDrainResult {
+        /// Profiles whose layout reached disk.
+        let persisted: [UUID]
+        /// Profiles whose layout could NOT be written — a non-empty value must block the exit.
+        let failed: [UUID]
+    }
+
+    /// Writes every dirty cached canvas to disk. Returns the profiles it could NOT persist.
+    ///
+    /// Mirrors `WorkflowCanvasView.saveLayout()` — store write first, `agentProfileIDs` synced only
+    /// once the bytes are down, `markSaved()` only once both succeeded — because a partial save is
+    /// worse than none: an `agentProfileIDs` list describing a canvas that was never written is a
+    /// profile that lies about itself.
+    ///
+    /// ⚠️ Callers at an exit point must treat a non-empty `failed` as a REFUSAL to continue. Quitting
+    /// after a failed save destroys the very work the user asked to keep.
+    ///
+    /// ⚠️ `persisted` is reported so an exit point can tell whether a canvas it is ALSO about to save
+    /// through an on-screen `saveHook` has already been written here (WF-PE1). Both paths write the
+    /// same `WorkflowLayoutSD` row and the store has no compare-and-swap, so "did the drain already
+    /// cover this profile?" has to be answerable rather than assumed.
+    @discardableResult
+    func persistDirtyWorkflowCanvases(profileService: BackendProfileService) -> CanvasDrainResult {
+        let dirty = workflowCanvasStates.filter { $0.value.hasUnsavedChanges }
+        guard !dirty.isEmpty else { return CanvasDrainResult(persisted: [], failed: []) }
+
+        var persisted: [UUID] = []
+        var failed: [UUID] = []
+        for (profileID, state) in dirty {
+            // Through the guarded accessor, not `currentLayout()`. The dictionary key and the
+            // state's own id agree by construction today, and this is what keeps that true.
+            guard let layout = state.layout(forProfile: profileID) else {
+                failed.append(profileID)
+                continue
+            }
+            let outcome = WorkflowLayoutStore.shared.save(layout, for: profileID)
+
+            guard outcome.didPersist else {
+                failed.append(profileID)
+                logger.error(
+                    "[WF_CANVAS] Exit-time save FAILED for workflow \(profileID): \(String(describing: outcome)). "
+                    + "CONSEQUENCE: \(layout.nodes.count) node(s) and \(layout.edges.count) edge(s) are "
+                    + "still only in memory; the caller must cancel the exit rather than discard them."
+                )
+                continue
+            }
+
+            // Same ordering rule as the canvas's own save: the profile's agent list is only allowed
+            // to describe a layout that is actually on disk.
+            if var profile = profileService.profiles.first(where: { $0.id == profileID }) {
+                let referencedIDs = profileService.profiles
+                    .filter { p in layout.nodes.contains(where: { $0.profileID == p.id }) }
+                    .map(\.id)
+                if case .workflow(var existingConfig) = profile.details {
+                    existingConfig.agentProfileIDs = referencedIDs
+                    profile.details = .workflow(existingConfig)
+                } else {
+                    profile.details = .workflow(WorkflowConfig(agentProfileIDs: referencedIDs))
+                }
+                do {
+                    try profileService.saveProfile(profile)
+                } catch {
+                    // The LAYOUT is already safe, which is the work the user cares about. Only the
+                    // derived agent list is stale, and the next canvas save recomputes it — so this
+                    // is logged, not escalated into a refusal to quit.
+                    logger.error(
+                        "[WF_CANVAS] Exit-time save: workflow \(profileID)'s layout WAS persisted, but "
+                        + "re-saving the profile to sync agentProfileIDs failed: \(error.localizedDescription). "
+                        + "CONSEQUENCE: the graph is safe; the profile's agent list is stale until the "
+                        + "next save from the canvas."
+                    )
+                }
+            } else {
+                logger.error(
+                    "[WF_CANVAS] Exit-time save: workflow \(profileID)'s layout WAS persisted, but no "
+                    + "matching profile is in the store, so agentProfileIDs could not be synced. "
+                    + "CONSEQUENCE: the graph is safe; the profile's agent list is stale."
+                )
+            }
+
+            state.markSaved()
+            // The drain runs over states whose views may not be mounted, so no `onChange` will fire
+            // to clear the mirror — do it here or the tab dot outlives the save.
+            dirtyWorkflowCanvasIDs.remove(profileID)
+            persisted.append(profileID)
+            logger.info(
+                "[WF_CANVAS] Exit-time save: workflow \(profileID) persisted "
+                + "(\(layout.nodes.count) node(s), \(layout.edges.count) edge(s))."
+            )
+        }
+        return CanvasDrainResult(persisted: persisted, failed: failed)
+    }
+
+    /// Drops the cached canvas state for a profile that no longer exists.
+    ///
+    /// ⚠️ Wired from `BackendProfileService.onProfileDeleted`, alongside the layout-row delete, so
+    /// every delete path cascades. Without it a DIRTY canvas for a just-deleted workflow stayed in
+    /// the cache and `persistDirtyWorkflowCanvases` re-INSERTED its `WorkflowLayoutSD` row at quit —
+    /// resurrecting the layout the delete had removed, as a row nothing will ever collect.
+    ///
+    /// ⚠️ Deliberately silent when there is nothing cached: deleting a non-workflow profile, or a
+    /// workflow whose canvas was never opened, is the ordinary case and must not log.
+    func discardWorkflowCanvasState(for profileID: UUID) {
+        dirtyWorkflowCanvasIDs.remove(profileID)
+        guard let state = workflowCanvasStates.removeValue(forKey: profileID) else { return }
+        if state.hasUnsavedChanges {
+            logger.notice(
+                "[WF_CANVAS] Discarded the cached canvas for DELETED workflow \(profileID), which had "
+                + "UNSAVED edits. CONSEQUENCE: those edits are gone — which is correct, the user "
+                + "deleted the workflow — and the quit-time drain can no longer re-create its layout "
+                + "row as an orphan."
+            )
+        }
+    }
+
+    // No general-purpose `discard(for:)` beyond the delete cascade above. Profile ids are UUIDs, so a
+    // deleted profile's state is a few KB that no recreated profile can ever inherit. Shipping an
+    // unreachable cleanup hook would be a guard with no consumer, which is a defect in its own
+    // right; add one here only alongside a caller that actually runs.
 
     // MARK: - Query History Properties
     private(set) var queryHistory: [String] = []

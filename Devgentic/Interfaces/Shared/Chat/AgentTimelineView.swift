@@ -37,10 +37,19 @@ struct AgentTimelineView: View {
     /// Bumped by `ChatMessage.timelineEvents.didSet` on EVERY mutation path.
     private let revision: UInt64
 
+    /// How the run ACTUALLY ended, when the caller knows it (`ChatMessage.terminalOutcome`,
+    /// stamped at finalize). The header must never claim a run was stopped without this:
+    /// the previous heuristic inferred cancellation from a per-tool `failureCategory`, which
+    /// `ToolExecutionLoop` also stamps when the user merely SKIPS an `ask_user` prompt on a run
+    /// that then completes normally. nil = not known (the workflow per-node init), and the
+    /// header then reports success/degraded but never "Stopped".
+    private let terminalOutcome: ExecutionOutcome?
+
     /// Initialize from a ChatMessage (existing usage in chat bubbles).
     init(message: ChatMessage) {
         self.events = message.timelineEvents
         self.revision = message.timelineRevision
+        self.terminalOutcome = message.terminalOutcome
         self.isStreaming = message.isStreaming
         self.finalContentText = message.currentAgentContent?.textContent ?? message.content.textContent
         self.streamingContext = StreamingContext(
@@ -73,6 +82,7 @@ struct AgentTimelineView: View {
     ) {
         self.events = events
         self.revision = revision
+        self.terminalOutcome = nil
         self.isStreaming = isStreaming
         self.finalContentText = finalContentText
         if chatFidelity, isStreaming, let start = streamingStartedAt {
@@ -119,9 +129,9 @@ struct AgentTimelineView: View {
                     }
                 } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: isStreaming ? "sparkles" : "checkmark.circle.fill")
+                        Image(systemName: isStreaming ? "sparkles" : summaryStatus.glyph)
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(isStreaming ? theme.accentColor : theme.successColor)
+                            .foregroundColor(isStreaming ? theme.accentColor : summaryTint)
 
                         Text(summaryTitle(nodesCount: nodes.count))
                             .font(.system(size: 11, weight: .medium))
@@ -147,7 +157,14 @@ struct AgentTimelineView: View {
                 }
                 .buttonStyle(.plain)
                 .help(isTimelineExpanded ? String(localized: "Collapse execution log") : String(localized: "Expand execution log"))
-                .accessibilityLabel(isTimelineExpanded ? String(localized: "Collapse execution log") : String(localized: "Expand execution log"))
+                // The label must carry the SUMMARY too. `.accessibilityLabel` on the button
+                // replaces its computed label, so the title Text above was invisible to
+                // VoiceOver — meaning the "3 failed" this fix adds would have reached sighted
+                // users only.
+                .accessibilityLabel(
+                    "\(summaryTitle(nodesCount: nodes.count)). "
+                    + (isTimelineExpanded ? String(localized: "Collapse execution log") : String(localized: "Expand execution log"))
+                )
 
                 // Expanded Nodes Content
                 if isTimelineExpanded || isStreaming {
@@ -185,22 +202,99 @@ struct AgentTimelineView: View {
         }
     }
 
+    /// What the collapsed header may claim about a finished run.
+    ///
+    /// The header is the ONLY thing visible once a run ends — `.onChange(of: isStreaming)`
+    /// collapses the body — and it used to hardcode a green `checkmark.circle.fill` plus
+    /// "Executed N steps", asserting success for runs where half the tools failed or which
+    /// were cancelled outright. The failed rows are red once expanded and `TerminalOutcomeChip`
+    /// renders below the content, but neither is inside the collapsed log, so the log itself
+    /// was the thing lying.
+    ///
+    /// Derived from the events rather than from `message.terminalOutcome` so the workflow
+    /// per-node init (which has no message) gets the same treatment.
+    enum TimelineSummaryStatus {
+        case succeeded, degraded, cancelled
+
+        var glyph: String {
+            switch self {
+            case .succeeded: return "checkmark.circle.fill"
+            case .degraded:  return "exclamationmark.triangle.fill"
+            case .cancelled: return "slash.circle"
+            }
+        }
+    }
+
+    /// Failed-tool count alongside the status, so the title can say how much went wrong.
+    /// `static` + internal for the same reason as `buildGroupedNodes`: it is the part with
+    /// logic worth testing directly.
+    static func summarize(events: [TimelineEvent],
+                          outcome: ExecutionOutcome? = nil) -> (status: TimelineSummaryStatus, failedTools: Int) {
+        // FLATTENED, not top-level. With Plan & Execute or Reflexion on — most agent runs —
+        // `CapabilityCardRouter` routes every tool event into the active step's/attempt's nested
+        // array, so the top-level array holds only the card itself and ZERO tool rows. Reading it
+        // flat made the header report "Thought for N steps" with a green checkmark for a run in
+        // which every tool failed: exactly the blindness CH25 was filed for, in the fix meant to
+        // stop the header lying.
+        var failed = 0
+        for event in events.flatMap(\.flattenedIncludingNested) {
+            guard case .toolExecution(let data) = event else { continue }
+            if data.isSuccess == false { failed += 1 }
+        }
+        // Cancellation comes from the RUN's outcome, never inferred from a tool row.
+        // `failureCategory == .cancelled` is also written by `ToolExecutionLoop` when the user
+        // skips an `ask_user` prompt ("skip/timeout = cancelled (soft failure, no constraint)"),
+        // after which the run continues and finishes — so the old heuristic asserted "Stopped"
+        // for a run that completed. Flattening makes those rows MORE visible, not less, so the
+        // two changes have to land together.
+        if outcome == .cancelled { return (.cancelled, failed) }
+        return (failed > 0 ? .degraded : .succeeded, failed)
+    }
+
+    private var summary: (status: TimelineSummaryStatus, failedTools: Int) {
+        Self.summarize(events: events, outcome: terminalOutcome)
+    }
+
+    private var summaryStatus: TimelineSummaryStatus { summary.status }
+
+    private var summaryTint: Color {
+        switch summaryStatus {
+        case .succeeded: return theme.successColor
+        case .degraded:  return theme.warningColor
+        case .cancelled: return theme.tertiaryText
+        }
+    }
+
     private func summaryTitle(nodesCount: Int) -> String {
         if isStreaming {
             return String(localized: "Agent is thinking & executing… (\(nodesCount) step\(nodesCount == 1 ? "" : "s"))")
-        } else {
-            let toolCount = events.filter { event in
-                switch event {
-                case .toolExecution: return true
-                default: return false
-                }
-            }.count
+        }
 
-            if toolCount > 0 {
-                return String(localized: "Executed \(nodesCount) step\(nodesCount == 1 ? "" : "s") (\(toolCount) tool\(toolCount == 1 ? "" : "s"))")
-            } else {
-                return String(localized: "Thought for \(nodesCount) step\(nodesCount == 1 ? "" : "s")")
+        // Same flattening as `summarize` — a capability-card run has no top-level tool rows.
+        let toolCount = events.flatMap(\.flattenedIncludingNested).filter { event in
+            switch event {
+            case .toolExecution: return true
+            default: return false
             }
+        }.count
+
+        guard toolCount > 0 else {
+            return String(localized: "Thought for \(nodesCount) step\(nodesCount == 1 ? "" : "s")")
+        }
+
+        let (status, failed) = summary
+        let steps = "\(nodesCount) step\(nodesCount == 1 ? "" : "s")"
+        let tools = "\(toolCount) tool\(toolCount == 1 ? "" : "s")"
+
+        switch status {
+        case .succeeded:
+            return String(localized: "Executed \(steps) (\(tools))")
+        case .degraded:
+            return String(localized: "Executed \(steps) (\(tools) · \(failed) failed)")
+        case .cancelled:
+            return failed > 0
+                ? String(localized: "Stopped after \(steps) (\(tools) · \(failed) failed)")
+                : String(localized: "Stopped after \(steps) (\(tools))")
         }
     }
 
@@ -673,7 +767,13 @@ struct TimelineFileViewerAction: Equatable {
               !rawPath.isEmpty else {
             return skip("no 'path'/'file_path' argument — nothing to open")
         }
-        let filePath = (rawPath as NSString).expandingTildeInPath
+        // MUST match how the executor resolved it. `expandingTildeInPath` expands `~` but
+        // leaves a RELATIVE path untouched, and `URL(fileURLWithPath:)` then anchors that to
+        // the PROCESS working directory — `/` for a GUI-launched app. The write tools go
+        // through `FilePathResolver`, which anchors relative paths to HOME; the viewer did
+        // not, so a model emitting `Notes.java` produced a tab pointing at `/Notes.java`
+        // while the agent had written `~/Notes.java`.
+        let filePath = FilePathResolver.resolve(rawPath)
         let fileName = (filePath as NSString).lastPathComponent
 
         switch data.name {
@@ -790,6 +890,12 @@ struct ActionDetailView: View {
     @State private var resolvedAction: TimelineFileViewerAction?
     /// True while a `.fromDisk` row is being read after a click.
     @State private var isOpeningFromDisk = false
+    /// Why the last "Open in viewer" failed, rendered under the row. `.fromDisk` is the ONLY
+    /// route a `read_file` row offers (`TimelineFileViewerAction.resolve` deliberately refuses
+    /// `data.output`), so a silent failure left the user with no affordance and no explanation
+    /// — the spinner simply stopped. Every other error surface in this cluster renders
+    /// something; this one rendered nothing.
+    @State private var openFailureReason: String?
 
     private func rowDetail(_ data: ToolExecutionData) -> TimelineRowDetail? {
         TimelineRowDetail.resolve(data)
@@ -971,21 +1077,53 @@ struct ActionDetailView: View {
 
         guard !isOpeningFromDisk else { return }
         isOpeningFromDisk = true
+        openFailureReason = nil
         let path = action.filePath
         Task {
-            let content = await Task.detached(priority: .userInitiated) {
-                try? String(contentsOfFile: path, encoding: .utf8)
+            // `try?` here discarded the real error, so "moved", "no permission" and
+            // "not UTF-8" were indistinguishable in the log and invisible in the UI.
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<String, Error> in
+                do { return .success(try String(contentsOfFile: path, encoding: .utf8)) }
+                catch { return .failure(error) }
             }.value
             isOpeningFromDisk = false
-            guard let content, !content.isEmpty else {
-                timelineLogger.warning("[CodeViewer] Timeline open of '\(path)' failed — unreadable or gone since the agent read it; nothing opened.")
+
+            switch result {
+            case .failure(let error):
+                let reason = Self.openFailureText(for: error, path: path)
+                openFailureReason = reason
+                timelineLogger.warning("[CodeViewer] Timeline open of '\(path)' failed — \(error.localizedDescription). Surfaced to the user under the row; nothing opened.")
                 return
+            case .success(let content) where content.isEmpty:
+                // Readable but empty: opening a blank tab looks like a bug, so say so.
+                openFailureReason = String(localized: "This file is now empty — nothing to show.")
+                timelineLogger.warning("[CodeViewer] Timeline open of '\(path)' read 0 bytes — the file is empty now; nothing opened.")
+                return
+            case .success(let content):
+                openFailureReason = nil
+                viewModel.openTimelineFileInCodeViewer(
+                    fileName: action.fileName,
+                    filePath: path,
+                    content: content
+                )
             }
-            viewModel.openTimelineFileInCodeViewer(
-                fileName: action.fileName,
-                filePath: path,
-                content: content
-            )
+        }
+    }
+
+    /// Turns a read error into something the user can act on. `CocoaError` codes are checked
+    /// rather than the message, so the distinction survives localization.
+    private static func openFailureText(for error: Error, path: String) -> String {
+        let name = (path as NSString).lastPathComponent
+        let cocoa = error as? CocoaError
+        switch cocoa?.code {
+        case .fileNoSuchFile, .fileReadNoSuchFile:
+            return String(localized: "\(name) has been moved or deleted since the agent read it.")
+        case .fileReadNoPermission:
+            return String(localized: "Devgentic doesn't have permission to read \(name).")
+        case .fileReadInapplicableStringEncoding:
+            return String(localized: "\(name) isn't UTF-8 text, so it can't be shown here.")
+        default:
+            return String(localized: "Couldn't open \(name): \(error.localizedDescription)")
         }
     }
 
@@ -1029,6 +1167,35 @@ struct ActionDetailView: View {
                     case .output(let out):
                         expandedOutput(out)
                     }
+                }
+
+                // The one route this row offers can fail (the file moved, went unreadable,
+                // or stopped being text). Say so where the click happened.
+                if let openFailureReason {
+                    HStack(alignment: .center, spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(theme.errorColor)
+                        Text(openFailureReason)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(theme.primaryText.opacity(0.85))
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(theme.errorColor.opacity(0.08))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(theme.errorColor.opacity(0.2), lineWidth: 0.5)
+                    )
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(String(localized: "Could not open file. \(openFailureReason)"))
+                    .transition(.opacity)
                 }
             }
             // Keyed on the completion state too: a row resolves to no chip while the tool
@@ -1292,7 +1459,15 @@ struct InterimReasoningRow: View {
     private static let expandThresholdChars = 220
 
     var body: some View {
-        HStack(alignment: .top, spacing: 6) {
+        // Flattened ONCE per pass. `flattenedText` is an unmemoized computed property that
+        // rewrites the whole blob (split + three trims + marker strips + two
+        // `replacingOccurrences` per line), and body used to read it twice: here and again
+        // through `needsExpandToggle`. Models like qwen-coder emit multi-KB narratives before
+        // every tool call, and every tool event bumps `timelineRevision` and re-runs this body
+        // for every reasoning row on screen — so the second pass was pure waste, done on the
+        // main actor purely to answer "is it longer than 220 characters?".
+        let flattened = flattenedText
+        return HStack(alignment: .top, spacing: 6) {
             Image(systemName: "sparkles")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundColor(theme.accentColor.opacity(0.85))
@@ -1301,7 +1476,7 @@ struct InterimReasoningRow: View {
                 .symbolEffect(.pulse, options: .repeating, isActive: isAnimating && !reduceMotion)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(flattenedText)
+                Text(flattened)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(theme.secondaryText.opacity(0.9))
                     .lineLimit(isExpanded ? nil : Self.collapsedLineLimit)
@@ -1310,7 +1485,7 @@ struct InterimReasoningRow: View {
                     // NB: no `.fixedSize(vertical: true)` — it overrides `lineLimit`
                     // by forcing the text to reserve space for every line of content.
 
-                if needsExpandToggle {
+                if flattened.count > Self.expandThresholdChars {
                     Button(isExpanded ? "Show less" : "Show more") {
                         withAnimation(.easeInOut(duration: 0.18)) {
                             isExpanded.toggle()
@@ -1384,9 +1559,6 @@ struct InterimReasoningRow: View {
         return String(line[line.index(after: afterPunct)...])
     }
 
-    private var needsExpandToggle: Bool {
-        flattenedText.count > Self.expandThresholdChars
-    }
 }
 
 // MARK: - Streaming Footer

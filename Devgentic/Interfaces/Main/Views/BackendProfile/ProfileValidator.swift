@@ -154,6 +154,18 @@ struct ProfileValidator {
                 errors.append(contentsOf: validateLLMConfig(config.llmConfig))
 
             case .workflow(let config):
+                // ⚠️ register B36 — DO NOT "clean up" `agentProfileIDs` by pruning ids whose
+                // profiles were deleted. This rule is `.blocking` (the init's default severity),
+                // and `BackendProfileStore` validates with `strict: isUpdate` — so pruning the last
+                // dead id empties the list and makes every subsequent UPDATE of that workflow
+                // throw, including a rename. The profile becomes permanently unsaveable.
+                //
+                // The register recorded the staleness as "cosmetic — feeds only a count", which is
+                // false: the popover count, the support dump (which prints each raw UUID with no
+                // liveness check) and this rule all read the field. A stale id is harmless; an
+                // emptied list is not. A30's own fix deliberately reads each workflow's LAYOUT
+                // instead — see `ProfileReferenceIndex` — precisely because this list is not kept
+                // in step, and that is a reason not to TRUST it, not a reason to rewrite it.
                 if config.agentProfileIDs.isEmpty {
                     errors.append(ProfileValidationError(
                         field: "workflow",

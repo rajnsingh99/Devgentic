@@ -34,7 +34,6 @@ struct ActionNodeInspectorView: View {
     @State private var maxRetries: Int = 0
     @State private var retryDelay: Double = 0
     @State private var hardTimeout: Double? = nil
-    @State private var failurePolicy: NodeFailurePolicy = .skipDependents
 
     // Live tool catalog (native + MCP).
     private var toolSources: [ToolSource] { UnifiedToolStore.shared.sources }
@@ -121,11 +120,32 @@ struct ActionNodeInspectorView: View {
                     .font(.system(size: 10))
                     .foregroundColor(theme.tertiaryText)
                     .italic()
+                Divider().padding(.vertical, 2)
+                Text("Things to know")
+                    .font(theme.fontCaption.weight(.semibold))
+                    .foregroundColor(theme.primaryText)
+                Group {
+                    guideLine("Retries re-run a call that THREW (network drop, timeout). A tool that RETURNED an error is not retried — its side effect may already have happened.")
+                    guideLine("Tools marked as requiring confirmation pause the run for your approval. In a scheduled run nobody can answer — prefer auto-allowed tools there.")
+                    guideLine("A failure activates the error port; wire it for recovery, or the branch stops with the reason in the final output.")
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(14)
             .background(theme.surfaceOverlay)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+    }
+
+    private func guideLine(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text("•")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.teal)
+            Text(text)
+                .font(.system(size: 11))
+                .foregroundColor(theme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -394,22 +414,9 @@ struct ActionNodeInspectorView: View {
                     }
                 }
 
-                Divider().opacity(0.3)
-
-                // Failure policy
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("On Failure → Downstream")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(theme.secondaryText)
-                    Picker("", selection: $failurePolicy) {
-                        Text("Skip Dependents").tag(NodeFailurePolicy.skipDependents)
-                        Text("Stop Workflow").tag(NodeFailurePolicy.stopWorkflow)
-                        Text("Continue All").tag(NodeFailurePolicy.continueAll)
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .controlSize(.small)
-                }
+                // Failure routing is not a setting — it is wiring. Connect this node's `error`
+                // port to handle a failure; leave it unwired and the branch stops. (The old
+                // "On Failure → Downstream" picker was retired 2026-08-12.)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 16)
@@ -564,7 +571,6 @@ struct ActionNodeInspectorView: View {
         maxRetries = node.nodeConfig?.maxNodeRetries ?? 0
         retryDelay = node.nodeConfig?.retryDelay ?? 0
         hardTimeout = node.nodeConfig?.hardTimeout
-        failurePolicy = node.nodeConfig?.onFailure ?? .skipDependents
 
         guard case .action(let config) = node.kind else { return }
         selectedTool = config.tool
@@ -576,12 +582,11 @@ struct ActionNodeInspectorView: View {
         let cleaned = bindings.filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         node.kind = .action(ActionNodeConfig(tool: selectedTool, argumentBindings: cleaned))
 
-        // Persist execution config (preserving other nodeConfig fields like joinMode).
+        // Persist execution config (preserving other nodeConfig fields).
         if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }
         node.nodeConfig?.maxNodeRetries = maxRetries
         node.nodeConfig?.retryDelay = retryDelay
         node.nodeConfig?.hardTimeout = hardTimeout
-        node.nodeConfig?.onFailure = failurePolicy
 
         closeInspector()
     }

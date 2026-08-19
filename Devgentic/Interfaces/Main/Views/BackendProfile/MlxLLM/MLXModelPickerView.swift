@@ -132,50 +132,68 @@ struct MLXModelPickerView: View {
     /// the `.task`'s cancellation scope, and it ran outside structured concurrency where no
     /// `Task.isCancelled` check could reach it. Writing directly keeps both callers inside the
     /// scope that owns them.
+    /// ⚠️ register B13 — this picker is now the FIFTH caller of `ModelSelectionPolicy`, and the
+    /// A44-era exception it used to carry is gone.
+    ///
+    /// That exception rested on "`isInstalled` is a local disk check, so an absent model genuinely
+    /// cannot run — there is no 'daemon still starting' case to preserve." The premise is false,
+    /// and the repo's own log lines say so two files away. `installedModels` can be non-empty while
+    /// the model the user saved is missing from it for reasons that are entirely transient:
+    ///
+    ///   • `MLXModelsLocation` falls back to the DEFAULT directory when the bookmarked custom one
+    ///     is "on an unmounted volume" or unreadable under TCC — and `setModelsDirectory` does not
+    ///     move models, so the default tree stays populated and the scan returns a full list from
+    ///     the wrong place.
+    ///   • `scanDisk` deliberately HIDES a model with incomplete shards (mid-re-download, or an
+    ///     interrupted update) and hides duplicate ids, while its siblings stay listed.
+    ///
+    /// The old guard caught only the all-empty case, which none of those trip. The consequence was
+    /// identical to A37's: the binding is `$providerConfig.modelName`, i.e. the edit-buffer draft,
+    /// so the rewrite persists on the next save — including A29's quit-time Save prompt. Plugging
+    /// the external drive back in does not undo it.
     private func attemptAutoSelect() {
-        // Ensure we have models to select from
         guard let first = service.installedModels.first else { return }
 
-        // Check if the current selection is valid (exists in the installed list)
-        let isSelectionValid = service.isInstalled(repoId: selectedModel)
+        let fillCandidate: MLXModelItem = {
+            guard filterForTools else { return first }
+            // Cached profiles rather than an inline `detectCognitiveProfile` call.
+            return service.installedModels.first {
+                service.cachedCognitiveProfile(for: $0).capability != .none
+            } ?? first
+        }()
 
-        // If nothing is selected OR the current selection is invalid (e.g. deleted), pick the first one.
-        if selectedModel.isEmpty || !isSelectionValid {
-            let target: MLXModelItem
-            if filterForTools {
-                // Use cached profiles instead of calling detectCognitiveProfile inline
-                let validModel = service.installedModels.first(where: {
-                    service.cachedCognitiveProfile(for: $0).capability != .none
-                })
-                target = validModel ?? first
-            } else {
-                target = first
-            }
+        switch ModelSelectionPolicy.resolve(
+            saved: selectedModel,
+            available: service.installedModels.map(\.displayName),
+            fillCandidate: fillCandidate.displayName
+        ) {
+        case .fill(let candidate):
+            logger.info(
+                "[PROFILE] Filling an empty MLX model selection with '\(candidate)'. "
+                + "CONSEQUENCE: the profile draft now names a model; nothing was overwritten."
+            )
+            selectedModel = candidate
+            evaluateCognitiveCapability(for: candidate)
 
-            // ⚠️ Unlike the cloud and Ollama pickers (registers G95 / MP-01 / A37), replacing the
-            // selection here is DEFENSIBLE: `isInstalled` is a local disk check, and an MLX model
-            // that is not on disk genuinely cannot run — there is no "the daemon is still starting"
-            // or "hand-typed name" case to preserve. It must not be SILENT, though, which is what
-            // it was: this is a profile-altering write with no record of having happened.
-            if selectedModel.isEmpty {
-                logger.info(
-                    "[PROFILE] Filling an empty MLX model selection with '\(target.displayName)'. "
-                    + "CONSEQUENCE: the profile draft now names a model; nothing was overwritten."
-                )
-            } else {
-                logger.notice(
-                    "[PROFILE] The saved MLX model '\(self.selectedModel)' is not installed; "
-                    + "selecting '\(target.displayName)' instead. CONSEQUENCE: the profile draft's "
-                    + "model is REPLACED — an uninstalled MLX model cannot run — and the editor is "
-                    + "left dirty, so the change is only persisted if the user saves."
-                )
-            }
+        case .keptUnlisted(let saved):
+            // ⚠️ KEPT, not replaced. A model missing from the scan may be on an unmounted volume,
+            // mid-re-download, or hidden by a models-directory fallback — all recoverable, none
+            // distinguishable from a genuine uninstall at this layer. The picker shows it as
+            // selected and the user can change it; nothing is silently rewritten under them.
+            logger.notice(
+                "[PROFILE] The saved MLX model '\(saved)' is not in the installed list. "
+                + "CONSEQUENCE: it is KEPT as the profile's model and NOT replaced — the scan can "
+                + "miss a model that is merely on an unmounted volume, mid-download, or in a "
+                + "models directory that failed to resolve. Re-select manually if it is really gone."
+            )
+            evaluateCognitiveCapability(for: saved)
 
-            selectedModel = target.displayName
-            evaluateCognitiveCapability(for: target.displayName)
-        } else {
-            // Even if valid, evaluate it on load in case the user toggled it manually before and we want to sync
+        case .keep:
+            // Re-evaluate on load so a manual toggle stays in sync with the model's real capability.
             evaluateCognitiveCapability(for: selectedModel)
+
+        case .nothingAvailable:
+            break
         }
     }
 

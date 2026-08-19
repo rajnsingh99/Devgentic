@@ -1,0 +1,531 @@
+//
+//  WorkflowValidatorRulesTests.swift
+//  DevgenticTests
+//
+//  Register WF-VA6 — the run-blocking half of the validator was untested — plus regression cover
+//  for the 2026-08-15 fixes: sub-workflow nesting (WF-VA1 ≡ WF-NS5 ≡ WF-SE4, originally found via
+//  the since-retired Loop node's bodies), empty sub-workflow targets (WF-VA3), and the
+//  variable-rule lints (WF-VA4, WF-VA5).
+//
+//  ⚠️ Why error-severity coverage matters more than warning coverage: an error BLOCKS the run at
+//  the executor's pre-flight before any node executes. A refactor that makes an error rule fire
+//  wrongly bricks every affected workflow, silently, with CI green — the inverse failure (a rule
+//  that stops firing) is merely a run-time surprise. Each error rule therefore gets a positive AND
+//  a negative case: the positive proves it fires, the negative proves it does not fire on a valid
+//  graph (a rule that flags everything passes every positive-only test).
+//
+//  Pure sync — direct WorkflowNode/WorkflowLayout construction, no ML loads, no store.
+//
+
+import XCTest
+@testable import devgentic
+
+final class WorkflowValidatorRulesTests: XCTestCase {
+
+    // MARK: - Fixtures
+
+    private func rule(_ label: String, field: ConditionField = .upstreamOutput,
+                      op: ConditionOp = .contains, value: String = "x",
+                      variableName: String? = nil) -> ConditionRule {
+        ConditionRule(label: label, field: field, op: op, value: value, variableName: variableName)
+    }
+
+    private func conditionNode(rules: [ConditionRule], name: String = "Router") -> WorkflowNode {
+        var config = ConditionNodeConfig()
+        config.rules = rules
+        return WorkflowNode(kind: .condition(config), position: .zero, displayName: name)
+    }
+
+    private func codeNode(template: String = "{{ input }}", writes variable: String? = nil,
+                          name: String = "Code") -> WorkflowNode {
+        var config = CodeNodeConfig()
+        config.template = template
+        config.outputVariable = variable
+        return WorkflowNode(kind: .code(config), position: .zero, displayName: name)
+    }
+
+    private func subWorkflowNode(_ workflowID: UUID, name: String = "Nested") -> WorkflowNode {
+        WorkflowNode(kind: .profile(profileID: workflowID, profileType: .workflow),
+                     position: .zero, displayName: name)
+    }
+
+    /// A chain layout: each listed node wired to the next, so no disconnected-node noise.
+    private func layout(_ nodes: [WorkflowNode]) -> WorkflowLayout {
+        var edges: [WorkflowEdge] = []
+        for i in 0..<(max(nodes.count, 1) - 1) {
+            edges.append(WorkflowEdge(sourceNodeID: nodes[i].id, targetNodeID: nodes[i + 1].id, sourcePortLabel: nil))
+        }
+        return WorkflowLayout(nodes: nodes, edges: edges, annotations: [])
+    }
+
+    private func validate(_ layout: WorkflowLayout,
+                          subs: [UUID: WorkflowLayout] = [:],
+                          profiles: [UUID: BackendProfileModel] = [:],
+                          root: UUID? = nil) -> [WorkflowValidationIssue] {
+        WorkflowValidator.validate(layout: layout, profileMap: profiles,
+                                   subWorkflowLayouts: subs, rootProfileID: root)
+    }
+
+    /// A minimal workflow profile entry so a `.profile(_, .workflow)` node passes the
+    /// profile-exists check. ⚠️ Needed since the nesting tests moved off the Loop node (which had
+    /// no profileID and so never touched the map): a sub-workflow node without its profile in the
+    /// map fails validation with "Profile not found" BEFORE any nesting rule is reached, which
+    /// would mask the rule a control test exists to clear.
+    private func workflowProfile(_ id: UUID, name: String = "Nested") -> (UUID, BackendProfileModel) {
+        (id, BackendProfileSnapshot(id: id, displayName: name,
+                                    details: .workflow(WorkflowConfig(agentProfileIDs: []))))
+    }
+
+    private func errors(_ issues: [WorkflowValidationIssue], containing text: String) -> [WorkflowValidationIssue] {
+        issues.filter { $0.severity == .error && $0.message.contains(text) }
+    }
+
+    private func warnings(_ issues: [WorkflowValidationIssue], containing text: String) -> [WorkflowValidationIssue] {
+        issues.filter { $0.severity == .warning && $0.message.contains(text) }
+    }
+
+    /// A minimal body layout with one node, so a referenced workflow is non-empty.
+    private var nonEmptyBody: WorkflowLayout {
+        WorkflowLayout(nodes: [codeNode(name: "BodyStep")], edges: [], annotations: [])
+    }
+
+    // MARK: - Workflow-level error rules
+
+    func testEmptyLayoutIsAnError() {
+        let issues = validate(WorkflowLayout(nodes: [], edges: [], annotations: []))
+        XCTAssertEqual(errors(issues, containing: "no nodes").count, 1)
+    }
+
+    func testSameLevelOutputVariableCollisionIsAnError() {
+        // Two Code nodes on the SAME level (both entry nodes) writing one variable race.
+        let a = codeNode(writes: "shared", name: "A")
+        let b = codeNode(writes: "shared", name: "B")
+        let sink = codeNode(name: "Sink")
+        let l = WorkflowLayout(
+            nodes: [a, b, sink],
+            edges: [WorkflowEdge(sourceNodeID: a.id, targetNodeID: sink.id, sourcePortLabel: nil),
+                    WorkflowEdge(sourceNodeID: b.id, targetNodeID: sink.id, sourcePortLabel: nil)],
+            annotations: []
+        )
+        XCTAssertEqual(errors(validate(l), containing: "also written by").count, 2,
+                       "both racing writers are named")
+    }
+
+    func testSequentialWritersOfOneVariableAreNotFlagged() {
+        // Same variable on DIFFERENT levels is deterministic (last write wins predictably).
+        let issues = validate(layout([codeNode(writes: "shared", name: "A"),
+                                      codeNode(writes: "shared", name: "B")]))
+        XCTAssertTrue(errors(issues, containing: "also written by").isEmpty,
+                      "sequential writes are legal — got: \(issues.map(\.message))")
+    }
+
+    func testProfileNodeWithUnknownProfileIsAnError() {
+        let orphan = WorkflowNode(profileID: UUID(), position: .zero,
+                                  displayName: "Ghost", profileType: .agent)
+        let issues = validate(layout([orphan, codeNode()]))
+        XCTAssertEqual(errors(issues, containing: "may have been deleted").count, 1)
+    }
+
+    // MARK: - Router (condition) error rules
+
+    func testTooFewRulesIsAnError() {
+        let issues = validate(layout([conditionNode(rules: [rule("Only")]), codeNode()]))
+        XCTAssertFalse(errors(issues, containing: "at least").isEmpty)
+    }
+
+    func testInvalidRuleLabelIsAnError() {
+        let issues = validate(layout([conditionNode(rules: [rule("has space"), rule("Fine")]), codeNode()]))
+        XCTAssertEqual(errors(issues, containing: "invalid").count, 1)
+    }
+
+    func testDuplicateRuleLabelIsAnError() {
+        let issues = validate(layout([conditionNode(rules: [rule("Same"), rule("Same")]), codeNode()]))
+        XCTAssertEqual(errors(issues, containing: "Duplicate rule label").count, 1)
+    }
+
+    func testValueRequiringOperatorWithEmptyValueIsAnError() {
+        let issues = validate(layout([conditionNode(rules: [rule("A", value: ""), rule("B")]), codeNode()]))
+        XCTAssertEqual(errors(issues, containing: "requires a match value").count, 1)
+    }
+
+    func testValidRouterProducesNoRuleErrors() {
+        let issues = validate(layout([conditionNode(rules: [rule("Bug"), rule("Feature")]), codeNode()]))
+        XCTAssertTrue(issues.filter { $0.severity == .error }.isEmpty,
+                      "a well-formed Router must not be blocked — got: \(issues.map(\.message))")
+    }
+
+    // MARK: - Variable lints (WF-VA5)
+
+    func testVariableRuleWithBlankNameIsAnError() {
+        let r = rule("V", field: .variable, op: .equals, value: "DONE", variableName: "  ")
+        let issues = validate(layout([conditionNode(rules: [r, rule("B")]), codeNode()]))
+        XCTAssertEqual(errors(issues, containing: "no variable name is set").count, 1)
+    }
+
+    func testVariableRuleOnAnUnwrittenVariableIsAWarning() {
+        let r = rule("V", field: .variable, op: .equals, value: "DONE", variableName: "status")
+        let issues = validate(layout([conditionNode(rules: [r, rule("B")]), codeNode()]))
+        let hits = warnings(issues, containing: "no Code node on this canvas writes it")
+        XCTAssertEqual(hits.count, 1)
+        XCTAssertTrue(errors(issues, containing: "no Code node").isEmpty,
+                      "unwritten is a WARNING — the graph still runs")
+    }
+
+    func testVariableRuleOnAWrittenVariableIsClean() {
+        let writer = codeNode(writes: "status", name: "Writer")
+        let r = rule("V", field: .variable, op: .equals, value: "DONE", variableName: "status")
+        let issues = validate(layout([writer, conditionNode(rules: [r, rule("B")]), codeNode()]))
+        XCTAssertTrue(issues.filter { $0.message.contains("status") && $0.nodeName == "Router" }.isEmpty,
+                      "a written variable must not be flagged — got: \(issues.map(\.message))")
+    }
+
+    // MARK: - Gate / Code / Action rules
+
+    func testGateWithFewerThanTwoOptionsIsAnError() {
+        var config = GateNodeConfig()
+        config.options = ["OnlyOne"]
+        let gate = WorkflowNode(kind: .gate(config), position: .zero, displayName: "Gate")
+        XCTAssertFalse(errors(validate(layout([gate, codeNode()])), containing: "at least 2").isEmpty)
+    }
+
+    func testGateDuplicateOptionsAreAWarningNotAnError() {
+        var config = GateNodeConfig()
+        config.options = ["Yes", "Yes"]
+        let gate = WorkflowNode(kind: .gate(config), position: .zero, displayName: "Gate")
+        let issues = validate(layout([gate, codeNode()]))
+        XCTAssertEqual(warnings(issues, containing: "duplicate option labels").count, 1)
+        XCTAssertTrue(errors(issues, containing: "duplicate option labels").isEmpty)
+    }
+
+    func testEmptyCodeTemplateIsAWarningNotAnError() {
+        let issues = validate(layout([codeNode(template: "  "), codeNode(name: "Next")]))
+        XCTAssertEqual(warnings(issues, containing: "template is empty").count, 1)
+        XCTAssertTrue(errors(issues, containing: "template is empty").isEmpty,
+                      "an empty template produces no output but must not block the run")
+    }
+
+    func testActionWithoutToolIsAnError() {
+        let action = WorkflowNode(kind: .action(ActionNodeConfig()), position: .zero, displayName: "Call")
+        XCTAssertEqual(errors(validate(layout([action, codeNode()])), containing: "no tool selected").count, 1)
+    }
+
+    // MARK: - Router no-match behaviour (2026-08-16)
+
+    /// A default route whose target rule was deleted must BLOCK the run — at run time the engine
+    /// fails the node rather than guess, so the only good outcome is catching it at design time.
+    func testNoMatchRouteToDeletedRuleIsAnError() {
+        var config = ConditionNodeConfig()
+        config.rules = [rule("A"), rule("B")]
+        config.noMatchBehavior = .route(ruleID: UUID())   // no rule carries this id
+        let node = WorkflowNode(kind: .condition(config), position: .zero, displayName: "Router")
+        let issues = validate(layout([node, codeNode()]))
+        XCTAssertEqual(errors(issues, containing: "'When Nothing Matches' route points at a rule that was deleted").count, 1)
+    }
+
+    /// …and a route to a LIVE rule is clean — a rule that flags everything passes every positive-only test.
+    func testNoMatchRouteToLiveRuleIsClean() {
+        var config = ConditionNodeConfig()
+        let target = rule("B")
+        config.rules = [rule("A"), target]
+        config.noMatchBehavior = .route(ruleID: target.id)
+        let node = WorkflowNode(kind: .condition(config), position: .zero, displayName: "Router")
+        let issues = validate(layout([node, codeNode()]))
+        XCTAssertTrue(errors(issues, containing: "When Nothing Matches").isEmpty)
+    }
+
+    /// A legacy `always` rule (hard-deleted operator, decodes to `.other("always")`) gets its own
+    /// WARNING pointing at the replacement — NOT the generic "saved by a newer version / Update
+    /// Devgentic" ERROR, which would block the run and point in exactly the wrong direction.
+    func testRetiredAlwaysOperatorWarnsWithoutBlocking() {
+        var config = ConditionNodeConfig()
+        config.rules = [rule("A"), ConditionRule(label: "Rest", field: .upstreamOutput, op: .other("always"), value: "")]
+        let node = WorkflowNode(kind: .condition(config), position: .zero, displayName: "Router")
+        let issues = validate(layout([node, codeNode()]))
+
+        XCTAssertTrue(issues.contains { $0.severity == .warning && $0.message.contains("retired 'always matches' operator") },
+                      "the retired op must be named with its replacement — got: \(issues.map(\.message))")
+        XCTAssertTrue(errors(issues, containing: "newer version").isEmpty,
+                      "the generic newer-build ERROR must not fire for 'always' — it blocks the run and says 'Update Devgentic', both wrong")
+    }
+
+    // MARK: - Sub-workflow nesting (WF-VA1 ≡ WF-NS5 ≡ WF-SE4)
+    // (Originally exercised through Loop bodies; rewritten onto sub-workflow nodes when the Loop
+    //  was retired 2026-08-15. The RULES under test — the shared extractor, cycle detection, the
+    //  depth limit, the legal-nesting control — are unchanged.)
+
+    /// The one shared extractor is the fix's foundation — every workflow-referencing node kind
+    /// must be collected here and only here.
+    func testWorkflowReferencesCollectsSubWorkflowNodes() {
+        let subID = UUID(), otherID = UUID()
+        let l = WorkflowLayout(nodes: [subWorkflowNode(subID, name: "Sub"),
+                                       subWorkflowNode(otherID, name: "Other"),
+                                       codeNode()],
+                               edges: [], annotations: [])
+
+        let refs = WorkflowLayoutStore.workflowReferences(in: l)
+
+        XCTAssertEqual(Set(refs.map(\.profileID)), [subID, otherID])
+        XCTAssertEqual(Set(WorkflowLayoutStore.subWorkflowProfileIDs(in: l)), [subID, otherID],
+                       "the legacy accessor must delegate, not re-implement")
+    }
+
+    /// A workflow that contains itself — the tightest recursion.
+    func testSubWorkflowPointingAtOwnWorkflowIsACycleError() {
+        let rootID = UUID()
+        let l = layout([subWorkflowNode(rootID, name: "Self"), codeNode()])
+        let issues = validate(l, subs: [rootID: l], root: rootID)
+        XCTAssertFalse(errors(issues, containing: "Sub-workflow loop").isEmpty,
+                       "self-recursion must be a design-time error — got: \(issues.map(\.message))")
+    }
+
+    /// Mutual recursion A⊂B⊂A — the WF-VA1 headline case.
+    func testMutualRecursionThroughSubWorkflowsIsACycleError() {
+        let aID = UUID(), bID = UUID()
+        let aLayout = layout([subWorkflowNode(bID, name: "RunB"), codeNode()])
+        let bLayout = layout([subWorkflowNode(aID, name: "RunA"), codeNode()])
+        let issues = validate(aLayout, subs: [bID: bLayout, aID: aLayout], root: aID)
+        XCTAssertFalse(errors(issues, containing: "Sub-workflow loop").isEmpty)
+    }
+
+    /// A 4-deep chain (limit is 3).
+    func testOverDeepChainIsADepthError() {
+        let aID = UUID(), bID = UUID(), cID = UUID()
+        let root = layout([subWorkflowNode(aID, name: "RunA"), codeNode()])
+        let aLayout = WorkflowLayout(nodes: [subWorkflowNode(bID, name: "B"), codeNode()], edges: [], annotations: [])
+        let bLayout = WorkflowLayout(nodes: [subWorkflowNode(cID, name: "C"), codeNode()], edges: [], annotations: [])
+        let issues = validate(root, subs: [aID: aLayout, bID: bLayout, cID: nonEmptyBody], root: UUID())
+        XCTAssertFalse(errors(issues, containing: "levels deep").isEmpty,
+                       "root→A→B→C is 4 levels against a limit of 3 — got: \(issues.map(\.message))")
+    }
+
+    /// The control: a legal one-level nesting must produce NO nesting errors, or the rule is just
+    /// flagging every nested workflow.
+    func testLegalNestingProducesNoNestingErrors() {
+        let bodyID = UUID()
+        let (pid, profile) = workflowProfile(bodyID)
+        let issues = validate(layout([subWorkflowNode(bodyID), codeNode()]),
+                              subs: [bodyID: nonEmptyBody], profiles: [pid: profile], root: UUID())
+        XCTAssertTrue(issues.filter { $0.severity == .error }.isEmpty,
+                      "legal nesting must not be blocked — got: \(issues.map(\.message))")
+    }
+
+    // MARK: - Empty sub-workflow targets (WF-VA3)
+
+    func testSubWorkflowNodeWithEmptyCanvasIsAnError() {
+        let subID = UUID()
+        let subNode = WorkflowNode(kind: .profile(profileID: subID, profileType: .workflow),
+                                   position: .zero, displayName: "Nested")
+        let issues = validate(layout([subNode, codeNode()]),
+                              subs: [subID: WorkflowLayout(nodes: [], edges: [], annotations: [])],
+                              root: UUID())
+        XCTAssertEqual(errors(issues, containing: "canvas is empty").count, 1)
+    }
+
+    func testNonEmptySubWorkflowIsNotFlaggedEmpty() {
+        let subID = UUID()
+        let subNode = WorkflowNode(kind: .profile(profileID: subID, profileType: .workflow),
+                                   position: .zero, displayName: "Nested")
+        let issues = validate(layout([subNode, codeNode()]), subs: [subID: nonEmptyBody], root: UUID())
+        XCTAssertTrue(errors(issues, containing: "canvas is empty").isEmpty)
+    }
+
+    // MARK: - WF-CC2: same-level MLX model contention (design-time warning)
+    //
+    // ⚠️ `MLXService` keeps ONE model container resident, so two same-level nodes on DIFFERENT MLX
+    // models evict each other on every generation call; two on the SAME model share one container
+    // for free. The runtime lane split (`WorkflowExecutor.profileDispatchLanes`) handles the
+    // PROFILE group; this warning is what tells the author before they ever hit Run, and it is the
+    // ONLY coverage the structural (AI Classifier Router) half gets today.
+
+    private static let mlxWarning = "Only one MLX model stays in memory"
+
+    private func mlxBotProfile(_ model: String, name: String) -> BackendProfileModel {
+        BackendProfileSnapshot(
+            id: UUID(), displayName: name,
+            details: .bot(BotConfig(llmConfig: ProviderConfig(apiProvider: .mlx, modelName: model)))
+        )
+    }
+
+    private func cloudBotProfile(name: String) -> BackendProfileModel {
+        BackendProfileSnapshot(
+            id: UUID(), displayName: name,
+            details: .bot(BotConfig(llmConfig: ProviderConfig(apiProvider: .anthropic, modelName: "claude")))
+        )
+    }
+
+    private func botNode(_ profile: BackendProfileModel) -> WorkflowNode {
+        var node = WorkflowNode(kind: .profile(profileID: profile.id, profileType: .bot),
+                                position: .zero, displayName: profile.displayName)
+        node.nodeConfig = WorkflowNodeConfig(taskDescription: "Do the thing.")
+        return node
+    }
+
+    /// Two entry nodes feeding one sink — the fan-out shape that puts them on one level.
+    private func fanOut(_ nodes: [WorkflowNode], into sink: WorkflowNode) -> WorkflowLayout {
+        WorkflowLayout(
+            nodes: nodes + [sink],
+            edges: nodes.map { WorkflowEdge(sourceNodeID: $0.id, targetNodeID: sink.id, sourcePortLabel: nil) },
+            annotations: []
+        )
+    }
+
+    /// ⚠️ The severity pairing is the whole point, not decoration. A future refactor that promoted
+    /// this to `.error` would BLOCK every affected workflow at pre-flight — violating the standing
+    /// "a capability label describes, never enforces" directive. Asserting the warning count alone
+    /// would not catch that; asserting zero errors is what does.
+    func testSameLevelDifferentMLXModels_IsAWarningNotAnError() {
+        let deep = mlxBotProfile("qwen3-8b", name: "Deep")
+        let fast = mlxBotProfile("llama3-3b", name: "Fast")
+        let sink = codeNode(name: "Merge")
+        let l = fanOut([botNode(deep), botNode(fast)], into: sink)
+
+        let issues = validate(l, profiles: [deep.id: deep, fast.id: fast])
+        XCTAssertEqual(warnings(issues, containing: Self.mlxWarning).count, 2,
+                       "both contending nodes must be flagged, so either one is clickable in the panel")
+        XCTAssertTrue(errors(issues, containing: "MLX model").isEmpty,
+                      "MUST stay a warning — the graph is legal and it runs; an error would block the run")
+    }
+
+    /// The negative case that pins the key as the MODEL rather than the provider.
+    func testSameLevelSameMLXModel_IsNotFlagged() {
+        let a = mlxBotProfile("qwen3-8b", name: "A")
+        let b = mlxBotProfile("qwen3-8b", name: "B")
+        let l = fanOut([botNode(a), botNode(b)], into: codeNode(name: "Merge"))
+
+        XCTAssertTrue(warnings(validate(l, profiles: [a.id: a, b.id: b]), containing: Self.mlxWarning).isEmpty,
+                      "same-model siblings share one container — flagging them would be a false alarm, and a rule that flags safe shapes teaches people to run past the panel")
+    }
+
+    /// A cloud sibling never touches the MLX slot.
+    func testOneMLXNodeBesideCloudNodes_IsNotFlagged() {
+        let deep = mlxBotProfile("qwen3-8b", name: "Deep")
+        let cloud = cloudBotProfile(name: "Cloud")
+        let l = fanOut([botNode(deep), botNode(cloud)], into: codeNode(name: "Merge"))
+
+        XCTAssertTrue(warnings(validate(l, profiles: [deep.id: deep, cloud.id: cloud]), containing: Self.mlxWarning).isEmpty)
+    }
+
+    /// Different LEVELS run sequentially, so there is nothing to contend for.
+    func testDifferentLevelsAreNotFlagged() {
+        let deep = mlxBotProfile("qwen3-8b", name: "Deep")
+        let fast = mlxBotProfile("llama3-3b", name: "Fast")
+        // A chain: Deep → Fast puts them on levels 0 and 1.
+        let l = layout([botNode(deep), botNode(fast)])
+
+        XCTAssertTrue(warnings(validate(l, profiles: [deep.id: deep, fast.id: fast]), containing: Self.mlxWarning).isEmpty,
+                      "a chain is sequential by construction — the second model loads after the first is done with it")
+    }
+
+    /// ⚠️ WHY THE RULE KEEPS TWO POOLS. The executor fully awaits the STRUCTURAL task group before
+    /// it opens the PROFILE group, so an AI-Classifier Router and a profile node on one level can
+    /// never overlap in time. Merging the pools would flag this provably safe shape.
+    func testClassifierAndProfileNodeOnOneLevel_DoNotWarn() {
+        var config = ConditionNodeConfig()
+        config.rules = [rule("A"), rule("B")]
+        config.llmFallbackEnabled = true
+        config.llmModelName = "llama3-3b"
+        let router = WorkflowNode(kind: .condition(config), position: .zero, displayName: "Router")
+
+        let deep = mlxBotProfile("qwen3-8b", name: "Deep")
+        let l = fanOut([router, botNode(deep)], into: codeNode(name: "Merge"))
+
+        XCTAssertTrue(warnings(validate(l, profiles: [deep.id: deep]), containing: Self.mlxWarning).isEmpty,
+                      "structural and profile nodes are dispatched in separate, fully-awaited groups — they cannot contend")
+    }
+
+    /// ⚠️ Two same-level Routers DO contend, and unlike profile nodes they are NOT covered by the
+    /// runtime lane split — the structural group was deliberately left alone. This warning is
+    /// their only protection, which is exactly why it must fire.
+    func testTwoSameLevelMLXRouters_DoWarn() {
+        func router(_ model: String, _ name: String) -> WorkflowNode {
+            var config = ConditionNodeConfig()
+            config.rules = [rule("A"), rule("B")]
+            config.llmFallbackEnabled = true
+            config.llmModelName = model
+            return WorkflowNode(kind: .condition(config), position: .zero, displayName: name)
+        }
+        let l = fanOut([router("qwen3-8b", "R1"), router("llama3-3b", "R2")], into: codeNode(name: "Merge"))
+
+        let issues = validate(l)
+        XCTAssertEqual(warnings(issues, containing: Self.mlxWarning).count, 2)
+        XCTAssertTrue(errors(issues, containing: "MLX model").isEmpty)
+    }
+
+    /// A Router with the classifier switched OFF never loads a model.
+    func testRoutersWithClassifierDisabled_AreNotFlagged() {
+        func router(_ model: String, _ name: String) -> WorkflowNode {
+            var config = ConditionNodeConfig()
+            config.rules = [rule("A"), rule("B")]
+            config.llmFallbackEnabled = false          // the classifier is off
+            config.llmModelName = model
+            return WorkflowNode(kind: .condition(config), position: .zero, displayName: name)
+        }
+        let l = fanOut([router("qwen3-8b", "R1"), router("llama3-3b", "R2")], into: codeNode(name: "Merge"))
+
+        XCTAssertTrue(warnings(validate(l), containing: Self.mlxWarning).isEmpty)
+    }
+
+    // MARK: - Unified Router policy (2026-08-17)
+
+    private func policyRouter(_ policy: RouterDecisionPolicy, rules rs: [ConditionRule],
+                              name: String = "Router") -> WorkflowNode {
+        var config = ConditionNodeConfig()
+        config.rules = rs
+        config.decisionPolicy = policy
+        return WorkflowNode(kind: .condition(config), position: .zero, displayName: name)
+    }
+
+    /// The same stable-ID contract the legacy setting had, on the setting that replaced it.
+    func testADeletedRouteTargetOnTheUnifiedPolicyIsAnError() {
+        let kept = rule("Urgent")
+        let node = policyRouter(.route(ruleID: UUID()), rules: [kept, rule("Billing")])
+        XCTAssertEqual(errors(validate(layout([node])), containing: "Routing Can't Decide").count, 1)
+    }
+
+    /// …including when it hides inside an Ask fallback, which is the easier one to miss.
+    func testADeletedRouteTargetInsideAnAskFallbackIsAlsoAnError() {
+        let node = policyRouter(.ask(fallback: .route(ruleID: UUID())),
+                                rules: [rule("Urgent"), rule("Billing")])
+        XCTAssertEqual(errors(validate(layout([node])), containing: "Routing Can't Decide").count, 1)
+    }
+
+    func testAValidPolicyRouteIsNotFlagged() {
+        let target = rule("Billing")
+        let node = policyRouter(.route(ruleID: target.id), rules: [rule("Urgent"), target])
+        XCTAssertTrue(errors(validate(layout([node])), containing: "Routing Can't Decide").isEmpty)
+    }
+
+    /// ⚠️ A WARNING, never an error — the graph is legal and runs. It names the unattended
+    /// consequence the author cannot see from the canvas.
+    func testAskWithFailFallbackAndNoErrorPortIsAWarningNotAnError() {
+        let node = policyRouter(.ask(fallback: .failNode), rules: [rule("Urgent"), rule("Billing")])
+        let issues = validate(layout([node]))
+        XCTAssertEqual(warnings(issues, containing: "error port is not wired").count, 1)
+        XCTAssertTrue(errors(issues, containing: "error port is not wired").isEmpty,
+                      "must never block a run — the standing rule is that a capability describes, it does not gate")
+    }
+
+    /// Wiring the error port answers the warning.
+    func testAskWithFailFallbackAndAWiredErrorPortIsQuiet() {
+        let node = policyRouter(.ask(fallback: .failNode), rules: [rule("Urgent"), rule("Billing")])
+        let sink = codeNode(name: "Handler")
+        let l = WorkflowLayout(
+            nodes: [node, sink],
+            edges: [WorkflowEdge(sourceNodeID: node.id, targetNodeID: sink.id,
+                                 sourcePortLabel: WorkflowEdge.errorPortLabel)],
+            annotations: []
+        )
+        XCTAssertTrue(warnings(validate(l), containing: "error port is not wired").isEmpty)
+    }
+
+    /// ⚠️ A MIGRATED node must not be flagged for a stale legacy value the engine no longer reads.
+    func testAStaleLegacyRouteIsNotFlaggedOnceAPolicyGoverns() {
+        var config = ConditionNodeConfig()
+        config.rules = [rule("Urgent"), rule("Billing")]
+        config.noMatchBehavior = .route(ruleID: UUID())   // dangling, but superseded
+        config.decisionPolicy = .failNode
+        let node = WorkflowNode(kind: .condition(config), position: .zero, displayName: "Router")
+        XCTAssertTrue(errors(validate(layout([node])), containing: "When Nothing Matches").isEmpty,
+                      "the legacy setting is inert once a policy governs — flagging it would send the user to fix something with no effect")
+    }
+}

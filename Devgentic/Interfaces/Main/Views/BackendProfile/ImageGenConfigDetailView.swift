@@ -21,6 +21,9 @@ struct ImageGenConfigDetailView: View {
     /// that invokes this closure (typically `dismiss()` from a modal host like
     /// `WorkflowProfileEditorView`). Also hides the trash icon.
     var onCancel: (() -> Void)? = nil
+    /// When true, renders without DynamicIslandBar, outer ScrollView, and navigation guards
+    /// for embedding directly within composite containers like ProfileNodeInspectorView.
+    var isEmbedded: Bool = false
     @Environment(BackendProfileService.self) var profileService
     @Environment(ToastManager.self) private var toastManager
     @Environment(MainViewRouter.self) private var router
@@ -29,8 +32,19 @@ struct ImageGenConfigDetailView: View {
     // Advanced config local state
     @State private var localAdvancedConfig: ImageGenAdvancedConfig = .default()
 
-    // Guard flag: prevents onChange handlers from writing during initial load
-    @State private var isLoadingAdvancedConfig = false
+    /// The exact dictionary the last `loadAdvancedConfig()` produced.
+    ///
+    /// ⚠️ register B45 — this replaces an `isLoadingAdvancedConfig` boolean that could NEVER fire.
+    /// `load` set it true, assigned `localAdvancedConfig` and set it false, all synchronously in
+    /// one MainActor turn; SwiftUI runs `.onChange` on the *next* update pass, by which point the
+    /// flag was already false. So the write-back it existed to suppress happened on every open.
+    ///
+    /// This is register A9's defect verbatim, and A9's fix — a value baseline — never reached this
+    /// file because this editor hand-rolls the lifecycle instead of using
+    /// `ProviderAdvancedConfigManager`. A baseline survives the deferral because it is COMPARED,
+    /// not raced: `load` sets it in the same synchronous call, so whenever `.onChange` finally runs
+    /// it already holds the right value.
+    @State private var loadedAdvancedBaseline: [String: JSONValue]?
 
     // Deletion State
     @State private var showingDeleteAlert = false
@@ -53,60 +67,69 @@ struct ImageGenConfigDetailView: View {
     // MARK: - Computed Bindings
 
     private var providerConfig: Binding<ProviderConfig> {
-        Binding<ProviderConfig>(
+        // ⚠️ register B27 — capture the BUFFER, not `self`. Referencing `editBuffer` directly
+        // inside these closures captures the whole View struct, and the copy carries this
+        // view's `@State` window manager — so a binding handed to a long-lived NSWindow (or
+        // to a manager callback) closed a retain cycle straight back to the manager. A72
+        // fixed the callbacks and missed this, the other end of the same loop.
+        let buffer = editBuffer
+        return Binding<ProviderConfig>(
             get: {
-                if case .imageGen(let config) = editBuffer.draft.details { return config.llmConfig }
+                if case .imageGen(let config) = buffer.draft.details { return config.llmConfig }
                 return ProviderConfig(apiProvider: .openAI, modelName: "dall-e-3")
             },
             set: { newConfig in
-                if case .imageGen(var config) = editBuffer.draft.details {
+                if case .imageGen(var config) = buffer.draft.details {
                     config.llmConfig = newConfig
-                    editBuffer.draft.details = .imageGen(config)
+                    buffer.draft.details = .imageGen(config)
                 }
             }
         )
     }
 
     private var negativePromptBinding: Binding<String> {
-        Binding<String>(
+        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        return Binding<String>(
             get: {
-                if case .imageGen(let config) = editBuffer.draft.details { return config.negativePrompt ?? "" }
+                if case .imageGen(let config) = buffer.draft.details { return config.negativePrompt ?? "" }
                 return ""
             },
             set: { newValue in
-                if case .imageGen(var config) = editBuffer.draft.details {
+                if case .imageGen(var config) = buffer.draft.details {
                     config.negativePrompt = newValue.isEmpty ? nil : newValue
-                    editBuffer.draft.details = .imageGen(config)
+                    buffer.draft.details = .imageGen(config)
                 }
             }
         )
     }
 
     private var aspectRatioBinding: Binding<ImageAspectRatio> {
-        Binding<ImageAspectRatio>(
+        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        return Binding<ImageAspectRatio>(
             get: {
-                if case .imageGen(let config) = editBuffer.draft.details { return config.defaultAspectRatio ?? .square }
+                if case .imageGen(let config) = buffer.draft.details { return config.defaultAspectRatio ?? .square }
                 return .square
             },
             set: { newValue in
-                if case .imageGen(var config) = editBuffer.draft.details {
+                if case .imageGen(var config) = buffer.draft.details {
                     config.defaultAspectRatio = newValue
-                    editBuffer.draft.details = .imageGen(config)
+                    buffer.draft.details = .imageGen(config)
                 }
             }
         )
     }
 
     private var advancedSettingsBinding: Binding<[String: JSONValue]?> {
-        Binding<[String: JSONValue]?>(
+        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        return Binding<[String: JSONValue]?>(
             get: {
-                if case .imageGen(let config) = editBuffer.draft.details { return config.advancedSettings }
+                if case .imageGen(let config) = buffer.draft.details { return config.advancedSettings }
                 return nil
             },
             set: { newValue in
-                if case .imageGen(var config) = editBuffer.draft.details {
+                if case .imageGen(var config) = buffer.draft.details {
                     config.advancedSettings = newValue
-                    editBuffer.draft.details = .imageGen(config)
+                    buffer.draft.details = .imageGen(config)
                 }
             }
         )
@@ -124,6 +147,44 @@ struct ImageGenConfigDetailView: View {
     // MARK: - Body
 
     var body: some View {
+        Group {
+            if isEmbedded {
+                embeddedContent
+            } else {
+                standaloneContent
+            }
+        }
+        .task {
+            loadAdvancedConfig()
+        }
+        .onChange(of: providerConfig.wrappedValue.apiProvider) { _, _ in
+            // When switching to MLX, immediately correct any invalid model name
+            if providerConfig.wrappedValue.apiProvider == .mlx {
+                snapToValidFlux2Model()
+            }
+            // Reload advanced config with provider-appropriate defaults
+            loadAdvancedConfig()
+        }
+        .onChange(of: localAdvancedConfig) { _, newValue in
+            // ⚠️ register B45 — compare against what `load` produced, do not consult a flag.
+            // Two consequences this restores, both of them A9's: an MLX profile with no stored
+            // config used to load `.mlxDefault()` over a `.default()` seed and go DIRTY ON MERE
+            // OPEN (phantom Save/Revert pill), and a profile whose blob failed to decode used to
+            // have app defaults written into the draft — so the next save overwrote a
+            // configuration that was unreadable but still present.
+            let encoded = profileService.encodeConfig(from: newValue)
+            guard encoded != loadedAdvancedBaseline else { return }
+            advancedSettingsBinding.wrappedValue = encoded
+        }
+    }
+
+    private var embeddedContent: some View {
+        VStack(spacing: 20) {
+            formSections
+        }
+    }
+
+    private var standaloneContent: some View {
         VStack(spacing: 0) {
             // See AgentConfigDetailView for the rationale — `onCancel` swaps
             // the leading chevron for an xmark and routes it to the modal host.
@@ -134,134 +195,27 @@ struct ImageGenConfigDetailView: View {
                 actionButtons
             }
 
+            // ⚠️ register B17 — OUTSIDE the ScrollView, directly under the pinned island bar
+            // that holds Save. It used to be the first child of the scrolling form, with a comment
+            // claiming it sat "where the user's eye already is after pressing Save" — untrue for
+            // anyone saving from the Advanced section of an 800-line page, who got a green success
+            // toast and an advisory several screens above them. Pinning it beside the control that
+            // produced it makes the channel reach the user regardless of scroll position, without
+            // a ScrollViewReader or an auto-scroll that would yank the page under them.
+            SaveAdvisoryBanner(advisories: saveAdvisories) {
+                withAnimation { saveAdvisories = [] }
+            }
+            .padding(.horizontal, 24)
+
             ScrollView {
                 VStack(spacing: 32) {
-
-                // ⚠️ Register A34. Sits at the top of the scroll view, where the user's eye already is
-                // after pressing Save in the island bar above. Dismissible, and replaced on the next
-                // save — never a permanent fixture, because an advisory describes a choice the user
-                // already made rather than a fault they must fix.
-                SaveAdvisoryBanner(advisories: saveAdvisories) {
-                    withAnimation { saveAdvisories = [] }
+                    formSections
                 }
-
-                // 1. Identity Header
-                HStack(alignment: .center, spacing: 16) {
-                    Image(systemName: ProfileType.imageGen.iconNameFilled)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 48, height: 48)
-                        .foregroundColor(.orange) // ImageGen specific color
-
-                    VStack(alignment: .leading) {
-                        TextField("Profile Name", text: profile.displayName)
-                            .font(theme.fontTitle2)
-                            .fontWeight(.bold)
-                            .textFieldStyle(.plain)
-                            .foregroundColor(theme.primaryText)
-
-                        Text("AI-powered image generation")
-                            .font(theme.fontSubheadline)
-                            .foregroundColor(theme.secondaryText)
-                    }
-                    Spacer()
-                }
-                .padding(.bottom, 8)
-
-                // 2. Inference Engine (Provider)
-                SettingsCard(title: "Inference Engine", icon: "server.rack", theme: theme) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        ProviderConfigSection(
-                        providerConfig: providerConfig,
-                        profileID: editBuffer.draft.id,
-                        profileType: .imageGen,
-                        customMLXContent: AnyView(
-                            VStack(alignment: .leading, spacing: 12) {
-                                HStack(alignment: .center) {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text("Model Selection")
-                                            .font(theme.fontBody.weight(.medium))
-                                        Text("Flux2 models run fully on-device via Apple Silicon.")
-                                            .font(theme.fontCaption)
-                                            .foregroundColor(theme.secondaryText)
-                                    }
-                                    Spacer(minLength: 16)
-                                    Flux2ModelPickerView(selectedModel: providerConfig.modelName)
-                                        .frame(maxWidth: 260, alignment: .trailing)
-                                }
-                            }
-                            .onAppear { snapToValidFlux2Model() }
-                        )
-                    )
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 16)
-                }
-
-                // 3. Generation Defaults
-                generationDefaultsSection
-
-                // 4. Negative Prompt
-                negativePromptSection
-
-                // 5. Advanced Configuration
-                SettingsCard(title: "Advanced Configuration", icon: "gearshape.2.fill", theme: theme) {
-                    ImageGenSettingsView(
-                        config: $localAdvancedConfig,
-                        provider: providerConfig.wrappedValue.apiProvider
-                    )
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 16)
-                }
-
-                // 6. Capability Badge
-                SettingsCard(title: "Model Capabilities", icon: "checkmark.shield", theme: theme) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack(spacing: 16) {
-                            capabilityBadge(
-                                label: "Text-to-Image",
-                                supported: capability.supportsTextToImage
-                            )
-                            capabilityBadge(
-                                label: "Image-to-Image",
-                                supported: capability.supportsImageToImage
-                            )
-                        }
-
-                        if let maxRes = capability.maxResolution {
-                            Text("Max Resolution: \(maxRes.width)x\(maxRes.height)")
-                                .font(theme.fontCaption)
-                                .foregroundColor(theme.secondaryText)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 16)
-                }
+                .padding(ViewLayout.containerPadding)
+                .padding(.bottom, ViewLayout.containerPadding)
+                .frame(maxWidth: 1000)
+                .frame(maxWidth: .infinity)
             }
-            .padding(ViewLayout.containerPadding)
-            .padding(.bottom, ViewLayout.containerPadding)
-            .frame(maxWidth: 1000)
-            .frame(maxWidth: .infinity)
-        }
-        } // end outer VStack
-        .task {
-            isLoadingAdvancedConfig = true
-            loadAdvancedConfig()
-            isLoadingAdvancedConfig = false
-        }
-        .onChange(of: providerConfig.wrappedValue.apiProvider) { _, _ in
-            // When switching to MLX, immediately correct any invalid model name
-            if providerConfig.wrappedValue.apiProvider == .mlx {
-                snapToValidFlux2Model()
-            }
-            // Reload advanced config with provider-appropriate defaults
-            isLoadingAdvancedConfig = true
-            loadAdvancedConfig()
-            isLoadingAdvancedConfig = false
-        }
-        .onChange(of: localAdvancedConfig) { _, _ in
-            guard !isLoadingAdvancedConfig else { return }
-            advancedSettingsBinding.wrappedValue = profileService.encodeConfig(from: localAdvancedConfig)
         }
         .unsavedChangesBackGuard(
             isDirty: editBuffer.isDirty,
@@ -269,12 +223,6 @@ struct ImageGenConfigDetailView: View {
             onDiscard: { editBuffer.revert() },
             onLeave: { leaveEditor() }
         )
-        // ⚠️ This modifier was MISSING. The trash button set `showingDeleteAlert = true` and
-        // nothing rendered — no alert, no toast, no log, no deletion. `showingDeleteAlert` had
-        // exactly two references in the whole file: its declaration and that assignment. The user
-        // clicks repeatedly and concludes the app is frozen; the only working delete path was the
-        // sidebar row's hover-trash, which is not discoverable from the screen they are on.
-        // Mirrors BotConfigDetailView's alert so the three detail views behave identically.
         .alert("Delete '\(editBuffer.draft.displayName)'?", isPresented: $showingDeleteAlert) {
             Button("Delete", role: .destructive) {
                 do {
@@ -286,11 +234,140 @@ struct ImageGenConfigDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Are you sure you want to delete this image generator? This action cannot be undone.")
+            Text(ProfileReferenceIndex.deletionMessage(
+                for: editBuffer.draft, in: profileService.profiles))
         }
     }
 
+    @ViewBuilder
+    private var formSections: some View {
+        // 1. Identity Header
+        if !isEmbedded {
+            identitySection
+        }
+
+        // 2. Inference Engine (Provider)
+        inferenceEngineSection
+
+        // 3. Generation Defaults
+        generationDefaultsSection
+
+        // 4. Negative Prompt
+        negativePromptSection
+
+        // 5. Advanced Configuration
+        advancedConfigSection
+
+        // 6. Capability Badge
+        modelCapabilitiesSection
+    }
+
+    private var identitySection: some View {
+        HStack(alignment: .center, spacing: 16) {
+            Image(systemName: ProfileType.imageGen.iconNameFilled)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 48, height: 48)
+                .foregroundColor(.orange) // ImageGen specific color
+
+            VStack(alignment: .leading) {
+                TextField("Profile Name", text: profile.displayName)
+                    .font(theme.fontTitle2)
+                    .fontWeight(.bold)
+                    .textFieldStyle(.plain)
+                    .foregroundColor(theme.primaryText)
+
+                Text("AI-powered image generation")
+                    .font(theme.fontSubheadline)
+                    .foregroundColor(theme.secondaryText)
+            }
+            Spacer()
+        }
+        .padding(.bottom, 8)
+    }
+
+    private var inferenceEngineSection: some View {
+        SettingsCard(title: "Inference Engine", icon: "server.rack", theme: theme) {
+            VStack(alignment: .leading, spacing: 16) {
+                ProviderConfigSection(
+                    providerConfig: providerConfig,
+                    profileID: editBuffer.draft.id,
+                    profileType: .imageGen,
+                    customMLXContent: AnyView(
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack(alignment: .center) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Model Selection")
+                                        .font(theme.fontBody.weight(.medium))
+                                    Text("Flux2 models run fully on-device via Apple Silicon.")
+                                        .font(theme.fontCaption)
+                                        .foregroundColor(theme.secondaryText)
+                                }
+                                Spacer(minLength: 16)
+                                Flux2ModelPickerView(selectedModel: providerConfig.modelName)
+                                    .frame(maxWidth: 260, alignment: .trailing)
+                            }
+                        }
+                        .onAppear { snapToValidFlux2Model() }
+                    )
+                )
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
+        }
+    }
+
+    private var advancedConfigSection: some View {
+        SettingsCard(title: "Advanced Configuration", icon: "gearshape.2.fill", theme: theme) {
+            ImageGenSettingsView(
+                config: $localAdvancedConfig,
+                provider: providerConfig.wrappedValue.apiProvider
+            )
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
+        }
+    }
+
+    private var modelCapabilitiesSection: some View {
+        SettingsCard(title: "Model Capabilities", icon: "checkmark.shield", theme: theme) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 16) {
+                    capabilityBadge(
+                        label: "Text-to-Image",
+                        supported: capability.supportsTextToImage
+                    )
+                    capabilityBadge(
+                        label: "Image-to-Image",
+                        supported: capability.supportsImageToImage
+                    )
+                }
+
+                if let maxRes = capability.maxResolution {
+                    Text("Max Resolution: \(maxRes.width)x\(maxRes.height)")
+                        .font(theme.fontCaption)
+                        .foregroundColor(theme.secondaryText)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
+        }
+    }
+
+    /// ⚠️ register B46 — FLUSH FIRST. `BackendProfileService.flushPendingEditorText`'s own doc
+    /// comment says "call this BEFORE reading `hasUnsavedEditorChanges` at an exit point", and
+    /// until now it had exactly one caller: `applicationShouldTerminate` (register B3). The
+    /// floating Advanced prompt editor holds typing in `@State` and writes back only on an explicit
+    /// commit, so a back tap read a CLEAN buffer and left with no prompt — the multi-thousand
+    /// character loss A27/A29/B3 exist to prevent, at the exit B3 did not cover.
+    ///
+    /// ⚠️ Placed in the tap ACTION, not in the `isDirty:` the guard modifier reads: that value is
+    /// computed during a view update, and committing there would mutate state mid-pass.
+    ///
+    /// A no-op in editors that register no commit hook (`SimplePromptWindowManager` syncs on every
+    /// keystroke, so it has nothing pending). It is here in all three anyway — the whole class of
+    /// B44/B46 defects is a fix that landed on the one site that had the bug.
     private func handleBackTap() {
+        profileService.flushPendingEditorText()
         if editBuffer.isDirty {
             showingBackAlert = true
         } else {
@@ -406,24 +483,74 @@ struct ImageGenConfigDetailView: View {
         }
     }
 
-    /// If the stored model name isn't a valid Flux2 inference model, reset to klein-4b.
+    /// Resolves the Flux2 model selection through `ModelSelectionPolicy` — register B34.
+    ///
+    /// ⚠️ This was `if !inferenceRawValues.contains(modelName) { modelName = klein4B }`, duplicated
+    /// verbatim inside `Flux2ModelPickerView.onAppear`, and neither copy logged. It made this the
+    /// SIXTH picker to implement the model-selection rule inline (`MLXModelPickerView` already
+    /// calls itself the fifth), which is precisely the drift `ModelSelectionPolicy` was extracted
+    /// to stop. The picker's copy is gone; this is the only site.
+    ///
+    /// ⚠️ **Re-derived, because the register row's failure scenario was wrong.** B34 reads as if
+    /// switching provider away and back loses a saved `dall-e-3`. It cannot: `switchProvider(to:)`
+    /// clears `modelName` to `""` by design, so the common path here is a *compliant fill of an
+    /// empty selection*, not an overwrite. The genuine defect is narrower — a stored, NON-empty
+    /// name this build does not recognise was silently replaced. That is reachable by running an
+    /// older build against a store a newer one wrote (a `Flux2Model` case this binary lacks), or by
+    /// a stored variant whose `isForInference` is false.
+    ///
+    /// ⚠️ **`.keptUnlisted` KEEPS, with no exception.** `MLXModelPickerView` used to carry the
+    /// module's one exception, and register B13 deleted it after proving its premise false; making
+    /// Flux2 the new exception would re-introduce what B13 just removed. Keeping is also safe here,
+    /// which is the part worth knowing: `MLXImageGenService.resolveFlux2Model` already falls back
+    /// to `.dev` and logs when it cannot map a name, so an unrecognised value still generates — it
+    /// does not strand the profile. Destroying the user's stored choice to avoid a warning the
+    /// runtime already handles is the worse trade.
     private func snapToValidFlux2Model() {
         let inferenceRawValues = Flux2Model.allCases
             .filter(\.isForInference)
             .map(\.rawValue)
-        if !inferenceRawValues.contains(providerConfig.wrappedValue.modelName) {
-            providerConfig.wrappedValue.modelName = Flux2Model.klein4B.rawValue
+
+        switch ModelSelectionPolicy.resolve(
+            saved: providerConfig.wrappedValue.modelName,
+            available: inferenceRawValues,
+            fillCandidate: Flux2Model.klein4B.rawValue
+        ) {
+        case .fill(let candidate):
+            logger.info(
+                "[PROFILE] Filling an empty Flux2 model selection with '\(candidate)'. "
+                + "CONSEQUENCE: the profile draft now names a model; nothing was overwritten."
+            )
+            providerConfig.wrappedValue.modelName = candidate
+
+        case .keptUnlisted(let saved):
+            logger.notice(
+                "[PROFILE] The stored Flux2 model '\(saved)' is not an inference variant this "
+                + "build knows. CONSEQUENCE: it is KEPT, not replaced — a newer build may have "
+                + "written it. Generation falls back to the default pipeline and logs that "
+                + "separately; re-select from the picker to change it."
+            )
+
+        case .keep, .nothingAvailable:
+            break
         }
     }
 
+    /// Decodes the stored advanced config into local state and records the baseline.
+    ///
+    /// ⚠️ register B45 — the baseline assignment is not bookkeeping, it is the fix. It must stay in
+    /// the same synchronous call as the `localAdvancedConfig` write, because the `.onChange` this
+    /// guards runs one update pass later and reads whatever is here by then.
     private func loadAdvancedConfig() {
         let defaultConfig: ImageGenAdvancedConfig = providerConfig.wrappedValue.apiProvider == .mlx
             ? .mlxDefault()
             : .default()
-        self.localAdvancedConfig = profileService.decodeConfig(
+        let loaded = profileService.decodeConfig(
             from: advancedSettingsBinding.wrappedValue,
             as: ImageGenAdvancedConfig.self
         ) ?? defaultConfig
+        self.localAdvancedConfig = loaded
+        self.loadedAdvancedBaseline = profileService.encodeConfig(from: loaded)
     }
 
     private func capabilityBadge(label: String, supported: Bool) -> some View {
@@ -451,13 +578,19 @@ struct ImageGenConfigDetailView: View {
                 IslandPillButton(
                     title: "Revert",
                     style: .secondary,
-                    accessibilityLabel: "Revert unsaved changes",
-                    keyboardShortcut: .cancelAction
+                    // ⚠️ register B12 — NO `.cancelAction`. Revert is destructive and discards
+                    // every unsaved edit without a prompt, so binding it to Esc gave a dirty editor
+                    // a silent one-keypress exit: Esc reverted, `isDirty` went false, and the
+                    // second Esc then passed `interactiveDismissDisabled(isDirty)` and closed the
+                    // sheet. A28's comment claimed "exactly one way out of a dirty editor, and it
+                    // is the one that prompts" — this was the second, and it prompted for nothing.
+                    // Esc now means close, which the unsaved-changes guard already governs.
+                    accessibilityLabel: "Revert unsaved changes"
                 ) {
                     editBuffer.revert()
-                    isLoadingAdvancedConfig = true
+                    // ⚠️ register B17 — the draft the advisory was about no longer exists.
+                    saveAdvisories = []
                     loadAdvancedConfig()
-                    isLoadingAdvancedConfig = false
                 }
 
                 IslandPillButton(
@@ -484,6 +617,13 @@ struct ImageGenConfigDetailView: View {
                             + "CONSEQUENCE: the edit buffer stays dirty and the persisted profile is "
                             + "unchanged; the user's edits are still on screen but not on disk."
                         )
+                        // ⚠️ register B17 — clear on FAILURE too. `saveAdvisories` was assigned
+                        // only in the `do` branch and never reset, so a banner from an earlier
+                        // successful save stayed on screen reading "Saved — one thing worth
+                        // knowing" while an error toast reported that this write did not happen.
+                        // An advisory describes the state of a profile that WAS saved; after a
+                        // failure it describes nothing that exists.
+                        saveAdvisories = []
                         toastManager.show(error.localizedDescription, style: .error)
                     }
                 }
@@ -529,11 +669,9 @@ private struct Flux2ModelPickerView: View {
                 }
             }
             .pickerStyle(.menu)
-            .onAppear {
-                if !models.map(\.rawValue).contains(selectedModel) {
-                    selectedModel = Flux2Model.klein4B.rawValue
-                }
-            }
+            // ⚠️ register B34 — the second copy of the snap rule lived here and is DELETED, not
+            // rewritten. `snapToValidFlux2Model()` in the host owns it, runs on the same appear,
+            // and now logs. Two copies of a rule is how this defect reached six pickers.
 
             // VRAM / memory info for the currently selected model
             if let model = selectedFlux2Model {

@@ -49,7 +49,11 @@ struct WorkflowPortView: View {
         }
         .scaleEffect(isHovering || isCompatibleTarget ? 1.35 : 1.0)
         .opacity(isNodeHovered || isHovering || isCompatibleTarget ? 1.0 : 0.0)
-        .contentShape(Circle().inset(by: -8)) // Larger hit area
+        .contentShape(Circle().inset(by: -8))
+        // Drag-only affordance with nothing to say. Left visible to VoiceOver it would put an
+        // unlabelled element beside every node and bury the node labels in noise; connection
+        // topology is conveyed by the edges themselves, which are now labelled.
+        .accessibilityHidden(true) // Larger hit area
         .onHover { hovering in
             withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                 isHovering = hovering

@@ -30,12 +30,10 @@ struct ChatBubbleView: View {
             || (!message.thoughts.isEmpty && message.profileType == nil)
     }
 
-    private var contentToDisplay: MessageContent {
-        if message.sender == .agent, let content = message.currentAgentContent {
-            return content
-        }
-        return message.content
-    }
+    /// Single-sourced on `ChatMessage`. This was the duplicate `displayedContent`'s own comment
+    /// names — search and render must never disagree about WHICH text a message shows, or a
+    /// regenerated response is searched in one variant and highlighted in another.
+    private var contentToDisplay: MessageContent { message.displayedContent }
 
     var body: some View {
         HStack(alignment: .top, spacing: theme.spacingMedium) {

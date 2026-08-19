@@ -47,29 +47,28 @@ final class SimplePromptWindowManager: NSObject, NSWindowDelegate {
     ) {
         let theme = themeManager.currentTheme
 
-        if let existingWindow = window, existingWindow.isVisible {
+        // ⚠️ register B7 — `isVisible` is FALSE while miniaturized, so minimizing this editor
+        // and re-opening it orphaned the old window. A71 fixed the red-button leak here and left
+        // the minimize one; the identity guard in `windowWillClose` is what makes it safe.
+        if let existingWindow = window {
             existingWindow.contentView = NSHostingView(
                 rootView: makeHost(text: text, botName: botName,
                                    themeManager: themeManager, contextWindow: contextWindow)
             )
             existingWindow.title = Self.title(for: botName.wrappedValue)
             existingWindow.backgroundColor = NSColor(theme.primaryBackground)
+            if existingWindow.isMiniaturized { existingWindow.deminiaturize(nil) }
             existingWindow.makeKeyAndOrderFront(nil)
             logger.info("[PROFILE] Re-presented the floating prompt editor for '\(botName.wrappedValue)'.")
             return
         }
 
-        // ⚠️ Reached with a non-nil `window` after a red-button close. Before the delegate below
-        // existed this silently orphaned the old window; now it should never happen, so say so if
-        // it does rather than leaking quietly a second time.
-        if window != nil {
-            logger.error(
-                "[PROFILE] A closed prompt-editor window was still retained when opening a new one "
-                + "for '\(botName.wrappedValue)'. CONSEQUENCE: releasing it now; if this appears, the "
-                + "windowWillClose delegate is not firing and the leak from A71 is back."
-            )
-            window = nil
-        }
+        // ⚠️ register B7 — A71's orphan branch lived here and is GONE, not silenced. It existed
+        // because the reuse test above rejected a non-visible window and fell through with a
+        // live one still retained; now the reuse path takes every non-nil window, so reaching
+        // this point means `window` is genuinely nil and there is nothing to orphan. The canary
+        // it provided moved into `windowWillClose`'s identity check, which is where a stray
+        // window can actually still show up.
 
         let newWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 600, height: 500),
@@ -130,7 +129,9 @@ final class SimplePromptWindowManager: NSObject, NSWindowDelegate {
     /// Still `internal`: `CreateScheduledTaskView` drives it explicitly because its title is a
     /// derived string (with an "unnamed task" fallback), not a plain binding into the draft.
     func updateTitle(botName: String) {
-        guard let window, window.isVisible else { return }
+        // ⚠️ register B7 — `isVisible` is false while miniaturized; a rename during that time
+        // was dropped and the window resurfaced with a stale title.
+        guard let window else { return }
         window.title = Self.title(for: botName)
     }
 
@@ -145,8 +146,19 @@ final class SimplePromptWindowManager: NSObject, NSWindowDelegate {
     /// hosting view in all of them.
     nonisolated func windowWillClose(_ notification: Notification) {
         MainActor.assumeIsolated {
+            // ⚠️ register B7 — identity check. Clearing unconditionally meant a close from ANY
+            // window this object had been the delegate of dropped the LIVE window's reference,
+            // after which its own close went untracked and it leaked for good.
+            guard let closing = notification.object as? NSWindow, closing === window else {
+                logger.error(
+                    "[PROFILE] A prompt-editor window closed that is NOT the one currently tracked. "
+                    + "CONSEQUENCE: ignored, so the live editor keeps its window reference; if this "
+                    + "appears, an orphan survived the reuse path."
+                )
+                return
+            }
             logger.info("[PROFILE] Floating prompt editor closed; releasing its window and hosting view.")
-            window?.delegate = nil
+            closing.delegate = nil
             window = nil
         }
     }

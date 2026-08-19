@@ -96,6 +96,11 @@ struct CodeViewerTab: Identifiable, Equatable {
 
 
     /// What the editor should display: the user's draft when one exists, else the block.
+    ///
+    /// ⚠️ This is "the editor's live text" ONLY because `updateCodeViewerDraft` stores every
+    /// keystroke, including one that returns to the restore point. It used to store `nil`
+    /// there, which made this property silently return the pristine block for a tab the user
+    /// was actively editing — and the save path reads it as the buffer to write.
     var effectiveCode: String { editedCode ?? snippet.code }
 
     /// Unsaved edits exist.

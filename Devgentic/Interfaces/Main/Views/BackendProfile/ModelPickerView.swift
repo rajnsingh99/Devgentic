@@ -9,6 +9,58 @@ import SwiftUI
 
 private let logger = DGLogger(category: "ModelPicker")
 
+// MARK: - Configured Endpoint (register B22)
+
+/// How a profile's API Endpoint field resolves for model discovery.
+///
+/// ⚠️ The third case is the point. The pickers used to take a `URL?` derived by
+/// `URL(string:)`, so an endpoint the user had typed but that did not parse arrived as `nil` —
+/// indistinguishable from "not configured" — and the fetch went to the VENDOR host carrying the
+/// key the user had scoped to their gateway. "I couldn't use this" must not render, or behave,
+/// identically to "you didn't set one" — the same rule A47 established for the profile list.
+enum ConfiguredEndpoint: Equatable {
+    /// No endpoint configured: the vendor default is correct and intended.
+    case vendorDefault
+    /// A usable, user-supplied endpoint.
+    case custom(URL)
+    /// Something is in the field but it is not a usable URL (mid-typing, or a typo).
+    case unusable(String)
+
+    /// The URL to hand a service, or nil to let it apply its own `ProviderDefaults` value.
+    /// ⚠️ nil ONLY for `.vendorDefault` — `.unusable` must never reach a fetch at all.
+    var serviceURL: URL? {
+        if case .custom(let url) = self { return url }
+        return nil
+    }
+
+    var isUsable: Bool {
+        if case .unusable = self { return false }
+        return true
+    }
+
+    /// For logs: names where a request actually went.
+    var description: String {
+        switch self {
+        case .vendorDefault:      return "the default endpoint"
+        case .custom(let url):    return url.absoluteString
+        case .unusable(let raw):  return "an unusable endpoint ('\(raw)')"
+        }
+    }
+
+    static func resolve(_ raw: String?) -> ConfiguredEndpoint {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return .vendorDefault
+        }
+        // Shares `ProviderDefaults`' predicate on purpose: the picker's idea of "usable" and the
+        // request builders' idea of it must not be allowed to drift apart, or a user gets a model
+        // list from a host the actual requests then refuse to use.
+        guard let url = URL(string: trimmed), ProviderDefaults.isUsableEndpoint(url) else {
+            return .unusable(trimmed)
+        }
+        return .custom(url)
+    }
+}
+
 // MARK: - Cloud Model Picker (Shared)
 
 /// Shared implementation for cloud provider model pickers (Gemini, Anthropic, OpenAI).
@@ -16,19 +68,33 @@ private let logger = DGLogger(category: "ModelPicker")
 private struct CloudModelPickerView: View {
     @Binding var selectedModel: String
     let apiKey: String
-    let fetchClosure: (String) async throws -> [String]
+    /// ⚠️ register B22 — the endpoint is now a VALUE this view holds, not something baked into
+    /// `fetchClosure`. Closures are not `Equatable`, so with the old shape SwiftUI had nothing to
+    /// compare and `.onChange` could not observe an endpoint edit at all: the only trigger was
+    /// `apiKey`. A user who pointed an existing profile at a gateway kept the vendor's model list
+    /// on screen, and the "Verifying key…" that had already run verified it against the vendor.
+    let endpoint: ConfiguredEndpoint
+    /// Vendor name, for logs and the failure line. Combined with `endpoint` rather than passed
+    /// pre-formatted, so the description can never name a different host than the fetch used.
+    let providerName: String
+    let fetchClosure: (String, URL?) async throws -> [String]
     let fetchOnAppear: Bool
-    /// Provider name + resolved endpoint, for the failure log only.
-    /// ⚠️ Passed in rather than derived: the wrappers bake `baseURL` into `fetchClosure`, so this
-    /// view cannot see where the request actually went — and after A18 that may be a corporate
-    /// gateway rather than the vendor, which is exactly what a failure log has to name.
-    let endpointDescription: String
 
     @State private var models: [String] = []
     @State private var isLoading: Bool = false
     @State private var errorMessage: String? = nil
     @State private var fetchTask: Task<Void, Never>?
     @Environment(\.appTheme) private var theme
+
+    private var endpointDescription: String { "\(providerName) at \(endpoint.description)" }
+
+    /// Everything a fetch depends on, in one `Equatable` value so a change to EITHER retriggers.
+    private struct FetchInputs: Equatable {
+        let apiKey: String
+        let endpoint: ConfiguredEndpoint
+    }
+
+    private var fetchInputs: FetchInputs { FetchInputs(apiKey: apiKey, endpoint: endpoint) }
 
     var body: some View {
         HStack {
@@ -53,10 +119,13 @@ private struct CloudModelPickerView: View {
                 await fetchModels()
             }
         }
-        .onChange(of: apiKey) { _, _ in
+        .onChange(of: fetchInputs) { _, _ in
             fetchTask?.cancel()
             fetchTask = Task {
-                do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+                // The debounce matters more now that an ENDPOINT edit lands here: the field is
+                // live-bound, so without it every keystroke of a host name would be a request
+                // carrying the API key to whatever prefix had been typed so far.
+                do { try await Task.sleep(for: .milliseconds(600)) } catch { return }
                 await fetchModels()
             }
         }
@@ -70,12 +139,31 @@ private struct CloudModelPickerView: View {
             return
         }
 
+        // ⚠️ register B22 — refuse rather than fall back. The endpoint field has content that is
+        // not a usable URL, and the only alternative host is the vendor's: sending a
+        // gateway-scoped key there is precisely the exposure this finding is about. Half-typed
+        // hosts also land here, which is what keeps the debounce above from walking a key up a
+        // domain one character at a time.
+        guard endpoint.isUsable else {
+            logger.notice("""
+                [PROFILE] Skipping the \(providerName) model fetch: \(endpoint.description). \
+                CONSEQUENCE: no request is made and the API key is NOT sent anywhere — in \
+                particular it is not sent to the vendor default, which is the only other host \
+                available. The picker asks the user to fix the endpoint.
+                """)
+            self.models = []
+            self.errorMessage = "Check the API Endpoint — it isn't a valid URL."
+            self.isLoading = false
+            return
+        }
+
         isLoading = true
         errorMessage = nil
 
         do {
+            let requestURL = endpoint.serviceURL
             let fetchedModels = try await withThrowingTaskGroup(of: [String].self) { group in
-                group.addTask { try await fetchClosure(apiKey) }
+                group.addTask { try await fetchClosure(apiKey, requestURL) }
                 group.addTask {
                     try await Task.sleep(for: .seconds(15))
                     throw URLError(.timedOut)
@@ -136,20 +224,24 @@ private struct CloudModelPickerView: View {
 
 // MARK: - Cloud Provider Wrappers
 
+/// ⚠️ register B22 — all three wrappers take `endpoint` rather than `baseURL: URL?`, and none of
+/// them capture it in the fetch closure. The closure now receives the URL as a PARAMETER, which is
+/// what lets the shared picker treat the endpoint as observable state instead of an invisible
+/// capture. Keeping a `URL?` here would have re-created the bug the day someone added a default.
 struct GeminiModelPickerView: View {
     @Binding var selectedModel: String
     let apiKey: String
-    /// The profile's configured API Endpoint, or nil to use the vendor default.
-    /// ⚠️ Not optional plumbing — see `GeminiService.verifyAndFetchModels`.
-    var baseURL: URL? = nil
+    /// The profile's configured API Endpoint. See `GeminiService.verifyAndFetchModels`.
+    var endpoint: ConfiguredEndpoint = .vendorDefault
 
     var body: some View {
         CloudModelPickerView(
             selectedModel: $selectedModel,
             apiKey: apiKey,
-            fetchClosure: { key in try await GeminiService().verifyAndFetchModels(apiKey: key, baseURL: baseURL) },
-            fetchOnAppear: false,
-            endpointDescription: "Gemini at \(baseURL?.absoluteString ?? "the default endpoint")"
+            endpoint: endpoint,
+            providerName: "Gemini",
+            fetchClosure: { key, url in try await GeminiService().verifyAndFetchModels(apiKey: key, baseURL: url) },
+            fetchOnAppear: false
         )
     }
 }
@@ -157,17 +249,17 @@ struct GeminiModelPickerView: View {
 struct AnthropicModelPickerView: View {
     @Binding var selectedModel: String
     let apiKey: String
-    /// The profile's configured API Endpoint, or nil to use the vendor default.
-    /// ⚠️ Not optional plumbing — see `AnthropicService.verifyAndFetchModels`.
-    var baseURL: URL? = nil
+    /// The profile's configured API Endpoint. See `AnthropicService.verifyAndFetchModels`.
+    var endpoint: ConfiguredEndpoint = .vendorDefault
 
     var body: some View {
         CloudModelPickerView(
             selectedModel: $selectedModel,
             apiKey: apiKey,
-            fetchClosure: { key in try await AnthropicService().verifyAndFetchModels(apiKey: key, baseURL: baseURL) },
-            fetchOnAppear: true,
-            endpointDescription: "Anthropic at \(baseURL?.absoluteString ?? "the default endpoint")"
+            endpoint: endpoint,
+            providerName: "Anthropic",
+            fetchClosure: { key, url in try await AnthropicService().verifyAndFetchModels(apiKey: key, baseURL: url) },
+            fetchOnAppear: true
         )
     }
 }
@@ -175,17 +267,17 @@ struct AnthropicModelPickerView: View {
 struct OpenAIModelPickerView: View {
     @Binding var selectedModel: String
     let apiKey: String
-    /// The profile's configured API Endpoint, or nil to use the vendor default.
-    /// ⚠️ Not optional plumbing — see `OpenAIService.verifyAndFetchModels`.
-    var baseURL: URL? = nil
+    /// The profile's configured API Endpoint. See `OpenAIService.verifyAndFetchModels`.
+    var endpoint: ConfiguredEndpoint = .vendorDefault
 
     var body: some View {
         CloudModelPickerView(
             selectedModel: $selectedModel,
             apiKey: apiKey,
-            fetchClosure: { key in try await OpenAIService().verifyAndFetchModels(apiKey: key, baseURL: baseURL) },
-            fetchOnAppear: true,
-            endpointDescription: "OpenAI at \(baseURL?.absoluteString ?? "the default endpoint")"
+            endpoint: endpoint,
+            providerName: "OpenAI",
+            fetchClosure: { key, url in try await OpenAIService().verifyAndFetchModels(apiKey: key, baseURL: url) },
+            fetchOnAppear: true
         )
     }
 }
@@ -206,9 +298,11 @@ struct OpenRouterModelPickerView: View {
 
     let apiKey: String
 
-    /// The profile's configured API Endpoint, or nil to use the vendor default.
-    /// ⚠️ Not optional plumbing — see `OpenRouterService.verifyAndFetchModels`.
-    var baseURL: URL? = nil
+    /// The profile's configured API Endpoint. See `OpenRouterService.verifyAndFetchModels`.
+    /// ⚠️ register B22 — the twin of the shared cloud picker's defect, and it needed the same two
+    /// halves: an endpoint edit must retrigger the fetch, and an endpoint that is present but
+    /// unusable must NOT fall back to the vendor host carrying the user's key.
+    var endpoint: ConfiguredEndpoint = .vendorDefault
 
     /// If true (Agents), models without tool support are hidden entirely.
     var filterForTools: Bool = false
@@ -293,10 +387,10 @@ struct OpenRouterModelPickerView: View {
                 await fetchModels()
             }
         }
-        .onChange(of: apiKey) { _, _ in
+        .onChange(of: FetchInputs(apiKey: apiKey, endpoint: endpoint)) { _, _ in
             fetchTask?.cancel()
             fetchTask = Task {
-                do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+                do { try await Task.sleep(for: .milliseconds(600)) } catch { return }
                 await fetchModels()
             }
         }
@@ -321,6 +415,12 @@ struct OpenRouterModelPickerView: View {
         return "  \(note)"
     }
 
+    /// Mirrors the shared picker's input struct — see the note there.
+    private struct FetchInputs: Equatable {
+        let apiKey: String
+        let endpoint: ConfiguredEndpoint
+    }
+
     private func fetchModels() async {
         guard !apiKey.isEmpty else {
             allModels = []
@@ -328,12 +428,25 @@ struct OpenRouterModelPickerView: View {
             return
         }
 
+        guard endpoint.isUsable else {
+            logger.notice("""
+                [PROFILE] Skipping the OpenRouter model fetch: \(endpoint.description). \
+                CONSEQUENCE: no request is made and the API key is NOT sent anywhere — in \
+                particular not to the vendor default, which is the only other host available.
+                """)
+            allModels = []
+            errorMessage = "Check the API Endpoint — it isn't a valid URL."
+            isLoading = false
+            return
+        }
+
         isLoading = true
         errorMessage = nil
 
         do {
+            let requestURL = endpoint.serviceURL
             let fetched = try await withThrowingTaskGroup(of: [OpenRouterModel].self) { group in
-                group.addTask { try await OpenRouterService().verifyAndFetchModels(apiKey: apiKey, baseURL: baseURL) }
+                group.addTask { try await OpenRouterService().verifyAndFetchModels(apiKey: apiKey, baseURL: requestURL) }
                 group.addTask {
                     try await Task.sleep(for: .seconds(15))
                     throw URLError(.timedOut)

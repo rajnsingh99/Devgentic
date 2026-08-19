@@ -54,6 +54,11 @@ final class WorkflowLayoutSD {
     @Transient
     private var _layoutDecodeFailed: Bool = false
 
+    /// Set by `primeDecodeState` when the blob's stamp exceeds `layoutBlobVersion`. Same transient
+    /// discipline as `_layoutDecodeFailed`: never read raw without priming.
+    @Transient
+    private var _layoutFromNewerVersion: Bool = false
+
     // MARK: - Computed Accessor
 
     /// True when the stored canvas could not be read, so `layout` is a placeholder and writes are
@@ -65,6 +70,26 @@ final class WorkflowLayoutSD {
     var hasUnreadableLayout: Bool {
         primeDecodeState()
         return _layoutDecodeFailed
+    }
+
+    /// True when the stored blob was stamped by a NEWER build than this one (WF-PE2).
+    ///
+    /// ⚠️ The stamp was WRITE-ONLY before this: a v2 blob decoded cleanly on a v1 build (Codable
+    /// drops unknown keys silently), and the next save re-encoded the in-memory struct — which
+    /// never held the v2-only fields — freshly stamped v1. Every newer-version setting was
+    /// stripped permanently, with no error, no log and no dirty indicator, and re-upgrading did
+    /// not bring the data back. Sparkle self-distribution makes the rollback that triggers this a
+    /// real user path. Writes are refused while this is true; viewing and RUNNING stay allowed,
+    /// because the decode genuinely succeeded.
+    var hasNewerVersionLayout: Bool {
+        primeDecodeState()
+        return _layoutFromNewerVersion
+    }
+
+    /// The blob's stamped version when it exceeds this build's — for the refusal message.
+    var newerBlobVersion: Int? {
+        primeDecodeState()
+        return _layoutFromNewerVersion ? BlobVersioning.version(of: layoutData) : nil
     }
 
     /// True when the denormalized counts say this row once held content but the blob now decodes to
@@ -91,6 +116,19 @@ final class WorkflowLayoutSD {
         let outcome = Self.decodeLayout(from: layoutData)
         _cachedLayout = outcome.layout
         _layoutDecodeFailed = outcome.didFail
+        // Version probe is separate from decode success: a newer blob usually DECODES fine (the
+        // enum catch-alls and decodeIfPresent defaults make it), which is exactly what made the
+        // downgrade silent. Probed here so every accessor sees it regardless of access order —
+        // the same prime-is-load-bearing rule as `_layoutDecodeFailed`.
+        if let stamped = BlobVersioning.version(of: layoutData), stamped > Self.layoutBlobVersion {
+            _layoutFromNewerVersion = true
+            logger.notice(
+                "[PERSISTENCE] Workflow layout for profile \(self.workflowProfileID) was saved by a "
+                + "NEWER build (blob v\(stamped), this build understands v\(Self.layoutBlobVersion)). "
+                + "CONSEQUENCE: the canvas is readable and runnable but READ-ONLY — saving here would "
+                + "silently strip the newer version's fields on re-encode."
+            )
+        }
     }
 
     /// The decoded `WorkflowLayout`. Reading decodes from `layoutData` (cached);
@@ -122,6 +160,16 @@ final class WorkflowLayoutSD {
             // ⚠️ The prime is load-bearing, not defensive: without it this guard reads a `@Transient`
             // that is `false` on any instance whose getter has not run. See `primeDecodeState()`.
             primeDecodeState()
+            guard !_layoutFromNewerVersion else {
+                logger.error(
+                    "[PERSISTENCE] Refusing to overwrite NEWER-VERSION workflow layout — profile "
+                    + "\(workflowProfileID): the stored blob is v\(BlobVersioning.version(of: layoutData) ?? -1), "
+                    + "this build writes v\(Self.layoutBlobVersion), and a re-encode would permanently strip "
+                    + "every field this build does not understand. CONSEQUENCE: layoutData is left "
+                    + "byte-intact; the canvas stays read-only on this build. Update Devgentic to edit it."
+                )
+                return
+            }
             guard !_layoutDecodeFailed else {
                 logger.error(
                     "[PERSISTENCE] Refusing to overwrite unreadable workflow layout — profile "
@@ -186,7 +234,20 @@ final class WorkflowLayoutSD {
     /// version rides as a sibling and the blob keeps its shape — existing readers are unaffected and
     /// no type gains a `schemaVersion` property (which would be the G13 trap). Bump on any change to
     /// the persisted shape of nodes, edges or annotations.
-    static let layoutBlobVersion = 1
+    ///
+    /// ⚠️ INCLUDING A PURELY ADDITIVE OPTIONAL FIELD. Additive is NOT free here: no Codable in
+    /// `WorkflowModels.swift` carries an unknown-key sidecar, so an older build drops the new key on
+    /// decode and omits it on re-encode. This stamp is the ONLY thing that turns that drop into a
+    /// refused write instead of permanent loss (WF-TS5, pinned by
+    /// `BlobWriteRefusalTests.testNewerVersionBlobKeepsAFutureFieldTheDecoderCannotSee`).
+    ///
+    /// **v2 (2026-08-17)** — `ConditionNodeConfig.decisionPolicy` added (the unified Router
+    /// decision setting). Additive and optional, and bumped anyway BECAUSE it is additive: an older
+    /// build drops the key on decode and omits it on re-encode, so without the bump a v1 build
+    /// could silently launder a Router's policy out of a layout on any ordinary save. With it, that
+    /// build reads and RUNS the layout normally and is refused the write — a read-only canvas on
+    /// downgrade, which is the trade this stamp exists to make.
+    static let layoutBlobVersion = 2
 
     private static func encodeLayout(_ layout: WorkflowLayout) -> Data {
         do {

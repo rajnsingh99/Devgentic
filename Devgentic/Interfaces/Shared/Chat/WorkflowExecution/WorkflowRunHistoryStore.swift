@@ -33,7 +33,13 @@ final class WorkflowRunHistoryStore {
 
     // MARK: - Tuning
 
-    private let maxRecordsPerConversation = 20
+    /// Sliding-window size per conversation.
+    ///
+    /// `static` and internal so the in-memory mirror kept by `MainApplicationViewModel` can trim
+    /// to the SAME number instead of repeating the literal — the two were duplicated `20`s that
+    /// nothing tied together, so a change here would have silently desynced the UI list from the
+    /// store.
+    static let maxRecordsPerConversation = 20
 
     // MARK: - SwiftData Container
 
@@ -71,6 +77,39 @@ final class WorkflowRunHistoryStore {
             logger.error("Failed to fetch run history for \(conversationID): \(error.localizedDescription)")
             return []
         }
+    }
+
+    /// `load(forConversation:)` with the DECODE off the main actor (WF-UI6 ≡ WF-PE7).
+    ///
+    /// The fetch and the row-field copies stay on main (SwiftData requires it); the JSON decode of
+    /// every run's node-results blob — the expensive part, and the reason first-visit to a
+    /// workflow-heavy conversation hitched the main thread — runs detached. Mirrors
+    /// `upsertFinalized`, which moved the ENCODE off-main for the same reason. Rows carrying a
+    /// warm `_cachedRecord` decode for free either way.
+    func loadFinalized(forConversation conversationID: UUID) async -> [WorkflowRunRecord] {
+        guard let context = mainContext else {
+            logger.error("loadFinalized(forConversation:) called before container was configured — returning [].")
+            return []
+        }
+
+        let predicate = #Predicate<WorkflowRunRecordSD> { $0.conversationID == conversationID }
+        let descriptor = FetchDescriptor<WorkflowRunRecordSD>(
+            predicate: predicate,
+            sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
+        )
+
+        let snapshots: [WorkflowRunRecordSD.RowSnapshot]
+        do {
+            snapshots = try context.fetch(descriptor).map(\.rowSnapshot)
+        } catch {
+            logger.error("Failed to fetch run history for \(conversationID): \(error.localizedDescription)")
+            return []
+        }
+        guard !snapshots.isEmpty else { return [] }
+
+        return await Task.detached(priority: .userInitiated) {
+            snapshots.map { WorkflowRunRecordSD.decodeRecord(from: $0) }
+        }.value
     }
 
     /// Inserts or updates a run record under the given conversation, keyed by `record.id`.
@@ -134,7 +173,30 @@ final class WorkflowRunHistoryStore {
             }
 
             // Insert path
-            let conversation = try fetchConversation(id: conversationID, in: context)
+            //
+            // ⚠️ REFUSE when the conversation is gone. A run is persisted twice — a `.running`
+            // stub at start, then a finalize upsert at the end — and `MessagingCoordinator`
+            // cannot start one without an existing `ConversationSD` (it returns early, logging
+            // CRITICAL). So a missing conversation on the INSERT path means exactly one thing:
+            // the user deleted the conversation while the run was still going, `clearHistory`
+            // removed this row, and the cancelled stream is now finalizing.
+            //
+            // Inserting anyway is what made deleted content come back. The delete path
+            // deliberately purges messages, traces and vector memory for privacy; writing the
+            // run's node outputs and final text back afterwards defeats that — and the row is
+            // unparented, so no UI, no cascade and no cleanup path can ever reach it again.
+            guard let conversation = try fetchConversation(id: conversationID, in: context) else {
+                logger.error(
+                    "[PERSISTENCE] Run \(record.id) NOT persisted — conversation \(conversationID) "
+                    + "no longer exists, so this is a finalize landing after the conversation was "
+                    + "deleted mid-run (status=\(record.status.rawValue), \(record.nodeResults.count) "
+                    + "node result(s)). CONSEQUENCE: the record is DROPPED by design. Persisting it "
+                    + "would resurrect content the user deleted and leave an orphan row no UI or "
+                    + "cleanup path can reach."
+                )
+                return
+            }
+
             let newRow = WorkflowRunRecordSD(record: record, conversation: conversation, blobs: resolvedBlobs)
             context.insert(newRow)
 
@@ -146,7 +208,7 @@ final class WorkflowRunHistoryStore {
                 sortBy: [SortDescriptor(\.timestamp, order: .forward)]
             )
             let allForConversation = try context.fetch(overflowDescriptor)
-            let overflow = allForConversation.count - maxRecordsPerConversation
+            let overflow = allForConversation.count - Self.maxRecordsPerConversation
             if overflow > 0 {
                 for old in allForConversation.prefix(overflow) {
                     context.delete(old)
@@ -184,14 +246,25 @@ final class WorkflowRunHistoryStore {
             for orphan in orphans {
                 orphan.statusRaw = WorkflowRunRecord.RunStatus.cancelled.rawValue
                 orphan.errorMessage = orphan.errorMessage ?? "Interrupted"
-                // Recompute duration from start → now so the displayed time
-                // reflects how long the run actually ran before being lost.
-                if orphan.duration == 0 {
-                    orphan.duration = Date().timeIntervalSince(orphan.timestamp)
-                }
+                // Duration is deliberately LEFT AT 0 for an interrupted run.
+                //
+                // This used to be `Date().timeIntervalSince(orphan.timestamp)`, with the
+                // rationale "so the displayed time reflects how long the run actually ran".
+                // It cannot: `Date()` here is the time of the NEXT APP LAUNCH, not the moment
+                // the run died, so the stored interval spanned all the intervening downtime.
+                // `orphan.timestamp` is the run's start and `duration == 0` is precisely the
+                // `.running` stub's value, so the branch fired for EVERY interrupted run — a
+                // run killed on Monday and reopened on Thursday was rendered by
+                // `DurationFormat.seconds` as "4320m 0s" in the history card, the run picker
+                // and the VoiceOver label.
+                //
+                // `DurationFormat.seconds` already renders "" for <= 0, so leaving it at 0
+                // simply omits the duration and lets the "Interrupted" error carry the meaning.
+                // Recording a real value would need a heartbeat persisted DURING the run;
+                // there is no such field today.
             }
             try context.save()
-            logger.info("Reconciled \(orphans.count) orphaned .running run record(s) to .cancelled (Interrupted).")
+            logger.info("Reconciled \(orphans.count) orphaned .running run record(s) to .cancelled (Interrupted); duration left unset — the wall-clock time since the run started would include app downtime, not execution time.")
         } catch {
             logger.error("Failed to reconcile orphaned runs: \(error.localizedDescription)")
         }
@@ -224,10 +297,12 @@ final class WorkflowRunHistoryStore {
 
     // MARK: - Helpers
 
-    /// Fetches the `ConversationSD` row for a given conversation ID, if it
-    /// exists. Returning `nil` is fine — the record still persists; it just
-    /// won't be cascade-deleted by SwiftData. Defensive against the case where
-    /// a workflow somehow runs against an unpersisted conversation.
+    /// Fetches the `ConversationSD` row for a given conversation ID, if it exists.
+    ///
+    /// ⚠️ `nil` is NOT benign, despite what this comment used to say ("the record still persists;
+    /// it just won't be cascade-deleted"). An unparented run row is unreachable forever: the
+    /// history list, run picker and `clearHistory` all query by `conversationID`, and the
+    /// `@Relationship` cascade cannot collect it. The only caller now refuses the write.
     private func fetchConversation(id: UUID, in context: ModelContext) throws -> ConversationSD? {
         let predicate = #Predicate<ConversationSD> { $0.id == id }
         var descriptor = FetchDescriptor<ConversationSD>(predicate: predicate)

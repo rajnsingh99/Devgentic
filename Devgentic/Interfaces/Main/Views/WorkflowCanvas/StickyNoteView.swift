@@ -17,6 +17,16 @@ struct StickyNoteView: View {
 
     @Environment(\.appTheme) private var theme
     @State private var isEditing = false
+
+    /// Drives the commit-on-focus-loss path.
+    ///
+    /// ⚠️ Before this, `commitText()` had exactly two callers: `.onSubmit` on a `TextEditor`, which
+    /// never fires (Return inserts a newline in multi-line text), and a tap on the note itself. So
+    /// typing a note and then clicking ANYWHERE ELSE — the most natural next action — left the text
+    /// stranded in this view's `@State` and destroyed it the moment the canvas unmounted, which a
+    /// run does automatically by flipping to the Execution view. The toolbar said "All changes
+    /// saved" throughout, so it was false reassurance rather than merely silence.
+    @FocusState private var isTextFocused: Bool
     @State private var editText: String = ""
     @State private var isHovering = false
     
@@ -73,6 +83,12 @@ struct StickyNoteView: View {
             // --- Text content ---
             if isEditing {
                 TextEditor(text: $editText)
+                    .focused($isTextFocused)
+                    .onAppear { isTextFocused = true }
+                    .onChange(of: isTextFocused) { _, focused in
+                        // Clicking away is a commit, not a discard.
+                        if !focused && isEditing { commitText() }
+                    }
                     .font(.system(size: 13, weight: .regular, design: .rounded))
                     .scrollContentBackground(.hidden)
                     .background(Color.clear)
@@ -83,7 +99,12 @@ struct StickyNoteView: View {
                         commitText()
                     }
             } else {
-                Text(note.text.isEmpty ? "Double-click to edit..." : note.text)
+                // ⚠️ `String(localized:)` on the placeholder (WF-CU8 class). The `note.text` branch
+                // types the whole ternary as `String`, which binds `Text`'s verbatim init — so this
+                // literal never reached the String Catalog and would have shipped untranslated.
+                // Visible wording is byte-identical, and it stays ONE `Text(_: String)` call, so no
+                // view identity changes.
+                Text(note.text.isEmpty ? String(localized: "Double-click to edit...") : note.text)
                     .font(.system(size: 13, weight: .regular, design: .rounded))
                     .foregroundColor(note.text.isEmpty ? theme.secondaryText.opacity(0.6) : theme.primaryText)
                     .padding(.horizontal, 10)
@@ -129,6 +150,9 @@ struct StickyNoteView: View {
         }
         .gesture(isEditing ? nil : dragGesture)
         .onHover { isHovering = $0 }
+        // Backstop for the unmount path, which no focus change accompanies: switching to the
+        // Execution view (a run does this automatically) tears this view down mid-edit.
+        .onDisappear { if isEditing { commitText() } }
         
         // --- Resize Handle ---
         .overlay(alignment: .bottomTrailing) {
@@ -137,6 +161,70 @@ struct StickyNoteView: View {
             }
         }
         
+        // MARK: Accessibility (WF-CU7)
+        //
+        // ⚠️ The note was the ONE canvas object with no accessibility at all — `grep -c accessibility`
+        // on this file returned 0 — while `WorkflowNodeView` and `WorkflowEdgeView` both carry a
+        // full label + actions treatment. Selecting, editing, deleting and recolouring a note
+        // existed ONLY as pointer gestures, so any documentation the author put on the canvas was
+        // inert for a VoiceOver user.
+        //
+        // Every action below calls the SAME `canvasState` method its pointer gesture calls, so this
+        // is a second route to existing behaviour, not a new interaction model. Move and resize are
+        // deliberately ABSENT, for the same reason they are absent on nodes: keyboard nudge-to-move
+        // is a real interaction design competing with three live gesture recognizers, not an
+        // accessibility patch. ⚠️ This brings notes to PARITY with nodes; it does not make them
+        // movable, and the register row must not claim otherwise.
+        //
+        // ⚠️ PLACEMENT IS LOAD-BEARING, three ways:
+        //   1. AFTER the resize-handle overlay, so the handle folds into this one element instead of
+        //      surfacing as a stray unlabelled Image beside every note.
+        //   2. BEFORE `.position`, mirroring the node, whose a11y block sits on its card while
+        //      `.position` is applied outside.
+        //   3. BELOW the gestures, and NEVER between the two `.onTapGesture`s — that pair must stay
+        //      adjacent for double-tap to win over single-tap.
+        //
+        // POINTER BEHAVIOUR IS UNCHANGED: accessibility modifiers neither hit-test nor affect
+        // layout; nothing is inserted between the gestures; no `.contentShape` is added (the note's
+        // hit region comes from its clipped background shape and must keep that shape, dog-ear and
+        // all); and no `.focusable()` is introduced to compete with the canvas's single focus stop.
+        //
+        // ⚠️ `children:` is CONDITIONAL, and the condition is the whole point. A flat `.ignore`
+        // would delete the TextEditor from the accessibility tree, so the "Edit text" action below
+        // would lead a VoiceOver user into a field they cannot see. `.contain` while editing keeps
+        // it reachable. Only the ARGUMENT varies — an `if isEditing` at chain level would give the
+        // note two view identities and tear the editor down on every toggle.
+        .accessibilityElement(children: isEditing ? .contain : .ignore)
+        .accessibilityLabel(canvasState.accessibilityDescription(for: note))
+        .accessibilityValue(isSelected ? Text("Selected") : Text(""))
+        .accessibilityAddTraits(isEditing ? [] : (isSelected ? [.isButton, .isSelected] : .isButton))
+        .accessibilityAction(named: Text("Select")) {
+            canvasState.select(annotationID: note.id)
+        }
+        .accessibilityAction(named: Text("Edit text")) {
+            // The same two lines the double-tap runs.
+            editText = note.text
+            isEditing = true
+        }
+        .accessibilityAction(named: Text("Delete note")) {
+            // ⚠️ Direct, not via the canvas's `.onDeleteCommand`. The node does the same, which
+            // sidesteps the focus stop entirely. `removeStickyNote` already pushes an undo snapshot.
+            canvasState.removeStickyNote(note.id)
+        }
+        // ⚠️ Recolouring CANNOT be exposed by labelling the swatches. That row renders only when
+        // `isHovering || isSelected`, and `isHovering` is written solely by `.onHover` — a
+        // pointer-only signal VoiceOver never fires — so labels there would be affordances absent
+        // from the tree for exactly the users they are for. They are also bare `Circle()` shapes,
+        // which produce no element to label. Actions on the note's own element are the only route
+        // that survives `children: .ignore`.
+        .accessibilityActions {
+            Button("Make yellow") { canvasState.updateStickyNoteColor(note.id, color: .yellow) }
+            Button("Make blue")   { canvasState.updateStickyNoteColor(note.id, color: .blue) }
+            Button("Make green")  { canvasState.updateStickyNoteColor(note.id, color: .green) }
+            Button("Make pink")   { canvasState.updateStickyNoteColor(note.id, color: .pink) }
+            Button("Make purple") { canvasState.updateStickyNoteColor(note.id, color: .purple) }
+        }
+
         // --- Apply Positions & Offsets Here, instead of parent! ---
         .position(
             x: note.position.x + currentSize.width / 2,
@@ -180,6 +268,10 @@ struct StickyNoteView: View {
             .font(.system(size: 10, weight: .bold))
             .foregroundColor(note.color.swiftUIColor.opacity(0.8))
             .frame(width: 24, height: 24)
+            // ⚠️ Hidden, NOT unlabelled (WF-CU7). It is a drag-only affordance with nothing to say,
+            // and while the note is being edited — when the element is `children: .contain` — it
+            // would otherwise surface as a stray unlabelled Image beside every note.
+            .accessibilityHidden(true)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 1, coordinateSpace: .named("canvasContent"))

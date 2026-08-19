@@ -148,6 +148,8 @@ struct MCPDiscoverView: View {
         .padding(.horizontal, 14)
         .padding(.top, 12)
         .padding(.bottom, 10)
+        .frame(maxWidth: 1000)
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: - Content
@@ -187,6 +189,8 @@ struct MCPDiscoverView: View {
                     }
                 }
                 .padding(14)
+                .frame(maxWidth: 1000)
+                .frame(maxWidth: .infinity)
             }
         }
     }

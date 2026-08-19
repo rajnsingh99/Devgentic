@@ -41,7 +41,8 @@ enum ImageGenProviderFactory {
             logger.info("Creating Gemini image provider for model: \(config.modelName)")
             return GeminiImageGenService(
                 apiKey: apiKey,
-                modelName: config.modelName
+                modelName: config.modelName,
+                baseURL: config.baseURL
             )
 
         case .mlx:

@@ -154,6 +154,10 @@ struct ThemeDecorator: Theme {
 
     // Capability Accent Color (forwarded so a base theme may override the hues)
     func capabilityColor(for category: CapabilityMilestoneKind.MilestoneColor) -> Color { base.capabilityColor(for: category) }
+    // ⚠️ Required for CORRECTNESS, not compilation: `ThemeDecorator` is hand-forwarded per token,
+    // and an unforwarded token still COMPILES (the protocol extension covers it) while silently
+    // serving the DEFAULT instead of the base theme's override.
+    func nodeIdentityColor(for role: WorkflowNodeRole) -> Color { base.nodeIdentityColor(for: role) }
 
     // Syntax Highlighting
     var syntaxTheme: SyntaxTheme {
@@ -258,6 +262,14 @@ protocol Theme {
     /// compaction). Single source of truth for the capability hues used by the timeline
     /// milestone chips and the plan/reflection progress cards.
     func capabilityColor(for category: CapabilityMilestoneKind.MilestoneColor) -> Color
+
+    /// Identity colour for a structural workflow node kind. Single source for the canvas card, its
+    /// ports, its edges, the Add-node palette and the guideline legend (WF-CU10).
+    ///
+    /// ⚠️ Deliberately NOT derived from `errorColor` / `warningColor` / `successColor` /
+    /// `accentColor`: those already carry RUN STATUS on the same cards, so reusing them would make
+    /// "this is a Gate" and "this failed" the same colour on the same card.
+    func nodeIdentityColor(for role: WorkflowNodeRole) -> Color
 
     // ── Tier 2: Extended Color Tokens (defaults provided) ────────────
 
@@ -380,6 +392,65 @@ protocol Theme {
 
 // MARK: - Protocol Extension (Sensible Defaults)
 
+// MARK: - Workflow Node Identity Ramp (WF-CU10)
+
+/// The hues behind `Theme.nodeIdentityColor(for:)`.
+///
+/// ⚠️ THIS CANNOT BE ONE FIXED SET OF HUES, and that is the whole of WF-CU10. The node card's fill
+/// is `controlBackground`, and the themes put it at opposite ends of the luminance range: OneLight
+/// `#f0f0f0` (relative luminance 0.871) versus Dracula `#383A59` (0.046), with DefaultTheme's
+/// `.controlBackgroundColor` following the system appearance.
+///
+/// REASON for the split, measured: a colour clearing the WCAG 1.4.11 3:1 component bar against
+/// Dracula's card needs relative luminance L ≥ 0.238; clearing 3:1 against OneLight's needs
+/// L ≤ 0.257. That ~0.02-wide window also conflicts with the L ≤ 0.183 a white glyph drawn ON the
+/// colour would need. So there is no single ramp, and the branch below is not a preference.
+///
+/// ⚠️ The DARK arm is today's five values VERBATIM. Dracula, OneDark, CosmicDark and DefaultTheme
+/// in Dark Mode must not move — those hues already clear 3:1 on their own cards. Only the light arm
+/// is new, which is exactly where the defect lives: SwiftUI's `.yellow` on `#f0f0f0` measures
+/// **1.33:1**, i.e. an unselected Router's only edge was effectively invisible.
+enum WorkflowNodeIdentityRamp {
+
+    /// Today's hues. Do not "improve" these without re-checking Dracula's `#383A59` card.
+    static func dark(_ role: WorkflowNodeRole) -> Color {
+        switch role {
+        case .router:  return .yellow
+        case .code:    return .cyan
+        case .gate:    return .red
+        case .trigger: return .gray
+        case .action:  return .teal
+        }
+    }
+
+    /// Light-surface ramp. Every hue clears the 4.5:1 TEXT bar against OneLight's `#f0f0f0` card —
+    /// the stricter of the two bars, needed because some of these are drawn as small text, not only
+    /// as strokes and glyphs.
+    ///
+    /// Measured against `#f0f0f0`: router 6.22:1 · code 4.70:1 · gate 5.68:1 · action 4.80:1 ·
+    /// trigger 6.65:1. Against pure white each is higher still.
+    static func lightHex(_ role: WorkflowNodeRole) -> String {
+        switch role {
+        case .router:  return "#92400E"   // amber
+        case .code:    return "#0E7490"   // cyan
+        case .gate:    return "#B91C1C"   // red
+        case .action:  return "#0F766E"   // teal
+        case .trigger: return "#475569"   // slate — an inert marker, deliberately neutral
+        }
+    }
+
+    /// For a theme with NO declared light/dark intent (`colorScheme == nil`), which follows the
+    /// system appearance. A dynamic `NSColor` is the only mechanism that re-resolves when the user
+    /// flips Light/Dark without the app rebuilding its themes.
+    static func systemAdaptive(_ role: WorkflowNodeRole) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                ? NSColor(dark(role))
+                : NSColor(Color(hex: lightHex(role)))
+        })
+    }
+}
+
 /// Default values for all Tier 2 / Tier 3 tokens. Existing themes compile
 /// with zero changes; any theme may selectively override.
 extension Theme {
@@ -472,6 +543,14 @@ extension Theme {
         // neutral secondary text colour rather than borrowing one of the four hues.
         case .unrecognised: return secondaryText
         }
+    }
+
+    /// Defaults branch on the theme's own light/dark intent — see `WorkflowNodeIdentityRamp` for
+    /// why one fixed ramp is not available. A theme may still override to substitute its palette.
+    func nodeIdentityColor(for role: WorkflowNodeRole) -> Color {
+        if colorScheme == .light { return Color(hex: WorkflowNodeIdentityRamp.lightHex(role)) }
+        if colorScheme == .dark  { return WorkflowNodeIdentityRamp.dark(role) }
+        return WorkflowNodeIdentityRamp.systemAdaptive(role)
     }
 
     // ── Code Highlight Theme Default ─────────────────────────────────

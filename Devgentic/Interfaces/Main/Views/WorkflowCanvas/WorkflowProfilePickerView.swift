@@ -19,13 +19,46 @@ struct WorkflowProfilePickerView: View {
     @Environment(\.appTheme) private var theme
     @State private var searchText = ""
 
-    private var availableProfiles: [BackendProfileModel] {
+    /// The profile types this picker offers as workflow nodes.
+    ///
+    /// ⚠️ `.imageGen` is excluded BY PRODUCT DECISION (2026-08-16, WF-CS9): image generation is not
+    /// supported as a workflow step, so it is not listed at all — not greyed out, not shown with an
+    /// explanation. The RUNTIME backstops stay regardless of this list and must NOT be deleted on
+    /// the strength of it: a layout SAVED BEFORE this change can still hold such a node, and
+    /// `WorkflowCanvasState.load(from:)` replays the stored blob verbatim with no migration — a
+    /// picker filter cannot reach it.
+    ///
+    /// ⚠️ An ALLOW-list, deliberately not `!= .imageGen`. `ProfileType` has FIVE cases and this
+    /// picker renders FOUR sections, so `.code` profiles — which ARE real persisted rows, created
+    /// the first time the Code interface opens — already passed this filter, counted toward the
+    /// `availableProfiles.isEmpty` gate, and then rendered in NO section: an empty scroll view with
+    /// no explanation. Naming what IS offered closes that hole with the same line, and leaves any
+    /// future sixth `ProfileType` excluded until someone deliberately admits it.
+    static let offerableProfileTypes: Set<ProfileType> = [.agent, .bot, .workflow]
+
+    /// Hoisted out of `availableProfiles` so a test can reach it.
+    ///
+    /// ⚠️ Not tidiness: `availableProfiles` is `private`, which is file-scoped — `@testable`
+    /// elevates *internal*, not private — and this project has no view-inspection harness, so a
+    /// filter reachable only through `body` cannot be asserted at all.
+    static func offeredProfiles(
+        from profiles: [BackendProfileModel],
+        excludingNodeProfileIDs existing: Set<UUID>,
+        workflowProfileID: UUID
+    ) -> [BackendProfileModel] {
         profiles.filter { profile in
             // Exclude the current workflow itself (prevent self-reference).
             // Other workflow profiles are allowed for sub-workflow nesting (P0-4).
-            profile.id != workflowProfileID &&
-            !existingNodeProfileIDs.contains(profile.id)
+            profile.id != workflowProfileID
+                && !existing.contains(profile.id)
+                && offerableProfileTypes.contains(profile.profileType)
         }
+    }
+
+    private var availableProfiles: [BackendProfileModel] {
+        Self.offeredProfiles(from: profiles,
+                             excludingNodeProfileIDs: existingNodeProfileIDs,
+                             workflowProfileID: workflowProfileID)
     }
 
     private var filteredProfiles: [BackendProfileModel] {
@@ -45,10 +78,6 @@ struct WorkflowProfilePickerView: View {
 
     private var workflowProfiles: [BackendProfileModel] {
         filteredProfiles.filter { $0.profileType == .workflow }
-    }
-
-    private var imageGenProfiles: [BackendProfileModel] {
-        filteredProfiles.filter { $0.profileType == .imageGen }
     }
 
     var body: some View {
@@ -115,9 +144,6 @@ struct WorkflowProfilePickerView: View {
                         }
                         if !workflowProfiles.isEmpty {
                             profileSection(title: "Workflows", icon: ProfileType.workflow.iconName, color: .purple, profiles: workflowProfiles)
-                        }
-                        if !imageGenProfiles.isEmpty {
-                            profileSection(title: "Image Generators", icon: ProfileType.imageGen.iconName, color: .orange, profiles: imageGenProfiles)
                         }
                         if filteredProfiles.isEmpty && !searchText.isEmpty {
                             Text("No matches for \"\(searchText)\"")

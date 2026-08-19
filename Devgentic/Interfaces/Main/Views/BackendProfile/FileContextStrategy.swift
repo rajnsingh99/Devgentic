@@ -35,26 +35,13 @@ enum FileContextStrategy: String, Codable, CaseIterable, Sendable, Hashable {
     case stateless = "stateless"
 
     // MARK: - Display Properties
+    //
+    // ⚠️ register A63 — `displayName` and `description` are now `localizedTitle` /
+    // `localizedDescription` (`LocalizedStringKey`) in `ProfileEnumLocalizedTitles.swift`. This
+    // file is Foundation-only by design, so a SwiftUI type cannot live here.
 
-    var displayName: String {
-        switch self {
-        case .contextualRAG:   return "Contextual RAG"
-        case .directInjection: return "Direct Injection"
-        case .stateless:       return "Stateless"
-        }
-    }
 
-    var description: String {
-        switch self {
-        case .contextualRAG:
-            // Deprecated — never shown (availableStrategies excludes it everywhere).
-            return "Files are indexed for semantic search across the conversation."
-        case .directInjection:
-            return "Attached files and knowledge sources are included in the prompt as text. Best for a few small-to-medium documents."
-        case .stateless:
-            return "Files are not pre-loaded — the agent reads them on demand with the read_file tool. Best for code-heavy work and large files."
-        }
-    }
+
 
     var iconName: String {
         switch self {

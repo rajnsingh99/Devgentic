@@ -17,6 +17,18 @@ private let logToolExecution = DGLogger(category: "ToolExecution")
 /// It acts as the Hub, initializing models, resolving tools, and routing to the correct Executor.
 @Observable
 class AgentConnect: @unchecked Sendable {
+
+    /// Whether agent delegation (`call_agent` / sub-agents) is available at all. Register B15.
+    ///
+    /// ⚠️ **Deliberately `false`.** The capability was withdrawn from the UI, but the runtime gate
+    /// is the mere PRESENCE of `capabilities.agentDelegation` — there is no `isEnabled` flag — so
+    /// legacy "Supervisor" profiles kept injecting `call_agent` forever with no control and no
+    /// indication. Withdrawing a toggle is only half a decision; this is the other half.
+    ///
+    /// One constant so restoring the feature is one line, not an archaeology exercise. Same shape
+    /// as `PlanningCapability.parallelSubtasksSupported` (register A67), and the same reason: a
+    /// stored preference is ignored, never rewritten.
+    static let agentDelegationSupported = false
     
     // MARK: - Initialization
     
@@ -172,12 +184,11 @@ class AgentConnect: @unchecked Sendable {
                     continuation.yield(.thought("Preparing agent tools…"))
 
                     // Extract capabilities for tool injection (delegation)
-                    let agentCapabilities: AgentCapabilities?
-                    if case .agent(let agentConfig) = profile.details {
-                        agentCapabilities = agentConfig.capabilities
-                    } else {
-                        agentCapabilities = nil
-                    }
+                    // ⚠️ register B44 — was `if case .agent … else { nil }`, which dropped `.code`.
+                    // Latent rather than live (a Code session's `AgentCapabilities()` is all-nil,
+                    // so nil and default behaved alike), but it is the same omission as the four
+                    // below and would go live the moment a Code session enabled planning.
+                    let agentCapabilities: AgentCapabilities? = profile.details.agentCapabilities
 
                     // 5. Resolve Tools (model passed for delegation tool to reuse)
                     // An MCP server's `sampling/createMessage` arrives out-of-band on the client
@@ -269,12 +280,10 @@ class AgentConnect: @unchecked Sendable {
                     let nativeContextBudgetChars = PromptFitCheck.nativePayloadCharBudget(forContextWindow: contextWindow)
 
                     // Resolve history strategy from profile (default: .recentHistory)
-                    let historyStrategy: HistoryStrategy
-                    if case .agent(let agentConfig) = profile.details {
-                        historyStrategy = agentConfig.historyStrategy ?? .recentHistory
-                    } else {
-                        historyStrategy = .recentHistory
-                    }
+                    // ⚠️ register B44 — LIVE defect: `CodeSessionManager` configures
+                    // `historyStrategy: .pointer`, and `.code` fell into the `else`, so every Code
+                    // session ran on `.recentHistory` instead of the strategy it was built with.
+                    let historyStrategy: HistoryStrategy = profile.details.historyStrategy
 
                     // Determine if this is a native provider (supports turn-by-turn history)
                     let isNativeProvider: Bool = {
@@ -419,18 +428,14 @@ class AgentConnect: @unchecked Sendable {
                     }
                     
                     // Extract resilience config from agent profile
-                    let retryPolicy: RetryPolicy
-                    let errorRecovery: ErrorRecovery
-                    let resilienceOverrides: ResilienceOverrides?
-                    if case .agent(let agentConfig) = profile.details {
-                        retryPolicy = agentConfig.retryPolicy ?? RetryPolicy()
-                        errorRecovery = agentConfig.errorRecovery ?? ErrorRecovery()
-                        resilienceOverrides = agentConfig.resilienceOverrides
-                    } else {
-                        retryPolicy = RetryPolicy()
-                        errorRecovery = ErrorRecovery()
-                        resilienceOverrides = nil
-                    }
+                    // ⚠️ register B44 — THE live defect, and it sat 85 lines above A7's own
+                    // `.code` fix in this same function. `.code` fell into the `else`, so a Code
+                    // session got `ErrorRecovery()` (`onToolFailure: .abort`) in place of the
+                    // `.fallbackPrompt` `CodeSessionManager` configures, and `resilienceOverrides`
+                    // was nil so its Loop Safety caps were discarded too — with nothing logged.
+                    let retryPolicy = profile.details.retryPolicy
+                    let errorRecovery = profile.details.errorRecovery
+                    let resilienceOverrides = profile.details.resilienceOverrides
 
                     // Resolve the three-tier resilience policy ONCE, here, where the
                     // provider class is known. Transport budgets are provider-derived
@@ -503,20 +508,19 @@ class AgentConnect: @unchecked Sendable {
                     
                     try Task.checkCancellation()
 
-                    // Extract execution timeout from the profile's agent configuration.
+                    // Execution timeout from the profile's agent configuration.
                     //
-                    // ⚠️ `.code` carries an `AgentConfig` too and MUST be matched here. It used to
-                    // fall into the `else`, so a Code session's persisted `executionTimeout` (300 s,
-                    // set by `CodeSessionManager`) was silently discarded and the run had NO
-                    // wall-clock bound at all — a stalled tool loop streamed forever with nothing in
-                    // the log to say a limit had been configured, let alone dropped.
-                    let executionTimeout: TimeInterval?
-                    switch profile.details {
-                    case .agent(let agentConfig), .code(let agentConfig):
-                        executionTimeout = agentConfig.executionTimeout
-                    case .bot, .workflow, .imageGen:
-                        executionTimeout = nil
-                    }
+                    // ⚠️ `.code` carries an `AgentConfig` too and MUST be matched. It used to fall
+                    // into an `else`, so a Code session's persisted `executionTimeout` (300 s, set
+                    // by `CodeSessionManager`) was silently discarded and the run had NO wall-clock
+                    // bound at all (register A7).
+                    //
+                    // ⚠️ register B44 — A7's fix was an exhaustive `switch` written HERE, at the one
+                    // site the row named, while four more sites in this same file kept the `if case
+                    // .agent … else` shape and kept dropping `.code`. Fixing the site rather than
+                    // the class is why the trap survived. The switch now lives once, in
+                    // `ProfileDetails.agentConfig`, and every agent-setting accessor derives from it.
+                    let executionTimeout: TimeInterval? = profile.details.executionTimeout
 
                     if let executionTimeout {
                         logger.info("""
@@ -685,10 +689,8 @@ class AgentConnect: @unchecked Sendable {
 
                     // 6. Resolve tools (still needed for agent nodes)
                     let longTermMemory: any LongTermMemoryStrategy = StaticGroundingMemory(ragContext: "")
-                    let agentCapabilities: AgentCapabilities? = {
-                        if case .agent(let config) = profile.details { return config.capabilities }
-                        return nil
-                    }()
+                    // ⚠️ register B44 — the fifth copy, in closure form. Same omission.
+                    let agentCapabilities: AgentCapabilities? = profile.details.agentCapabilities
 
                     let rateLimitCategory = RateLimitCategory.from(provider: llmConfig.apiProvider)
                     let rateLimitKey = RateLimitCategory.deriveBucketKey(
@@ -749,18 +751,14 @@ class AgentConnect: @unchecked Sendable {
                     let nativeContextBudgetChars = PromptFitCheck.nativePayloadCharBudget(forContextWindow: contextWindow)
 
                     // Resilience config
-                    let retryPolicy: RetryPolicy
-                    let errorRecovery: ErrorRecovery
-                    let resilienceOverrides: ResilienceOverrides?
-                    if case .agent(let agentConfig) = profile.details {
-                        retryPolicy = agentConfig.retryPolicy ?? RetryPolicy()
-                        errorRecovery = agentConfig.errorRecovery ?? ErrorRecovery()
-                        resilienceOverrides = agentConfig.resilienceOverrides
-                    } else {
-                        retryPolicy = RetryPolicy()
-                        errorRecovery = ErrorRecovery()
-                        resilienceOverrides = nil
-                    }
+                    // ⚠️ register B44 — THE live defect, and it sat 85 lines above A7's own
+                    // `.code` fix in this same function. `.code` fell into the `else`, so a Code
+                    // session got `ErrorRecovery()` (`onToolFailure: .abort`) in place of the
+                    // `.fallbackPrompt` `CodeSessionManager` configures, and `resilienceOverrides`
+                    // was nil so its Loop Safety caps were discarded too — with nothing logged.
+                    let retryPolicy = profile.details.retryPolicy
+                    let errorRecovery = profile.details.errorRecovery
+                    let resilienceOverrides = profile.details.resilienceOverrides
 
                     // Image payload (Phase 3): upstream image artifacts become native
                     // image blocks so vision-capable bot nodes "see" them. Reference-
@@ -1186,8 +1184,18 @@ class AgentConnect: @unchecked Sendable {
                 throw NSError(domain: "AgentConnect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Gemini API Key is required."])
             }
 
-            // Use native Gemini endpoint exclusively to prevent 429 schema compatibility errors
-            let googleBaseURL = ProviderDefaults.geminiBaseURL.appendingPathComponent("models/\(llmConfig.modelName)")
+            // Use the native Gemini API SHAPE exclusively to prevent 429 schema compatibility
+            // errors — that decision is about the request format, not about the host.
+            //
+            // ⚠️ register B21 (twin of the imageGen finding). The host was hardcoded here too, so a
+            // Google profile pointed at a corporate gateway listed its models through the gateway
+            // (`GeminiService.verifyAndFetchModels` honours `baseURL`) and then sent every actual
+            // completion — and its gateway-scoped key — to `generativelanguage.googleapis.com`.
+            // One profile, two hosts, and the credential went to the one the user configured away
+            // from. The path suffix is unchanged; only the root is now the configured one.
+            let googleBaseURL = ProviderDefaults
+                .resolvedBaseURL(configured: llmConfig.baseURL, fallback: ProviderDefaults.geminiBaseURL)
+                .appendingPathComponent("models/\(llmConfig.modelName)")
             var options: [String: JSONValue]? = nil
             if let advConfig = llmConfig.advancedConfiguration {
                 options = advConfig
@@ -1256,7 +1264,10 @@ class AgentConnect: @unchecked Sendable {
     
     // MARK: - Tool Resolution
     
-    private func resolveExecutableTools(
+    /// `internal` rather than `private` ONLY so the no-cross-source-fallback invariant below can
+    /// be tested directly. It has no other callers outside this type; the tool-shadowing rule it
+    /// enforces is a security boundary, and a source scan is too weak a guard for one.
+    func resolveExecutableTools(
         profileTools: [Tool],
         conversationID: UUID,
         longTermMemory: any LongTermMemoryStrategy,
@@ -1305,7 +1316,7 @@ class AgentConnect: @unchecked Sendable {
 
         var unresolved: [String] = []
         for toolConfig in profileTools where toolConfig.isEnabled {
-            // Resolve by SOURCE first, not by name.
+            // Resolve by SOURCE, not by name — and ONLY within that source.
             //
             // This used to try `resolveNativeTool(toolName:)` unconditionally and only fall
             // through to MCP when the name missed. Because MCP servers choose their own
@@ -1314,15 +1325,24 @@ class AgentConnect: @unchecked Sendable {
             // dispatched to Devgentic's LOCAL implementation instead, ignoring
             // `toolConfig.sourceId` entirely. The user enabled one tool and a different
             // one ran, with matching arguments making the swap invisible.
+            //
+            // `sourceId` is the whole answer, in both directions: it says which
+            // implementation the user chose, and a same-named tool from anywhere else is a
+            // different program with different limits. See the resolver below for why the
+            // remaining `??` fallbacks were removed too.
             let isBuiltIn = toolConfig.sourceId == ToolSource.builtInSourceID
 
             // Skip tools from a disabled server BEFORE any resolution attempt.
             //
-            // Returning nil from `resolveMCPTool` alone is not enough: the caller falls
-            // through to `resolveNativeTool`, so a disabled server exposing a name that
-            // collides with a built-in (`read_file`) would have had its calls quietly
-            // executed by Devgentic's LOCAL implementation — the tool-shadowing bug in
-            // reverse, and reachable by simply switching a server off.
+            // This once carried the load of a correctness guard: while the resolver below fell
+            // back across sources, returning nil from `resolveMCPTool` was not enough, because
+            // the caller then ran the same-named built-in — the shadowing bug in reverse,
+            // reachable by simply switching a server off. That fallback is gone, so
+            // `resolveMCPTool`'s own `source.isEnabled` guard would now produce the same
+            // OUTCOME. This stays for the DIAGNOSTIC: a server the user deliberately switched
+            // off is not a dropped capability, and it must not be reported as one. Falling
+            // through would add the tool to `unresolved` and emit the ⚠️ NOT RESOLVED error,
+            // burying real drops in noise every turn.
             if !isBuiltIn,
                let source = allToolSources.first(where: { $0.id == toolConfig.sourceId }),
                !source.isEnabled {
@@ -1334,11 +1354,26 @@ class AgentConnect: @unchecked Sendable {
                 continue
             }
 
+            // Resolve STRICTLY within the declared source — no cross-source fallback.
+            //
+            // ⚠️ Both arms used to end in `?? <the other resolver>`, which left the shadowing bug
+            // half-open in each direction. Branching on `isBuiltIn` fixed the common case (a name
+            // that exists on BOTH sides resolves to the declared one), but the fallbacks still
+            // fired whenever the declared side MISSED:
+            //   • non-built-in ?? native — a server that is enabled yet no longer exposes the name
+            //     (tool renamed or removed upstream), or a server row that is GONE entirely, had
+            //     its calls quietly executed by Devgentic's same-named local implementation. The
+            //     `!source.isEnabled` skip above does not cover this: it only fires when the source
+            //     row still exists, so a REMOVED server was the sharpest form of the substitution.
+            //   • built-in ?? MCP — a built-in deleted or renamed between releases resolved to
+            //     whatever MCP server happened to expose the old name.
+            // In both cases the user enabled one tool and a different implementation ran, with
+            // matching arguments making the swap invisible. "The source you chose is unavailable,
+            // so run something else with the same name" is never the safe default for a tool call.
+            // Dropping the capability is, and the drop is reported loudly below.
             let resolved: AgentTool? = isBuiltIn
                 ? self.resolveNativeTool(toolName: toolConfig.name, conversationID: conversationID, requiresConfirmation: toolConfig.requiresConfirmation, timeout: toolConfig.timeout, timeoutMessage: toolConfig.timeoutMessage)
-                    ?? self.resolveMCPTool(toolConfig: toolConfig, availableSources: allToolSources, conversationID: conversationID)
                 : self.resolveMCPTool(toolConfig: toolConfig, availableSources: allToolSources, conversationID: conversationID)
-                    ?? self.resolveNativeTool(toolName: toolConfig.name, conversationID: conversationID, requiresConfirmation: toolConfig.requiresConfirmation, timeout: toolConfig.timeout, timeoutMessage: toolConfig.timeoutMessage)
 
             if let agentTool = resolved {
                 activeTools.append(agentTool)
@@ -1353,12 +1388,37 @@ class AgentConnect: @unchecked Sendable {
                 // no profile, no conversation, no statement of the consequence — unusable for
                 // working out why an agent "forgot" how to do something.
                 unresolved.append(toolConfig.name)
-                logger.error("""
-                    [TOOLRESOLVE] ⚠️ '\(toolConfig.name)' NOT RESOLVED — the agent will run WITHOUT \
-                    this capability. Neither `NativeToolCatalog` nor MCP source \(toolConfig.sourceId) \
-                    knows the name. Usual cause: a tool deleted or renamed since this profile was \
-                    saved. [profile \(profileID?.uuidString ?? "unknown") conv \(conversationID)]
-                    """)
+
+                // Name the OTHER side explicitly when it would have matched. That case is exactly
+                // what the removed fallback used to swallow, and it is the one the user can act
+                // on: a same-named implementation exists, it is simply not the one this profile
+                // declared. Saying so is the difference between "re-add it from the Tool Library"
+                // and a fruitless hunt for a tool that looks present everywhere.
+                let shadowCandidate: String? = isBuiltIn
+                    ? (allToolSources.first { $0.id != ToolSource.builtInSourceID && $0.tools.contains { $0.name == toolConfig.name } }
+                        .map { "MCP server '\($0.serverName)' (\($0.id))" })
+                    : (NativeToolCatalog.entry(named: toolConfig.name) != nil ? "the built-in catalogue" : nil)
+
+                if let shadowCandidate {
+                    logger.error("""
+                        [TOOLRESOLVE] ⚠️ '\(toolConfig.name)' NOT RESOLVED from its declared \
+                        \(isBuiltIn ? "built-in source" : "MCP source \(toolConfig.sourceId)") — the agent \
+                        will run WITHOUT this capability. A tool of the SAME NAME exists in \
+                        \(shadowCandidate), and it is deliberately NOT substituted: a same-named tool \
+                        from a different source is a different implementation with different limits \
+                        (sandboxing, allow-lists, credentials). To use that one, add it from the Tool \
+                        Library so the profile declares its real source. \
+                        [profile \(profileID?.uuidString ?? "unknown") conv \(conversationID)]
+                        """)
+                } else {
+                    logger.error("""
+                        [TOOLRESOLVE] ⚠️ '\(toolConfig.name)' NOT RESOLVED — the agent will run WITHOUT \
+                        this capability. \(isBuiltIn ? "`NativeToolCatalog`" : "MCP source \(toolConfig.sourceId)") \
+                        does not know the name, and no other source offers it either. Usual cause: a \
+                        tool deleted or renamed since this profile was saved. \
+                        [profile \(profileID?.uuidString ?? "unknown") conv \(conversationID)]
+                        """)
+                }
             }
         }
         if !unresolved.isEmpty {
@@ -1396,7 +1456,29 @@ class AgentConnect: @unchecked Sendable {
         // -----------------------------------------------------------------
         // 4. Agent Delegation Tool (when capability is ON)
         // -----------------------------------------------------------------
-        if let delegation = agentCapabilities?.agentDelegation,
+        // ⚠️ register B15 — agent delegation is WITHDRAWN, and the runtime now enforces that
+        // rather than obeying whatever the stored blob says. The toggle was removed from the UI
+        // long ago (A66), but the gate here is the mere PRESENCE of `capabilities.agentDelegation`
+        // — there is no `isEnabled` flag — so every legacy "Supervisor" profile that
+        // `ProfileMigrator.migrateToV2` created went on injecting `call_agent` on every run, with
+        // nothing on screen to say so.
+        //
+        // Enforced at CONSUMPTION with one named constant, exactly like
+        // `PlanningCapability.parallelSubtasksSupported` (register A67): one line to flip when
+        // sub-agents are worth reviving. The stored config is logged and IGNORED, never rewritten
+        // — a migration would destroy a preference the user expressed for a feature the team
+        // intends to restore, and that is a one-way door.
+        if !Self.agentDelegationSupported, agentCapabilities?.agentDelegation != nil {
+            logger.notice("""
+                [PROFILE] Ignoring the stored Agent Delegation configuration — the capability is \
+                withdrawn (register B15) and `call_agent` is NOT being injected. CONSEQUENCE: this \
+                agent runs without sub-agents; its stored settings are preserved untouched, and the \
+                Capabilities card offers a one-way switch to clear them.
+                """)
+        }
+
+        if Self.agentDelegationSupported,
+           let delegation = agentCapabilities?.agentDelegation,
            let model = parentModel,
            let generator = generatorStrategy,
            let rlKey = rateLimitKey,

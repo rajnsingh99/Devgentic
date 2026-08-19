@@ -13,13 +13,42 @@ private let logger = DGLogger(category: "ConversationExporter")
 
 struct ConversationExporter {
 
+    /// A fence long enough to contain `content`.
+    ///
+    /// CommonMark closes a fenced block at the first run of backticks at least as long as the
+    /// opening fence, so a hardcoded ``` is broken by any content that contains one — the
+    /// remainder of that block then renders as document structure. This is reachable on the
+    /// ordinary `.codeBlock` path (an agent answer about markdown, or any nested fence), not
+    /// only in the file-embedding branch.
+    private static func fence(for content: String) -> String {
+        var longestRun = 0, currentRun = 0
+        for character in content {
+            if character == "`" {
+                currentRun += 1
+                longestRun = max(longestRun, currentRun)
+            } else {
+                currentRun = 0
+            }
+        }
+        return String(repeating: "`", count: max(3, longestRun + 1))
+    }
+
     /// Exports a conversation's messages to a Markdown string.
     /// - Parameter includeFileContent: When true, embeds extracted document content inline (up to 10K chars per file).
-    static func toMarkdown(title: String, messages: [ChatMessage], includeFileContent: Bool = false) async -> String {
+    /// - Parameter isTruncated: true when the caller's fetch hit its cap, so older turns are
+    ///   missing. Stated in the document — an export that silently begins partway through
+    ///   misrepresents the conversation exactly like a dropped turn does. Deliberately a flag
+    ///   and not a total: the caller knows it was capped, not how many messages exist.
+    static func toMarkdown(title: String, messages: [ChatMessage], includeFileContent: Bool = false,
+                           isTruncated: Bool = false) async -> String {
         var lines: [String] = []
 
         lines.append("# \(title)")
         lines.append("")
+        if isTruncated {
+            lines.append("> ⚠️ This export contains only the most recent \(messages.count) messages of this conversation. Earlier turns exceeded the export limit and are not included.")
+            lines.append("")
+        }
 
         let dateFormatter = DateFormatter()
         dateFormatter.dateStyle = .medium
@@ -49,12 +78,13 @@ struct ConversationExporter {
                         if registry.canExtract(from: file.url) {
                             do {
                                 let result = try await registry.extract(from: file.url, maxSize: 10_000)
+                                let fence = Self.fence(for: result.text)
                                 lines.append("<details>")
                                 lines.append("<summary>Content of \(file.name)</summary>")
                                 lines.append("")
-                                lines.append("```")
+                                lines.append(fence)
                                 lines.append(result.text)
-                                lines.append("```")
+                                lines.append(fence)
                                 lines.append("</details>")
                                 lines.append("")
                             } catch {
@@ -76,9 +106,10 @@ struct ConversationExporter {
                 lines.append(text)
 
             case .codeBlock(let language, let code):
-                lines.append("```\(language ?? "")")
+                let fence = Self.fence(for: code)
+                lines.append("\(fence)\(language ?? "")")
                 lines.append(code)
-                lines.append("```")
+                lines.append(fence)
 
             case .error(let errorTitle, let details, _, let suggestion):
                 lines.append("> **Error**: \(errorTitle ?? "Unknown") — \(details)")
@@ -108,8 +139,11 @@ struct ConversationExporter {
 
     /// Presents an NSSavePanel and writes the Markdown export to disk.
     @MainActor
-    static func exportToFile(title: String, messages: [ChatMessage], includeFileContent: Bool = false) async {
-        let markdown = await toMarkdown(title: title, messages: messages, includeFileContent: includeFileContent)
+    static func exportToFile(title: String, messages: [ChatMessage], includeFileContent: Bool = false,
+                            isTruncated: Bool = false) async {
+        let markdown = await toMarkdown(title: title, messages: messages,
+                                        includeFileContent: includeFileContent,
+                                        isTruncated: isTruncated)
 
         let savePanel = NSSavePanel()
         savePanel.title = String(localized: "Export Conversation")

@@ -18,6 +18,8 @@ struct ToolLibraryContainerView: View {
     let routeProfileID: UUID?
 
     @Environment(BackendProfileService.self) private var profileService
+    // register B16 — needed to surface the tool-capability advisory this screen was discarding.
+    @Environment(ToastManager.self) private var toastManager
     @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
@@ -273,6 +275,19 @@ struct ToolLibraryContainerView: View {
     }
 
     /// Writes a tools list back into either an `.agent` or `.code` profile detail case.
+
+    /// Surfaces save advisories that are ABOUT tools on the screen where tools are edited.
+    ///
+    /// ⚠️ register B16. Filtered rather than shown wholesale: this screen can also produce the
+    /// endpoint-transport and missing-instructions advisories, and neither is actionable from a
+    /// tool list — showing them here would be noise that trains the user to ignore the one warning
+    /// that matters. The profile editors' banner (A34) remains the surface for the rest.
+    private func showToolAdvisories(_ advisories: [ProfileValidationError]) {
+        for advisory in advisories where advisory.field == "modelCapabilities" {
+            toastManager.show(advisory.message, style: .warning)
+        }
+    }
+
     private func writeTools(_ tools: [Tool], into details: ProfileDetails) -> ProfileDetails {
         switch details {
         case .agent(var config):
@@ -363,7 +378,14 @@ struct ToolLibraryContainerView: View {
             // this) no log line either. This was the only one of the affected save paths that
             // produced zero diagnostic output.
             do {
-                try profileService.saveProfile(profileService.profiles[idx])
+                // ⚠️ register B16 — the advisories are SHOWN here, not discarded. `ProfileValidator`
+                // emits "the selected model does not support tool calling" for local providers, and
+                // this screen is where the user is enabling tools: every save recomputed that
+                // warning and threw it away, so someone could tick ten tools onto a model that
+                // cannot call any of them and be told nothing. A34's banner lives in the three
+                // detail editors — the one screen the user is NOT on at this moment.
+                let advisories = try profileService.saveProfile(profileService.profiles[idx])
+                showToolAdvisories(advisories)
                 // ⚠️ Re-baseline ONLY on success, and only onto what was actually written. Without
                 // this the detail editor kept an `original` describing the pre-change tool list, so
                 // it showed Save/Revert pills for an edit the user never made — and Revert restored
@@ -458,7 +480,9 @@ struct ToolLibraryContainerView: View {
                 // ⚠️ Same as above — the binding's setter has already mutated both the edit buffer
                 // and the service array, so a swallowed throw desynchronises the UI from disk.
                 do {
-                    try self.profileService.saveProfile(self.profileService.profiles[idx])
+                    // register B16 — same surfacing as the bulk path above.
+                    let advisories = try self.profileService.saveProfile(self.profileService.profiles[idx])
+                    self.showToolAdvisories(advisories)
                     // Same re-baseline as the bulk path above — see the note there.
                     self.profileService.rebaseEditBuffer(to: self.profileService.profiles[idx])
                 } catch {

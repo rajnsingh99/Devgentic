@@ -56,7 +56,12 @@ enum AgentStreamEvent: Sendable {
 
     /// [E1] A workflow Gate node is asking the user to pick one of `options`. The choice routes the
     /// workflow to the matching output port. `deadline` is the absolute auto-reject time (live countdown).
-    case requestGate(prompt: String, options: [String], operationID: UUID = UUID(), deadline: Date? = nil, sourceNodeID: UUID? = nil)
+    /// ⚠️ New associated values MUST be defaulted and appended. This event SUSPENDS the executor,
+    /// and the sub-workflow forwarder ends in `default:` — a swallowed suspending
+    /// event is a permanent hang, not a visible failure, because the executor is already parked on
+    /// the operationID and nothing times out. Defaulted values keep every existing positional
+    /// binding compiling while a NEW case would silently fall into those `default:` arms.
+    case requestGate(prompt: String, options: [String], operationID: UUID = UUID(), deadline: Date? = nil, sourceNodeID: UUID? = nil, inputText: String? = nil, highlights: [RuleMatchSpan] = [])
 
     /// The tool executed successfully. Carries the observation payload for the LLM + UI.
     /// - durationMs: optional wall-clock execution time (from dispatch to completion)
@@ -109,11 +114,25 @@ enum AgentStreamEvent: Sendable {
     /// folds into the node's failure detail.
     case workflowNodeFailed(nodeID: UUID, profileName: String, error: String, suggestion: String? = nil)
 
+    /// A workflow node DID NOT RUN. Not a failure — see `NodeSkipReason`.
+    ///
+    /// ⚠️ This case exists because the channel used to have no way to say it. A skip was squeezed
+    /// through `workflowNodeFailed` carrying the prose "Upstream dependency failed", so:
+    ///   • every node on an unchosen Router branch was reported as an upstream FAILURE on a run
+    ///     where nothing failed;
+    ///   • `.skipped` was declared in both the live and the persisted status enums and was
+    ///     **unreachable in both** — the UI drew a "Skipped" icon, colour and label that no run
+    ///     could ever produce;
+    ///   • nine surfaces string-matched the message back into "did not run", and three of them
+    ///     forgot, so one node read "Not run" on screen and "Failed" to VoiceOver.
+    /// Emit this — never `workflowNodeFailed` — for a node that did not execute.
+    case workflowNodeSkipped(nodeID: UUID, profileName: String, reason: NodeSkipReason)
+
+    /// A workflow node was cancelled mid-flight. Distinct from failure: the user asked for it.
+    case workflowNodeCancelled(nodeID: UUID, profileName: String)
+
     /// Overall workflow progress update.
     case workflowProgress(completed: Int, total: Int)
-
-    /// A loop node has completed one iteration of its body workflow.
-    case workflowLoopIteration(nodeID: UUID, profileName: String, iteration: Int, maxIterations: Int)
 
     // MARK: - Capability Events (Planning, Self-Reflection, Delegation)
 
@@ -629,17 +648,45 @@ struct PendingPlanReview: Sendable, Identifiable, Codable, Equatable {
 
 /// Data Model for a Workflow Gate HITL (E1). The user picks one of N options; that choice routes the
 /// workflow to the matching output port (per-option branching, like a Condition node but human-decided).
+/// A span of the arbitration input that a specific rule matched, so the banner can paint it in that
+/// rule's colour.
+///
+/// ⚠️ Offsets are in CHARACTERS, measured against the exact `inputText` carried alongside them —
+/// never against anything the UI re-derives. `WorkflowRunDisplayData` builds its own per-node input
+/// by joining upstreams with `"\n\n"` over layout topology with no liveness filter, while the
+/// executor joins the LIVE upstreams with `"\n"`; the two strings differ in separator width AND in
+/// which upstreams they contain, so an offset from one is meaningless in the other.
+struct RuleMatchSpan: Sendable, Codable, Equatable, Hashable {
+    /// The rule label — matches one of `PendingGate.options`, which is also the button title.
+    let label: String
+    let start: Int
+    let end: Int
+}
+
 struct PendingGate: Sendable, Identifiable, Codable, Equatable {
     let id: UUID                // operationID for suspension correlation
     let prompt: String
     let options: [String]       // the choices; each maps to an output port of the same label
     let deadline: Date?         // absolute auto-reject time for the live countdown (nil = indefinite)
 
-    init(id: UUID = UUID(), prompt: String, options: [String], deadline: Date? = nil) {
+    /// The text the decision is about, when there is one (Router ambiguity arbitration). Carried in
+    /// the payload rather than re-read anywhere, because `highlights` is measured against exactly
+    /// this string. `nil` for an ordinary Gate, which has no input to show.
+    let inputText: String?
+
+    /// Which rule matched which part of `inputText`. Empty for an ordinary Gate, and empty for
+    /// operators that have no locatable span (`equals` gives only the whole field; `does not
+    /// contain` / `is empty` / `always` match by absence or unconditionally).
+    let highlights: [RuleMatchSpan]
+
+    init(id: UUID = UUID(), prompt: String, options: [String], deadline: Date? = nil,
+         inputText: String? = nil, highlights: [RuleMatchSpan] = []) {
         self.id = id
         self.prompt = prompt
         self.options = options
         self.deadline = deadline
+        self.inputText = inputText
+        self.highlights = highlights
     }
 }
 

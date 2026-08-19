@@ -19,6 +19,9 @@
 
 import SwiftUI
 import AppKit
+import os
+
+private let logger = DGLogger(category: "AttachedImage")
 
 struct AttachedImageCardView: View {
     let file: AttachedImageFile
@@ -28,7 +31,14 @@ struct AttachedImageCardView: View {
     @State private var decodeFailed = false
     @State private var showLightbox = false
     @State private var fullImage: NSImage?
-    @State private var saveError: String?
+    /// Failure of any context-menu action, surfaced as one alert. Was `saveError: String?`,
+    /// which only Save ever set.
+    @State private var actionError: ActionError?
+
+    struct ActionError {
+        let title: String
+        let message: String
+    }
 
     var body: some View {
         Group {
@@ -91,10 +101,13 @@ struct AttachedImageCardView: View {
                        altText: file.name,
                        data: file.binaryData,
                        mimeType: "image/\(ImageExport.fileExtension(for: file.binaryData))")
-        .alert("Couldn't save image", isPresented: .constant(saveError != nil)) {
-            Button("OK") { saveError = nil }
+        // One alert for all three context-menu actions. It used to cover Save only, so
+        // "View Full Size" and "Copy Image" failed with no feedback whatsoever — see
+        // `openLightbox` / `copyImage`.
+        .alert(actionError?.title ?? "", isPresented: .constant(actionError != nil)) {
+            Button("OK") { actionError = nil }
         } message: {
-            Text(saveError ?? "")
+            Text(actionError?.message ?? "")
         }
     }
 
@@ -108,7 +121,16 @@ struct AttachedImageCardView: View {
         let data = file.binaryData
         Task {
             let image = await Task.detached(priority: .userInitiated) { NSImage(data: data) }.value
-            guard let image else { return }   // undecodable at full size: keep the thumbnail, no empty lightbox
+            guard let image else {
+                // Was a bare `return`. The user CLICKED this — nothing opening, with no alert
+                // and no log, reads as the app being unresponsive rather than a failed decode.
+                logger.warning("[MEDIA] Full-size decode of attached image '\(self.file.name)' (\(data.count) bytes) FAILED after the thumbnail succeeded. CONSEQUENCE: 'View Full Size' opened nothing; the chip keeps its thumbnail and the user is told.")
+                actionError = ActionError(
+                    title: String(localized: "Couldn't open this image"),
+                    message: String(localized: "\(self.file.name) can't be decoded at full size. The preview thumbnail is still available.")
+                )
+                return
+            }
             fullImage = image
             showLightbox = true
         }
@@ -145,7 +167,16 @@ struct AttachedImageCardView: View {
         let data = file.binaryData
         Task {
             let image = await Task.detached(priority: .userInitiated) { NSImage(data: data) }.value
-            guard let image else { return }
+            guard let image else {
+                // The clipboard is NOT cleared on failure, so a silent return here left the
+                // user pasting stale contents believing the copy had worked.
+                logger.warning("[MEDIA] Full-size decode of attached image '\(self.file.name)' (\(data.count) bytes) FAILED. CONSEQUENCE: nothing was copied and the CLIPBOARD STILL HOLDS ITS PREVIOUS CONTENTS; the user is told so they don't paste the wrong thing.")
+                actionError = ActionError(
+                    title: String(localized: "Couldn't copy this image"),
+                    message: String(localized: "\(self.file.name) can't be decoded at full size, so nothing was copied. Your clipboard is unchanged.")
+                )
+                return
+            }
             fullImage = image
             ImageExport.copyToPasteboard(image)
         }
@@ -159,7 +190,11 @@ struct AttachedImageCardView: View {
                 baseName: (file.name as NSString).deletingPathExtension
             )
         } catch {
-            saveError = error.localizedDescription
+            logger.error("[MEDIA] Save to Downloads FAILED for attached image '\(self.file.name)' (\(self.file.binaryData.count) bytes): \(error.localizedDescription). CONSEQUENCE: nothing was written; the alert tells the user.")
+            actionError = ActionError(
+                title: String(localized: "Couldn't save image"),
+                message: error.localizedDescription
+            )
         }
     }
 }

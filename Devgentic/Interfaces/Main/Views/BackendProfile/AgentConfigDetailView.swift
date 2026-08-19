@@ -48,6 +48,9 @@ struct AgentConfigDetailView: View {
     /// editors don't allow profile deletion; that's reserved for the standalone
     /// profile management screen.
     var onCancel: (() -> Void)? = nil
+    /// When true, renders without DynamicIslandBar, outer ScrollView, and navigation guards
+    /// for embedding directly within composite containers like ProfileNodeInspectorView.
+    var isEmbedded: Bool = false
     @Environment(BackendProfileService.self) var profileService
     @Environment(MainViewRouter.self) private var router
     @Environment(ToastManager.self) private var toastManager
@@ -122,9 +125,15 @@ struct AgentConfigDetailView: View {
     // MARK: - Computed Bindings
 
     private var providerConfig: Binding<ProviderConfig> {
-        Binding<ProviderConfig>(
+        // ⚠️ register B27 — capture the BUFFER, not `self`. Referencing `editBuffer` directly
+        // inside these closures captures the whole View struct, and the copy carries this
+        // view's `@State` window manager — so a binding handed to a long-lived NSWindow (or
+        // to a manager callback) closed a retain cycle straight back to the manager. A72
+        // fixed the callbacks and missed this, the other end of the same loop.
+        let buffer = editBuffer
+        return Binding<ProviderConfig>(
             get: {
-                switch editBuffer.draft.details {
+                switch buffer.draft.details {
                 case .bot(let config): return config.llmConfig
                 case .agent(let config): return config.llmConfig
                 case .code(let config): return config.llmConfig
@@ -133,27 +142,28 @@ struct AgentConfigDetailView: View {
                 }
             },
             set: { newConfig in
-                if case .agent(var config) = editBuffer.draft.details {
+                if case .agent(var config) = buffer.draft.details {
                     config.llmConfig = newConfig
-                    editBuffer.draft.details = .agent(config)
-                } else if case .code(var config) = editBuffer.draft.details {
+                    buffer.draft.details = .agent(config)
+                } else if case .code(var config) = buffer.draft.details {
                     config.llmConfig = newConfig
-                    editBuffer.draft.details = .code(config)
+                    buffer.draft.details = .code(config)
                 }
             }
         )
     }
 
     private var capabilitiesBinding: Binding<AgentCapabilities> {
-        Binding<AgentCapabilities>(
+        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        return Binding<AgentCapabilities>(
             get: {
-                if case .agent(let config) = editBuffer.draft.details { return config.capabilities }
+                if case .agent(let config) = buffer.draft.details { return config.capabilities }
                 return AgentCapabilities()
             },
             set: { newValue in
-                if case .agent(var config) = editBuffer.draft.details {
+                if case .agent(var config) = buffer.draft.details {
                     config.capabilities = newValue
-                    editBuffer.draft.details = .agent(config)
+                    buffer.draft.details = .agent(config)
                 }
             }
         )
@@ -168,137 +178,146 @@ struct AgentConfigDetailView: View {
     }
 
     private var maxIterationsBinding: Binding<Int?> {
-        Binding<Int?>(
+        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        return Binding<Int?>(
             get: {
-                if case .agent(let config) = editBuffer.draft.details { return config.maxIterations }
+                if case .agent(let config) = buffer.draft.details { return config.maxIterations }
                 return nil
             },
             set: { newValue in
-                if case .agent(var config) = editBuffer.draft.details {
+                if case .agent(var config) = buffer.draft.details {
                     config.maxIterations = newValue
-                    editBuffer.draft.details = .agent(config)
+                    buffer.draft.details = .agent(config)
                 }
             }
         )
     }
 
     private var executionTimeoutBinding: Binding<TimeInterval?> {
-        Binding<TimeInterval?>(
+        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        return Binding<TimeInterval?>(
             get: {
-                if case .agent(let config) = editBuffer.draft.details { return config.executionTimeout }
+                if case .agent(let config) = buffer.draft.details { return config.executionTimeout }
                 return nil
             },
             set: { newValue in
-                if case .agent(var config) = editBuffer.draft.details {
+                if case .agent(var config) = buffer.draft.details {
                     config.executionTimeout = newValue
-                    editBuffer.draft.details = .agent(config)
+                    buffer.draft.details = .agent(config)
                 }
             }
         )
     }
 
     private var resilienceOverridesBinding: Binding<ResilienceOverrides?> {
-        Binding<ResilienceOverrides?>(
+        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        return Binding<ResilienceOverrides?>(
             get: {
-                if case .agent(let config) = editBuffer.draft.details { return config.resilienceOverrides }
+                if case .agent(let config) = buffer.draft.details { return config.resilienceOverrides }
                 return nil
             },
             set: { newValue in
-                if case .agent(var config) = editBuffer.draft.details {
+                if case .agent(var config) = buffer.draft.details {
                     config.resilienceOverrides = newValue
-                    editBuffer.draft.details = .agent(config)
+                    buffer.draft.details = .agent(config)
                 }
             }
         )
     }
 
     private var errorRecoveryBinding: Binding<ErrorRecovery?> {
-        Binding<ErrorRecovery?>(
+        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        return Binding<ErrorRecovery?>(
             get: {
-                if case .agent(let config) = editBuffer.draft.details { return config.errorRecovery }
+                if case .agent(let config) = buffer.draft.details { return config.errorRecovery }
                 return nil
             },
             set: { newValue in
-                if case .agent(var config) = editBuffer.draft.details {
+                if case .agent(var config) = buffer.draft.details {
                     config.errorRecovery = newValue
-                    editBuffer.draft.details = .agent(config)
+                    buffer.draft.details = .agent(config)
                 }
             }
         )
     }
 
     private var historyStrategyBinding: Binding<HistoryStrategy> {
-        Binding<HistoryStrategy>(
+        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        return Binding<HistoryStrategy>(
             get: {
-                if case .agent(let config) = editBuffer.draft.details {
+                if case .agent(let config) = buffer.draft.details {
                     return config.historyStrategy ?? .recentHistory
                 }
                 return .recentHistory
             },
             set: { newValue in
-                if case .agent(var config) = editBuffer.draft.details {
+                if case .agent(var config) = buffer.draft.details {
                     config.historyStrategy = newValue
-                    editBuffer.draft.details = .agent(config)
+                    buffer.draft.details = .agent(config)
                 }
             }
         )
     }
 
     private var instructionsBinding: Binding<String> {
-        Binding<String>(
+        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        return Binding<String>(
             get: {
-                if case .agent(let config) = editBuffer.draft.details { return config.instructions ?? "" }
+                if case .agent(let config) = buffer.draft.details { return config.instructions ?? "" }
                 return ""
             },
             set: { newValue in
-                if case .agent(var config) = editBuffer.draft.details {
+                if case .agent(var config) = buffer.draft.details {
                     config.instructions = newValue
-                    editBuffer.draft.details = .agent(config)
+                    buffer.draft.details = .agent(config)
                 }
             }
         )
     }
 
     private var knowledgeSourcesBinding: Binding<[KnowledgeSource]> {
-        Binding<[KnowledgeSource]>(
+        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        return Binding<[KnowledgeSource]>(
             get: {
-                if case .agent(let config) = editBuffer.draft.details { return config.knowledgeSources ?? [] }
+                if case .agent(let config) = buffer.draft.details { return config.knowledgeSources ?? [] }
                 return []
             },
             set: { newValue in
-                if case .agent(var config) = editBuffer.draft.details {
+                if case .agent(var config) = buffer.draft.details {
                     config.knowledgeSources = newValue.isEmpty ? nil : newValue
-                    editBuffer.draft.details = .agent(config)
+                    buffer.draft.details = .agent(config)
                 }
             }
         )
     }
 
     private var toolsBinding: Binding<[Tool]> {
-        Binding<[Tool]>(
+        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        return Binding<[Tool]>(
             get: {
-                if case .agent(let config) = editBuffer.draft.details { return config.tools }
+                if case .agent(let config) = buffer.draft.details { return config.tools }
                 return []
             },
             set: { newTools in
-                if case .agent(var config) = editBuffer.draft.details {
+                if case .agent(var config) = buffer.draft.details {
                     config.tools = newTools
-                    editBuffer.draft.details = .agent(config)
+                    buffer.draft.details = .agent(config)
                 }
             }
         )
     }
 
     private var skillConfigBinding: Binding<SkillFolderConfig?> {
-        Binding<SkillFolderConfig?>(
+        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        return Binding<SkillFolderConfig?>(
             get: {
-                if case .agent(let config) = editBuffer.draft.details { return config.skillConfig }
+                if case .agent(let config) = buffer.draft.details { return config.skillConfig }
                 return nil
             },
             set: { newValue in
-                if case .agent(var config) = editBuffer.draft.details {
+                if case .agent(var config) = buffer.draft.details {
                     config.skillConfig = newValue
-                    editBuffer.draft.details = .agent(config)
+                    buffer.draft.details = .agent(config)
                 }
             }
         )
@@ -306,513 +325,12 @@ struct AgentConfigDetailView: View {
 
     // MARK: - Body
     var body: some View {
-        VStack(spacing: 0) {
-            // When `onCancel` is set (workflow modal context), the leading
-            // button becomes an xmark that dismisses the sheet — clearer than
-            // a back-chevron, which implies router navigation that doesn't
-            // exist here. Default path keeps the chevron + handleBackTap so
-            // the standalone profile screen behaves identically to before.
-            DynamicIslandBar(
-                onBack: handleBackTap,
-                leadingSymbol: onCancel != nil ? "xmark" : "chevron.left"
-            ) {
-                actionButtons
+        Group {
+            if isEmbedded {
+                embeddedContent
+            } else {
+                standaloneContent
             }
-
-            ScrollView {
-                VStack(spacing: 32) {
-
-                    // ⚠️ Register A34. Sits at the top of the scroll view, where the user's eye already is
-                    // after pressing Save in the island bar above. Dismissible, and replaced on the next
-                    // save — never a permanent fixture, because an advisory describes a choice the user
-                    // already made rather than a fault they must fix.
-                    SaveAdvisoryBanner(advisories: saveAdvisories) {
-                        withAnimation { saveAdvisories = [] }
-                    }
-
-                    // 1. Identity Header
-                    HStack(alignment: .center, spacing: 16) {
-                        ZStack {
-                            Circle()
-                                .fill(LinearGradient(colors: [theme.accentColor.opacity(0.22), theme.accentColor.opacity(0.06)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                                .frame(width: 52, height: 52)
-                                .overlay(Circle().stroke(theme.accentColor.opacity(0.35), lineWidth: 0.5))
-                                .shadow(color: theme.accentColor.opacity(0.2), radius: 8)
-
-                            Image(systemName: ProfileType.agent.iconNameFilled)
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .frame(width: 26, height: 26)
-                                .foregroundColor(theme.accentColor)
-                        }
-
-                        VStack(alignment: .leading) {
-                            TextField("Agent Name", text: profile.displayName)
-                                .font(theme.fontTitle2)
-                                .fontWeight(.bold)
-                                .textFieldStyle(.plain)
-                                .foregroundColor(theme.primaryText)
-
-                            Text("Define your agent's personality, logic, and tools.")
-                                .font(theme.fontSubheadline)
-                                .foregroundColor(theme.secondaryText)
-                        }
-                        Spacer()
-
-                        Button(action: { showingAgentGuide = true }) {
-                            Image(systemName: "questionmark.circle")
-                                .font(theme.fontTitle3)
-                                .foregroundColor(theme.secondaryText)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Agent configuration guide")
-                        .accessibilityLabel("Agent configuration guide")
-                    }
-                .padding(.bottom, 8)
-                .sheet(isPresented: $showingAgentGuide) {
-                    AgentConfigGuideView()
-                }
-
-                // 2. Inference Engine (Provider)
-                SettingsCard(title: "Inference Engine", icon: "cpu", theme: theme) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        ProviderConfigSection(
-                            providerConfig: providerConfig,
-                            profileID: editBuffer.draft.id,
-                            profileType: .agent,
-                            onProviderChanged: { _, newProvider in
-                                providerConfig.wrappedValue.cognitiveCapability =
-                                    ProfileCapabilityFilter.defaultCognitiveCapability(for: .agent, provider: newProvider)
-                            }
-                        )
-
-                        Divider()
-
-                        // Capability Status Badge (Agent-specific)
-                        HStack(alignment: .center) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Inference Capability")
-                                    .fontWeight(.medium)
-                                Text("Detected architectural support for complex structured reasoning.")
-                                    .font(theme.fontCaption)
-                                    .foregroundColor(theme.secondaryText)
-                            }
-
-                            Spacer(minLength: 16)
-
-                            HStack(spacing: 6) {
-                                let capability = providerConfig.wrappedValue.cognitiveCapability
-                                Image(systemName: capabilityIcon(for: capability))
-                                Text(capability.localizedTitle)
-                                    .font(theme.fontCaption)
-                                    .fontWeight(.semibold)
-                            }
-                            .padding(.vertical, 4)
-                            .padding(.horizontal, 10)
-                            .background(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability).opacity(0.1))
-                            .foregroundColor(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability).opacity(0.2), lineWidth: 1))
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 16)
-                }
-
-                // 3. Agent Capabilities (composable toggles + tools)
-                SettingsCard(title: "Capabilities", icon: "brain.head.profile", theme: theme) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        AgentCapabilitiesSection(capabilities: capabilitiesBinding)
-
-                        Divider()
-
-                        // Tools
-                        VStack(alignment: .leading, spacing: 12) {
-                            HStack(alignment: .center) {
-                                HStack(spacing: 10) {
-                                    Image(systemName: "hammer.fill")
-                                        .font(theme.fontBody)
-                                        .foregroundColor(theme.secondaryText)
-                                        .frame(width: 24, alignment: .center)
-
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("Tools")
-                                            .font(theme.fontBody.weight(.medium))
-                                            .foregroundColor(theme.primaryText)
-                                        let count = toolsBinding.wrappedValue.filter { $0.isEnabled }.count
-                                        Text(count == 0 ? "No tools enabled" : "\(count) tool(s) active")
-                                            .font(theme.fontCaption)
-                                            .foregroundColor(theme.secondaryText)
-                                    }
-                                }
-
-                                Spacer(minLength: 16)
-
-                                GlassActionButton(title: "Manage Library...", icon: "arrow.up.forward.app") {
-                                    router.navigate(to: .toolLibrary(profileID: editBuffer.draft.id))
-                                }
-                            }
-
-                            if !toolsBinding.wrappedValue.filter({ $0.isEnabled }).isEmpty {
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    HStack {
-                                        ForEach(toolsBinding.wrappedValue.filter { $0.isEnabled }) { tool in
-                                            HStack(spacing: 4) {
-                                                Image(systemName: "wrench.fill")
-                                                    .font(theme.fontCaption2)
-                                                Text(tool.name)
-                                                    .font(theme.fontCaption)
-                                                    .fontWeight(.medium)
-                                            }
-                                            .padding(.vertical, 6)
-                                            .padding(.horizontal, 10)
-                                            .background(theme.accentColor.opacity(0.1))
-                                            .foregroundColor(theme.accentColor)
-                                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.accentColor.opacity(0.2), lineWidth: 1))
-                                        }
-                                    }
-                                }
-                                .padding(.leading, 34)
-                            } else {
-                                Text("Enable tools to give your agent agency.")
-                                    .font(theme.fontCaption)
-                                    .italic()
-                                    .foregroundColor(theme.secondaryText)
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 16)
-                }
-
-                // 3. System Instructions & Identity
-                SettingsCard(title: "System Instructions", icon: "text.quote", theme: theme) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        // Instructions Editor
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack(spacing: 8) {
-                                Spacer()
-
-                                GlassActionButton(title: "Expand", icon: "arrow.up.left.and.arrow.down.right", isAccent: false) {
-                                    promptWindowManager.showEditor(
-                                        text: instructionsBinding,
-                                        agentName: editBuffer.draft.displayName,
-                                        configuredTools: toolsBinding,
-                                        themeManager: themeManager
-                                    )
-                                }
-
-                                GlassActionButton(title: "Default Persona", icon: "sparkles", isAccent: true) {
-                                    instructionsBinding.wrappedValue = defaultSystemPersona
-                                }
-                            }
-
-                            ZStack(alignment: .topLeading) {
-                            TokenizingTextEditor(
-                                text: instructionsBinding,
-                                configuredTools: toolsBinding,
-                                theme: theme,
-                                promptLibraryVM: promptLibraryVM
-                            )
-                            .frame(minHeight: 120)
-                            .padding(8)
-                            .scrollContentBackground(.hidden)
-                            .background(theme.textBackground)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(instructionsError != nil ? theme.errorColor : theme.dividerColor,
-                                            lineWidth: instructionsError != nil ? 1.5 : 1)
-                            )
-                            .onChange(of: instructionsBinding.wrappedValue) { _, _ in
-                                // Clear the validation error as soon as the user starts editing.
-                                instructionsError = nil
-                            }
-
-                            if instructionsBinding.wrappedValue.isEmpty {
-                                Text("Define persona, reasoning strategy, and tool guidelines...")
-                                    .font(theme.fontCode)
-                                    .foregroundColor(theme.secondaryText.opacity(0.5))
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 16)
-                                    .allowsHitTesting(false)
-                            }
-                        }
-
-                        let instrCount = instructionsBinding.wrappedValue.count
-                        let instrLimit = ProfileValidationLimits.maxInstructionsLength
-                        Text("\(instrCount) characters · ~\(instrCount / 4) tokens")
-                            .font(theme.fontCaption2)
-                            .foregroundColor(
-                                instrCount > instrLimit ? .red :
-                                instrCount > Int(Double(instrLimit) * 0.9) ? .orange :
-                                theme.secondaryText
-                            )
-
-                        // Inline validation error — same visual pattern as
-                        // CreateScheduledTaskView's `inlineError(_:)` helper.
-                        if let message = instructionsError {
-                            HStack(spacing: 4) {
-                                Image(systemName: "exclamationmark.circle.fill")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .accessibilityHidden(true)
-                                Text(message)
-                                    .font(theme.fontCaption)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            .foregroundColor(theme.errorColor)
-                        }
-                        }
-
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 16)
-                }
-
-                // 4. Skills
-                AgentSkillsSection(
-                    skillConfig: skillConfigBinding,
-                    tools: toolsBinding,
-                    currentModelTier: currentModelTier,
-                    theme: theme
-                )
-
-                // 5. Knowledge
-                SettingsCard(title: "Knowledge", icon: "book.closed.fill", theme: theme) {
-                    VStack(alignment: .leading, spacing: 16) {
-
-                        // Reference Documents
-                        VStack(alignment: .leading, spacing: 12) {
-                            HStack(alignment: .center) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Reference Documents")
-                                        .font(theme.fontBody.weight(.semibold))
-                                    Text("Add external documents the agent can use as context")
-                                    .font(theme.fontCaption)
-                                    .foregroundColor(theme.secondaryText)
-                            }
-
-                            Spacer(minLength: 16)
-
-                            GlassActionButton(title: "Add File", icon: "plus") {
-                                showingKnowledgeImporter = true
-                            }
-                            .fileImporter(
-                                isPresented: $showingKnowledgeImporter,
-                                allowedContentTypes: [.item],
-                                allowsMultipleSelection: true
-                            ) { result in
-                                knowledgeImportError = KnowledgeSourceImport.apply(
-                                    result, to: knowledgeSourcesBinding, profileKind: "agent")
-                            }
-                            }
-
-                            // The reason "Add File" appeared to do nothing (register A60). Cleared as soon as the
-                            // next import succeeds or is cancelled, so it never lingers past the attempt it describes.
-                            if let knowledgeImportError {
-                                Label(knowledgeImportError, systemImage: "exclamationmark.triangle")
-                                    .font(theme.fontCaption)
-                                    .foregroundColor(theme.warningColor)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .padding(8)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(theme.warningColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
-                            }
-
-                            if !knowledgeSourcesBinding.wrappedValue.isEmpty {
-                            VStack(spacing: 8) {
-                                ForEach(knowledgeSourcesBinding.wrappedValue) { source in
-                                    KnowledgeSourceRow(source: source, theme: theme) {
-                                        knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
-                                    }
-                                }
-                            }
-                            .padding(.leading, 12)
-                        } else {
-                             Text("No reference documents added.")
-                                .font(theme.fontCaption)
-                                .foregroundColor(theme.secondaryText)
-                                .italic()
-                                .padding(.leading, 12)
-                        }
-                    }
-
-                    Divider()
-
-                        // File Handling Strategy
-                        VStack(alignment: .leading, spacing: 12) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("File Handling")
-                                    .font(theme.fontBody.weight(.semibold))
-                                Text("How attached files and knowledge sources are delivered to the model")
-                                    .font(theme.fontCaption)
-                                    .foregroundColor(theme.secondaryText)
-                            }
-
-                            FileContextStrategyPicker(
-                                strategy: $editBuffer.draft.fileContextStrategy,
-                                profileType: .agent
-                            )
-                            .padding(.leading, 12)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 16)
-                }
-
-                // 7. Execution
-                SettingsCard(title: "Execution", icon: "bolt.fill", theme: theme) {
-                    VStack(alignment: .leading, spacing: 16) {
-
-                        // Limits
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Limits")
-                                .font(theme.fontBody.weight(.semibold))
-                                .foregroundColor(theme.primaryText)
-
-                            ExecutionLimitsSection(
-                                maxIterations: maxIterationsBinding,
-                                executionTimeout: executionTimeoutBinding
-                            )
-                            .padding(.leading, 12)
-                        }
-
-                        Divider()
-
-                        // Error Recovery
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Error Recovery")
-                                .font(theme.fontBody.weight(.semibold))
-                                .foregroundColor(theme.primaryText)
-
-                            ErrorRecoverySection(
-                                resilienceOverrides: resilienceOverridesBinding,
-                                errorRecovery: errorRecoveryBinding,
-                                legacyRetryPolicy: legacyRetryPolicy
-                            )
-                            .padding(.leading, 12)
-                        }
-
-                        Divider()
-
-                        // Loop Safety — circuit-breaker caps (repetition / clarification /
-                        // idle / denial). Sibling group to Error Recovery; applies in chat
-                        // and when a workflow node executes this agent.
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Loop Safety")
-                                .font(theme.fontBody.weight(.semibold))
-                                .foregroundColor(theme.primaryText)
-
-                            LoopSafetySection(
-                                resilienceOverrides: resilienceOverridesBinding,
-                                legacyRetryPolicy: legacyRetryPolicy
-                            )
-                            .padding(.leading, 12)
-                        }
-
-                        Divider()
-
-                        // Conversation Memory
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Conversation Memory")
-                                .font(theme.fontBody.weight(.semibold))
-                                .foregroundColor(theme.primaryText)
-                                .padding(.bottom, 2)
-
-                            VStack(spacing: 8) {
-                                ForEach(HistoryStrategy.allCases) { strategy in
-                                    let isSelected = historyStrategyBinding.wrappedValue == strategy
-
-                                    Button {
-                                        historyStrategyBinding.wrappedValue = strategy
-                                    } label: {
-                                        HStack(alignment: .top, spacing: 12) {
-                                            Image(systemName: strategy.icon)
-                                                .font(theme.fontBody)
-                                                .foregroundColor(isSelected ? .accentColor : theme.secondaryText)
-                                                .frame(width: 22, alignment: .center)
-                                                .padding(.top, 2)
-
-                                            VStack(alignment: .leading, spacing: 3) {
-                                                Text(strategy.displayName)
-                                                    .font(theme.fontSubheadline.weight(.medium))
-                                                    .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
-                                                Text(strategy.strategyDescription)
-                                                    .font(theme.fontCaption)
-                                                    .foregroundColor(theme.tertiaryText)
-                                                    .lineSpacing(2)
-                                                    .fixedSize(horizontal: false, vertical: true)
-                                            }
-
-                                            Spacer(minLength: 8)
-
-                                            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                                .foregroundColor(isSelected ? .accentColor : theme.surfaceOverlayStrong)
-                                                .font(theme.fontTitle3)
-                                                .padding(.top, 2)
-                                        }
-                                        .padding(.horizontal, 14)
-                                        .padding(.vertical, 10)
-                                        .background(
-                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                                .fill(isSelected ? Color.accentColor.opacity(0.08) : Color.clear)
-                                        )
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                                .stroke(isSelected ? Color.accentColor.opacity(0.3) : theme.surfaceOverlayStrong.opacity(0.3), lineWidth: 1)
-                                        )
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                            .padding(.leading, 12)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 16)
-                }
-
-                SettingsCard(title: "Advanced Configuration", icon: "gearshape.2.fill", theme: theme) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        advancedSettingsView
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 16)
-                }
-
-                // Profile applicability note
-                HStack(spacing: 6) {
-                    Image(systemName: "info.circle")
-                        .font(theme.fontCaption2)
-                    Text("This profile's settings apply when running standalone or as a node in a workflow.")
-                        .font(theme.fontCaption2)
-                }
-                .foregroundColor(theme.tertiaryText)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.top, 8)
-            }
-            .padding(ViewLayout.containerPadding)
-            .padding(.bottom, ViewLayout.containerPadding)
-            .frame(maxWidth: 1000)
-            .frame(maxWidth: .infinity)
-        }
-        } // end outer VStack
-        .alert("Delete '\(editBuffer.draft.displayName)'?", isPresented: $showingDeleteAlert) {
-            Button("Delete", role: .destructive) {
-                do {
-                    try profileService.deleteProfile(withId: editBuffer.draft.id)
-                    // ⚠️ Without this the container re-evaluates, finds no edit buffer, and renders
-                    // "Profile Not Found — this profile may have been deleted": a deliberate,
-                    // confirmed action reported back to the user as an error.
-                    router.returnToChat()
-                } catch {
-                    toastManager.show(error.localizedDescription, style: .error)
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Are you sure you want to delete this agent? This action cannot be undone.")
         }
         .task {
             // Instructions are no longer auto-populated. Empty field is the
@@ -841,6 +359,71 @@ struct AgentConfigDetailView: View {
             configManager.load(from: providerConfig.wrappedValue, using: profileService, defaultProfile: .agent)
         }
         .advancedConfigSync(configManager: configManager, providerConfig: providerConfig, profileService: profileService)
+    }
+
+    private var embeddedContent: some View {
+        VStack(spacing: 20) {
+            formSections
+        }
+    }
+
+    private var standaloneContent: some View {
+        VStack(spacing: 0) {
+            // When `onCancel` is set (workflow modal context), the leading
+            // button becomes an xmark that dismisses the sheet — clearer than
+            // a back-chevron, which implies router navigation that doesn't
+            // exist here. Default path keeps the chevron + handleBackTap so
+            // the standalone profile screen behaves identically to before.
+            DynamicIslandBar(
+                onBack: handleBackTap,
+                leadingSymbol: onCancel != nil ? "xmark" : "chevron.left"
+            ) {
+                actionButtons
+            }
+
+            // ⚠️ register B17 — OUTSIDE the ScrollView, directly under the pinned island bar
+            // that holds Save. It used to be the first child of the scrolling form, with a comment
+            // claiming it sat "where the user's eye already is after pressing Save" — untrue for
+            // anyone saving from the Advanced section of an 800-line page, who got a green success
+            // toast and an advisory several screens above them. Pinning it beside the control that
+            // produced it makes the channel reach the user regardless of scroll position, without
+            // a ScrollViewReader or an auto-scroll that would yank the page under them.
+            SaveAdvisoryBanner(advisories: saveAdvisories) {
+                withAnimation { saveAdvisories = [] }
+            }
+            .padding(.horizontal, 24)
+
+            ScrollView {
+                VStack(spacing: 32) {
+                    formSections
+                }
+                .padding(ViewLayout.containerPadding)
+                .padding(.bottom, ViewLayout.containerPadding)
+                .frame(maxWidth: 1000)
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .alert("Delete '\(editBuffer.draft.displayName)'?", isPresented: $showingDeleteAlert) {
+            Button("Delete", role: .destructive) {
+                do {
+                    try profileService.deleteProfile(withId: editBuffer.draft.id)
+                    // ⚠️ Without this the container re-evaluates, finds no edit buffer, and renders
+                    // "Profile Not Found — this profile may have been deleted": a deliberate,
+                    // confirmed action reported back to the user as an error.
+                    router.returnToChat()
+                } catch {
+                    toastManager.show(error.localizedDescription, style: .error)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            // ⚠️ register B10 — was "This action cannot be undone", which is true and useless:
+            // it names no consequence beyond the profile itself. A30 added the real warning and
+            // wired it only to the sidebar's hover-trash — the path A26's own note calls the least
+            // discoverable. Shared with all four delete entry points, never re-implemented.
+            Text(ProfileReferenceIndex.deletionMessage(
+                for: editBuffer.draft, in: profileService.profiles))
+        }
         // NOTE: Auto-applying an Ollama preset on every modelName change was
         // removed — it silently wiped any user customization the moment the
         // model selector changed. Users now explicitly opt in via the "Apply
@@ -853,7 +436,526 @@ struct AgentConfigDetailView: View {
         )
     }
 
+    @ViewBuilder
+    private var formSections: some View {
+        // 1. Identity Header
+        if !isEmbedded {
+            identitySection
+        }
+
+        // 2. Inference Engine (Provider)
+        inferenceEngineSection
+
+        // 3. Agent Capabilities (composable toggles + tools)
+        capabilitiesSection
+
+        // 4. System Instructions & Identity
+        instructionsSection
+
+        // 5. Skills
+        skillsSection
+
+        // 6. Knowledge
+        knowledgeSection
+
+        // 7. Execution
+        executionSection
+
+        // 8. Advanced Configuration
+        advancedConfigSection
+
+        // Profile applicability note
+        if !isEmbedded {
+            applicabilityNote
+        }
+    }
+
+    private var identitySection: some View {
+        HStack(alignment: .center, spacing: 16) {
+            ZStack {
+                Circle()
+                    .fill(LinearGradient(colors: [theme.accentColor.opacity(0.22), theme.accentColor.opacity(0.06)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .frame(width: 52, height: 52)
+                    .overlay(Circle().stroke(theme.accentColor.opacity(0.35), lineWidth: 0.5))
+                    .shadow(color: theme.accentColor.opacity(0.2), radius: 8)
+
+                Image(systemName: ProfileType.agent.iconNameFilled)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 26, height: 26)
+                    .foregroundColor(theme.accentColor)
+            }
+
+            VStack(alignment: .leading) {
+                TextField("Agent Name", text: profile.displayName)
+                    .font(theme.fontTitle2)
+                    .fontWeight(.bold)
+                    .textFieldStyle(.plain)
+                    .foregroundColor(theme.primaryText)
+
+                Text("Define your agent's personality, logic, and tools.")
+                    .font(theme.fontSubheadline)
+                    .foregroundColor(theme.secondaryText)
+            }
+            Spacer()
+
+            Button(action: { showingAgentGuide = true }) {
+                Image(systemName: "questionmark.circle")
+                    .font(theme.fontTitle3)
+                    .foregroundColor(theme.secondaryText)
+            }
+            .buttonStyle(.plain)
+            .help("Agent configuration guide")
+            .accessibilityLabel("Agent configuration guide")
+        }
+        .padding(.bottom, 8)
+        .sheet(isPresented: $showingAgentGuide) {
+            AgentConfigGuideView()
+        }
+    }
+
+    private var inferenceEngineSection: some View {
+        SettingsCard(title: "Inference Engine", icon: "cpu", theme: theme) {
+            VStack(alignment: .leading, spacing: 16) {
+                ProviderConfigSection(
+                    providerConfig: providerConfig,
+                    profileID: editBuffer.draft.id,
+                    profileType: .agent,
+                    onProviderChanged: { _, newProvider in
+                        providerConfig.wrappedValue.cognitiveCapability =
+                            ProfileCapabilityFilter.defaultCognitiveCapability(for: .agent, provider: newProvider)
+                    }
+                )
+
+                Divider()
+
+                // Capability Status Badge (Agent-specific)
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Inference Capability")
+                            .fontWeight(.medium)
+                        Text("Detected architectural support for complex structured reasoning.")
+                            .font(theme.fontCaption)
+                            .foregroundColor(theme.secondaryText)
+                    }
+
+                    Spacer(minLength: 16)
+
+                    HStack(spacing: 6) {
+                        let capability = providerConfig.wrappedValue.cognitiveCapability
+                        Image(systemName: capabilityIcon(for: capability))
+                        Text(capability.localizedTitle)
+                            .font(theme.fontCaption)
+                            .fontWeight(.semibold)
+                    }
+                    .padding(.vertical, 4)
+                    .padding(.horizontal, 10)
+                    .background(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability).opacity(0.1))
+                    .foregroundColor(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability).opacity(0.2), lineWidth: 1))
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
+        }
+    }
+
+    private var capabilitiesSection: some View {
+        SettingsCard(title: "Capabilities", icon: "brain.head.profile", theme: theme) {
+            VStack(alignment: .leading, spacing: 16) {
+                AgentCapabilitiesSection(capabilities: capabilitiesBinding)
+
+                Divider()
+
+                // Tools
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .center) {
+                        HStack(spacing: 10) {
+                            Image(systemName: "hammer.fill")
+                                .font(theme.fontBody)
+                                .foregroundColor(theme.secondaryText)
+                                .frame(width: 24, alignment: .center)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Tools")
+                                    .font(theme.fontBody.weight(.medium))
+                                    .foregroundColor(theme.primaryText)
+                                let count = toolsBinding.wrappedValue.filter { $0.isEnabled }.count
+                                Text(count == 0 ? "No tools enabled" : "\(count) tool(s) active")
+                                    .font(theme.fontCaption)
+                                    .foregroundColor(theme.secondaryText)
+                            }
+                        }
+
+                        Spacer(minLength: 16)
+
+                        GlassActionButton(title: "Manage Library...", icon: "arrow.up.forward.app") {
+                            router.navigate(to: .toolLibrary(profileID: editBuffer.draft.id))
+                        }
+                    }
+
+                    if !toolsBinding.wrappedValue.filter({ $0.isEnabled }).isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack {
+                                ForEach(toolsBinding.wrappedValue.filter { $0.isEnabled }) { tool in
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "wrench.fill")
+                                            .font(theme.fontCaption2)
+                                        Text(tool.name)
+                                            .font(theme.fontCaption)
+                                            .fontWeight(.medium)
+                                    }
+                                    .padding(.vertical, 6)
+                                    .padding(.horizontal, 10)
+                                    .background(theme.accentColor.opacity(0.1))
+                                    .foregroundColor(theme.accentColor)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.accentColor.opacity(0.2), lineWidth: 1))
+                                }
+                            }
+                        }
+                        .padding(.leading, 34)
+                    } else {
+                        Text("Enable tools to give your agent agency.")
+                            .font(theme.fontCaption)
+                            .italic()
+                            .foregroundColor(theme.secondaryText)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
+        }
+    }
+
+    private var instructionsSection: some View {
+        SettingsCard(title: "System Instructions", icon: "text.quote", theme: theme) {
+            VStack(alignment: .leading, spacing: 16) {
+                // Instructions Editor
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Spacer()
+
+                        GlassActionButton(title: "Expand", icon: "arrow.up.left.and.arrow.down.right", isAccent: false) {
+                            promptWindowManager.showEditor(
+                                text: instructionsBinding,
+                                agentName: $editBuffer.draft.displayName,
+                                configuredTools: toolsBinding,
+                                themeManager: themeManager
+                            )
+                        }
+
+                        GlassActionButton(title: "Default Persona", icon: "sparkles", isAccent: true) {
+                            instructionsBinding.wrappedValue = defaultSystemPersona
+                        }
+                    }
+
+                    ZStack(alignment: .topLeading) {
+                        TokenizingTextEditor(
+                            text: instructionsBinding,
+                            configuredTools: toolsBinding,
+                            theme: theme,
+                            promptLibraryVM: promptLibraryVM
+                        )
+                        .frame(minHeight: 120)
+                        .padding(8)
+                        .scrollContentBackground(.hidden)
+                        .background(theme.textBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(instructionsError != nil ? theme.errorColor : theme.dividerColor,
+                                        lineWidth: instructionsError != nil ? 1.5 : 1)
+                        )
+                        .onChange(of: instructionsBinding.wrappedValue) { _, _ in
+                            // Clear the validation error as soon as the user starts editing.
+                            instructionsError = nil
+                        }
+
+                        if instructionsBinding.wrappedValue.isEmpty {
+                            Text("Define persona, reasoning strategy, and tool guidelines...")
+                                .font(theme.fontCode)
+                                .foregroundColor(theme.secondaryText.opacity(0.5))
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 16)
+                                .allowsHitTesting(false)
+                        }
+                    }
+
+                    let instrCount = instructionsBinding.wrappedValue.count
+                    let instrLimit = ProfileValidationLimits.maxInstructionsLength
+                    Text("\(instrCount) characters · ~\(instrCount / 4) tokens")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(
+                            instrCount > instrLimit ? .red :
+                            instrCount > Int(Double(instrLimit) * 0.9) ? .orange :
+                            theme.secondaryText
+                        )
+
+                    // Inline validation error — same visual pattern as
+                    // CreateScheduledTaskView's `inlineError(_:)` helper.
+                    if let message = instructionsError {
+                        HStack(spacing: 4) {
+                            Image(systemName: "exclamationmark.circle.fill")
+                                .font(.system(size: 11, weight: .semibold))
+                                .accessibilityHidden(true)
+                            Text(message)
+                                .font(theme.fontCaption)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .foregroundColor(theme.errorColor)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
+        }
+    }
+
+    private var skillsSection: some View {
+        AgentSkillsSection(
+            skillConfig: skillConfigBinding,
+            tools: toolsBinding,
+            currentModelTier: currentModelTier,
+            theme: theme
+        )
+    }
+
+    private var knowledgeSection: some View {
+        SettingsCard(title: "Knowledge", icon: "book.closed.fill", theme: theme) {
+            VStack(alignment: .leading, spacing: 16) {
+
+                // Reference Documents
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .center) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Reference Documents")
+                                .font(theme.fontBody.weight(.semibold))
+                            Text("Add external documents the agent can use as context")
+                            .font(theme.fontCaption)
+                            .foregroundColor(theme.secondaryText)
+                    }
+
+                    Spacer(minLength: 16)
+
+                    GlassActionButton(title: "Add File", icon: "plus") {
+                        showingKnowledgeImporter = true
+                    }
+                    .fileImporter(
+                        isPresented: $showingKnowledgeImporter,
+                        allowedContentTypes: [.item],
+                        allowsMultipleSelection: true
+                    ) { result in
+                        knowledgeImportError = KnowledgeSourceImport.apply(
+                            result, to: knowledgeSourcesBinding, profileKind: "agent")
+                    }
+                    }
+
+                    // The reason "Add File" appeared to do nothing (register A60). Cleared as soon as the
+                    // next import succeeds or is cancelled, so it never lingers past the attempt it describes.
+                    if let knowledgeImportError {
+                        Label(knowledgeImportError, systemImage: "exclamationmark.triangle")
+                            .font(theme.fontCaption)
+                            .foregroundColor(theme.warningColor)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(theme.warningColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+                    }
+
+                    if !knowledgeSourcesBinding.wrappedValue.isEmpty {
+                    VStack(spacing: 8) {
+                        ForEach(knowledgeSourcesBinding.wrappedValue) { source in
+                            KnowledgeSourceRow(source: source, theme: theme) {
+                                knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
+                            }
+                        }
+                    }
+                    .padding(.leading, 12)
+                } else {
+                     Text("No reference documents added.")
+                        .font(theme.fontCaption)
+                        .foregroundColor(theme.secondaryText)
+                        .italic()
+                        .padding(.leading, 12)
+                }
+            }
+
+            Divider()
+
+                // File Handling Strategy
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("File Handling")
+                            .font(theme.fontBody.weight(.semibold))
+                        Text("How attached files and knowledge sources are delivered to the model")
+                            .font(theme.fontCaption)
+                            .foregroundColor(theme.secondaryText)
+                    }
+
+                    FileContextStrategyPicker(
+                        strategy: $editBuffer.draft.fileContextStrategy,
+                        profileType: .agent
+                    )
+                    .padding(.leading, 12)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
+        }
+    }
+
+    private var executionSection: some View {
+        SettingsCard(title: "Execution", icon: "bolt.fill", theme: theme) {
+            VStack(alignment: .leading, spacing: 16) {
+
+                // Limits
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Limits")
+                        .font(theme.fontBody.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
+
+                    ExecutionLimitsSection(
+                        maxIterations: maxIterationsBinding,
+                        executionTimeout: executionTimeoutBinding
+                    )
+                    .padding(.leading, 12)
+                }
+
+                Divider()
+
+                // Error Recovery
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Error Recovery")
+                        .font(theme.fontBody.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
+
+                    ErrorRecoverySection(
+                        resilienceOverrides: resilienceOverridesBinding,
+                        errorRecovery: errorRecoveryBinding,
+                        legacyRetryPolicy: legacyRetryPolicy
+                    )
+                    .padding(.leading, 12)
+                }
+
+                Divider()
+
+                // Loop Safety — circuit-breaker caps (repetition / clarification /
+                // idle / denial). Sibling group to Error Recovery; applies in chat
+                // and when a workflow node executes this agent.
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Loop Safety")
+                        .font(theme.fontBody.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
+
+                    LoopSafetySection(
+                        resilienceOverrides: resilienceOverridesBinding,
+                        legacyRetryPolicy: legacyRetryPolicy
+                    )
+                    .padding(.leading, 12)
+                }
+
+                Divider()
+
+                // Conversation Memory
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Conversation Memory")
+                        .font(theme.fontBody.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
+                        .padding(.bottom, 2)
+
+                    VStack(spacing: 8) {
+                        ForEach(HistoryStrategy.allCases) { strategy in
+                            let isSelected = historyStrategyBinding.wrappedValue == strategy
+
+                            Button {
+                                historyStrategyBinding.wrappedValue = strategy
+                            } label: {
+                                HStack(alignment: .top, spacing: 12) {
+                                    Image(systemName: strategy.icon)
+                                        .font(theme.fontBody)
+                                        .foregroundColor(isSelected ? .accentColor : theme.secondaryText)
+                                        .frame(width: 22, alignment: .center)
+                                        .padding(.top, 2)
+
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(strategy.localizedTitle)
+                                            .font(theme.fontSubheadline.weight(.medium))
+                                            .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
+                                        Text(strategy.localizedDescription)
+                                            .font(theme.fontCaption)
+                                            .foregroundColor(theme.tertiaryText)
+                                            .lineSpacing(2)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+
+                                    Spacer(minLength: 8)
+
+                                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                        .foregroundColor(isSelected ? .accentColor : theme.surfaceOverlayStrong)
+                                        .font(theme.fontTitle3)
+                                        .padding(.top, 2)
+                                }
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 10)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(isSelected ? Color.accentColor.opacity(0.08) : Color.clear)
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .stroke(isSelected ? Color.accentColor.opacity(0.3) : theme.surfaceOverlayStrong.opacity(0.3), lineWidth: 1)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.leading, 12)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
+        }
+    }
+
+    private var advancedConfigSection: some View {
+        SettingsCard(title: "Advanced Configuration", icon: "gearshape.2.fill", theme: theme) {
+            VStack(alignment: .leading, spacing: 16) {
+                advancedSettingsView
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
+        }
+    }
+
+    private var applicabilityNote: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "info.circle")
+                .font(theme.fontCaption2)
+            Text("This profile's settings apply when running standalone or as a node in a workflow.")
+                .font(theme.fontCaption2)
+        }
+        .foregroundColor(theme.tertiaryText)
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.top, 8)
+    }
+
+    /// ⚠️ register B46 — FLUSH FIRST. `BackendProfileService.flushPendingEditorText`'s own doc
+    /// comment says "call this BEFORE reading `hasUnsavedEditorChanges` at an exit point", and
+    /// until now it had exactly one caller: `applicationShouldTerminate` (register B3). The
+    /// floating Advanced prompt editor holds typing in `@State` and writes back only on an explicit
+    /// commit, so a back tap read a CLEAN buffer and left with no prompt — the multi-thousand
+    /// character loss A27/A29/B3 exist to prevent, at the exit B3 did not cover.
+    ///
+    /// ⚠️ Placed in the tap ACTION, not in the `isDirty:` the guard modifier reads: that value is
+    /// computed during a view update, and committing there would mutate state mid-pass.
+    ///
+    /// A no-op in editors that register no commit hook (`SimplePromptWindowManager` syncs on every
+    /// keystroke, so it has nothing pending). It is here in all three anyway — the whole class of
+    /// B44/B46 defects is a fix that landed on the one site that had the bug.
     private func handleBackTap() {
+        profileService.flushPendingEditorText()
         if editBuffer.isDirty {
             showingBackAlert = true
         } else {
@@ -893,10 +995,18 @@ struct AgentConfigDetailView: View {
                 IslandPillButton(
                     title: "Revert",
                     style: .secondary,
-                    accessibilityLabel: "Revert unsaved changes",
-                    keyboardShortcut: .cancelAction
+                    // ⚠️ register B12 — NO `.cancelAction`. Revert is destructive and discards
+                    // every unsaved edit without a prompt, so binding it to Esc gave a dirty editor
+                    // a silent one-keypress exit: Esc reverted, `isDirty` went false, and the
+                    // second Esc then passed `interactiveDismissDisabled(isDirty)` and closed the
+                    // sheet. A28's comment claimed "exactly one way out of a dirty editor, and it
+                    // is the one that prompts" — this was the second, and it prompted for nothing.
+                    // Esc now means close, which the unsaved-changes guard already governs.
+                    accessibilityLabel: "Revert unsaved changes"
                 ) {
                     editBuffer.revert()
+                    // ⚠️ register B17 — the draft the advisory was about no longer exists.
+                    saveAdvisories = []
                     configManager.load(from: providerConfig.wrappedValue, using: profileService, defaultProfile: .agent)
                 }
 
@@ -915,6 +1025,10 @@ struct AgentConfigDetailView: View {
                     // every non-editor save path had neither.
                     if ProfileValidator.instructionsAreMissing(instructionsBinding.wrappedValue) {
                         instructionsError = ProfileValidator.missingInstructionsMessage
+                        // ⚠️ register B17 — the save is being refused here, so any banner from an
+                        // earlier successful save is now describing a profile state this attempt
+                        // did not produce.
+                        saveAdvisories = []
                         return
                     }
                     instructionsError = nil
@@ -937,6 +1051,13 @@ struct AgentConfigDetailView: View {
                             + "CONSEQUENCE: the edit buffer stays dirty and the persisted profile is "
                             + "unchanged; the user's edits are still on screen but not on disk."
                         )
+                        // ⚠️ register B17 — clear on FAILURE too. `saveAdvisories` was assigned
+                        // only in the `do` branch and never reset, so a banner from an earlier
+                        // successful save stayed on screen reading "Saved — one thing worth
+                        // knowing" while an error toast reported that this write did not happen.
+                        // An advisory describes the state of a profile that WAS saved; after a
+                        // failure it describes nothing that exists.
+                        saveAdvisories = []
                         toastManager.show(error.localizedDescription, style: .error)
                     }
                 }

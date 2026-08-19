@@ -109,7 +109,24 @@ struct CapabilityToolbarButtons: View {
                 updated.details = .agent(cfg)
 
                 do {
-                    try BackendProfileStore.shared.saveProfile(updated)
+                    // ⚠️ register B16 — the advisories are LOGGED here rather than discarded.
+                    // `ProfileValidator` recomputes "the selected model does not support tool
+                    // calling" on every one of these writes, and the chip is one of the surfaces
+                    // that turns tool-using capabilities ON, so it is exactly the moment the
+                    // warning is earned. It is deliberately NOT a toast: a chip toggle is a
+                    // one-click, instantly reversible action in the middle of typing, and a
+                    // banner over the composer for a condition the user may already know about
+                    // would be the nagging A34 explicitly rejected. The send path carries the
+                    // user-facing version of this via `AdvisoryCenter` (register B14), where the
+                    // consequence actually lands.
+                    let advisories = try BackendProfileStore.shared.saveProfile(updated)
+                    for advisory in advisories where advisory.severity == .advisory {
+                        logger.notice(
+                            "[PROFILE] Capability chip saved with an advisory for \(cached.id): "
+                            + "\(advisory.message) CONSEQUENCE: the toggle took effect and was "
+                            + "persisted; the advisory is surfaced to the user on the next send."
+                        )
+                    }
                     // Refresh the composer's cache from what was actually written, so the chip
                     // reflects disk and the next toggle starts from current bytes.
                     profile = updated

@@ -289,8 +289,15 @@ final class ChatHistoryViewModel {
     /// (unless the user's follow toggle is on AND the panel is visible), and a tab
     /// holding unsaved user edits is never touched.
     func handleAgentWriteBegan(_ payload: AgentLiveWriteEvent.Began) {
-        guard payload.conversationID == currentChatMessages.first?.conversationId else {
-            logger.info("[CodeViewer] Live write for '\(payload.fileName)' ignored — it belongs to conversation \(payload.conversationID.uuidString.prefix(8)) but \(self.currentChatMessages.first?.conversationId.uuidString.prefix(8) ?? "none") is loaded. No live tab; the timeline chip still appears when that conversation is open.")
+        // Compare against the DESTINATION, not the displayed conversation. During a switch
+        // `currentChatMessages` still holds the OUTGOING conversation until the fetch returns,
+        // so a write for the conversation being LEFT passed this guard and appended its tab to
+        // the incoming conversation's just-cleared viewer — and `restoreCodeViewerSession`
+        // only fires on an empty viewer, so the incoming conversation's stashed tabs were then
+        // silently never restored, and the orphaned tab got stashed under the WRONG
+        // conversation on the next switch.
+        guard payload.conversationID == destinationConversationID else {
+            logger.info("[CodeViewer] Live write for '\(payload.fileName)' ignored — it belongs to conversation \(payload.conversationID.uuidString.prefix(8)) but \(self.destinationConversationID?.uuidString.prefix(8) ?? "none") is \(self.loadingConversationID == nil ? "loaded" : "loading"). No live tab; the timeline chip still appears when that conversation is open.")
             return
         }
 
@@ -312,6 +319,16 @@ final class ChatHistoryViewModel {
             // tab is the active one — where showing the fresh content is the point.
             codeViewerTabs[index].snippet = snippet
             codeViewerTabs[index].liveState = .active
+            // `editedCode` MUST be cleared with the rest. `isDirty` is false whenever
+            // `editedCode == (lastSavedBuffer ?? snippet.code)`, which is exactly the state a
+            // SUCCESSFUL SAVE leaves behind — so a saved-then-rewritten tab passed the
+            // !isDirty guard above while still holding the user's old buffer. Leaving it set
+            // meant `effectiveCode` kept returning that stale text over the agent's new
+            // content, the tab showed an unsaved-changes dot it never earned, and a ⌘S wrote
+            // the stale buffer back over the agent's write — with the drift guard satisfied,
+            // because `lastSavedDisk` was reset on the line below. Clearing it is what makes
+            // the tab genuinely adopt the incoming snippet.
+            codeViewerTabs[index].editedCode = nil
             codeViewerTabs[index].lastSavedBuffer = nil
             codeViewerTabs[index].lastSavedDisk = nil
             logger.info("[CodeViewer] Live write updating tab '\(payload.fileName)' (\(snippet.code.count) chars).")
@@ -356,7 +373,17 @@ final class ChatHistoryViewModel {
     /// the tab shows a proposal that never reached disk). The executor's authoritative
     /// pre-write snapshot replaces the UI's best-effort pre-read.
     func handleAgentWriteCompleted(_ payload: AgentLiveWriteEvent.Completed) {
-        guard payload.conversationID == currentChatMessages.first?.conversationId else { return }
+        // MUST be the same expression `handleAgentWriteBegan` admits on. It was left reading
+        // `currentChatMessages.first?.conversationId`, which names the OUTGOING conversation for
+        // the whole duration of a switch — so a write admitted mid-load by the began-guard could
+        // never be settled here, and returned SILENTLY. The tab then keeps `liveState == .active`
+        // forever: the orange "Agent is writing this file" banner stays up, `hasLiveAgentTabs`
+        // keeps the pill pulsing, and a DENIED write is never flipped to `.rejected`, so the user
+        // is told a file is being written when the proposal never reached disk.
+        guard payload.conversationID == destinationConversationID else {
+            logger.warning("[CodeViewer] Live-write completion for '\(payload.fileName)' DROPPED — it belongs to conversation \(payload.conversationID.uuidString.prefix(8)) but \(self.destinationConversationID?.uuidString.prefix(8) ?? "none") is \(self.loadingConversationID == nil ? "loaded" : "loading"). CONSEQUENCE: if that conversation holds a live tab for this file it stays marked as writing and is never settled or marked rejected.")
+            return
+        }
         guard let index = codeViewerTabs.firstIndex(where: { $0.filePath == payload.path && $0.liveState == .active }) else {
             logger.debug("[CodeViewer] Live-write completion for '\(payload.fileName)' has no active live tab — settled or skipped earlier.")
             return
@@ -495,13 +522,19 @@ final class ChatHistoryViewModel {
 
     /// Per-keystroke write-through from the editor buffer. Deliberately NOT synced "at
     /// boundaries" (tab switch, close, minimize, …) — one missed boundary is silent data
-    /// loss; write-through is correct by construction. `editedCode` is nilled when the
-    /// buffer matches the restore point (last save, else the chat block), so typing your
-    /// way back to the original clears the dirty dot.
+    /// loss; write-through is correct by construction.
+    ///
+    /// ⚠️ ALWAYS stores the content, even when it equals the restore point. It used to store
+    /// `nil` in that case as a way to clear the dirty dot — but that made `editedCode == nil`
+    /// mean TWO different things ("the editor has no draft" and "the draft happens to equal the
+    /// restore point"), and `effectiveCode` (`editedCode ?? snippet.code`) therefore reported
+    /// the PRISTINE CHAT BLOCK for a tab whose editor was showing the user's text. Anything
+    /// that read `effectiveCode` as "what the editor is showing" was silently wrong in that
+    /// state — including the save path, which then wrote the original block over the user's
+    /// file. The dirty dot still clears, because `isDirty` decides by COMPARISON, not by nil.
     func updateCodeViewerDraft(tabID: UUID, content: String) {
         guard let index = codeViewerTabs.firstIndex(where: { $0.id == tabID }) else { return }
-        let restorePoint = codeViewerTabs[index].lastSavedBuffer ?? codeViewerTabs[index].snippet.code
-        codeViewerTabs[index].editedCode = (content == restorePoint) ? nil : content
+        codeViewerTabs[index].editedCode = content
     }
 
     /// Closes one tab, pending a confirmation first when it holds unsaved edits.
@@ -623,6 +656,41 @@ final class ChatHistoryViewModel {
     /// Cap on persisted tabs — a runaway accumulation guard, not a practical limit.
     private static let persistedTabLimit = 20
 
+    /// The conversation the CURRENTLY OPEN tabs belong to.
+    ///
+    /// ONE expression, deliberately, because the reset DECISION and the stash KEY must agree:
+    /// deriving them separately is what let the viewer be cleared under an identity the stash
+    /// could not resolve, destroying tabs and unsaved drafts.
+    ///
+    /// `loadedConversationID` leads, and that ordering is the fix. It is written in exactly two
+    /// places, both inside `loadConversation`, whereas `currentChatMessages` is ALSO pre-cleared
+    /// by callers before they trigger a load — `deselectConversationAndShowWelcome`
+    /// (ConversationManagementCoordinator) and `performInterfaceSwitch`
+    /// (MainApplicationViewModel) both set it to `[]` and only then let the debounced
+    /// `loadConversation` run. Reading identity from the messages therefore returned nil for a
+    /// conversation that was still loaded. The message fallback stays for the pre-load window,
+    /// where `loadedConversationID` is not yet set.
+    private var viewerOwningConversationID: UUID? {
+        loadedConversationID ?? currentChatMessages.first?.conversationId
+    }
+
+    /// The conversation the viewer will belong to once any in-flight load settles.
+    ///
+    /// `loadConversation` only assigns `currentChatMessages`/`loadedConversationID` AFTER its
+    /// fetch returns, so for the whole duration of a switch both still name the OUTGOING
+    /// conversation. Anything reacting to an event mid-load — a live agent write landing while
+    /// the user navigates away — must ask THIS, not the displayed state, or it attributes the
+    /// event to the conversation being left and drops a tab into the incoming conversation's
+    /// freshly cleared viewer (which then suppresses that conversation's restore, because
+    /// `restoreCodeViewerSession` only fires on an empty viewer).
+    private var destinationConversationID: UUID? {
+        loadingConversationID ?? viewerOwningConversationID
+    }
+
+    /// Destination of the in-flight `loadConversation`, nil when no load is in flight.
+    /// Written only by `loadConversation`; see `destinationConversationID`.
+    private var loadingConversationID: UUID?
+
     /// Brings back this conversation's tabs from the in-session store. No-op on a
     /// same-conversation reload — tabs weren't cleared, so the tabs-empty guard skips it.
     func restoreCodeViewerSession(for conversationID: UUID) {
@@ -644,18 +712,38 @@ final class ChatHistoryViewModel {
     /// tab and then triggering a same-conversation reload (the user-messages filter routes
     /// through `loadConversation`) restored the closed tabs from a stale entry.
     private func dropStashedTabs(reason: String) {
-        guard ownsCodeViewer,
-              let conversationID = loadedConversationID ?? currentChatMessages.first?.conversationId,
-              tabsByConversation.removeValue(forKey: conversationID) != nil else { return }
+        guard ownsCodeViewer else { return }
+        // NEVER drop while a load is in flight. `viewerOwningConversationID` still names the
+        // OUTGOING conversation until the fetch returns, but `resetCodeViewer` has already filed
+        // that conversation's tabs (and its unsaved drafts) under it and cleared the viewer — so
+        // any tab the user can close right now belongs to the INCOMING one. Resolving the key
+        // here would remove the outgoing conversation's stash instead, destroying drafts that
+        // live nowhere else, and log a reason describing a tab the user never closed.
+        //
+        // Refusing costs a stale entry that may resurrect closed tabs on the next open — the
+        // thing this method exists to prevent — which is the better of the two errors.
+        guard loadingConversationID == nil else {
+            logger.warning("[CodeViewer] Deferred dropping stashed tabs (\(reason)) — a conversation switch is still in flight, and the resolvable identity is the OUTGOING conversation whose tabs and drafts are already stashed. CONSEQUENCE: nothing was dropped; tabs closed during the switch may reappear when that conversation is reopened.")
+            return
+        }
+        guard let conversationID = viewerOwningConversationID else {
+            logger.warning("[CodeViewer] Could not drop stashed tabs (\(reason)) — no conversation identity is resolvable; any stale entry is left in place and may be restored on the next open.")
+            return
+        }
+        guard tabsByConversation.removeValue(forKey: conversationID) != nil else { return }
         logger.info("[CodeViewer] Dropped in-session tabs for \(conversationID.uuidString.prefix(8)) — \(reason).")
     }
 
     /// Hands the current conversation's tabs to the in-session store before the viewer is
     /// cleared. Must run BEFORE `loadedConversationID` moves, or the tabs get filed under
     /// the INCOMING conversation.
-    private func stashCurrentCodeViewerTabs() {
-        guard ownsCodeViewer,
-              let conversationID = loadedConversationID ?? currentChatMessages.first?.conversationId else { return }
+    @discardableResult
+    private func stashCurrentCodeViewerTabs() -> Bool {
+        guard ownsCodeViewer else { return false }
+        // Empties are checked BEFORE identity: with nothing open there is nothing to preserve
+        // and nothing to lose, so an unresolvable identity is not a failure here. (It is on
+        // every app launch — first load, `loadedConversationID` still nil — and reporting that
+        // as a data-loss error would bury the one case that is.)
         guard !codeViewerTabs.isEmpty else {
             // NOTHING is dropped here. An empty viewer used to be read as "the user closed
             // everything" and the conversation's entry was deleted — but the viewer is ALSO
@@ -666,8 +754,16 @@ final class ChatHistoryViewModel {
             // Emptiness cannot distinguish the two, so it is no longer asked to: the close
             // paths drop the entry explicitly via `dropStashedTabs`, because they are the only
             // places that know the user meant it.
-            logger.debug("[CodeViewer] Nothing to stash for \(conversationID.uuidString.prefix(8)) — viewer already empty; any existing entry is left intact.")
-            return
+            logger.debug("[CodeViewer] Nothing to stash for \(self.viewerOwningConversationID?.uuidString.prefix(8) ?? "no loaded conversation") — viewer already empty; any existing entry is left intact.")
+            return true
+        }
+        guard let conversationID = viewerOwningConversationID else {
+            // Was a SILENT return, and it sat directly upstream of `codeViewerTabs.removeAll()`
+            // — so the one path that destroyed unsaved drafts was also the one path that said
+            // nothing. The drafts exist nowhere else (see this type's doc comment).
+            let drafts = codeViewerTabs.filter(\.isDirty).count
+            logger.error("[CodeViewer] CANNOT stash \(self.codeViewerTabs.count) open tab(s) (\(drafts) with unsaved draft(s)) — no conversation identity is resolvable, so they cannot be filed for restore. They are about to be cleared and any unsaved draft is LOST.")
+            return false
         }
         tabsByConversation[conversationID] = ConversationViewerState(
             tabs: codeViewerTabs,
@@ -676,6 +772,7 @@ final class ChatHistoryViewModel {
             presentation: codeViewerPresentation
         )
         logger.info("[CodeViewer] Stashed \(self.codeViewerTabs.count) tab(s) for \(conversationID.uuidString.prefix(8)) until the conversation is reopened (this app session only).")
+        return true
     }
 
     /// Clears the viewer wholesale (no animation) when the loaded conversation changes —
@@ -685,8 +782,9 @@ final class ChatHistoryViewModel {
         // STASH FIRST, unconditionally — before the guard and before `loadedConversationID`
         // moves, or the tabs get filed under the INCOMING conversation. Unconditional
         // because a viewer emptied by close-all must clear its entry too.
-        stashCurrentCodeViewerTabs()
+        let stashed = stashCurrentCodeViewerTabs()
         guard !codeViewerTabs.isEmpty || isCodeViewerVisible else { return }
+        let lostDrafts = stashed ? 0 : codeViewerTabs.filter(\.isDirty).count
         codeViewerTabs.removeAll()
         activeCodeViewerTabID = nil
         isCodeViewerVisible = false
@@ -695,7 +793,14 @@ final class ChatHistoryViewModel {
         codeApplyError = nil
         pendingCloseTabID = nil
         isPendingCloseAll = false
-        logger.info("[CodeViewer] Cleared for conversation switch (outgoing tabs stashed in memory).")
+        // Report what actually happened. This line used to claim the tabs were stashed
+        // unconditionally, including on the one path where the stash had just failed — a log
+        // asserting the opposite of the truth on a data-loss path.
+        if stashed {
+            logger.info("[CodeViewer] Cleared for conversation switch (outgoing tabs stashed in memory).")
+        } else {
+            logger.error("[CodeViewer] Cleared for conversation switch WITHOUT stashing — \(lostDrafts) unsaved draft(s) discarded and no tabs will be restored for the outgoing conversation.")
+        }
     }
 
     // MARK: - Tab navigation (previous/next across the strip)
@@ -831,14 +936,41 @@ final class ChatHistoryViewModel {
                 // write was in flight (tab identity is content-based and we no longer
                 // mutate `snippet`, so the lookup is stable when the tab still exists).
                 if let index = self.tabIndex(for: snippet) {
-                    // Only mark clean if the buffer hasn't moved DURING the write —
-                    // keystrokes that landed mid-save are still unsaved edits.
-                    // Keep the buffer — clearing it reverted the tab to the pristine
-                    // block. `isDirty` compares against `lastSavedBuffer`, so the tab is
-                    // still clean.
-                    self.codeViewerTabs[index].editedCode = buffer
+                    // The bytes ARE on disk, so the saved-state bookkeeping always advances:
+                    // `lastSavedDisk` is the drift baseline for the next save, and
+                    // `lastSavedBuffer` records which buffer produced it.
                     self.codeViewerTabs[index].lastSavedBuffer = buffer
                     self.codeViewerTabs[index].lastSavedDisk = newContent
+
+                    // Only adopt `buffer` as the tab's text if the buffer hasn't moved
+                    // DURING the write — keystrokes that landed mid-save are still unsaved
+                    // edits. The editor writes through per keystroke
+                    // (`updateCodeViewerDraft`) and its document is only rebuilt when
+                    // `snippet.id` changes, which this path deliberately avoids; so an
+                    // unconditional `editedCode = buffer` here silently reverted the model
+                    // to the pre-keystroke text while the NSTextView kept showing the newer
+                    // one, and `isDirty` (buffer == lastSavedBuffer) then reported clean, so
+                    // close-gating never warned and the next ⌘S hit the no-op guard above.
+                    // Keep the buffer rather than clearing it — clearing reverted the tab to
+                    // the pristine block.
+                    // `effectiveCode` is only trustworthy as "the editor's live text" because
+                    // `updateCodeViewerDraft` always stores the content — see the ⚠️ on it. When
+                    // it nilled `editedCode` at the restore point, this comparison read the
+                    // pristine chat block instead, took the else-branch, and left the tab CLEAN
+                    // holding that block; the next save then wrote it over the user's file.
+                    let live = self.codeViewerTabs[index].effectiveCode
+                    if live == buffer {
+                        self.codeViewerTabs[index].editedCode = buffer
+                    } else {
+                        // Report the state REACHED, not the state intended. After AD1 the tab is
+                        // dirty in the ordinary case (the editor's write-through keeps
+                        // `editedCode`), but `handleAgentWriteBegan` can clear it mid-write when
+                        // an agent rewrites the same file — and then the tab is clean and holds
+                        // the agent's content, not "the newer text". Asserting the happy path
+                        // here is the same shape as the comments this cluster keeps correcting.
+                        let stillDirty = self.codeViewerTabs[index].isDirty
+                        logger.info("[CodeViewer] Saved \(buffer.count) chars of '\(fileName)', but the tab's buffer moved to \(live.count) chars during the write — kept the newer text; tab is now \(stillDirty ? "DIRTY (the next save writes it)" : "CLEAN (its buffer was reset mid-write, e.g. by an agent rewrite)").")
+                    }
                 }
             }
         } catch let error as CodeApplyError {
@@ -858,7 +990,13 @@ final class ChatHistoryViewModel {
     func saveTabToItsPath(tabID: UUID) async {
         guard let index = codeViewerTabs.firstIndex(where: { $0.id == tabID }),
               let path = codeViewerTabs[index].filePath else { return }
-        let url = URL(fileURLWithPath: path)
+        // Write through a symlink to its TARGET. `write(to:atomically:)` aimed at a symlink
+        // REPLACES the link with a regular file and leaves the real file untouched —
+        // verified empirically. The drift check below reads THROUGH the link, so it compares
+        // the correct bytes and then the write lands on a different inode: the user's log
+        // says "Saved N chars", the link is silently gone, and every other consumer of the
+        // shared file still sees the old content.
+        let url = Self.writeTarget(forPath: path)
         let buffer = codeViewerTabs[index].effectiveCode
 
         // The baseline falls back to the content the tab was OPENED with, mirroring
@@ -883,9 +1021,21 @@ final class ChatHistoryViewModel {
                 codeApplyError = CodeApplyError.diskDrift(fileName: url.lastPathComponent).errorDescription
                 return
             }
-        } catch {
+        } catch let error as CocoaError where Self.meansFileAbsent(error) {
             // Missing file is fine — a Save-As target may legitimately not exist yet.
             logger.info("[CodeViewer] No existing file at \(url.path) to drift-check; treating the save as a create.")
+        } catch {
+            // UNREADABLE IS NOT ABSENT. `String(contentsOf:encoding:.utf8)` also throws for a
+            // non-UTF-8 document (Latin-1 source, a stray high byte) and for a permissions or
+            // unreachable-mount failure. Those used to land in the branch above, which skipped
+            // the drift guard entirely and then overwrote the file — discarding whatever was
+            // on disk — while logging "No existing file", a claim the catch never established.
+            logger.error("[CodeViewer] Save refused for \(url.lastPathComponent) — its current contents could not be read to drift-check against: \(Self.readFailureReason(error)). Its absence was NOT established, so overwriting could discard work; nothing was written.")
+            codeApplyError = CodeApplyError.writeFailed(
+                fileName: url.lastPathComponent,
+                underlying: String(localized: "its current contents could not be read to compare against (\(error.localizedDescription))")
+            ).errorDescription
+            return
         }
 
         // Preserve the file's edge whitespace — leading blank line/indentation AND the POSIX
@@ -920,7 +1070,12 @@ final class ChatHistoryViewModel {
     ///
     /// Adopting the path is also what gives a follow-up query something real to work with:
     /// model-generated content stops being a bare filename the moment it lands on disk.
-    func markCodeViewerTabSavedAs(tabID: UUID, savedBuffer: String, savedTo url: URL) {
+    /// `wroteToDisk` is the BYTES that landed on disk, which differ from `savedBuffer`
+    /// whenever `contentToApply` restored the destination's edge whitespace. It is the drift
+    /// baseline, so it must be the bytes and not the editor buffer — seeding the guard with
+    /// the buffer made the next save read its own restored newline as external drift.
+    /// Defaults to `savedBuffer` for callers that write the buffer verbatim.
+    func markCodeViewerTabSavedAs(tabID: UUID, savedBuffer: String, savedTo url: URL, wroteToDisk: String? = nil) {
         guard let index = codeViewerTabs.firstIndex(where: { $0.id == tabID }) else {
             logger.warning("[CodeViewer] Save-As bookkeeping skipped — tab \(tabID.uuidString.prefix(8)) closed while the save panel was open; the file WAS written to \(url.path).")
             return
@@ -928,9 +1083,56 @@ final class ChatHistoryViewModel {
         codeViewerTabs[index].editedCode = savedBuffer
         codeViewerTabs[index].filePath = url.path
         codeViewerTabs[index].fileName = url.lastPathComponent
-        codeViewerTabs[index].lastSavedDisk = savedBuffer
+        codeViewerTabs[index].lastSavedDisk = wroteToDisk ?? savedBuffer
         codeViewerTabs[index].lastSavedBuffer = savedBuffer
         logger.info("[CodeViewer] Tab \(tabID.uuidString.prefix(8)) saved as \(url.path) (\(savedBuffer.count) chars) — the tab is now linked to that file and ⌘S writes there.")
+    }
+
+    /// The URL a save must actually write to.
+    ///
+    /// Resolves symlinks so a save lands on the real file rather than replacing the link with
+    /// a regular file. Shared by both save engines so they cannot diverge: `saveTabToItsPath`
+    /// silently unlinked the file, while `atomicallyWrite`'s `replaceItemAt` failed outright
+    /// with "the file doesn't exist" on the same input — two different wrong answers.
+    nonisolated static func writeTarget(forPath path: String) -> URL {
+        let raw = URL(fileURLWithPath: path)
+        let resolved = raw.resolvingSymlinksInPath()
+        if resolved.path != raw.path {
+            logger.info("[CodeViewer] '\(raw.lastPathComponent)' resolves through a symlink — writing to \(resolved.path) so the link is preserved and the real file is updated.")
+        }
+        return resolved
+    }
+
+    /// True only for "the file isn't there", the one read failure a save may ignore.
+    ///
+    /// Everything else — undecodable bytes, permissions, an I/O error — means we could not read
+    /// the file and therefore cannot compare against it, which must refuse the save. Note this
+    /// does NOT assert the file exists: only that its absence was not established. (An earlier
+    /// version of this comment claimed an unreachable mount lands here; a path on an unmounted
+    /// volume actually yields `fileReadNoSuchFile`, so it is classified ABSENT and the save
+    /// proceeds. That is a separate open question, not something this function decides.)
+    nonisolated static func meansFileAbsent(_ error: CocoaError) -> Bool {
+        error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile
+    }
+
+    /// A short, honest name for why a read failed — so a refusal log states the CLASSIFIED
+    /// reason instead of asserting one.
+    ///
+    /// The previous fixed sentence read "The file EXISTS but is unreadable as UTF-8" on every
+    /// non-absent error, including permission failures, I/O errors and non-`CocoaError` throws —
+    /// none of which establish either half of it. That is the same defect shape CH6 was filed
+    /// for ("the log asserted a fact the catch had not established"), reproduced by its own fix.
+    nonisolated static func readFailureReason(_ error: Error) -> String {
+        guard let cocoa = error as? CocoaError else {
+            return "the read failed (\(error.localizedDescription))"
+        }
+        switch cocoa.code {
+        case .fileReadInapplicableStringEncoding: return "it is not UTF-8 text"
+        case .fileReadNoPermission:               return "Devgentic does not have permission to read it"
+        case .fileReadCorruptFile:                return "its contents could not be decoded"
+        case .fileReadTooLarge:                   return "it is too large to read"
+        default:                                  return "the read failed (\(error.localizedDescription))"
+        }
     }
 
     /// Transaction-safe file write, off the main actor.
@@ -941,7 +1143,10 @@ final class ChatHistoryViewModel {
     /// is in place). `nonisolated` + `Task.detached` keeps every blocking call off
     /// the main thread; security-scoped access is opened and balanced around the
     /// whole transaction.
-    nonisolated private static func atomicallyWrite(
+    /// Internal rather than private so the temp-file lifecycle can be tested directly — the
+    /// orphan only appears on failure paths that cannot be provoked through `performApplyChanges`
+    /// without injecting a filesystem. Same reason `writeTarget` / `meansFileAbsent` are internal.
+    nonisolated static func atomicallyWrite(
         _ content: String,
         to fileURL: URL,
         expectingBaseline baseline: String? = nil,
@@ -955,32 +1160,69 @@ final class ChatHistoryViewModel {
                 }
             }
 
+            // Same symlink rule as `saveTabToItsPath`. Here the old behaviour failed loudly
+            // rather than silently — `replaceItemAt` throws "the file doesn't exist" against a
+            // symlink — but a save that cannot target a linked file at all is still a defect.
+            let target = Self.writeTarget(forPath: fileURL.path)
+            let displayName = fileName.isEmpty ? target.lastPathComponent : fileName
+
             // Disk-drift guard: `baseline` is the file's content when it was attached —
             // the same content the on-screen diff was computed against. If the file on
             // disk no longer matches, it was edited since (e.g. in Xcode), and applying
-            // would silently discard those edits. Refuse rather than destroy work. A read
-            // failure (file deleted) falls through to the write, which recreates it —
-            // the same outcome the pre-guard code produced.
-            if let baseline,
-               let onDisk = try? String(contentsOf: fileURL, encoding: .utf8),
-               onDisk != baseline {
-                throw CodeApplyError.diskDrift(fileName: fileName.isEmpty ? fileURL.lastPathComponent : fileName)
+            // would silently discard those edits. Refuse rather than destroy work.
+            if let baseline {
+                do {
+                    let onDisk = try String(contentsOf: target, encoding: .utf8)
+                    if onDisk != baseline {
+                        throw CodeApplyError.diskDrift(fileName: displayName)
+                    }
+                } catch let error as CocoaError where Self.meansFileAbsent(error) {
+                    // Genuinely absent — the write below recreates it, which is the same
+                    // outcome the pre-guard code produced.
+                } catch let error as CodeApplyError {
+                    throw error
+                } catch {
+                    // Was `try?`, which made an UNDECODABLE or unreadable file compare as
+                    // "no drift" and let the write proceed over content we never inspected.
+                    logger.error("[CodeViewer] Apply refused for \(displayName) — its current contents could not be read to drift-check against: \(Self.readFailureReason(error)). Its absence was NOT established, so overwriting could discard work; nothing was written.")
+                    throw CodeApplyError.writeFailed(
+                        fileName: displayName,
+                        underlying: String(localized: "its current contents could not be read to compare against (\(error.localizedDescription))")
+                    )
+                }
             }
 
-            let tempURL = fileURL.deletingLastPathComponent()
+            let tempURL = target.deletingLastPathComponent()
                 .appendingPathComponent(".devgentic_tmp_\(UUID().uuidString)")
             try content.write(to: tempURL, atomically: true, encoding: .utf8)
+
+            // EVERY exit path from here must remove the temp. Only the verify-mismatch branch
+            // used to, so a throwing read-back or replace left a hidden `.devgentic_tmp_<uuid>`
+            // holding the file's full proposed contents next to the user's file — invisible in
+            // Finder, one more per retry, and picked up by `git status` / `git add .`.
+            //
+            // A no-op on success: `replaceItemAt` MOVES the temp into place, so nothing remains
+            // at `tempURL`. The existence check is what keeps the success path silent.
+            defer {
+                if FileManager.default.fileExists(atPath: tempURL.path) {
+                    do {
+                        try FileManager.default.removeItem(at: tempURL)
+                        logger.warning("[CodeViewer] Save of \(displayName) did not complete — its temp file was removed. Nothing was written to the target.")
+                    } catch {
+                        logger.error("[CodeViewer] Save of \(displayName) did not complete AND its temp file could not be removed (\(error.localizedDescription)). CONSEQUENCE: a hidden '\(tempURL.lastPathComponent)' holding the proposed content is left in \(tempURL.deletingLastPathComponent().path) — it is safe to delete.")
+                    }
+                }
+            }
 
             // Verify the temp file was written correctly before replacing
             let verifyContent = try String(contentsOf: tempURL, encoding: .utf8)
             guard verifyContent == content else {
-                try? FileManager.default.removeItem(at: tempURL)
                 throw NSError(domain: "ChatHistoryViewModel", code: 1,
                               userInfo: [NSLocalizedDescriptionKey: "Write verification failed — content mismatch"])
             }
 
             // Atomic replace: original is only removed after temp is in place
-            _ = try FileManager.default.replaceItemAt(fileURL, withItemAt: tempURL)
+            _ = try FileManager.default.replaceItemAt(target, withItemAt: tempURL)
         }.value
     }
 
@@ -1139,7 +1381,16 @@ final class ChatHistoryViewModel {
         // against the loaded conversation's messages, so a DIFFERENT conversation makes them
         // stale — clear the viewer. But NOT on a same-conversation reload (e.g. the
         // user-messages filter routes through here), which would wipe the user's open tabs.
-        if id != currentChatMessages.first?.conversationId {
+        //
+        // The identity MUST come from `viewerOwningConversationID`, the same expression the
+        // stash keys on. Reading it from `currentChatMessages` alone meant a caller that
+        // pre-cleared the messages before triggering a load (welcome screen, interface-mode
+        // switch, ⌘N from code/workflow mode) made this `nil != nil` — so the reset was
+        // SKIPPED here, `loadedConversationID` was then nil'd below, and the identity was gone
+        // by the time the NEXT load ran the reset for real: the stash could not resolve a key,
+        // and every tab and unsaved draft was cleared. Returning to the SAME conversation lost
+        // them too, since the tabs were already orphaned.
+        if id != viewerOwningConversationID {
             resetCodeViewer()
         }
 
@@ -1150,6 +1401,17 @@ final class ChatHistoryViewModel {
         }
 
         logger.debug("Loading conversation \(selectedID.uuidString), merging with active streams.")
+
+        // Publish the DESTINATION for the duration of the load. Between here and the
+        // assignments at the bottom, `currentChatMessages` and `loadedConversationID` both
+        // still describe the OUTGOING conversation, so anything that asks "which conversation
+        // is this?" mid-load gets the wrong answer — see `destinationConversationID`.
+        //
+        // Cleared under the epoch check so a STALE load (a newer one started while we were
+        // suspended) cannot erase the newer load's destination on its way out. `defer` so
+        // cancellation and the early returns below are covered too.
+        loadingConversationID = selectedID
+        defer { if myEpoch == loadEpoch { loadingConversationID = nil } }
 
         isInitiallyLoadingConversation = true
         await Task.yield()
@@ -1283,7 +1545,18 @@ final class ChatHistoryViewModel {
     // MARK: - Search corpus (store-backed, so scroll position can't change what is findable)
 
     /// Newest-first store snapshot used as the search corpus, cached per conversation.
-    @ObservationIgnored private var searchCorpusCache: [ChatMessage] = []
+    ///
+    /// Holds PROJECTIONS, not messages. It used to cache up to 1000 fully decoded
+    /// `ChatMessage`s — including every attached image's full `binaryData` — released only
+    /// when the conversation changed, so one ⌘F in a long image-heavy conversation pinned tens
+    /// of MB for the rest of the session.
+    @ObservationIgnored private var searchCorpusCache: [SearchDocument] = []
+
+    /// Resident messages are projected at READ time so in-place mutations (a stream
+    /// finalizing, a variant switch) are picked up — but re-decomposing the whole resident
+    /// window on every keystroke is wasteful, so the result is memoized on a hash of the
+    /// displayed text. Text changes → hash changes → automatic invalidation.
+    @ObservationIgnored private var residentUnitsCache: [UUID: (textHash: Int, units: [SearchUnit])] = [:]
     @ObservationIgnored private var searchCorpusConversationID: UUID?
 
     /// How far back search reaches. Larger than `maxResidentMessages`: finding a match is
@@ -1298,16 +1571,29 @@ final class ChatHistoryViewModel {
     /// it reported "no results", which reads as "not there" rather than "not loaded".
     /// Merging resident over stored keeps streaming and just-sent messages fresh (they are
     /// not in the store yet) while still reaching everything older.
-    var searchCorpus: [ChatMessage] {
+    var searchCorpus: [SearchDocument] {
         guard searchCorpusConversationID == loadedConversationID, !searchCorpusCache.isEmpty else {
-            return currentChatMessages
+            return currentChatMessages.map(projectedResidentDocument)
         }
-        var byID: [UUID: ChatMessage] = [:]
-        for message in searchCorpusCache { byID[message.id] = message }
-        for message in currentChatMessages { byID[message.id] = message }
+        var byID: [UUID: SearchDocument] = [:]
+        for document in searchCorpusCache { byID[document.id] = document }
+        // Resident messages override the stored projection and are re-projected HERE rather
+        // than cached whole: a streaming message's text changes without any membership change.
+        for message in currentChatMessages { byID[message.id] = projectedResidentDocument(message) }
         // Newest-first, matching `currentChatMessages` — `performSearch` reverses it to
         // emit matches in display order.
         return byID.values.sorted { $0.timestamp > $1.timestamp }
+    }
+
+    /// A resident message's projection, memoized on its displayed text.
+    private func projectedResidentDocument(_ message: ChatMessage) -> SearchDocument {
+        let hash = message.displayedContent.textContent?.hashValue ?? 0
+        if let cached = residentUnitsCache[message.id], cached.textHash == hash {
+            return SearchDocument(id: message.id, timestamp: message.timestamp, units: cached.units)
+        }
+        let units = ChatSearchDecomposition.units(for: message)
+        residentUnitsCache[message.id] = (hash, units)
+        return SearchDocument(id: message.id, timestamp: message.timestamp, units: units)
     }
 
     /// Loads the store snapshot once per conversation, when search opens. Deliberately NOT
@@ -1318,9 +1604,8 @@ final class ChatHistoryViewModel {
         guard let conversationID = loadedConversationID else { return }
         guard searchCorpusConversationID != conversationID || searchCorpusCache.isEmpty else { return }
 
-        let stored = await persistenceService.fetchMessages(
+        let stored = await persistenceService.fetchSearchDocuments(
             for: conversationID,
-            offset: 0,
             limit: Self.searchCorpusLimit
         )
         guard conversationID == loadedConversationID else {
@@ -1335,6 +1620,19 @@ final class ChatHistoryViewModel {
     private func invalidateSearchCorpus() {
         searchCorpusCache = []
         searchCorpusConversationID = nil
+        residentUnitsCache = [:]
+    }
+
+    /// Drops the corpus when search closes or the chat view goes away.
+    ///
+    /// Previously it lived until the conversation changed, so a single ⌘F kept the whole
+    /// projection resident for the rest of the session.
+    func releaseSearchCorpus() {
+        let freed = searchCorpusCache.count
+        let memoized = residentUnitsCache.count
+        guard freed > 0 || memoized > 0 else { return }
+        invalidateSearchCorpus()
+        logger.info("[SEARCH] Corpus released — \(freed) stored document(s) and \(memoized) memoized resident projection(s) freed; the next search re-fetches.")
     }
 
     /// Pages older messages in until `messageID` is rendered, so a search hit outside the

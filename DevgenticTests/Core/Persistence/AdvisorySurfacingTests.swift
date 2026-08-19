@@ -102,6 +102,60 @@ final class SaveAdvisoryReturnTests: XCTestCase {
 
 // MARK: - A67: a stored `parallelSubtasks` no longer decides anything
 
+// MARK: - B13/B14/B15: the surfaces and gates fixed 2026-08-08
+
+@MainActor
+final class WithdrawnCapabilityAndAdvisorySurfaceTests: XCTestCase {
+
+    /// ⚠️ register B15. The delegation toggle was withdrawn from the UI long ago, but the runtime
+    /// gate is the mere PRESENCE of `capabilities.agentDelegation` — no `isEnabled` flag — so every
+    /// legacy "Supervisor" profile kept injecting `call_agent` forever. One named constant now
+    /// decides it, the same shape as `PlanningCapability.parallelSubtasksSupported`.
+    func testAgentDelegationIsWithdrawnAtTheRuntimeGate() {
+        XCTAssertFalse(AgentConnect.agentDelegationSupported,
+                       "delegation is withdrawn — flipping this back is the one line that restores it")
+    }
+
+    /// ⚠️ register B14. The instructions advisory is only truthful for types that HAVE the field:
+    /// an image generator has no instructions to be missing, and bannering on every send would
+    /// train the user to dismiss the one signal this category exists to carry.
+    func testOnlyProfileTypesWithInstructionsCanReportThemMissing() {
+        let agent = ProfileDetails.agent(AgentConfig(
+            llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "llama3")))
+        let imageGen = ProfileDetails.imageGen(ImageGenConfig(
+            llmConfig: ProviderConfig(apiProvider: .openAI, modelName: "dall-e-3")))
+
+        XCTAssertTrue(agent.supportsSystemInstructions)
+        XCTAssertFalse(imageGen.supportsSystemInstructions,
+                       "an image generator has no instructions field to be empty")
+        XCTAssertFalse(ProfileDetails.workflow(WorkflowConfig(agentProfileIDs: []))
+                        .supportsSystemInstructions)
+    }
+
+    func testSystemInstructionsAreReadableForTheTypesThatCarryThem() {
+        let agent = ProfileDetails.agent(AgentConfig(
+            llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "llama3"),
+            instructions: "be brief"))
+        XCTAssertEqual(agent.systemInstructions, "be brief")
+        XCTAssertNil(ProfileDetails.workflow(WorkflowConfig(agentProfileIDs: [])).systemInstructions)
+    }
+
+    /// The advisory must remain non-blocking — G92, re-asserted on the new channel.
+    func testTheMissingInstructionsFindingIsAdvisoryNotBlocking() {
+        let profile = BackendProfileSnapshot(
+            displayName: "Unconfigured",
+            details: .agent(AgentConfig(
+                llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "llama3", apiKey: nil))))
+
+        let errors = ProfileValidator.validate(profile, strict: true)
+        let instructionFindings = errors.filter { $0.field == "instructions" }
+
+        XCTAssertFalse(instructionFindings.isEmpty, "an instruction-less agent must be reported")
+        XCTAssertTrue(instructionFindings.allSatisfy { $0.severity == .advisory },
+                      "it must never gate the save — out-of-band writers include the thinking auto-heal")
+    }
+}
+
 final class ParallelSubtaskEnforcementTests: XCTestCase {
 
     /// ⚠️ THE fix. The UI comment claimed "Default is forced to false below" and nothing forced it;

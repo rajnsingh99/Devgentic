@@ -53,9 +53,12 @@ protocol CognitiveSafetyGuarding: Sendable {
 /// The resulting action the executor must take when encountering an LLM error.
 enum RetryAction: Equatable, Sendable {
     case throttle(seconds: TimeInterval, message: String)
-    /// Transient transport failure (5xx, timeout) — retry after `delaySeconds`.
-    /// Bounded by `TransportResiliencePolicy.maxTransientRetries`; the strategy
-    /// returns `.fatal` once the budget is exhausted.
+    /// A transient failure that a bounded wait may clear — retry after `delaySeconds`.
+    /// Two producers, each with its OWN budget:
+    ///   - transport (5xx, timeout), bounded by `TransportResiliencePolicy.maxTransientRetries`;
+    ///   - MLX model-slot contention, bounded by `LLMRetryStrategy.maxModelSlotRetries` (WF-CC6) —
+    ///     separate because the MLX transport budget is 0 by design.
+    /// The strategy returns `.fatal` once the relevant budget is spent.
     case networkRetry(message: String, delaySeconds: TimeInterval)
     case parseRetry(systemAlert: String, attemptCount: Int, maxAttempts: Int)
     /// Deterministic, non-retryable failure (auth, bad model id, context

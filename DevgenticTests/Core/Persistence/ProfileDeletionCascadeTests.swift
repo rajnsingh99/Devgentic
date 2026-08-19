@@ -99,6 +99,43 @@ final class ProfileDeletionWarningTests: XCTestCase {
         ProfileReference(id: UUID(), kind: kind, displayName: name)
     }
 
+    // MARK: - B10: every delete entry point shows the same message
+
+    private func profile(_ name: String) -> BackendProfileModel {
+        BackendProfileSnapshot(
+            displayName: name,
+            details: .agent(AgentConfig(
+                llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "llama3")))
+        )
+    }
+
+    /// ⚠️ A30 built this message inline in the sidebar alert, so the three detail-view trash
+    /// buttons kept saying only "This action cannot be undone" — and by A26's own note the
+    /// sidebar hover-trash is the path the user is LEAST likely to use. The message is now one
+    /// function; these pin what every caller therefore shows.
+    func testTheDeletionMessageAlwaysNamesTheProfileAndIrreversibility() {
+        let message = ProfileReferenceIndex.deletionMessage(
+            for: profile("Research Agent"), in: [], tasksAreKnown: true)
+
+        XCTAssertTrue(message.contains("Research Agent"), "the user must see WHICH profile")
+        XCTAssertTrue(message.lowercased().contains("undone"))
+    }
+
+    /// ⚠️ register B24, fixed in the same extraction because B10 multiplies its blast radius by
+    /// four. `scheduledTasks` is empty both when there are none and when the load failed at
+    /// launch — so a confidently silent message would recreate the exact gap A30 was filed for.
+    func testTheMessageAdmitsWhenScheduledTasksCouldNotBeChecked() {
+        let unknown = ProfileReferenceIndex.deletionMessage(
+            for: profile("Research Agent"), in: [], tasksAreKnown: false)
+        XCTAssertTrue(unknown.lowercased().contains("could not be checked"),
+                      "silence here reads as 'nothing uses this', which we do not know")
+
+        let known = ProfileReferenceIndex.deletionMessage(
+            for: profile("Research Agent"), in: [], tasksAreKnown: true)
+        XCTAssertFalse(known.lowercased().contains("could not be checked"),
+                       "and it must NOT hedge when the answer is actually known")
+    }
+
     func testNoReferencesProducesNoWarning() {
         XCTAssertNil(ProfileReferenceIndex.deletionWarning(for: []))
     }

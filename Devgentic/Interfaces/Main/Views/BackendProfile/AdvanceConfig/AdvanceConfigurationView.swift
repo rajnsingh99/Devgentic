@@ -849,42 +849,65 @@ struct OpenAISettingsView: View {
 
             Divider()
 
-            // Temperature
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Temperature").fontWeight(.medium)
-                    Text("Controls the randomness of the generated response.").font(.caption).foregroundColor(theme.secondaryText)
+            // ⚠️ register B33 — the panel STATED the hide-don't-disable rule above and then applied
+            // it to one control out of three. `family` was consulted exactly once, for Reasoning
+            // Effort, while Temperature and Top P rendered unconditionally at full opacity with
+            // captions that said nothing about reasoning models. On an o1/o3/o4/GPT-5 profile the
+            // user could drag Temperature to 0.2, watch it save, reopen the panel to see 0.20 — and
+            // every request omitted it and ran at the model's fixed sampling
+            // (`OpenAILLMProvider.applyGenerationParams`). That is the decorative knob A56 exists to
+            // prevent, and it was strictly worse disclosure than the Anthropic panel it is modelled
+            // on, which hides the block and explains why.
+            if family.acceptsSamplingParameters {
+                // Temperature
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Temperature").fontWeight(.medium)
+                        Text("Controls the randomness of the generated response.").font(.caption).foregroundColor(theme.secondaryText)
+                    }
+                    Spacer(minLength: 16)
+                    HStack {
+                        Slider(value: $config.temperature.toNonOptional(defaultValue: 1.0), in: 0.0...2.0, step: 0.1)
+                            .accessibilityLabel("Temperature")
+                            .accessibilityValue(String(format: "%.2f", config.temperature ?? 1.0))
+                            .frame(width: 150)
+                        Text("\(config.temperature ?? 1.0, specifier: "%.2f")")
+                            .monospacedDigit()
+                            .frame(width: 40, alignment: .trailing)
+                    }
                 }
-                Spacer(minLength: 16)
-                HStack {
-                    Slider(value: $config.temperature.toNonOptional(defaultValue: 1.0), in: 0.0...2.0, step: 0.1)
-                        .accessibilityLabel("Temperature")
-                        .accessibilityValue(String(format: "%.2f", config.temperature ?? 1.0))
-                        .frame(width: 150)
-                    Text("\(config.temperature ?? 1.0, specifier: "%.2f")")
-                        .monospacedDigit()
-                        .frame(width: 40, alignment: .trailing)
-                }
-            }
 
-            Divider()
+                Divider()
 
-            // Top P
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Top P").fontWeight(.medium)
-                    Text("Cumulative probability of tokens to consider.").font(.caption).foregroundColor(theme.secondaryText)
+                // Top P
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Top P").fontWeight(.medium)
+                        Text("Cumulative probability of tokens to consider.").font(.caption).foregroundColor(theme.secondaryText)
+                    }
+                    Spacer(minLength: 16)
+                    HStack {
+                        Slider(value: $config.topP.toNonOptional(defaultValue: 1.0), in: 0.0...1.0, step: 0.05)
+                            .frame(width: 150)
+                            .accessibilityLabel("Top P")
+                            .accessibilityValue(String(format: "%.2f", config.topP ?? 1.0))
+                        Text("\(config.topP ?? 1.0, specifier: "%.2f")")
+                            .monospacedDigit()
+                            .frame(width: 40, alignment: .trailing)
+                    }
                 }
-                Spacer(minLength: 16)
-                HStack {
-                    Slider(value: $config.topP.toNonOptional(defaultValue: 1.0), in: 0.0...1.0, step: 0.05)
-                        .frame(width: 150)
-                        .accessibilityLabel("Top P")
-                        .accessibilityValue(String(format: "%.2f", config.topP ?? 1.0))
-                    Text("\(config.topP ?? 1.0, specifier: "%.2f")")
-                        .monospacedDigit()
-                        .frame(width: 40, alignment: .trailing)
+            } else {
+                // ⚠️ Same shape as the Anthropic panel's note: say WHICH controls are gone, WHY,
+                // and what to steer with instead. A hidden control with no explanation reads as a
+                // missing feature.
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "info.circle")
+                        .foregroundColor(theme.secondaryText)
+                    Text("Temperature and Top P are not available on reasoning models — OpenAI fixes sampling for this family and rejects both. Steer the response with your system instructions and the Reasoning Effort setting instead.")
+                        .font(.caption)
+                        .foregroundColor(theme.secondaryText)
                 }
+                .accessibilityElement(children: .combine)
             }
 
             if family.acceptsReasoningEffort {

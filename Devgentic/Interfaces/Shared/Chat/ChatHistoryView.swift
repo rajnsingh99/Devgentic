@@ -188,7 +188,7 @@ struct ChatHistoryView: View {
                         // with a query, re-run it so matches track membership changes (new message,
                         // conversation switch). When the bar is closed this costs nothing — the old
                         // always-rebuild here re-lowercased the whole history on every append.
-                        if searchViewModel.isSearchActive, !searchViewModel.searchQuery.isEmpty {
+                        if searchViewModel.isSearchActive, !searchViewModel.effectiveQuery.isEmpty {
                             searchViewModel.performSearch(in: chatHistoryViewModel.searchCorpus)
                         }
 
@@ -239,14 +239,25 @@ struct ChatHistoryView: View {
                     // Loaded once when the bar opens so search reaches past the scroll
                     // window; a per-keystroke fetch would decode every message's timeline.
                     .onChange(of: searchViewModel.isSearchActive) { _, isActive in
-                        guard isActive else { return }
+                        // Closing search RELEASES the corpus. It used to live until the
+                        // conversation changed, so one ⌘F pinned the whole projection for the
+                        // rest of the session.
+                        guard isActive else {
+                            chatHistoryViewModel.releaseSearchCorpus()
+                            return
+                        }
                         Task {
                             await chatHistoryViewModel.prepareSearchCorpus()
-                            if !searchViewModel.searchQuery.isEmpty {
+                            if !searchViewModel.effectiveQuery.isEmpty {
                                 searchViewModel.performSearch(in: chatHistoryViewModel.searchCorpus)
                             }
                         }
                     }
+                    // `ChatHistoryView` is built in two mutually-exclusive places
+                    // (`MainApplicationView` and `CodeDedicatedView`), each with its own
+                    // `@State searchViewModel` — so switching interface mode tears this view
+                    // down without any `isSearchActive` false-transition to release on.
+                    .onDisappear { chatHistoryViewModel.releaseSearchCorpus() }
 
                     // MARK: - Search Bar Overlay
                     if searchViewModel.isSearchActive {

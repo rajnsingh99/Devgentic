@@ -30,6 +30,11 @@ struct BackendProfileDetailView: View {
     @Environment(ToastManager.self) private var toastManager
     @Environment(\.appTheme) private var theme
 
+    /// ⚠️ Present ONLY to source the shared `WorkflowCanvasState` for a workflow profile — see the
+    /// `.workflow` case below. Injected at the app root (`DevgenticApp`), so it is available here
+    /// even though this view is reached through the Profiles destination rather than the chat area.
+    @Environment(MainApplicationViewModel.self) private var mainViewModel
+
     /// Set when this profile's stored blob could not be decoded — carries the surviving columns so
     /// the warning can say what the profile actually was.
     ///
@@ -61,10 +66,29 @@ struct BackendProfileDetailView: View {
                     // `editBuffer.draft`, so leaving this nil (as it was) meant `isDirty` stayed
                     // false however much the user had drawn, and clicking another profile row
                     // destroyed every unsaved node and edge with no prompt at all.
+                    //
+                    // ⚠️ `canvasState` is likewise NOT optional plumbing (WF-PE1). It MUST come from
+                    // `MainApplicationViewModel.workflowCanvasState(for:)` — the same call
+                    // `WorkflowDedicatedView` makes — so that both surfaces edit ONE state object
+                    // per workflow. While this argument was omitted, the view fell back to its own
+                    // `@State ownedCanvasState` and a second, independent graph existed for the same
+                    // profile: the profile editor loaded the DISK layout while the main Workflow
+                    // interface held unsaved edits, and at quit `persistDirtyWorkflowCanvases`
+                    // wrote the main interface's graph and `saveHook()` then wrote this stale one
+                    // straight over the same `WorkflowLayoutSD` row. The store has no
+                    // compare-and-swap, so the newer nodes were destroyed with no prompt, no undo
+                    // and no error log. Sharing the state makes that unrepresentable rather than
+                    // merely unlikely.
+                    //
+                    // Safe against a reload clobbering the other surface's work:
+                    // `loadLayout()` early-returns on `canvasState.acceptsDiskReload`
+                    // (`!hasUnsavedChanges`), so mounting this editor over an already-dirty shared
+                    // state does NOT re-read the disk layout.
                     WorkflowCanvasView(
                         profile: $editBuffer.draft,
                         onDelete: onDelete,
-                        editGuard: profileService.canvasEditGuard
+                        editGuard: profileService.canvasEditGuard,
+                        canvasState: mainViewModel.workflowCanvasState(for: editBuffer.draft.id)
                     )
                 case .imageGen:
                     ImageGenConfigDetailView(editBuffer: editBuffer, onDelete: onDelete)

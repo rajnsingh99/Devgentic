@@ -116,7 +116,7 @@ final class SearchDebounceTests: XCTestCase {
         ]
 
         vm.searchQuery = "the"
-        vm.performSearch(in: messages)
+        vm.performSearch(in: messages.map(ChatSearchDecomposition.document(for:)))
 
         // "the" appears in message 1 ("The") and message 2 ("the")
         XCTAssertGreaterThanOrEqual(vm.matches.count, 2, "Should find 'the' in at least 2 messages")
@@ -128,11 +128,11 @@ final class SearchDebounceTests: XCTestCase {
         let messages = [makeMessage(text: "Hello world")]
 
         vm.searchQuery = "hello"
-        vm.performSearch(in: messages)
+        vm.performSearch(in: messages.map(ChatSearchDecomposition.document(for:)))
         XCTAssertFalse(vm.matches.isEmpty)
 
         vm.searchQuery = ""
-        vm.performSearch(in: messages)
+        vm.performSearch(in: messages.map(ChatSearchDecomposition.document(for:)))
         XCTAssertTrue(vm.matches.isEmpty, "Empty query should clear matches")
     }
 
@@ -148,7 +148,7 @@ final class SearchDebounceTests: XCTestCase {
 
         // Search once so any caching layer would have captured the old content.
         vm.searchQuery = "placeholder"
-        vm.performSearch(in: messages)
+        vm.performSearch(in: messages.map(ChatSearchDecomposition.document(for:)))
         XCTAssertEqual(vm.matches.count, 1, "Baseline: original content should match")
 
         // Mutate in place — same object, same array — exactly what a completing
@@ -157,11 +157,11 @@ final class SearchDebounceTests: XCTestCase {
         msg.agentResponse?.variants[0].content = .markdownText("The final streamed answer")
 
         vm.searchQuery = "streamed"
-        vm.performSearch(in: messages)
+        vm.performSearch(in: messages.map(ChatSearchDecomposition.document(for:)))
         XCTAssertEqual(vm.matches.count, 1, "Search must see content mutated after a previous search")
 
         vm.searchQuery = "placeholder"
-        vm.performSearch(in: messages)
+        vm.performSearch(in: messages.map(ChatSearchDecomposition.document(for:)))
         XCTAssertTrue(vm.matches.isEmpty, "Search must not match pre-mutation content")
     }
 
@@ -171,7 +171,7 @@ final class SearchDebounceTests: XCTestCase {
         let messages = [makeMessage(text: "SwiftUI Framework")]
 
         vm.searchQuery = "swiftui"
-        vm.performSearch(in: messages)
+        vm.performSearch(in: messages.map(ChatSearchDecomposition.document(for:)))
         XCTAssertEqual(vm.matches.count, 1, "Search should be case-insensitive")
     }
 
@@ -181,7 +181,7 @@ final class SearchDebounceTests: XCTestCase {
         let messages = [makeMessage(text: "aaa aaa aaa")]
 
         vm.searchQuery = "aaa"
-        vm.performSearch(in: messages)
+        vm.performSearch(in: messages.map(ChatSearchDecomposition.document(for:)))
         let total = vm.matches.count
         XCTAssertEqual(total, 3)
 
@@ -196,7 +196,7 @@ final class SearchDebounceTests: XCTestCase {
         let messages = [makeMessage(text: "aaa aaa")]
 
         vm.searchQuery = "aaa"
-        vm.performSearch(in: messages)
+        vm.performSearch(in: messages.map(ChatSearchDecomposition.document(for:)))
 
         vm.currentMatchIndex = 0
         vm.previousMatch()
@@ -216,7 +216,7 @@ final class SearchDebounceTests: XCTestCase {
         vm.searchQuery = "quick brown"
 
         measure {
-            vm.performSearch(in: messages)
+            vm.performSearch(in: messages.map(ChatSearchDecomposition.document(for:)))
         }
 
         XCTAssertGreaterThan(vm.matches.count, 0, "Should find matches in 1000 messages")

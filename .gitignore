@@ -1,0 +1,58 @@
+# Devgentic — .gitignore
+#
+# Created 2026-08-05. The repo had none, which is why `build/` (SPM checkouts + DerivedData) and
+# per-user Xcode state were being picked up by `git add`.
+#
+# ⚠️ Adding a path here does NOT untrack what is already committed. Anything listed under
+# "already tracked" below still needs `git rm --cached` to stop being versioned.
+
+# ── Build output ────────────────────────────────────────────────────────────────
+# This project builds with `-derivedDataPath build/DerivedData`, so everything under build/ is
+# regenerable: DerivedData, SPM checkouts/artifacts, XCBuildData, test results.
+build/
+DerivedData/
+*.xcarchive
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# ── Xcode per-user state ────────────────────────────────────────────────────────
+# ⚠️ xcuserdata is per-developer (window layout, breakpoints, scheme ordering) and churns on every
+# session. SHARED schemes live in xcshareddata/ and MUST stay tracked — devgentic.xcscheme and
+# devgenticTests.xcscheme carry the test-isolation environment variables (G55), so ignoring
+# xcshareddata would silently un-isolate everyone's test runs.
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad
+*.moved-aside
+*.perspectivev3
+
+# ── Swift Package Manager ───────────────────────────────────────────────────────
+.build/
+.swiftpm/
+Packages/
+# Package.resolved IS tracked on purpose — it pins dependency versions for reproducible builds.
+
+# ── Claude Code / agent working state ───────────────────────────────────────────
+# Worktrees are checkouts of this same repo; committing the gitlink makes the parent repo depend on
+# a directory that only exists on one machine (and is what left an orphaned session record here).
+.claude/worktrees/
+.claude/settings.local.json
+
+# ── macOS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# ── Local scratch ───────────────────────────────────────────────────────────────
+# ⚠️ NOT `logs/` or `*.log`: the repo-root `logs/` directory holds captured investigation
+# transcripts that are deliberately tracked and cited from `observability_baseline.md`.
+*.tmp
+
+# ── Harnesses' own build output ─────────────────────────────────────────────────
+# ToolHarness/ and MCPHarness/ are SwiftPM packages at the repo root; their sources are tracked,
+# their build products are not.
+ToolHarness/.build/
+MCPHarness/.build/

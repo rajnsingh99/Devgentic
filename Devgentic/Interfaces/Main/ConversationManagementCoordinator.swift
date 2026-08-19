@@ -339,8 +339,17 @@ final class ConversationManagementCoordinator {
         let title = conversationSD.toRowStruct().displayTitle
 
         Task { [persistenceService] in
-            let messages = await persistenceService.fetchMessages(for: conversationID, offset: 0, limit: 10000)
-            await ConversationExporter.exportToFile(title: title, messages: messages)
+            let limit = 10_000
+            let messages = await persistenceService.fetchMessages(for: conversationID, offset: 0, limit: limit)
+            // `fetchMessages` sorts NEWEST-first, so hitting the cap drops the conversation's
+            // EARLIEST turns. That used to happen with no log and no notice in the file: the
+            // export simply began partway through. Probe one past the cap to distinguish
+            // "exactly at the limit" from "truncated".
+            let isTruncated = !(await persistenceService.fetchMessages(for: conversationID, offset: limit, limit: 1)).isEmpty
+            if isTruncated {
+                logger.warning("[EXPORT] Conversation \(conversationID.uuidString.prefix(8)) exceeds the \(limit)-message export cap — the export carries the most recent \(messages.count) and its EARLIEST turns are omitted. CONSEQUENCE: stated in the exported document's header so the file is not silently partial.")
+            }
+            await ConversationExporter.exportToFile(title: title, messages: messages, isTruncated: isTruncated)
         }
     }
 }

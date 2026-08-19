@@ -80,6 +80,15 @@ final class BackendProfile {
     /// Unchanged meaning, now derived — every existing guard reads this and keeps working.
     private var _detailsDecodeFailed: Bool { _detailsUnreadableReason != nil }
 
+    /// Whether the last Keychain read for this profile FAILED, as opposed to finding nothing.
+    /// Register B2.
+    ///
+    /// ⚠️ This exists solely to stop a read failure being mistaken for user intent. When it is
+    /// true, `details` carries no API key — but that absence is OUR failure, not the user's
+    /// choice, so the setter must not act on it by deleting the stored credential.
+    @Transient
+    private var _providerKeyUnreadable: Bool = false
+
     // MARK: - Computed Accessors
 
     /// The strongly-typed profile type, derived from the stored raw value.
@@ -129,11 +138,20 @@ final class BackendProfile {
         // Done HERE rather than in the getter so the Keychain is touched once per decode and the
         // result is cached — `details` is read on nearly every render.
         //
-        // The `??` is the migration path: a blob written before this change still carries its key
-        // inline, and must keep working until `BackendProfileStore.migrateAPIKeysToKeychain()`
-        // rewrites it. Keychain wins when both exist — it is the newer of the two by construction.
+        // ⚠️ register B2 — `read`, not `load`. `load` answers nil for BOTH "no key stored" and
+        // "the Keychain read failed", and this row's write path treats a nil key as "the user
+        // cleared it" and DELETES the item. One locked Keychain therefore turned into permanent
+        // credential destruction on the next opportunistic save. The flag below is what stops that.
+        let keyOutcome = ProviderKeyStore.read(for: id)
+        _providerKeyUnreadable = { if case .failed = keyOutcome { return true } else { return false } }()
+
+        let keychainKey: String? = { if case .found(let k) = keyOutcome { return k } else { return nil } }()
+
+        // The `??` is the migration path: a blob written before the Keychain move still carries its
+        // key inline and must keep working until the launch sweep rewrites it. Keychain wins when
+        // both exist — it is the newer of the two by construction.
         _cachedDetails = outcome.details.settingProviderAPIKey(
-            ProviderKeyStore.load(for: id) ?? outcome.details.providerAPIKey
+            keychainKey ?? outcome.details.providerAPIKey
         )
         _detailsUnreadableReason = outcome.reason
     }
@@ -146,6 +164,7 @@ final class BackendProfile {
     func resetDecodeCacheForTesting() {
         _cachedDetails = nil
         _detailsUnreadableReason = nil
+        _providerKeyUnreadable = false
     }
 
     /// Whether the STORED BYTES still carry an inline API key — i.e. this row predates the move to
@@ -218,7 +237,34 @@ final class BackendProfile {
             // user's credential; this way the worst case is the pre-existing behaviour (key stays
             // in the blob) rather than a key that exists nowhere.
             let keyForKeychain = newValue.providerAPIKey
-            let storedSecurely = ProviderKeyStore.save(keyForKeychain, for: id)
+
+            // ⚠️ register B2 — THE GUARD THAT STOPS A READ FAILURE BECOMING A DELETE. When the
+            // Keychain could not be read, `details` came back with no key, so an unrelated save
+            // (a rename, a capability chip, the thinking auto-heal, the MLX context healer) called
+            // `save(nil)` → `delete` and destroyed a credential that was perfectly intact. A nil
+            // key is only user intent when we could actually SEE that there was nothing there.
+            //
+            // Deliberately asymmetric: a nil key with an unreadable Keychain leaves the item
+            // alone, while a nil key with a readable one still clears it. Refusing to clear in
+            // both cases would break the user's ability to remove a key at all.
+            let suppressKeychainClear = (keyForKeychain == nil && _providerKeyUnreadable)
+            if suppressKeychainClear {
+                logger.error(
+                    "[SECRETS] NOT clearing the Keychain API key for profile '\(displayName)' "
+                    + "(id \(id)): the key is absent from this write only because the Keychain read "
+                    + "FAILED earlier in this session, not because the user cleared it. "
+                    + "CONSEQUENCE: the stored credential is preserved and the rest of this save "
+                    + "proceeds normally; the profile will keep behaving as unconfigured until the "
+                    + "Keychain is readable again."
+                )
+            }
+
+            // `true` in the suppressed case is correct rather than a fudge: it means "the blob may
+            // be written without the key", which is exactly right — the key is not in the blob, it
+            // is safe in the Keychain and we are deliberately not touching it.
+            let storedSecurely = suppressKeychainClear
+                ? true
+                : ProviderKeyStore.save(keyForKeychain, for: id)
             let detailsToEncode = storedSecurely ? newValue.settingProviderAPIKey(nil) : newValue
 
             guard let encoded = Self.encodeDetails(detailsToEncode) else {

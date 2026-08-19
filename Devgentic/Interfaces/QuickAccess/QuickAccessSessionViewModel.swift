@@ -336,14 +336,31 @@ final class QuickAccessSessionViewModel {
             // this id, a stopped older stream's late completion would nil a NEWER stream's state
             // and leave the newer stream unstoppable. Captured var is filled right after the call.
             var thisStreamID: UUID?
+            // Workflow bookkeeping. ⚠️ Currently ALWAYS nil here: `allowedProfileTypes` is
+            // `[.bot, .agent]`, so the panel cannot select a workflow profile. Kept so the call
+            // shape is uniform across every `startMessageStream` site — if that filter ever
+            // widens, the panel gets run records for free instead of silently reintroducing WF20.
+            let workflowTicket = WorkflowRunBootstrap.begin(
+                config: config,
+                conversationID: convID,
+                userInput: query,
+                registry: mainVM,
+                origin: .quickAccess
+            )
             let agentMessage = activeStreamManager.startMessageStream(
                 withConfig: config,
                 conversationID: convID,
                 userQuery: query,
                 history: Array(history),
                 files: files,
+                workflowExecutionState: workflowTicket?.state,
                 onComplete: { [weak self] in
                     DispatchQueue.main.async {
+                        // ⚠️ finalize BEFORE the identity guard. That guard exists so a stopped
+                        // older stream's late completion can't nil a NEWER stream's UI state —
+                        // but the older run's RECORD still has to be frozen, or it stays
+                        // `.running` on disk until the next launch reconciles it.
+                        workflowTicket?.finalize()
                         guard let self, self.streamingMessageID == thisStreamID else { return }
                         self.streamingMessageID = nil
                         self.streamingConversationID = nil

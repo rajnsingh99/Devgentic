@@ -35,6 +35,9 @@ struct BotConfigDetailView: View {
     /// that invokes this closure (typically `dismiss()` from a modal host like
     /// `WorkflowProfileEditorView`). Also hides the trash icon.
     var onCancel: (() -> Void)? = nil
+    /// When true, renders without DynamicIslandBar, outer ScrollView, and navigation guards
+    /// for embedding directly within composite containers like ProfileNodeInspectorView.
+    var isEmbedded: Bool = false
     @Environment(BackendProfileService.self) var profileService
     @Environment(ToastManager.self) private var toastManager
     @Environment(MainViewRouter.self) private var router
@@ -81,9 +84,15 @@ struct BotConfigDetailView: View {
     // MARK: - Computed Bindings
 
     private var providerConfig: Binding<ProviderConfig> {
-        Binding<ProviderConfig>(
+        // ⚠️ register B27 — capture the BUFFER, not `self`. Referencing `editBuffer` directly
+        // inside these closures captures the whole View struct, and the copy carries this
+        // view's `@State` window manager — so a binding handed to a long-lived NSWindow (or
+        // to a manager callback) closed a retain cycle straight back to the manager. A72
+        // fixed the callbacks and missed this, the other end of the same loop.
+        let buffer = editBuffer
+        return Binding<ProviderConfig>(
             get: {
-                switch editBuffer.draft.details {
+                switch buffer.draft.details {
                 case .bot(let config): return config.llmConfig
                 case .agent(let config): return config.llmConfig
                 case .code(let config): return config.llmConfig
@@ -92,19 +101,19 @@ struct BotConfigDetailView: View {
                 }
             },
             set: { newConfig in
-                switch editBuffer.draft.details {
+                switch buffer.draft.details {
                 case .bot(var config):
                     config.llmConfig = newConfig
-                    editBuffer.draft.details = .bot(config)
+                    buffer.draft.details = .bot(config)
                 case .agent(var config):
                     config.llmConfig = newConfig
-                    editBuffer.draft.details = .agent(config)
+                    buffer.draft.details = .agent(config)
                 case .code(var config):
                     config.llmConfig = newConfig
-                    editBuffer.draft.details = .code(config)
+                    buffer.draft.details = .code(config)
                 case .imageGen(var config):
                     config.llmConfig = newConfig
-                    editBuffer.draft.details = .imageGen(config)
+                    buffer.draft.details = .imageGen(config)
                 case .workflow:
                     break
                 }
@@ -113,30 +122,32 @@ struct BotConfigDetailView: View {
     }
 
     private var instructionsBinding: Binding<String> {
-        Binding<String>(
+        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        return Binding<String>(
             get: {
-                if case .bot(let config) = editBuffer.draft.details { return config.instructions ?? "" }
+                if case .bot(let config) = buffer.draft.details { return config.instructions ?? "" }
                 return ""
             },
             set: { newValue in
-                if case .bot(var config) = editBuffer.draft.details {
+                if case .bot(var config) = buffer.draft.details {
                     config.instructions = newValue
-                    editBuffer.draft.details = .bot(config)
+                    buffer.draft.details = .bot(config)
                 }
             }
         )
     }
 
     private var knowledgeSourcesBinding: Binding<[KnowledgeSource]> {
-        Binding<[KnowledgeSource]>(
+        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        return Binding<[KnowledgeSource]>(
             get: {
-                if case .bot(let config) = editBuffer.draft.details { return config.knowledgeSources ?? [] }
+                if case .bot(let config) = buffer.draft.details { return config.knowledgeSources ?? [] }
                 return []
             },
             set: { newValue in
-                if case .bot(var config) = editBuffer.draft.details {
+                if case .bot(var config) = buffer.draft.details {
                     config.knowledgeSources = newValue.isEmpty ? nil : newValue
-                    editBuffer.draft.details = .bot(config)
+                    buffer.draft.details = .bot(config)
                 }
             }
         )
@@ -144,193 +155,12 @@ struct BotConfigDetailView: View {
 
     // MARK: - Body
     var body: some View {
-        VStack(spacing: 0) {
-            // See AgentConfigDetailView for the rationale — `onCancel` swaps
-            // the leading chevron for an xmark and routes it to the modal host.
-            DynamicIslandBar(
-                onBack: handleBackTap,
-                leadingSymbol: onCancel != nil ? "xmark" : "chevron.left"
-            ) {
-                actionButtons
+        Group {
+            if isEmbedded {
+                embeddedContent
+            } else {
+                standaloneContent
             }
-
-            ScrollView {
-                VStack(spacing: 32) {
-
-                    // ⚠️ Register A34. Sits at the top of the scroll view, where the user's eye already is
-                    // after pressing Save in the island bar above. Dismissible, and replaced on the next
-                    // save — never a permanent fixture, because an advisory describes a choice the user
-                    // already made rather than a fault they must fix.
-                    SaveAdvisoryBanner(advisories: saveAdvisories) {
-                        withAnimation { saveAdvisories = [] }
-                    }
-
-                    // 1. Identity Header
-                    HStack(alignment: .center, spacing: 16) {
-                        ZStack {
-                            Circle()
-                                .fill(LinearGradient(colors: [Color.blue.opacity(0.22), Color.blue.opacity(0.06)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                                .frame(width: 52, height: 52)
-                                .overlay(Circle().stroke(Color.blue.opacity(0.35), lineWidth: 0.5))
-                                .shadow(color: Color.blue.opacity(0.2), radius: 8)
-
-                            Image(systemName: ProfileType.bot.iconNameFilled)
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .frame(width: 26, height: 26)
-                                .foregroundColor(.blue)
-                        }
-
-                        VStack(alignment: .leading) {
-                            TextField("Bot Name", text: profile.displayName)
-                                .font(theme.fontTitle2)
-                                .fontWeight(.bold)
-                                .textFieldStyle(.plain)
-                                .foregroundColor(theme.primaryText)
-
-                            Text("A straightforward LLM interface without agentic capabilities.")
-                                .font(theme.fontSubheadline)
-                                .foregroundColor(theme.secondaryText)
-                        }
-                        Spacer()
-                    }
-                .padding(.bottom, 8)
-
-                // 2. Inference Engine (Provider)
-                SettingsCard(title: "Inference Engine", icon: "server.rack", theme: theme) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        ProviderConfigSection(
-                            providerConfig: providerConfig,
-                            profileID: editBuffer.draft.id,
-                            profileType: .bot,
-                            onProviderChanged: { _, newProvider in
-                                providerConfig.wrappedValue.cognitiveCapability =
-                                    ProfileCapabilityFilter.defaultCognitiveCapability(for: .bot, provider: newProvider)
-                            }
-                        )
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 16)
-                }
-
-                // 3. Persona & Behavior
-                SettingsCard(title: "Persona & Behavior", icon: "text.quote", theme: theme) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("System Instructions")
-                                .font(theme.fontSubheadline)
-                                .fontWeight(.medium)
-                                .foregroundColor(theme.secondaryText)
-
-                            Spacer()
-
-                            GlassActionButton(title: "Expand", icon: "arrow.up.left.and.arrow.down.right", isAccent: false) {
-                                promptWindowManager.showEditor(
-                                    text: instructionsBinding,
-                                    // A binding, so renaming the bot retitles the detached
-                                    // window instead of leaving it on the old name (A75).
-                                    botName: profile.displayName,
-                                    themeManager: themeManager,
-                                    // ⚠️ Register A75: this argument existed and NO caller ever
-                                    // passed it, so the editor's "% of context" readout — the
-                                    // thing that tells you a system prompt is eating the window —
-                                    // was dead code. The value is right here on the profile.
-                                    contextWindow: providerConfig.wrappedValue.modelMetadata?.contextWindow
-                                )
-                            }
-                        }
-
-                        ZStack(alignment: .topLeading) {
-                            TextEditor(text: instructionsBinding)
-                                .font(theme.fontCode)
-                                .disableAutocorrection(true)
-                                .frame(minHeight: 120)
-                                .padding(8)
-                                .scrollContentBackground(.hidden)
-                                .background(theme.textBackground)
-                                .foregroundColor(theme.primaryText)
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(instructionsError != nil ? theme.errorColor : theme.dividerColor,
-                                                lineWidth: instructionsError != nil ? 1.5 : 1)
-                                )
-                                .onChange(of: instructionsBinding.wrappedValue) { _, _ in
-                                    // Clear the validation error as soon as the user starts editing.
-                                    instructionsError = nil
-                                }
-
-                            if instructionsBinding.wrappedValue.isEmpty {
-                                Text("Enter system instructions for your bot here...")
-                                    .font(theme.fontCode)
-                                    .foregroundColor(theme.secondaryText.opacity(0.5))
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 16)
-                                    .allowsHitTesting(false)
-                            }
-                        }
-
-                        let charCount = instructionsBinding.wrappedValue.count
-                        let charLimit = ProfileValidationLimits.maxInstructionsLength
-                        Text("\(charCount) characters · ~\(charCount / 4) tokens")
-                            .font(theme.fontCaption2)
-                            .foregroundColor(
-                                charCount > charLimit ? theme.errorColor :
-                                charCount > Int(Double(charLimit) * 0.9) ? theme.warningColor :
-                                theme.secondaryText
-                            )
-
-                        // Inline validation error — same visual pattern as
-                        // CreateScheduledTaskView's `inlineError(_:)` helper.
-                        if let message = instructionsError {
-                            HStack(spacing: 4) {
-                                Image(systemName: "exclamationmark.circle.fill")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .accessibilityHidden(true)
-                                Text(message)
-                                    .font(theme.fontCaption)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            .foregroundColor(theme.errorColor)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 16)
-                }
-
-                // 4. File Handling Strategy & Knowledge
-                fileHandlingSection
-
-                // 5. Advanced Configuration
-                SettingsCard(title: "Advanced Configuration", icon: "gearshape.2.fill", theme: theme) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        advancedSettingsView
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 16)
-                }
-            }
-            .padding(ViewLayout.containerPadding)
-            .padding(.bottom, ViewLayout.containerPadding)
-            .frame(maxWidth: 1000)
-            .frame(maxWidth: .infinity)
-        }
-        } // end outer VStack
-        .alert("Delete '\(editBuffer.draft.displayName)'?", isPresented: $showingDeleteAlert) {
-            Button("Delete", role: .destructive) {
-                do {
-                    try profileService.deleteProfile(withId: editBuffer.draft.id)
-                    // ⚠️ Without this the container re-evaluates, finds no edit buffer, and renders
-                    // "Profile Not Found — this profile may have been deleted": a deliberate,
-                    // confirmed action reported back to the user as an error.
-                    router.returnToChat()
-                } catch {
-                    toastManager.show(error.localizedDescription, style: .error)
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Are you sure you want to delete this bot? This action cannot be undone.")
         }
         .task {
             // Instructions are no longer auto-populated. Empty field is the
@@ -351,6 +181,68 @@ struct BotConfigDetailView: View {
             configManager.load(from: providerConfig.wrappedValue, using: profileService, defaultProfile: .chat)
         }
         .advancedConfigSync(configManager: configManager, providerConfig: providerConfig, profileService: profileService)
+    }
+
+    private var embeddedContent: some View {
+        VStack(spacing: 20) {
+            formSections
+        }
+    }
+
+    private var standaloneContent: some View {
+        VStack(spacing: 0) {
+            // See AgentConfigDetailView for the rationale — `onCancel` swaps
+            // the leading chevron for an xmark and routes it to the modal host.
+            DynamicIslandBar(
+                onBack: handleBackTap,
+                leadingSymbol: onCancel != nil ? "xmark" : "chevron.left"
+            ) {
+                actionButtons
+            }
+
+            // ⚠️ register B17 — OUTSIDE the ScrollView, directly under the pinned island bar
+            // that holds Save. It used to be the first child of the scrolling form, with a comment
+            // claiming it sat "where the user's eye already is after pressing Save" — untrue for
+            // anyone saving from the Advanced section of an 800-line page, who got a green success
+            // toast and an advisory several screens above them. Pinning it beside the control that
+            // produced it makes the channel reach the user regardless of scroll position, without
+            // a ScrollViewReader or an auto-scroll that would yank the page under them.
+            SaveAdvisoryBanner(advisories: saveAdvisories) {
+                withAnimation { saveAdvisories = [] }
+            }
+            .padding(.horizontal, 24)
+
+            ScrollView {
+                VStack(spacing: 32) {
+                    formSections
+                }
+                .padding(ViewLayout.containerPadding)
+                .padding(.bottom, ViewLayout.containerPadding)
+                .frame(maxWidth: 1000)
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .alert("Delete '\(editBuffer.draft.displayName)'?", isPresented: $showingDeleteAlert) {
+            Button("Delete", role: .destructive) {
+                do {
+                    try profileService.deleteProfile(withId: editBuffer.draft.id)
+                    // ⚠️ Without this the container re-evaluates, finds no edit buffer, and renders
+                    // "Profile Not Found — this profile may have been deleted": a deliberate,
+                    // confirmed action reported back to the user as an error.
+                    router.returnToChat()
+                } catch {
+                    toastManager.show(error.localizedDescription, style: .error)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            // ⚠️ register B10 — was "This action cannot be undone", which is true and useless:
+            // it names no consequence beyond the profile itself. A30 added the real warning and
+            // wired it only to the sidebar's hover-trash — the path A26's own note calls the least
+            // discoverable. Shared with all four delete entry points, never re-implemented.
+            Text(ProfileReferenceIndex.deletionMessage(
+                for: editBuffer.draft, in: profileService.profiles))
+        }
         // NOTE: Auto-applying an Ollama preset on every modelName change was
         // removed — it silently wiped any user customization the moment the
         // model selector changed. Users now explicitly opt in via the "Apply
@@ -363,7 +255,187 @@ struct BotConfigDetailView: View {
         )
     }
 
+    @ViewBuilder
+    private var formSections: some View {
+        // 1. Identity Header
+        if !isEmbedded {
+            identitySection
+        }
+
+        // 2. Inference Engine (Provider)
+        inferenceEngineSection
+
+        // 3. Persona & Behavior
+        personaSection
+
+        // 4. File Handling Strategy & Knowledge
+        fileHandlingSection
+
+        // 5. Advanced Configuration
+        advancedConfigSection
+    }
+
+    private var identitySection: some View {
+        HStack(alignment: .center, spacing: 16) {
+            ZStack {
+                Circle()
+                    .fill(LinearGradient(colors: [Color.blue.opacity(0.22), Color.blue.opacity(0.06)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .frame(width: 52, height: 52)
+                    .overlay(Circle().stroke(Color.blue.opacity(0.35), lineWidth: 0.5))
+                    .shadow(color: Color.blue.opacity(0.2), radius: 8)
+
+                Image(systemName: ProfileType.bot.iconNameFilled)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 26, height: 26)
+                    .foregroundColor(.blue)
+            }
+
+            VStack(alignment: .leading) {
+                TextField("Bot Name", text: profile.displayName)
+                    .font(theme.fontTitle2)
+                    .fontWeight(.bold)
+                    .textFieldStyle(.plain)
+                    .foregroundColor(theme.primaryText)
+
+                Text("A straightforward LLM interface without agentic capabilities.")
+                    .font(theme.fontSubheadline)
+                    .foregroundColor(theme.secondaryText)
+            }
+            Spacer()
+        }
+        .padding(.bottom, 8)
+    }
+
+    private var inferenceEngineSection: some View {
+        SettingsCard(title: "Inference Engine", icon: "server.rack", theme: theme) {
+            VStack(alignment: .leading, spacing: 16) {
+                ProviderConfigSection(
+                    providerConfig: providerConfig,
+                    profileID: editBuffer.draft.id,
+                    profileType: .bot,
+                    onProviderChanged: { _, newProvider in
+                        providerConfig.wrappedValue.cognitiveCapability =
+                            ProfileCapabilityFilter.defaultCognitiveCapability(for: .bot, provider: newProvider)
+                    }
+                )
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
+        }
+    }
+
+    private var personaSection: some View {
+        SettingsCard(title: "Persona & Behavior", icon: "text.quote", theme: theme) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("System Instructions")
+                        .font(theme.fontSubheadline)
+                        .fontWeight(.medium)
+                        .foregroundColor(theme.secondaryText)
+
+                    Spacer()
+
+                    GlassActionButton(title: "Expand", icon: "arrow.up.left.and.arrow.down.right", isAccent: false) {
+                        promptWindowManager.showEditor(
+                            text: instructionsBinding,
+                            // A binding, so renaming the bot retitles the detached
+                            // window instead of leaving it on the old name (A75).
+                            botName: profile.displayName,
+                            themeManager: themeManager,
+                            // ⚠️ Register A75: this argument existed and NO caller ever
+                            // passed it, so the editor's "% of context" readout — the
+                            // thing that tells you a system prompt is eating the window —
+                            // was dead code. The value is right here on the profile.
+                            contextWindow: providerConfig.wrappedValue.modelMetadata?.contextWindow
+                        )
+                    }
+                }
+
+                ZStack(alignment: .topLeading) {
+                    TextEditor(text: instructionsBinding)
+                        .font(theme.fontCode)
+                        .disableAutocorrection(true)
+                        .frame(minHeight: 120)
+                        .padding(8)
+                        .scrollContentBackground(.hidden)
+                        .background(theme.textBackground)
+                        .foregroundColor(theme.primaryText)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(instructionsError != nil ? theme.errorColor : theme.dividerColor,
+                                        lineWidth: instructionsError != nil ? 1.5 : 1)
+                        )
+                        .onChange(of: instructionsBinding.wrappedValue) { _, _ in
+                            // Clear the validation error as soon as the user starts editing.
+                            instructionsError = nil
+                        }
+
+                    if instructionsBinding.wrappedValue.isEmpty {
+                        Text("Enter system instructions for your bot here...")
+                            .font(theme.fontCode)
+                            .foregroundColor(theme.secondaryText.opacity(0.5))
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 16)
+                            .allowsHitTesting(false)
+                    }
+                }
+
+                let charCount = instructionsBinding.wrappedValue.count
+                let charLimit = ProfileValidationLimits.maxInstructionsLength
+                Text("\(charCount) characters · ~\(charCount / 4) tokens")
+                    .font(theme.fontCaption2)
+                    .foregroundColor(
+                        charCount > charLimit ? theme.errorColor :
+                        charCount > Int(Double(charLimit) * 0.9) ? theme.warningColor :
+                        theme.secondaryText
+                    )
+
+                // Inline validation error — same visual pattern as
+                // CreateScheduledTaskView's `inlineError(_:)` helper.
+                if let message = instructionsError {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .accessibilityHidden(true)
+                        Text(message)
+                            .font(theme.fontCaption)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .foregroundColor(theme.errorColor)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
+        }
+    }
+
+    private var advancedConfigSection: some View {
+        SettingsCard(title: "Advanced Configuration", icon: "gearshape.2.fill", theme: theme) {
+            VStack(alignment: .leading, spacing: 16) {
+                advancedSettingsView
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
+        }
+    }
+
+    /// ⚠️ register B46 — FLUSH FIRST. `BackendProfileService.flushPendingEditorText`'s own doc
+    /// comment says "call this BEFORE reading `hasUnsavedEditorChanges` at an exit point", and
+    /// until now it had exactly one caller: `applicationShouldTerminate` (register B3). The
+    /// floating Advanced prompt editor holds typing in `@State` and writes back only on an explicit
+    /// commit, so a back tap read a CLEAN buffer and left with no prompt — the multi-thousand
+    /// character loss A27/A29/B3 exist to prevent, at the exit B3 did not cover.
+    ///
+    /// ⚠️ Placed in the tap ACTION, not in the `isDirty:` the guard modifier reads: that value is
+    /// computed during a view update, and committing there would mutate state mid-pass.
+    ///
+    /// A no-op in editors that register no commit hook (`SimplePromptWindowManager` syncs on every
+    /// keystroke, so it has nothing pending). It is here in all three anyway — the whole class of
+    /// B44/B46 defects is a fix that landed on the one site that had the bug.
     private func handleBackTap() {
+        profileService.flushPendingEditorText()
         if editBuffer.isDirty {
             showingBackAlert = true
         } else {
@@ -395,10 +467,18 @@ struct BotConfigDetailView: View {
                 IslandPillButton(
                     title: "Revert",
                     style: .secondary,
-                    accessibilityLabel: "Revert unsaved changes",
-                    keyboardShortcut: .cancelAction
+                    // ⚠️ register B12 — NO `.cancelAction`. Revert is destructive and discards
+                    // every unsaved edit without a prompt, so binding it to Esc gave a dirty editor
+                    // a silent one-keypress exit: Esc reverted, `isDirty` went false, and the
+                    // second Esc then passed `interactiveDismissDisabled(isDirty)` and closed the
+                    // sheet. A28's comment claimed "exactly one way out of a dirty editor, and it
+                    // is the one that prompts" — this was the second, and it prompted for nothing.
+                    // Esc now means close, which the unsaved-changes guard already governs.
+                    accessibilityLabel: "Revert unsaved changes"
                 ) {
                     editBuffer.revert()
+                    // ⚠️ register B17 — the draft the advisory was about no longer exists.
+                    saveAdvisories = []
                     configManager.load(from: providerConfig.wrappedValue, using: profileService, defaultProfile: .chat)
                 }
 
@@ -417,6 +497,10 @@ struct BotConfigDetailView: View {
                     // every non-editor save path had neither.
                     if ProfileValidator.instructionsAreMissing(instructionsBinding.wrappedValue) {
                         instructionsError = ProfileValidator.missingInstructionsMessage
+                        // ⚠️ register B17 — the save is being refused here, so any banner from an
+                        // earlier successful save is now describing a profile state this attempt
+                        // did not produce.
+                        saveAdvisories = []
                         return
                     }
                     instructionsError = nil
@@ -439,6 +523,13 @@ struct BotConfigDetailView: View {
                             + "CONSEQUENCE: the edit buffer stays dirty and the persisted profile is "
                             + "unchanged; the user's edits are still on screen but not on disk."
                         )
+                        // ⚠️ register B17 — clear on FAILURE too. `saveAdvisories` was assigned
+                        // only in the `do` branch and never reset, so a banner from an earlier
+                        // successful save stayed on screen reading "Saved — one thing worth
+                        // knowing" while an error toast reported that this write did not happen.
+                        // An advisory describes the state of a profile that WAS saved; after a
+                        // failure it describes nothing that exists.
+                        saveAdvisories = []
                         toastManager.show(error.localizedDescription, style: .error)
                     }
                 }

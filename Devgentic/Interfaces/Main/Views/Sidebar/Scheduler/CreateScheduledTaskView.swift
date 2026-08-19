@@ -508,7 +508,12 @@ struct CreateScheduledTaskView: View {
             // tools but shouldn't mutate the underlying profile.
             advancedPromptManager.showEditor(
                 text: $promptTemplate,
-                agentName: titleName,
+                // ⚠️ `.constant` deliberately, mirroring the simple editor below (register B18):
+                // `titleName` is DERIVED per call from the task name with an "unnamed task"
+                // fallback, so there is no binding into the draft to hand over. This view keeps
+                // driving `updateTitle` explicitly on `.onChange(of: displayName)` — which is why
+                // the agent PROFILE editor was the only place the stale title ever showed.
+                agentName: .constant(titleName),
                 configuredTools: .constant(config.tools),
                 themeManager: themeManager
             )

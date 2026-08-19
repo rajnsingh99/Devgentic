@@ -258,48 +258,16 @@ struct OllamaModelStoreContent: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     
-    private var downloadBanner: some View {
-        HStack(spacing: 16) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Pulling \(viewModel.currentDownloadName)...")
-                    .font(.headline)
-                    .foregroundColor(theme.primaryText)
-                    .lineLimit(1)
-
-                ProgressView(value: viewModel.downloadProgress)
-                    .controlSize(.small)
-                    .tint(theme.accentColor)
-            }
-
-            Text("\(Int(viewModel.downloadProgress * 100))%")
-                .monospacedDigit()
-                .fontWeight(.bold)
-                .foregroundColor(theme.accentColor)
-                .frame(width: 50, alignment: .trailing)
-
-            Button {
-                viewModel.cancelDownload()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.title2)
-                    .foregroundColor(theme.secondaryText)
-            }
-            .buttonStyle(.plain)
-            .help("Cancel Download")
-        }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: theme.cornerRadiusLarge, style: .continuous)
-                .fill(theme.secondaryBackground)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: theme.cornerRadiusLarge, style: .continuous)
-                .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
-        )
-        .shadow(color: theme.primaryText.opacity(0.08), radius: 10, y: 4)
-        .padding(.horizontal, 40)
-        .transition(.move(edge: .bottom).combined(with: .opacity))
-    }
+    // ⚠️ register A42 — `downloadBanner` was removed here. It was declared and never called, and
+    // it was the ONLY reader of `viewModel.downloadProgress` / `.currentDownloadName`, which the
+    // view model mirrored on every NDJSON line of a pull (a full re-filter and re-sort of the grid
+    // per tick) to feed a view nothing rendered. Live per-row progress is `ModelDownloadStatusView`
+    // above, backed by `DownloadManager`.
+    //
+    // ⚠️ ADJACENT GAP, deliberately not closed here: this banner held the only Cancel affordance
+    // for an Ollama pull, so `OllamaModelStoreViewModel.cancelDownload()` is now unreferenced.
+    // Deleting it would remove the only implementation of a capability users arguably want, and
+    // wiring a new Cancel control is a feature decision, not part of A42. Left for its own finding.
 }
 
 struct OllamaModelCardView: View {

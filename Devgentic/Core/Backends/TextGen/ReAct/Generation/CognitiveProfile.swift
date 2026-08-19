@@ -228,7 +228,7 @@ enum ChatTemplateSource: Codable, Hashable, CustomStringConvertible {
 // MARK: - Supported Modalities
 
 /// Describes the input/output modalities a model supports.
-/// Used by ContextCompressor and provider adapters to filter media blocks
+/// Used by provider adapters to filter media blocks
 /// for models that cannot handle them.
 struct SupportedModalities: OptionSet, Sendable, Codable, Hashable {
     let rawValue: Int

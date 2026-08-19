@@ -50,6 +50,52 @@ actor ExecutionSuspensionService {
     private var gateContinuations: [UUID: CheckedContinuation<String?, Never>] = [:]
     // Reverse lookup: operationID -> conversationID (for cancel-by-conversation)
     private var operationToConversation: [UUID: UUID] = [:]
+
+    // MARK: - Park accounting (for compute-only node timeouts)
+
+    /// How many operations in this conversation are parked right now.
+    private var parkDepth: [UUID: Int] = [:]
+    /// When the current "someone is waiting" period began (set when depth goes 0 → 1).
+    private var parkBegan: [UUID: Date] = [:]
+    /// Completed parked time, as a UNION of overlapping parks — not a sum.
+    private var parkedTotal: [UUID: TimeInterval] = [:]
+
+    /// Cumulative wall-clock during which AT LEAST ONE operation in this conversation was parked
+    /// awaiting a human, including any park still open.
+    ///
+    /// ⚠️ This exists so a workflow node timeout can bound COMPUTE rather than wall-clock. A node
+    /// that sat for ten minutes because nobody clicked the confirmation button has not misbehaved,
+    /// and killing it is the wrong answer — that was a live defect on the profile path before
+    /// 2026-08-13 (a slow tool confirmation killed the node at 120s) and would have killed the
+    /// Router's deliberately-indefinite ambiguity arbitration outright.
+    ///
+    /// ⚠️ Reference-counted, so two simultaneous parks count once. Callers snapshot this at node
+    /// start and diff later; there is no history, only a running total.
+    ///
+    /// ⚠️ Scoped per CONVERSATION, not per node — parallel sibling nodes in one run share the
+    /// credit, so a node can over-run its limit if a sibling parked. That direction is deliberate:
+    /// over-crediting wastes some time, under-crediting kills work that was only ever waiting.
+    func cumulativeParkedTime(for conversationID: UUID) -> TimeInterval {
+        let completed = parkedTotal[conversationID] ?? 0
+        guard let began = parkBegan[conversationID] else { return completed }
+        return completed + Date().timeIntervalSince(began)
+    }
+
+    /// Called when an operation begins waiting on a human.
+    private func beginPark(_ conversationID: UUID) {
+        let depth = (parkDepth[conversationID] ?? 0) + 1
+        parkDepth[conversationID] = depth
+        if depth == 1 { parkBegan[conversationID] = Date() }
+    }
+
+    /// Called when an operation stops waiting — resolved, cancelled or timed out, all the same here.
+    private func endPark(_ conversationID: UUID) {
+        guard let depth = parkDepth[conversationID], depth > 0 else { return }
+        let next = depth - 1
+        parkDepth[conversationID] = next
+        guard next == 0, let began = parkBegan.removeValue(forKey: conversationID) else { return }
+        parkedTotal[conversationID, default: 0] += Date().timeIntervalSince(began)
+    }
     // [HITL/A3] operationID -> user-edited tool arguments to apply on approval.
     private var editedArgs: [UUID: [String: JSONValue]] = [:]
 
@@ -73,6 +119,19 @@ actor ExecutionSuspensionService {
             || !gateContinuations.isEmpty
     }
 
+    /// How many operations are parked right now, across every kind and conversation.
+    ///
+    /// ⚠️ Read-only, and NOT redundant with the boolean above. A park is only observable once its
+    /// continuation is INSTALLED: `suspendForGate` writes `operationToConversation` and calls
+    /// `beginPark` before it `await`s to install the continuation, so `isSuspended(for:)` goes true
+    /// while a `resumeGate` would still find nothing to resume. Anything that must wait for a
+    /// SECOND park to land cannot use `hasPendingSuspensions()` as its barrier — it is already
+    /// true from the first. This count is that barrier.
+    func pendingSuspensionCount() -> Int {
+        activeContinuations.count + clarificationContinuations.count
+            + planReviewContinuations.count + gateContinuations.count
+    }
+
     // MARK: - Permission Suspension (Tool Confirmation)
 
     /// Pauses execution for the specific operation until `resume` is called or timeout occurs.
@@ -89,6 +148,7 @@ actor ExecutionSuspensionService {
         }
 
         operationToConversation[operationID] = conversationID
+        beginPark(conversationID)
 
         logger.info("[Suspension] Suspending operation \(operationID) for conversation: \(conversationID). Indefinite — container owns the deadline.")
 
@@ -113,6 +173,7 @@ actor ExecutionSuspensionService {
     ///   - approved: Whether the user clicked "Allow" (true) or "Deny" (false).
     func resume(for operationID: UUID, approved: Bool, editedArguments: [String: JSONValue]? = nil) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
+        if let conversationID { endPark(conversationID) }
 
         // [HITL/A3] Stash user edits to apply on approval; drop them on denial.
         if approved, let editedArguments {
@@ -155,6 +216,7 @@ actor ExecutionSuspensionService {
         }
 
         operationToConversation[operationID] = conversationID
+        beginPark(conversationID)
 
         logger.info("[Clarification] Suspending operation \(operationID) for conversation: \(conversationID). Indefinite — container owns the deadline.")
 
@@ -173,6 +235,7 @@ actor ExecutionSuspensionService {
     /// Resumes a clarification suspension with the user's text input.
     func resumeClarification(for operationID: UUID, userInput: String?) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
+        if let conversationID { endPark(conversationID) }
 
         guard let continuation = clarificationContinuations.removeValue(forKey: operationID) else {
             logger.warning("[Clarification] Attempted to resume non-existent clarification for operation: \(operationID)")
@@ -202,6 +265,7 @@ actor ExecutionSuspensionService {
         }
 
         operationToConversation[operationID] = conversationID
+        beginPark(conversationID)
 
         logger.info("[PlanReview] Suspending operation \(operationID) for conversation: \(conversationID). No timeout — awaiting user action.")
 
@@ -222,6 +286,7 @@ actor ExecutionSuspensionService {
     /// Resumes a plan review suspension with the user-edited plan or nil for rejection.
     func resumePlanReview(for operationID: UUID, editedPlan: [SubTask]?) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
+        if let conversationID { endPark(conversationID) }
 
         guard let continuation = planReviewContinuations.removeValue(forKey: operationID) else {
             logger.warning("[PlanReview] Attempted to resume non-existent plan review for operation: \(operationID)")
@@ -246,6 +311,7 @@ actor ExecutionSuspensionService {
         }
 
         operationToConversation[operationID] = conversationID
+        beginPark(conversationID)
         logger.info("[Gate] Suspending operation \(operationID) for conversation: \(conversationID). Indefinite — container owns the deadline.")
 
         return await withTaskCancellationHandler {
@@ -263,6 +329,7 @@ actor ExecutionSuspensionService {
     /// Resumes a gate suspension with the user's chosen option (nil = cancelled / timed out / rejected).
     func resumeGate(for operationID: UUID, chosenOption: String?) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
+        if let conversationID { endPark(conversationID) }
 
         guard let continuation = gateContinuations.removeValue(forKey: operationID) else {
             logger.warning("[Gate] Attempted to resume non-existent gate for operation: \(operationID)")
@@ -285,6 +352,10 @@ actor ExecutionSuspensionService {
 
         for opID in permissionOps {
             operationToConversation.removeValue(forKey: opID)
+            // ⚠️ Force-cancel closes the park too. Without this the depth never returns to zero and
+            // `cumulativeParkedTime` grows forever, so every later node in the conversation would
+            // believe it had been waiting on a human and its timeout would never fire.
+            endPark(conversationID)
             editedArgs.removeValue(forKey: opID)
 
             // Post the matching resolved notification (mirrors resume*/timeout) so every surface —

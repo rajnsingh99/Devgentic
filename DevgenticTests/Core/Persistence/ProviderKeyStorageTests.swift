@@ -139,6 +139,125 @@ final class ProviderKeyStorageTests: XCTestCase {
         XCTAssertEqual(row.details.providerAPIKey, "current-key")
     }
 
+    // MARK: - B2 / B19: a failed Keychain read or delete must not destroy a credential
+
+    /// Programmable Keychain so the failure branches can actually run. Before this seam existed
+    /// they never had — which is why "strip only if the write succeeded" and "never delete on a
+    /// failed read" were asserted by comment rather than by test.
+    private final class StubKeychain: KeychainAccessing, @unchecked Sendable {
+        var stored: [String: String] = [:]
+        var readOutcome: KeychainReadOutcome?      // when set, overrides `stored`
+        var deleteStatus: OSStatus = errSecSuccess
+        /// Register B25: a Keychain that refuses WRITES — a login-item launch before first unlock
+        /// is the ordinary way this happens, and it is exactly when the migration sweep runs.
+        var saveStatus: OSStatus = errSecSuccess
+        private(set) var deleteCallCount = 0
+
+        func save(value: String, service: String, account: String) -> OSStatus {
+            guard saveStatus == errSecSuccess else { return saveStatus }
+            stored[account] = value
+            return errSecSuccess
+        }
+
+        func read(service: String, account: String) -> KeychainReadOutcome {
+            if let readOutcome { return readOutcome }
+            if let v = stored[account] { return .found(v) }
+            return .notFound
+        }
+
+        func delete(service: String, account: String) -> OSStatus {
+            deleteCallCount += 1
+            if deleteStatus == errSecSuccess { stored[account] = nil }
+            return deleteStatus
+        }
+    }
+
+    private func withStub(_ stub: StubKeychain, _ body: () -> Void) {
+        ProviderKeyStore.setStorageForTesting(stub)
+        defer { ProviderKeyStore.setStorageForTesting(nil) }
+        body()
+    }
+
+    /// ⚠️ THE B2 REGRESSION. A locked Keychain (or a denied ACL prompt after a re-sign) made
+    /// `read` fail; the row then decoded with no key; and the next opportunistic save — a rename,
+    /// a capability chip, the thinking auto-heal — called `save(nil)` and DELETED the credential.
+    /// No user action was involved at any point.
+    func testAFailedKeychainReadDoesNotDeleteTheStoredKey() {
+        let stub = StubKeychain()
+        withStub(stub) {
+            let row = makeRow(key: sentinel)
+            XCTAssertEqual(stub.stored[row.id.uuidString], sentinel, "precondition: key is stored")
+
+            // The Keychain goes unreadable, and the row is re-materialized (a fresh fetch).
+            stub.readOutcome = .failed(errSecAuthFailed)
+            row.resetDecodeCacheForTesting()
+            XCTAssertNil(row.details.providerAPIKey, "precondition: the read failure hides the key")
+
+            // An unrelated save — the shape every opportunistic writer takes.
+            row.details = row.details
+
+            XCTAssertEqual(stub.deleteCallCount, 0, "a failed read must never trigger a delete")
+            XCTAssertEqual(stub.stored[row.id.uuidString], sentinel,
+                           "the credential must survive a save made while the Keychain was unreadable")
+        }
+    }
+
+    /// The asymmetry that keeps the fix honest: when the Keychain is READABLE, clearing the field
+    /// must still clear the key. Suppressing in both cases would remove the user's ability to
+    /// remove a credential at all.
+    func testClearingTheKeyStillWorksWhenTheKeychainIsReadable() {
+        let stub = StubKeychain()
+        withStub(stub) {
+            let row = makeRow(key: sentinel)
+            row.details = agentDetails(key: nil)
+
+            XCTAssertEqual(stub.deleteCallCount, 1)
+            XCTAssertNil(stub.stored[row.id.uuidString])
+        }
+    }
+
+    /// ⚠️ B19. `save(nil)` returned `true` unconditionally because `delete` was `Void` and
+    /// swallowed its status — so a FAILED delete was reported as a successful clear, and
+    /// `primeDecodeState` re-injected the "removed" key on the next read.
+    func testSaveNilReportsFailureWhenTheDeleteFails() {
+        let stub = StubKeychain()
+        withStub(stub) {
+            let id = UUID()
+            _ = ProviderKeyStore.save(sentinel, for: id)
+            stub.deleteStatus = errSecInteractionNotAllowed
+
+            XCTAssertFalse(ProviderKeyStore.save(nil, for: id),
+                           "a failed delete must not be reported as a successful clear")
+            XCTAssertEqual(stub.stored[id.uuidString], sentinel,
+                           "precondition: the item really did survive, which is why it must be reported")
+        }
+    }
+
+    func testSaveNilReportsSuccessWhenTheItemWasAlreadyAbsent() {
+        let stub = StubKeychain()
+        withStub(stub) {
+            stub.deleteStatus = errSecItemNotFound
+            XCTAssertTrue(ProviderKeyStore.save(nil, for: UUID()),
+                          "the desired end state is 'gone', so an absent item is success")
+        }
+    }
+
+    /// `read` must separate the two outcomes that `load` flattens — the whole point of B2.
+    func testReadDistinguishesMissingFromFailed() {
+        let stub = StubKeychain()
+        withStub(stub) {
+            let id = UUID()
+            XCTAssertEqual(ProviderKeyStore.read(for: id), .notFound)
+
+            stub.readOutcome = .failed(errSecAuthFailed)
+            XCTAssertEqual(ProviderKeyStore.read(for: id), .failed(errSecAuthFailed))
+
+            // ⚠️ And `load` still flattens both to nil — which is why callers that WRITE based on
+            // the answer must not use it. Pinned so the distinction cannot quietly be lost again.
+            XCTAssertNil(ProviderKeyStore.load(for: id))
+        }
+    }
+
     // MARK: - A53: legacy plaintext credentials in UserDefaults
 
     /// A throwaway suite so the developer's real preferences are never touched.
@@ -171,6 +290,54 @@ final class ProviderKeyStorageTests: XCTestCase {
         ProviderKeyStore.purgeLegacyPlaintextKeys(defaults: defaults)
 
         XCTAssertEqual(defaults.string(forKey: "webSearchAPIKey"), "still-in-use")
+    }
+
+    // MARK: - B25: the launch sweep must count what happened, not what it attempted
+
+    /// ⚠️ THE B25 REGRESSION, at the seam the sweep's counter reads.
+    ///
+    /// `migrateAPIKeysToKeychain` did `model.details = model.details; migrated += 1`. The
+    /// assignment SUCCEEDS even when the Keychain write inside it failed — by design, since the
+    /// setter keeps the key inline rather than destroying it — so the counter incremented for rows
+    /// that had not moved, and the log then asserted the keys were "no longer readable from
+    /// DevgenticSD.store". That is a security property stated as achieved while the plaintext
+    /// credential was still sitting in the blob. The counter now re-reads
+    /// `hasInlineAPIKeyInStoredBlob` after the write, which is what this asserts stays true.
+    func testAFailedKeychainWriteLeavesTheRowStillInlineAfterTheSweepsOperation() throws {
+        let stub = StubKeychain()
+        ProviderKeyStore.setStorageForTesting(stub)
+        defer { ProviderKeyStore.setStorageForTesting(nil) }
+
+        let row = makeRow(key: nil)
+        row.configData = try JSONEncoder().encode(agentDetails(key: sentinel))
+        row.resetDecodeCacheForTesting()
+        XCTAssertTrue(row.hasInlineAPIKeyInStoredBlob, "precondition: an un-migrated legacy row")
+
+        stub.saveStatus = errSecInteractionNotAllowed
+        row.details = row.details   // the sweep's operation, verbatim
+
+        XCTAssertTrue(row.hasInlineAPIKeyInStoredBlob,
+                      "the key must stay in the blob when the Keychain write failed — losing it "
+                      + "would be worse — and the sweep must therefore NOT count this as migrated")
+        XCTAssertEqual(row.details.providerAPIKey, sentinel, "the profile keeps working")
+        XCTAssertNil(stub.stored[row.id.uuidString], "precondition: nothing reached the Keychain")
+    }
+
+    /// The other half: a row that really did move must stop reporting inline, or the sweep would
+    /// log a failure every launch and retry forever.
+    func testASuccessfulWriteClearsTheInlineKeySoTheSweepCountsItOnce() throws {
+        let stub = StubKeychain()
+        ProviderKeyStore.setStorageForTesting(stub)
+        defer { ProviderKeyStore.setStorageForTesting(nil) }
+
+        let row = makeRow(key: nil)
+        row.configData = try JSONEncoder().encode(agentDetails(key: sentinel))
+        row.resetDecodeCacheForTesting()
+
+        row.details = row.details
+
+        XCTAssertFalse(row.hasInlineAPIKeyInStoredBlob)
+        XCTAssertEqual(stub.stored[row.id.uuidString], sentinel)
     }
 
     /// Runs on every launch, so it has to be safe to repeat and quiet when there is nothing to do.

@@ -60,7 +60,11 @@ struct FileProcessorService {
         do {
             let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
             if let fileSize = attributes[.size] as? NSNumber {
-                if fileSize.intValue > maxSize * 4 {
+                // ⚠️ Overflow-safe: `maxSize * 4` TRAPS for a caller passing `Int.max` to mean
+                // "unbounded" (the workflow document path does exactly that since 2026-08-15).
+                // An overflowing cap means no real file can exceed it, so the check is skipped.
+                let byteCap = maxSize.multipliedReportingOverflow(by: 4)
+                if !byteCap.overflow, fileSize.intValue > byteCap.partialValue {
                     logger.warning("File \(url.lastPathComponent) is potentially too large (size: \(fileSize.intValue) bytes) to inline, exceeding estimated limit for \(maxSize) chars.")
                 }
             }
@@ -106,8 +110,12 @@ struct FileProcessorService {
 
         // Plain text.
         do {
+            // ⚠️ Overflow-safe — same rule as `readFileContent` above, and the two must not drift:
+            // `maxSize * 4` traps on `Int.max`, which the workflow document path passes to mean
+            // "unbounded" (user decision 2026-08-15). An overflowing cap admits every file size.
+            let byteCap = maxSize.multipliedReportingOverflow(by: 4)
             if let size = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber,
-               size.intValue > maxSize * 4 {
+               !byteCap.overflow, size.intValue > byteCap.partialValue {
                 throw FileRetrievalError.tooLarge(path: url.path)
             }
             let content = try String(contentsOf: url, encoding: .utf8)

@@ -106,7 +106,7 @@ final class CapabilityCardRouter {
     func handleTrialStarted(trial: Int, maxTrials: Int) {
         // A prior trial's nested plan card (stacked capabilities) never sees its own
         // executionFinished — the reflection wrapper captures it. Close it here.
-        closeNestedPlanCard()
+        closeNestedPlanCard(reason: "a new trial starting (superseded)")
 
         if reflectionCardID == nil {
             let card = ReflectionRunData(maxTrials: maxTrials)
@@ -142,7 +142,7 @@ final class CapabilityCardRouter {
                 data.attempts[a].durationMs = Int(Date().timeIntervalSince(start) * 1000)
             }
         }
-        closeNestedPlanCard()
+        closeNestedPlanCard(reason: "the trial being REJECTED (its work was discarded)")
         activeTrial = nil
     }
 
@@ -155,7 +155,7 @@ final class CapabilityCardRouter {
                 data.attempts[a].durationMs = Int(Date().timeIntervalSince(start) * 1000)
             }
         }
-        closeNestedPlanCard()
+        closeNestedPlanCard(reason: "the trial being accepted")
         activeTrial = nil
     }
 
@@ -340,15 +340,33 @@ final class CapabilityCardRouter {
     /// Finishes a plan card nested in a reflection attempt (its executionFinished is
     /// captured, not forwarded, by the reflection wrapper) and forgets it so the next
     /// trial gets a fresh card.
-    private func closeNestedPlanCard() {
+    /// - Parameter reason: the trial transition that closed the card, for the log only.
+    ///
+    /// A step still `.running` here never reported `subtaskCompleted` — the plan aborted early
+    /// (circuit breaker, iteration exhaustion). It is force-closed `.cancelled`, matching
+    /// `handleExecutionFinished`'s cancelled branch and `sanitizeCapabilityCardsForResume`.
+    /// It used to be marked `.completed`, which is a positive success claim, not a neutral one:
+    /// `CapabilityStatusIcon` renders a green checkmark for it and `completedCount` counts it,
+    /// so the header read "N steps · N done" for a plan whose last step never ran — and on the
+    /// REJECTED path that work had just been thrown away.
+    private func closeNestedPlanCard(reason: String) {
         guard planCardTrial != nil, planCardID != nil else { return }
+        let trial = planCardTrial
+        var forceClosed = 0
         mutatePlan { data in
             guard data.phase != .finished else { return }
             data.phase = .finished
             data.finishedAt = Date()
             for i in data.steps.indices where data.steps[i].status == .running {
-                data.steps[i].status = .completed
+                data.steps[i].status = .cancelled
+                forceClosed += 1
             }
+            // Was left nil, so the card carried no verdict at all. A plan that had to
+            // force-close a step did not run to completion, whatever the trial's verdict.
+            data.outcome = forceClosed > 0 ? .cancelled : .completed
+        }
+        if forceClosed > 0 {
+            logger.warning("[CAPABILITY] Nested plan card for trial \(trial.map(String.init) ?? "?") closed on \(reason) with \(forceClosed) step(s) still running — recorded as cancelled, not completed; those steps never reported completion and their work is not in the result.")
         }
         planCardID = nil
         planCardTrial = nil

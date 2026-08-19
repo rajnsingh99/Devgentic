@@ -24,8 +24,17 @@ final class WorkflowTestScenario {
     // MARK: - Profile Node Builders
 
     /// Adds a bot node and returns its node UUID.
+    ///
+    /// ⚠️ WF-CC2: `apiProvider`/`modelName` are INERT for execution — `MockWorkflowStreamProvider`
+    /// keys on `profile.id` and never reads `details`, so an `.mlx` profile here reaches the
+    /// WF-CC2 dispatch decision (`WorkflowExecutor.profileDispatchLanes`) and NOTHING else: no
+    /// MLXService, no MLXModelService, no model load, no disk. That is what lets the lane tests
+    /// stay hermetic. Do not "simplify" these back to a hardcoded `.ollama`.
     @discardableResult
-    func addBotNode(name: String, position: CGPoint = .zero) -> UUID {
+    func addBotNode(name: String,
+                    apiProvider: ApiProvider = .ollama,
+                    modelName: String = "test-model",
+                    position: CGPoint = .zero) -> UUID {
         let profileID = UUID()
         let nodeID = UUID()
 
@@ -33,7 +42,7 @@ final class WorkflowTestScenario {
             id: profileID,
             displayName: name,
             details: .bot(BotConfig(
-                llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "test-model")
+                llmConfig: ProviderConfig(apiProvider: apiProvider, modelName: modelName)
             ))
         )
         profileMap[profileID] = profile
@@ -53,6 +62,78 @@ final class WorkflowTestScenario {
         return nodeID
     }
 
+    /// Adds a node backed by a *workflow* profile — a nested sub-workflow step.
+    ///
+    /// Deliberately leaves `nodeConfig` nil (no task description): a sub-workflow node takes its
+    /// directive from upstream output, and `WorkflowValidator` exempts it for that reason. Tests
+    /// that pass a description explicitly can still do so; the default is the shape that used to
+    /// brick the whole workflow.
+    @discardableResult
+    func addSubWorkflowNode(
+        name: String,
+        workflowProfileID: UUID,
+        taskDescription: String? = nil,
+        position: CGPoint = .zero
+    ) -> UUID {
+        let nodeID = UUID()
+
+        // The dispatch loop resolves every profile node against the profile map before it can
+        // run, sub-workflow nodes included, so the child workflow's own profile must be present.
+        profileMap[workflowProfileID] = BackendProfileSnapshot(
+            id: workflowProfileID,
+            displayName: name,
+            details: .workflow(WorkflowConfig(agentProfileIDs: []))
+        )
+
+        var node = WorkflowNode(
+            id: nodeID,
+            kind: .profile(profileID: workflowProfileID, profileType: .workflow),
+            position: position,
+            displayName: name
+        )
+        if let taskDescription {
+            node.nodeConfig = WorkflowNodeConfig(taskDescription: taskDescription)
+        }
+        nodes.append(node)
+        return nodeID
+    }
+
+    /// Adds an Action node bound to a tool by name — the deterministic, no-LLM node kind.
+    ///
+    /// Pair with `MockWorkflowStreamProvider.scriptTool(name:output:)`, which the executor
+    /// resolves through `resolveWorkflowTool`.
+    @discardableResult
+    func addActionNode(
+        name: String,
+        toolName: String,
+        argumentBindings: [String: String] = [:],
+        requiresConfirmation: Bool = false,
+        sourceId: UUID = ToolSource.builtInSourceID,
+        onFailure: NodeFailurePolicy? = nil,
+        position: CGPoint = .zero
+    ) -> UUID {
+        let nodeID = UUID()
+        let tool = Tool(
+            name: toolName,
+            description: "Tool bound to Action node \(name)",
+            isEnabled: true,
+            requiresConfirmation: requiresConfirmation,
+            sourceId: sourceId,
+            parameters: ToolParameters(type: "object", properties: [:], required: [])
+        )
+        var node = WorkflowNode(
+            id: nodeID,
+            kind: .action(ActionNodeConfig(tool: tool, argumentBindings: argumentBindings)),
+            position: position,
+            displayName: name
+        )
+        if let onFailure {
+            node.nodeConfig = WorkflowNodeConfig(onFailure: onFailure)
+        }
+        nodes.append(node)
+        return nodeID
+    }
+
     /// Returns the profile UUID for a node (for scripting mock streams).
     func profileID(for nodeID: UUID) -> UUID? {
         guard let node = nodes.first(where: { $0.id == nodeID }) else { return nil }
@@ -60,6 +141,15 @@ final class WorkflowTestScenario {
     }
 
     // MARK: - Structural Node Builders
+
+    /// Full-config overload — for tests that need to set classifier fields, which the
+    /// convenience builder below deliberately does not expose.
+    @discardableResult
+    func addConditionNode(name: String, config: ConditionNodeConfig, position: CGPoint = .zero) -> UUID {
+        let nodeID = UUID()
+        nodes.append(WorkflowNode(id: nodeID, kind: .condition(config), position: position, displayName: name))
+        return nodeID
+    }
 
     /// Adds a condition node with pattern-matching rules.
     @discardableResult
@@ -70,12 +160,10 @@ final class WorkflowTestScenario {
             ConditionRule(label: "False", field: .upstreamOutput, op: .isEmpty, value: "")
         ],
         fallbackLabel: String = "False",
-        passthroughContent: Bool = true,
         position: CGPoint = .zero
     ) -> UUID {
         let nodeID = UUID()
         var config = ConditionNodeConfig()
-        config.passthroughContent = passthroughContent
         // Production validation requires ≥2 rules and that `fallbackLabel` names a
         // real rule (the canvas exposes one output port per rule). When a test models
         // a "match → A, else → B" router as a single rule + a distinct fallback,
@@ -173,51 +261,6 @@ final class WorkflowTestScenario {
         edges.append(edge)
     }
 
-    // MARK: - Loop Node Builder
-
-    /// Adds a loop node. Returns the loop node UUID.
-    /// The `bodyWorkflowID` should reference a layout saved via `WorkflowLayoutStore.shared.save()`.
-    @discardableResult
-    func addLoopNode(
-        name: String,
-        bodyWorkflowID: UUID,
-        bodyWorkflowName: String? = nil,
-        maxIterations: Int = 3,
-        exitCondition: ConditionRule? = nil,
-        position: CGPoint = .zero
-    ) -> UUID {
-        let nodeID = UUID()
-        let config = LoopNodeConfig(
-            bodyWorkflowID: bodyWorkflowID,
-            bodyWorkflowName: bodyWorkflowName,
-            maxIterations: maxIterations,
-            exitCondition: exitCondition
-        )
-        let node = WorkflowNode(
-            id: nodeID,
-            kind: .loop(config),
-            position: position,
-            displayName: name
-        )
-        nodes.append(node)
-        return nodeID
-    }
-
-    /// Adds a loop node with no body configured (for testing the error path).
-    @discardableResult
-    func addLoopNodeWithoutBody(name: String, position: CGPoint = .zero) -> UUID {
-        let nodeID = UUID()
-        let config = LoopNodeConfig(bodyWorkflowID: nil, maxIterations: 3)
-        let node = WorkflowNode(
-            id: nodeID,
-            kind: .loop(config),
-            position: position,
-            displayName: name
-        )
-        nodes.append(node)
-        return nodeID
-    }
-
     // MARK: - Node Configuration
 
     /// Sets per-node execution config (failure policy, retries, timeout).
@@ -244,9 +287,9 @@ final class WorkflowTestScenario {
     }
 }
 
-// MARK: - Inner Workflow Builder (for Loop Body)
+// MARK: - Inner Workflow Builder (for sub-workflow bodies)
 
-/// Builds an inner workflow layout for loop body testing.
+/// Builds an inner workflow layout for sub-workflow testing.
 /// Saves to WorkflowLayoutStore and cleans up on deinit.
 final class InnerWorkflowBuilder {
     let workflowProfileID: UUID
@@ -267,6 +310,18 @@ final class InnerWorkflowBuilder {
     @discardableResult
     func addCodeNode(name: String, template: String = "{{ input }}", outputVariable: String? = nil) -> UUID {
         scenario.addCodeNode(name: name, template: template, outputVariable: outputVariable)
+    }
+
+    /// Adds a Gate node to the inner workflow.
+    ///
+    /// ⚠️ Added when the Loop node was retired (2026-08-15): `LoopHITLForwardingTests` was the only
+    /// pin on child-stream HITL forwarding, and without an inner-gate builder no test could put a
+    /// suspending node inside a sub-workflow body at all — a swallowed suspending event is a
+    /// PERMANENT hang (no banner, nobody to answer, and the compute clock excludes parked time so
+    /// not even the node timeout fires).
+    @discardableResult
+    func addGateNode(name: String, options: [String] = ["Approve", "Reject"], timeout: TimeInterval? = nil) -> UUID {
+        scenario.addGateNode(name: name, options: options, timeout: timeout)
     }
 
     /// Connects two nodes in the inner workflow.

@@ -212,14 +212,21 @@ struct ProviderConfigSection: View {
 
     // MARK: - Remote Fields (Cloud Providers)
 
+    /// ⚠️ register B22 — the ENDPOINT LEADS. This used to render the API Key field first, and the
+    /// order is not cosmetic: `AnthropicModelPickerView` and `OpenAIModelPickerView` fetch as soon
+    /// as a key is present, so a user configuring the form top-to-bottom pasted a gateway-scoped
+    /// key and had it verified against the VENDOR host before they ever reached the field that
+    /// says where this profile talks to. `openAICompatibleFields` below already led with the
+    /// endpoint; matching it makes the two layouts agree and removes the exposure by construction
+    /// rather than by the user happening to fill the form out of order.
     @ViewBuilder
     private var remoteFields: some View {
         VStack(alignment: .leading, spacing: 12) {
-            apiKeyField()
+            endpointField
 
             Divider()
 
-            endpointField
+            apiKeyField()
 
             Divider()
 
@@ -336,13 +343,17 @@ struct ProviderConfigSection: View {
     /// value — one resolver here would have to know four vendor defaults and would drift from them.
     /// An unparseable string also resolves to nil: `ProfileValidator` Rule 5 already blocks saving
     /// one, and silently routing a typo'd endpoint to the vendor is exactly this finding.
-    private var configuredBaseURL: URL? {
-        guard let raw = providerConfig.baseURL?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !raw.isEmpty else { return nil }
-        return URL(string: raw)
+    /// ⚠️ register B22 — the three-case form. This was `configuredBaseURL: URL?`, which collapsed
+    /// "not set" and "set but unparseable" into the same `nil`, and `nil` means "use the vendor
+    /// default" — so a typo'd or half-typed gateway address silently sent the profile's key to the
+    /// vendor. `ConfiguredEndpoint` keeps the third case distinct so the picker can refuse instead
+    /// of falling back. The old property is gone rather than kept as a shim: leaving a `URL?`
+    /// accessor next to this is an invitation to re-introduce exactly the collapse it describes.
+    private var configuredEndpoint: ConfiguredEndpoint {
+        ConfiguredEndpoint.resolve(providerConfig.baseURL)
     }
 
-    /// ⚠️ Every picker below receives `configuredBaseURL`. The endpoint field is rendered directly
+    /// ⚠️ Every picker below receives `configuredEndpoint`. The endpoint field is rendered directly
     /// ABOVE these pickers, so "all traffic for this profile goes there" is the only reasonable
     /// reading — and it was false: the pickers hardcoded the vendor host and sent the user's
     /// gateway-scoped key to it.
@@ -353,7 +364,7 @@ struct ProviderConfigSection: View {
             GeminiModelPickerView(
                 selectedModel: $providerConfig.modelName,
                 apiKey: apiKey,
-                baseURL: configuredBaseURL
+                endpoint: configuredEndpoint
             )
             .labelsHidden()
             .frame(maxWidth: 350, alignment: .trailing)
@@ -362,7 +373,7 @@ struct ProviderConfigSection: View {
             AnthropicModelPickerView(
                 selectedModel: $providerConfig.modelName,
                 apiKey: apiKey,
-                baseURL: configuredBaseURL
+                endpoint: configuredEndpoint
             )
             .labelsHidden()
             .frame(maxWidth: 350, alignment: .trailing)
@@ -371,7 +382,7 @@ struct ProviderConfigSection: View {
             OpenAIModelPickerView(
                 selectedModel: $providerConfig.modelName,
                 apiKey: apiKey,
-                baseURL: configuredBaseURL
+                endpoint: configuredEndpoint
             )
             .labelsHidden()
             .frame(maxWidth: 350, alignment: .trailing)
@@ -392,7 +403,7 @@ struct ProviderConfigSection: View {
                     set: { providerConfig.supportedModalities = $0 }
                 ),
                 apiKey: apiKey,
-                baseURL: configuredBaseURL,
+                endpoint: configuredEndpoint,
                 filterForTools: ProfileCapabilityFilter.filterForTools(for: profileType)
             )
             .frame(maxWidth: 350, alignment: .trailing)

@@ -143,8 +143,84 @@ enum NodeExecutionStatus: Sendable {
     /// Node was canceled (user or timeout).
     case canceled
 
-    /// Node was skipped because an upstream dependency failed.
-    case skipped(reason: String)
+    /// Node did not run. See `NodeSkipReason` — "did not run" is NOT one thing.
+    case skipped(reason: NodeSkipReason)
+}
+
+// MARK: - Node Skip Reason
+
+/// Why a node did not run.
+///
+/// ⚠️ TYPED, and deliberately so. This was `skipped(reason: String)` carrying the single literal
+/// "Upstream dependency failed" for FOUR structurally different causes, which had two consequences:
+///
+/// 1. **The message was false in two of the four cases.** A Router choosing a different branch, and
+///    an `error` handler correctly not firing on a SUCCESSFUL node, both reported an upstream
+///    failure on a run where nothing failed at all.
+/// 2. **Consumers had to string-match English prose to tell "did not run" from "crashed."** Nine UI
+///    surfaces called `detail.hasPrefix("Upstream dependency")`; six got it right and three did not,
+///    so the same node read "Not run" on screen and "Failed" to VoiceOver. Rewording the message
+///    would have silently broken every failure count in the app.
+///
+/// The enum is the fix for both: the cause is carried structurally, and the wording lives in exactly
+/// one place (`displayText`).
+enum NodeSkipReason: String, Sendable, Codable, Equatable, CaseIterable {
+    /// A Condition/Router or Gate activated a different port. Completely normal routing.
+    case notChosen
+    /// This branch leaves an `error` port and the upstream SUCCEEDED. The happy path.
+    case errorPortNotTaken
+    /// An upstream node failed.
+    case upstreamFailed
+    /// An upstream node was itself skipped — a cascade; the root cause is further up.
+    case upstreamSkipped
+    /// An upstream node was cancelled.
+    case upstreamCancelled
+    /// The run ended before this node was reached.
+    case notReached
+
+    /// Whether this skip traces back to something going WRONG, as opposed to ordinary routing.
+    ///
+    /// Drives presentation only — a skip is NEVER counted as a failure, whatever this returns.
+    /// The distinction the user needs is "the Router went the other way" (nothing to do) versus
+    /// "something upstream broke" (worth looking at), and before this existed both looked identical.
+    var indicatesProblem: Bool {
+        switch self {
+        case .notChosen, .errorPortNotTaken, .notReached: return false
+        case .upstreamFailed, .upstreamSkipped, .upstreamCancelled: return true
+        }
+    }
+
+    /// The user-facing sentence. ⚠️ THE ONLY PLACE THIS WORDING LIVES — the previous arrangement had
+    /// producers and consumers agreeing on a literal by convention, and they drifted.
+    var displayText: String {
+        switch self {
+        case .notChosen:
+            return String(localized: "Not run — the workflow branched a different way")
+        case .errorPortNotTaken:
+            return String(localized: "Not run — no error to handle")
+        case .upstreamFailed:
+            return String(localized: "Not run — an upstream node failed")
+        case .upstreamSkipped:
+            return String(localized: "Not run — an earlier node in this branch did not run")
+        case .upstreamCancelled:
+            return String(localized: "Not run — an upstream node was cancelled")
+        case .notReached:
+            return String(localized: "Not run — the workflow ended first")
+        }
+    }
+
+    /// Ordering used when several dead upstream branches disagree: the most alarming cause wins, so
+    /// a node fed by both a crashed branch and an unchosen one reports the crash.
+    var severityRank: Int {
+        switch self {
+        case .upstreamFailed:    return 0
+        case .upstreamCancelled: return 1
+        case .upstreamSkipped:   return 2
+        case .notReached:        return 3
+        case .errorPortNotTaken: return 4
+        case .notChosen:         return 5
+        }
+    }
 }
 
 // MARK: - Execution Constraints

@@ -203,6 +203,26 @@ struct QuickAccessHITLBanner: View {
                 .font(theme.fontBody)
                 .foregroundColor(theme.primaryText)
                 .fixedSize(horizontal: false, vertical: true)
+
+            // ⚠️ A Router's ambiguity arbitration carries the text being routed in `inputText`
+            // rather than inside the prompt, because the highlight spans are measured against that
+            // exact string. Without this the QuickAccess panel would show "2 rules match this
+            // input — which branch?" and never show the input.
+            //
+            // Deliberately PLAIN here: this compact panel has no room for the colour-coded spans the
+            // main banner paints, so it degrades to unhighlighted text rather than dropping it.
+            if let input = g.inputText, !input.isEmpty {
+                ScrollView(.vertical, showsIndicators: false) {
+                    Text(input)
+                        .font(.system(.caption))
+                        .foregroundColor(theme.secondaryText)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                }
+                .frame(maxHeight: 72)
+                .background(RoundedRectangle(cornerRadius: 8).fill(theme.surfaceOverlay.opacity(0.35)))
+            }
+
             FlowRow(options: g.options) { option in
                 session.chooseGate(pending, option: option)
             }

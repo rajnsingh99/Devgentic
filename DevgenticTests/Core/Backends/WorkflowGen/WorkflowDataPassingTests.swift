@@ -6,7 +6,7 @@
 //    • JSONValue structured parsing, path access, and template rendering
 //    • WorkflowTemplate placeholder resolution ({{ input }}, {{ input.json.path }},
 //      {{ var.name }}, {{ var.name.path }}) including injection safety
-//    • ContextCompressor artifact manifest rendering
+//    • WorkflowInputAssembler artifact manifest rendering
 //
 //  Pure-logic tests — no LLM, network, or filesystem (manifest uses in-memory
 //  references; document extraction is covered by integration tests).
@@ -149,7 +149,7 @@ final class WorkflowDataPassingTests: XCTestCase {
         )
     }
 
-    // MARK: - ContextCompressor artifact manifest
+    // MARK: - WorkflowInputAssembler artifact manifest
 
     func testArtifactManifestListsKindLabelMimeAndLocator() {
         let artifact = MediaArtifact(
@@ -158,7 +158,7 @@ final class WorkflowDataPassingTests: XCTestCase {
             mimeType: "image/png",
             label: "Sales chart"
         )
-        let manifest = ContextCompressor.renderArtifactManifest([artifact])
+        let manifest = WorkflowInputAssembler.renderArtifactManifest([artifact])
         XCTAssertTrue(manifest.contains("image"))
         XCTAssertTrue(manifest.contains("Sales chart"))
         XCTAssertTrue(manifest.contains("image/png"))
@@ -166,7 +166,7 @@ final class WorkflowDataPassingTests: XCTestCase {
     }
 
     func testArtifactManifestEmptyForNoArtifacts() {
-        XCTAssertEqual(ContextCompressor.renderArtifactManifest([]), "")
+        XCTAssertEqual(WorkflowInputAssembler.renderArtifactManifest([]), "")
     }
 
     // MARK: - WorkflowActionArgs (Action node argument assembly)

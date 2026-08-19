@@ -245,13 +245,11 @@ enum ToolFailurePolicy: String, Codable, Hashable, Sendable, CaseIterable, Ident
 
     var id: String { rawValue }
 
-    var displayName: String {
-        switch self {
-        case .abort: "Abort"
-        case .skipAndContinue: "Skip & Continue"
-        case .fallbackPrompt: "Fallback Prompt"
-        }
-    }
+    // ⚠️ register A63 — the `String` `displayName` that lived here is now
+    // `localizedTitle: LocalizedStringKey` in `ProfileEnumLocalizedTitles.swift`. It cannot live
+    // beside the enum: this file is Foundation-only by design (these types are Codable and reach
+    // SwiftData/JSON) and `LocalizedStringKey` is SwiftUI. `rawValue` is unchanged and remains the
+    // persistence/telemetry identifier.
 }
 
 enum ExhaustionPolicy: String, Codable, Hashable, Sendable, CaseIterable, Identifiable {
@@ -260,12 +258,11 @@ enum ExhaustionPolicy: String, Codable, Hashable, Sendable, CaseIterable, Identi
 
     var id: String { rawValue }
 
-    var displayName: String {
-        switch self {
-        case .synthesizeBestEffort: "Best-effort Response"
-        case .failHard: "Fail Hard"
-        }
-    }
+    // ⚠️ register A63 — the `String` `displayName` that lived here is now
+    // `localizedTitle: LocalizedStringKey` in `ProfileEnumLocalizedTitles.swift`. It cannot live
+    // beside the enum: this file is Foundation-only by design (these types are Codable and reach
+    // SwiftData/JSON) and `LocalizedStringKey` is SwiftUI. `rawValue` is unchanged and remains the
+    // persistence/telemetry identifier.
 }
 
 // MARK: - History Strategy
@@ -285,27 +282,14 @@ enum HistoryStrategy: String, Codable, Hashable, Sendable, CaseIterable, Identif
 
     var id: String { rawValue }
 
-    var displayName: String {
-        switch self {
-        case .recentHistory: "Recent"
-        case .fullHistory: "Full"
-        case .pointer: "On-Demand"
-        case .hybrid: "Smart"
-        }
-    }
+    // ⚠️ register A63 — the `String` `displayName` that lived here is now
+    // `localizedTitle: LocalizedStringKey` in `ProfileEnumLocalizedTitles.swift`. It cannot live
+    // beside the enum: this file is Foundation-only by design (these types are Codable and reach
+    // SwiftData/JSON) and `LocalizedStringKey` is SwiftUI. `rawValue` is unchanged and remains the
+    // persistence/telemetry identifier.
 
-    var strategyDescription: String {
-        switch self {
-        case .recentHistory:
-            "Remembers your last 10 conversations. Works well for most everyday tasks."
-        case .fullHistory:
-            "Remembers everything from the entire conversation. Best when working on long, multi-step projects."
-        case .pointer:
-            "Keeps a lightweight overview of all conversations and recalls details only when needed. Uses the least resources."
-        case .hybrid:
-            "Full recall of recent conversations with a lightweight overview of older ones. Best overall balance of speed and context."
-        }
-    }
+    // ⚠️ register A63 — `strategyDescription` moved to `HistoryStrategy.localizedDescription`
+    // in `ProfileEnumLocalizedTitles.swift`. See the note on the title above.
 
     var icon: String {
         switch self {
@@ -422,24 +406,66 @@ struct WorkflowConfig: Codable, Hashable, Sendable {
 
     // MARK: - Execution Defaults (nil = use hardcoded system defaults)
 
-    /// Default timeout per node in seconds. Overridden by per-node `WorkflowNodeConfig.hardTimeout`.
+    /// The config a NEWLY CREATED workflow profile gets.
+    ///
+    /// ⚠️ Exists so this decision is unit-testable. It used to live inline in `AddBackendProfileView`
+    /// as `WorkflowConfig(agentProfileIDs: [], nodeTimeoutEnabled: false)` — new workflows were
+    /// created UNBOUNDED — and a mutation flipping it back passed every test, because the tests
+    /// constructed `WorkflowConfig` directly and never went through the view.
+    ///
+    /// ⚠️ Bounded by default since 2026-08-13. Unbounded was defensible while the Workflow Settings
+    /// sheet let you turn the timeout back on; that sheet is gone, so a profile created unbounded
+    /// could never be bounded through any UI. A genuinely long-running node overrides with its own
+    /// `hardTimeout`, or its bound profile's `executionTimeout`.
+    static func forNewProfile() -> WorkflowConfig {
+        WorkflowConfig(agentProfileIDs: [])
+    }
+
+    /// ⚠️ RETIRED FROM THE UI 2026-08-13 — decode/encode-only, and the whole Workflow Settings sheet
+    /// is gone with it. STILL HONOURED at runtime when non-nil, so an existing workflow keeps the
+    /// number it chose.
+    ///
+    /// The timeout itself is not optional — every node kind is bounded, and the clock excludes time
+    /// parked awaiting a human. What was removed is the per-workflow dial: a node that genuinely
+    /// needs longer sets its own `hardTimeout`, or its bound profile sets `executionTimeout`, and
+    /// both win over this.
     var defaultNodeTimeout: TimeInterval?
 
-    /// Whether the per-node execution timeout is enforced at all. `nil`/`true` = on
-    /// (the historical behavior); `false` = NO timeout — nodes run unbounded. Opt-out
-    /// for long-running local-model nodes. A per-node `hardTimeout`, if explicitly set,
-    /// still applies even when this is off. Optional for backward-compatible decoding.
+    /// ⚠️ RETIRED FROM THE UI 2026-08-13 — decode/encode-only. STILL HONOURED when explicitly
+    /// `false`, so a workflow that deliberately ran unbounded keeps doing so.
+    ///
+    /// ⚠️ New workflows no longer set it (`AddBackendProfileView`), so they are bounded by default.
+    /// Creating profiles that are unbounded AND have no UI to change it would strand them.
     var nodeTimeoutEnabled: Bool?
 
-    /// Default cascade behavior when a node fails. Overridden by per-node `WorkflowNodeConfig.onFailure`.
+    /// ⚠️ RETIRED 2026-08-12 — decoded and re-encoded so stored profiles round-trip unchanged, but
+    /// NEVER read at run time. It never was: the executor only ever consulted per-node
+    /// `WorkflowNodeConfig.onFailure` (register WF15), and that per-node policy is itself gone —
+    /// failure routing is now the `error` port on the canvas.
     var defaultFailurePolicy: NodeFailurePolicy?
 
-    /// Default retry count for failed nodes. Overridden by per-node `WorkflowNodeConfig.maxNodeRetries`.
+    /// ⚠️ RETIRED FROM THE UI 2026-08-13 — the workflow-level "Default Max Retries" stepper is gone.
+    /// Retries are a per-node decision because retry SAFETY differs by node kind: re-running a Code
+    /// node is pointless (deterministic — same input, same failure), re-running an Action node can
+    /// double-submit a side effect, and re-running a Loop or sub-workflow re-runs everything inside
+    /// it. Only Profile and Action nodes ever retried, and that is where the control lives.
+    ///
+    /// ⚠️ STILL HONOURED AT RUNTIME when non-nil, so a workflow that set it keeps its resilience.
+    /// Dropping it outright would silently stop retrying for anyone who had opted in, and a flaky
+    /// provider would start failing runs that used to succeed. Logged once per run with the
+    /// node-level equivalent.
     var defaultMaxRetries: Int?
 
     // MARK: - Context Pipeline
 
-    /// Maximum characters per upstream node output before truncation. nil = 2000.
+    /// ⚠️ RETIRED 2026-08-13 — decode/encode-only, never read. A workflow no longer truncates
+    /// upstream output at all (user decision): fitting a node's input is a function of which model
+    /// that node runs, which is the author's choice, and a workflow-level character count could not
+    /// know it. The old defaults quietly cut a three-paragraph answer on every run.
+    ///
+    /// ⚠️ Deliberately NOT deleted, same reasoning as `onFailure`, `joinMode` and
+    /// `passthroughContent`: the layout blob has no per-element resilience (WF24), so dropping a
+    /// Codable key is not free.
     var contextBudgetPerNode: Int?
 
     /// Maximum total characters for all upstream context combined. nil = 6000.
@@ -447,7 +473,17 @@ struct WorkflowConfig: Codable, Hashable, Sendable {
 
     // MARK: - Advanced
 
-    /// Maximum sub-workflow nesting depth. nil = 5.
+    /// ⚠️ RETIRED 2026-08-13 — decode/encode-only, never read. The "Max Nesting Depth" stepper is
+    /// gone, and with it the whole Workflow Settings sheet.
+    ///
+    /// It could only ever make the limit STRICTER: a hard `WorkflowDepth.maxDepth` is checked first,
+    /// so the stepper's 6–10 range did nothing at all, and there is no sensible reason to want
+    /// "fail at 2 levels" instead of the engine's limit. Over-deep nesting and sub-workflow cycles
+    /// are now reported by `WorkflowValidator` at design time — in the issues panel, as errors that
+    /// block the run — rather than as a failure five levels into execution.
+    ///
+    /// ⚠️ Deliberately NOT deleted, same reasoning as the other retirements: the layout blob has no
+    /// per-element resilience (WF24), so dropping a Codable key is not free.
     var maxNestingDepth: Int?
 
     // MARK: - Resolved Defaults
@@ -456,11 +492,9 @@ struct WorkflowConfig: Codable, Hashable, Sendable {
     /// The workflow-default timeout to actually enforce on nodes that don't set their
     /// own `hardTimeout`, or `nil` when the timeout is disabled (`nodeTimeoutEnabled == false`).
     var effectiveNodeTimeout: TimeInterval? { (nodeTimeoutEnabled ?? true) ? resolvedNodeTimeout : nil }
-    var resolvedFailurePolicy: NodeFailurePolicy { defaultFailurePolicy ?? .skipDependents }
+    /// ⚠️ LEGACY fallback only — see `defaultMaxRetries`. New workflows leave it nil, so a node
+    /// without its own `maxNodeRetries` does not retry.
     var resolvedMaxRetries: Int { defaultMaxRetries ?? 0 }
-    var resolvedContextBudgetPerNode: Int { contextBudgetPerNode ?? 2000 }
-    var resolvedTotalContextBudget: Int { totalContextBudget ?? 6000 }
-    var resolvedMaxNestingDepth: Int { maxNestingDepth ?? 5 }
 }
 
 /// Configuration for an Image Generation profile.

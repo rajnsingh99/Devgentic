@@ -34,8 +34,11 @@ final class SchedulerCoordinator {
     private let logger = DGLogger(category: "SchedulerCoordinator")
 
     /// Weak back-reference to the VM. Used for:
-    /// - Mutating streaming state (so HITL banners surface in the Mac UI
-    ///   when a scheduled agent pauses for confirmation).
+    /// - Mutating the shared streaming slot. ⚠️ CORRECTED 2026-08-17: this said the write makes
+    ///   "HITL banners surface in the Mac UI". It does NOT and has not since the HITL
+    ///   standardization — `InteractionBannerStack` keys purely on `selectedConversationID`
+    ///   (InteractionBannerStack.swift:35, :129) and contains zero references to either slot
+    ///   property. What the write actually load-bears is listed at the set site below.
     /// - Reaching `messagingCoordinator.createUserMessage(...)` and
     ///   `updateBackendForCurrentConversation(...)` through the VM so this
     ///   coordinator stays oblivious to its sibling coordinators.
@@ -127,17 +130,38 @@ final class SchedulerCoordinator {
         // `messageBox` (already declared), and we fill it after the call returns.
         // [HITL/P5] Scheduled runs are UNATTENDED — bound them with a 10-minute container deadline.
         let scheduledRunDeadline: TimeInterval = 600
+        // Workflow bookkeeping (no-op for other profile types). Without it a scheduled workflow
+        // run left NO record at all — and history is the only surface an unattended run can be
+        // reviewed from. It also flips HITL attribution to `.workflow`, which matters here more
+        // than anywhere: a gate in a scheduled run parks under a banner nobody is watching, and
+        // the 600 s deadline below kills the run if it goes unanswered.
+        let workflowTicket = WorkflowRunBootstrap.begin(
+            config: config,
+            conversationID: conversationID,
+            userInput: prompt,
+            registry: vm,
+            origin: .scheduled
+        )
+
         return await withCheckedContinuation { continuation in
             var messageBox: ChatMessage? = nil
             var deadlineTask: Task<Void, Never>? = nil
-            let agentMessage = activeStreamManager.startMessageStream(
+            // ⚠️ UNATTENDED. Bound around `startMessageStream` so every task the stream spawns —
+            // BOS, AgentConnect, the workflow executor, nested sub-workflows — inherits it. A
+            // Router's ambiguity arbitration checks this and takes FIRST MATCH instead of parking:
+            // a scheduled run renders no banner, so a park here only ever ended one way — the
+            // 600s run deadline cancelling the whole run.
+            let agentMessage = WorkflowRunAttendance.$isAttended.withValue(false) {
+                activeStreamManager.startMessageStream(
                 withConfig: config,
                 conversationID: conversationID,
                 userQuery: prompt,
                 history: history,
                 files: fileItems,
+                workflowExecutionState: workflowTicket?.state,
                 onComplete: { [weak self] in
                     deadlineTask?.cancel()
+                    workflowTicket?.finalize()
                     // Extract summary from the completed message.
                     let summary: String
                     switch messageBox?.content {
@@ -149,18 +173,39 @@ final class SchedulerCoordinator {
                         summary = "Response complete."
                     }
 
-                    // Clear streaming state so the Mac UI hides any HITL banner
-                    // it raised for this scheduled run.
+                    // Release the shared streaming slot. ⚠️ CORRECTED 2026-08-17: this is NOT
+                    // what hides a HITL banner (see the set site below). ⚠️ UNGUARDED — this nils
+                    // the slot regardless of whether THIS run still owns it, so a run that
+                    // superseded us is orphaned: the composer flips back to Send and that run
+                    // becomes unstoppable from the UI. Logs nothing, so the eviction is invisible
+                    // in the field. Tracked in LLM_Execution_Concurrency_Design.md (increment 1,
+                    // which deletes both this line and the slot).
                     self?.viewModel?.streamingMessageID = nil
                     self?.viewModel?.streamingMessage = nil
 
                     continuation.resume(returning: summary)
                 }
-            )
+                )
+            }
             messageBox = agentMessage // Fill the box so the closure can read it
 
-            // Set streaming state so the Mac UI can display HITL banners
-            // (ask_user / tool confirmation) for remotely-triggered work.
+            // ⚠️ CORRECTED 2026-08-17. This write does NOT drive HITL banners — the banner stack
+            // keys on `selectedConversationID` only (InteractionBannerStack.swift:35, :129), and a
+            // scheduled run deliberately never selects its conversation. That was true before the
+            // HITL standardization replaced the banner's mount and deleted the consumer without
+            // the producer.
+            //
+            // What this write ACTUALLY load-bears, undocumented until 2026-08-17:
+            //   1. Stop's target            — MessagingCoordinator.cancelStreamingResponse:549
+            //   2. The composer's Send/Stop state — ChatInputViewModel:279
+            //   3. ChatOps `/status`
+            //   4. The model-unload gate    — ConversationSwitchCoordinator:121, :139
+            // On (4): because [C7] excludes `.parkedHITL` runs from the `activeStreams` scan, this
+            // line is the ONLY thing keeping a multi-GB local model resident for a PARKED scheduled
+            // run — so a parked run pins the model iff it happens to have last written this slot.
+            // Deleting this line silently flips that policy. Owner decision 2026-08-17: a parked
+            // run should NOT pin the model (2-minute idle unload, reload on resume), which is what
+            // [C7] already intends. See LLM_Execution_Concurrency_Design.md §2.3 and §0.5.
             vm.streamingMessageID = agentMessage.id
             vm.streamingMessage = agentMessage
 

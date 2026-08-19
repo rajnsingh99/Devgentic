@@ -7,11 +7,37 @@
 
 import SwiftUI
 import Combine
+import os
 
-struct SearchMatch: Identifiable {
-    let id = UUID()
+private let logger = DGLogger(category: "ChatSearch")
+
+/// Where the active match lives inside a message. Value-comparable so
+/// `ContentBlockView.==` keeps memoizing settled blocks during streaming.
+struct ActiveSearchMatch: Equatable, Sendable {
+    let blockID: String?
+    let indexInBlock: Int
+}
+
+struct SearchMatch: Identifiable, Equatable, Sendable {
     let messageID: UUID
-    let matchIndex: Int // Which match within this message (0-based)
+    /// `ContentBlock.id` of the block that renders this match, or nil when the message renders
+    /// as ONE undecomposed `Text` (user bubbles, agent `.plainText`).
+    ///
+    /// The old model stored a single index counted across the message's whole raw source and
+    /// handed it to every block, which then compared it against its OWN offsets — so the
+    /// active highlight landed on the wrong occurrence or on nothing.
+    let blockID: String?
+    /// 0-based index of this match WITHIN that unit's highlightable string — exactly the index
+    /// `SearchHighlighter.applyHighlights` enumerates for the same string.
+    let indexInBlock: Int
+
+    /// Derived rather than a fresh UUID, so a re-run can re-anchor `currentMatchIndex` on the
+    /// same match instead of silently jumping the user somewhere else.
+    ///
+    /// ⚠️ Re-runs are MEMBERSHIP- and QUERY-driven, not streaming-driven: the three call sites
+    /// fire on `messagesToken` (count + first/last id), on the debounced query, and when the bar
+    /// opens. A message whose text mutates in place changes none of those — see CH64.
+    var id: String { "\(messageID.uuidString)#\(blockID ?? "-")#\(indexInBlock)" }
 }
 
 @Observable @MainActor
@@ -27,6 +53,22 @@ class ChatSearchViewModel {
     }
     var matches: [SearchMatch] = []
     var currentMatchIndex: Int = 0
+
+    /// THE query both sides measure. `searchQuery` is the user's raw text (the TextField binds
+    /// straight to it); this is what is actually searched for.
+    ///
+    /// ⚠️ Every consumer that highlights MUST use this, not `searchQuery`. The producer trimmed
+    /// and the three render paths did not, so a query with leading/trailing whitespace made the
+    /// two sides count occurrences of DIFFERENT strings — the same index-space drift CH28/CH29
+    /// exist to prevent, one argument over from the one they fixed. `ChatSearchDecomposition`
+    /// makes "the text we search IN" single-sourced; this does the same for "what we search FOR".
+    var effectiveQuery: String {
+        searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The query `matches` were produced from, so a re-run can tell "same query, new events"
+    /// from "the user edited the query".
+    @ObservationIgnored private var matchedQuery: String?
 
     // MARK: - Debounce Infrastructure
     /// Subject that receives raw query changes for debouncing.
@@ -45,10 +87,8 @@ class ChatSearchViewModel {
         return matches[currentMatchIndex].messageID
     }
 
-    /// Returns the local match index within the current message for highlighting the "active" match.
-    var currentMatchLocalIndex: Int? {
-        guard !matches.isEmpty, currentMatchIndex >= 0, currentMatchIndex < matches.count else { return nil }
-        return matches[currentMatchIndex].matchIndex
+    private var currentMatch: SearchMatch? {
+        matches.indices.contains(currentMatchIndex) ? matches[currentMatchIndex] : nil
     }
 
     init() {
@@ -65,57 +105,66 @@ class ChatSearchViewModel {
             }
     }
 
-    /// The searchable text for a message: the selected agent variant when present
-    /// (so results match what's on screen for regenerated responses), else `content`.
-    private static func searchableText(for message: ChatMessage) -> String? {
-        let content: String?
-        if message.sender == .agent, let agentContent = message.currentAgentContent {
-            content = agentContent.textContent
-        } else {
-            content = message.content.textContent
-        }
-        guard let text = content, !text.isEmpty else { return nil }
-        return text
-    }
-
-    /// Runs the search against the CURRENT message contents — extraction and
-    /// lowercasing happen at query time, so results are correct by construction.
+    /// Runs the search over the SAME decomposition and the SAME strings the renderer
+    /// highlights (`SearchDocument`/`SearchUnit`), emitting one match per paintable
+    /// occurrence, keyed by block.
     ///
-    /// A pre-computed index (the previous design) went stale on every in-place
-    /// content mutation: a streamed response finalizes without any membership
-    /// change, so the just-completed answer was unsearchable until the next
-    /// message arrived; variant switches (Redo) had the same hole. The 150ms
-    /// debounce bounds how often this runs, and lowercasing even hundreds of KB
-    /// is cheap relative to one keystroke.
-    func performSearch(in messages: [ChatMessage]) {
-        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Extraction happens at query time, so whatever this is handed is read fresh — a
+    /// pre-computed index (an older design) went stale on every in-place content mutation.
+    ///
+    /// ⚠️ That does NOT mean a streaming answer becomes searchable the moment it settles. This
+    /// method only runs when something CALLS it, and nothing re-runs it on an in-place text
+    /// mutation: a just-finished answer is still unsearchable until membership changes or the
+    /// user edits the query. Filed as CH64 — do not read "query-time" as "live".
+    ///
+    /// Units whose view accepts no search query (code, tables, images, error cards,
+    /// checkpoints) are counted as SUPPRESSED rather than emitted: "3 of 12" is a promise
+    /// that pressing Next twelve times shows twelve highlights, and the old behaviour
+    /// advertised positions that could never be painted.
+    func performSearch(in documents: [SearchDocument]) {
+        let query = effectiveQuery
         guard !query.isEmpty else {
             matches = []
+            matchedQuery = nil
             currentMatchIndex = 0
             return
         }
 
-        let lowercasedQuery = query.lowercased()
+        // Re-anchor on the SAME match across re-runs (membership changes re-run this) — but ONLY
+        // within the same query. `SearchMatch.id` is a pure (message, block, ordinal) tuple with
+        // no query identity, and `searchQuery.didSet` deliberately keeps the old `matches`, so
+        // after an EDIT the old anchor could still be found in the new result set and drop the
+        // user into the middle of it: broadening "error" to "err" jumped to "13 of 40" and
+        // scrolled away from the first hit of what they had just typed.
+        let previousKey = (matchedQuery == query) ? currentMatch?.id : nil
         var results: [SearchMatch] = []
+        var suppressed = 0
 
-        // Messages are stored newest→oldest; scan reversed so matches come out
-        // in display (oldest→newest) order for natural next/previous navigation.
-        for message in messages.reversed() {
-            guard let text = Self.searchableText(for: message) else { continue }
-            let lowercasedText = text.lowercased()
-            var searchRange = lowercasedText.startIndex..<lowercasedText.endIndex
-            var matchIndexInMessage = 0
-
-            while let range = lowercasedText.range(of: lowercasedQuery, range: searchRange) {
-                results.append(SearchMatch(messageID: message.id, matchIndex: matchIndexInMessage))
-                matchIndexInMessage += 1
-                searchRange = range.upperBound..<lowercasedText.endIndex
+        // Documents arrive newest→oldest; scan reversed so matches come out in display
+        // (oldest→newest) order for natural next/previous navigation.
+        for document in documents.reversed() {
+            for unit in document.units {
+                let count = SearchHighlighter.matchOffsets(in: unit.text, query: query).count
+                guard count > 0 else { continue }
+                guard unit.isHighlightable else {
+                    suppressed += count
+                    continue
+                }
+                for index in 0..<count {
+                    results.append(SearchMatch(messageID: document.id,
+                                               blockID: unit.blockID,
+                                               indexInBlock: index))
+                }
             }
         }
 
         matches = results
-        if currentMatchIndex >= results.count {
-            currentMatchIndex = 0
+        currentMatchIndex = previousKey.flatMap { key in results.firstIndex { $0.id == key } }
+            ?? (previousKey == nil ? 0 : (currentMatchIndex < results.count ? currentMatchIndex : 0))
+        matchedQuery = query
+
+        if suppressed > 0 {
+            logger.info("[SEARCH] \(results.count) match(es) across \(documents.count) document(s); \(suppressed) NOT counted — they sit in code/table/image/error content whose view accepts no search query, so counting them would promise a highlight that cannot be painted.")
         }
     }
 
@@ -137,6 +186,7 @@ class ChatSearchViewModel {
         isSearchActive = false
         searchQuery = ""
         matches = []
+        matchedQuery = nil
         currentMatchIndex = 0
     }
 
@@ -148,19 +198,20 @@ class ChatSearchViewModel {
         }
     }
 
-    /// Returns the number of matches for a specific message.
-    func matchCount(for messageID: UUID) -> Int {
-        matches.filter { $0.messageID == messageID }.count
-    }
-
     /// Returns whether this message contains the currently active match.
     func isCurrentMatchMessage(_ messageID: UUID) -> Bool {
         currentMatchMessageID == messageID
     }
 
-    /// Returns the local index of the active match within this message, or nil if not in this message.
-    func activeMatchLocalIndex(for messageID: UUID) -> Int? {
-        guard isCurrentMatchMessage(messageID) else { return nil }
-        return currentMatchLocalIndex
+    /// The active target when it lies inside this message; nil otherwise.
+    func activeMatch(in messageID: UUID) -> ActiveSearchMatch? {
+        guard let match = currentMatch, match.messageID == messageID else { return nil }
+        return ActiveSearchMatch(blockID: match.blockID, indexInBlock: match.indexInBlock)
+    }
+
+    /// For single-unit surfaces (user bubble, agent `.plainText`), which have no block id.
+    func activeMatchIndex(in messageID: UUID, blockID: String?) -> Int? {
+        guard let active = activeMatch(in: messageID), active.blockID == blockID else { return nil }
+        return active.indexInBlock
     }
 }

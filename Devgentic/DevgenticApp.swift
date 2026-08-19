@@ -595,6 +595,14 @@ struct DevgenticApp: App {
         let csm = self._codeSessionManager.wrappedValue
         mainVM.configureCodeSession(csm)
 
+        // Cascade a profile delete into the view model's per-profile canvas cache. Without this a
+        // deleted workflow's DIRTY canvas survives in memory and the quit-time drain re-creates its
+        // layout row as an orphan. `[weak mainVM]` because the service outlives nothing here but the
+        // closure is stored for the process lifetime.
+        self._backendProfileService.wrappedValue.onProfileDeleted = { [weak mainVM] profileID in
+            mainVM?.discardWorkflowCanvasState(for: profileID)
+        }
+
         // MARK: - Notification system bootstrap
         // Register the local delivery channel with the dispatcher so tasks can
         // fire macOS system notifications on completion.
@@ -657,7 +665,10 @@ struct DevgenticApp: App {
                     // the profile editor and ⌘Q discards unsaved edits silently. Injected here for
                     // the same reason the QuickAccess graph is — AppDelegate lives outside the
                     // SwiftUI environment.
-                    appDelegate.configureTerminationGuard(profileService: backendProfileService)
+                    appDelegate.configureTerminationGuard(
+                        profileService: backendProfileService,
+                        mainAppViewModel: mainApplicationViewModel
+                    )
                 }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                     // Catch up any scheduled tasks that fired while the app was in the background.

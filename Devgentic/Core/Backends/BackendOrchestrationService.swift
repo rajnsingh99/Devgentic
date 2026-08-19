@@ -430,6 +430,36 @@ class BackendOrchestrationService {
                     }
                 }
 
+                // ⚠️ register B14 — the missing-instructions advisory finally has a surface.
+                // `ProfileValidator` has computed it correctly since A35, and nothing could show
+                // it: the editors hard-block before saving (so they never see it) and every
+                // out-of-band writer discards `saveProfile`'s return value. Chat is the right
+                // place — it is where an agent with no guidance actually answers the user.
+                //
+                // ⚠️ Advisory, never a gate. G92 holds: this must not stop the send. A profile
+                // with no instructions still runs; the user is simply told why it may behave oddly
+                // and given one click to fix it.
+                await MainActor.run {
+                    let details = config.profile.details
+                    if details.supportsSystemInstructions,
+                       ProfileValidator.instructionsAreMissing(details.systemInstructions) {
+                        AdvisoryCenter.shared.post(Advisory(
+                            conversationID: conversationID,
+                            category: .profileMissingInstructions,
+                            message: "'\(config.profile.displayName)' has no system instructions, so it "
+                                + "has no guidance on how to behave or which tools to prefer. Add them "
+                                + "in the profile's settings.",
+                            actionLabel: "Profile Settings",
+                            action: .openProfileSettings(profileID: config.profile.id),
+                            dedupeKey: "\(conversationID.uuidString)|missingInstructions|\(config.profile.id.uuidString)"
+                        ))
+                    } else {
+                        // Self-heals the moment instructions are added.
+                        AdvisoryCenter.shared.clear(
+                            category: .profileMissingInstructions, conversationID: conversationID)
+                    }
+                }
+
                 // Check cancellation before heavy lifting
                 if Task.isCancelled {
                     continuation.finish(throwing: CancellationError())
@@ -568,7 +598,7 @@ class BackendOrchestrationService {
                             case .requestClarification(let question, _, _, _, _):
                                 logger.debug("[ASK_USER] Clarification requested: \(question)")
                                 continuation.yield(event)
-                            case .requestGate(let prompt, _, _, _, _):
+                            case .requestGate(let prompt, _, _, _, _, _, _):
                                 logger.debug("[GATE] Decision requested: \(prompt)")
                                 continuation.yield(event)
                             case .error(let err):
@@ -580,7 +610,9 @@ class BackendOrchestrationService {
                                 continuation.yield(event)
 
                             // Workflow orchestration events (not emitted by agent profiles, but needed for exhaustive switch)
-                            case .workflowNodeStarted, .workflowNodeCompleted, .workflowNodeFailed, .workflowProgress, .workflowLoopIteration:
+                            case .workflowNodeStarted, .workflowNodeCompleted, .workflowNodeFailed,
+                                 .workflowNodeSkipped, .workflowNodeCancelled,
+                                 .workflowProgress:
                                 continuation.yield(event)
 
                             // Multimodal events
@@ -1769,11 +1801,17 @@ extension BackendProfileModel {
     }
 
     /// The agent's resolved history strategy (default `.recentHistory` when unset,
-    /// matching `AgentConnect`). Non-agent profiles → nil. Used by the fit gauge to
-    /// avoid charging history-image tokens under `.pointer`, which ships none.
+    /// matching `AgentConnect`). Profiles with no `AgentConfig` → nil. Used by the fit
+    /// gauge to avoid charging history-image tokens under `.pointer`, which ships none.
+    ///
+    /// ⚠️ register B44 (twin, outside the filed file) — this was `if case .agent(let c) = details`,
+    /// so `.code` returned nil. `CodeSessionManager` configures `.pointer` precisely because Code
+    /// sessions must not resend history images, and nil meant the gauge charged for images the run
+    /// never sends — over-reporting context pressure on exactly the profile type that avoids it.
+    /// The nil-for-non-agent contract is preserved via `agentConfig`, which is the one place that
+    /// decides which profile types are agent-shaped.
     var resolvedHistoryStrategy: HistoryStrategy? {
-        if case .agent(let c) = details { return c.historyStrategy ?? .recentHistory }
-        return nil
+        details.agentConfig == nil ? nil : details.historyStrategy
     }
 
     /// LOCAL provider (MLX / Ollama), where vision detection is authoritative and the

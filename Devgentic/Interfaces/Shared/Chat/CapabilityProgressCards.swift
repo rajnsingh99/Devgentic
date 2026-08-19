@@ -36,6 +36,10 @@ struct PlanProgressCard: View {
     /// Live = the run is still producing events. A persisted card left unfinished by a
     /// force-quit is NOT live (isStreaming false on reload) — it renders frozen, and the
     /// InterruptedRunChip below the bubble explains why.
+    ///
+    /// ⚠️ This gates the ticking `elapsedLabel` AND the step glyph (`CapabilityStatusIcon`).
+    /// It used to gate only the label, so the comment above was aspirational: a `.running`
+    /// step still rendered an animating spinner on a dead card.
     private var isLive: Bool { isStreaming && data.phase != .finished }
 
     private var isCardExpanded: Bool { cardExpandedOverride ?? (data.phase != .finished) }
@@ -206,7 +210,7 @@ struct PlanProgressCard: View {
                 }
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    CapabilityStatusIcon(status: step.status)
+                    CapabilityStatusIcon(status: step.status, isLive: isLive)
                         .frame(width: 16, alignment: .center)
 
                     VStack(alignment: .leading, spacing: 2) {
@@ -457,7 +461,7 @@ struct ReflectionAttemptsCard: View {
             } label: {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        CapabilityStatusIcon(status: attempt.status.stepEquivalent, isEvaluating: attempt.status == .evaluating)
+                        CapabilityStatusIcon(status: attempt.status.stepEquivalent, isEvaluating: attempt.status == .evaluating, isLive: isLive)
                             .frame(width: 16, alignment: .center)
 
                         Text("Attempt \(attempt.trial)")
@@ -593,6 +597,15 @@ private extension ReflectionAttemptStatus {
 private struct CapabilityStatusIcon: View {
     let status: PlanStepStatus
     var isEvaluating: Bool = false
+    /// False when the card is a persisted record rather than a running one.
+    ///
+    /// A `.running` status survives a force-quit: the normal end paths repair it
+    /// (`CapabilityCardRouter.handleExecutionFinished`) and so does
+    /// `sanitizeCapabilityCardsForResume`, but the latter runs ONLY on the resume path — a run
+    /// that is merely reloaded and never resumed keeps `.running` forever. Without this flag
+    /// the glyph animated anyway, so a dead card showed a live spinner next to the
+    /// InterruptedRunChip explaining the run was cut off; the two disagreed.
+    var isLive: Bool = true
 
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -604,7 +617,14 @@ private struct CapabilityStatusIcon: View {
                 .font(.system(size: 12))
                 .foregroundColor(theme.tertiaryText.opacity(0.7))
         case .running:
-            if isEvaluating {
+            if !isLive {
+                // Interrupted: the step never reported a terminal status and nothing is
+                // working on it now. A static glyph, distinct from `.cancelled`'s
+                // `slash.circle`, which means "we know it was stopped".
+                Image(systemName: "circle.dotted")
+                    .font(.system(size: 12))
+                    .foregroundColor(theme.tertiaryText.opacity(0.8))
+            } else if isEvaluating {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(theme.streamingIndicator)

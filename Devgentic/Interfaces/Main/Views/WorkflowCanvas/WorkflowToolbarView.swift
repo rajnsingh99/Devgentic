@@ -15,9 +15,9 @@ struct WorkflowToolbarView: View {
     let onAddProfile: () -> Void
     let onAddStructuralNode: (WorkflowNodeKind, String) -> Void
     let onClearCanvas: () -> Void
+    let onShowGuideline: () -> Void
     let onSave: () -> Void
     let onRevert: () -> Void
-    let onOpenSettings: () -> Void
 
     @Environment(\.appTheme) private var theme
     @State private var showNodePalette = false
@@ -53,6 +53,30 @@ struct WorkflowToolbarView: View {
 
                 // Top Right: Contextual Actions
                 HStack(spacing: 8) {
+                    // The in-app workflow manual — one place for every node's behaviour, including
+                    // the unattended (scheduled / chat-bridge) differences a canvas cannot show.
+                    ToolbarPillButton(
+                        title: "Guide",
+                        icon: "book.closed",
+                        color: theme.secondaryText
+                    ) {
+                        onShowGuideline()
+                    }
+
+                    // ⚠️ A VISIBLE undo affordance, not just ⌘Z. The canvas has no autosave and no
+                    // focus model, so a user who deletes a node by mistake needs a control they can
+                    // see — and if the Delete KEY turns out not to fire (no focusable content in
+                    // this hierarchy), the toolbar is the only path in and must be the way back out.
+                    if canvasState.canUndo {
+                        ToolbarPillButton(
+                            title: "Undo",
+                            icon: "arrow.uturn.backward",
+                            color: theme.secondaryText
+                        ) {
+                            canvasState.undo()
+                        }
+                    }
+
                     if canvasState.selectedNodeID != nil || canvasState.selectedEdgeID != nil || canvasState.selectedAnnotationID != nil {
                         ToolbarPillButton(
                             title: "Delete",
@@ -197,13 +221,6 @@ struct WorkflowToolbarView: View {
                 canvasState.resetZoom()
             }
 
-            Divider()
-                .frame(height: 14)
-                .padding(.horizontal, 2)
-
-            ToolbarIconButton(icon: "gearshape", help: "Workflow settings") {
-                onOpenSettings()
-            }
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 4)
@@ -215,12 +232,16 @@ struct WorkflowToolbarView: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .strokeBorder(theme.secondaryText.opacity(0.18), lineWidth: 1)
         )
-        .shadow(color: Color.black.opacity(0.08), radius: 3, x: 0, y: 1)
+        .shadow(color: theme.shadowColor.opacity(0.08), radius: 3, x: 0, y: 1)
     }
 
     private var saveRevertGroup: some View {
         HStack(spacing: 8) {
-            ToolbarPillButton(title: "Revert", icon: "arrow.counterclockwise") {
+            // "Discard Changes", pairing with "Save Changes" beside it: the bottom-right cluster
+            // is DOCUMENT-level (keep or discard everything since the last save), the top cluster
+            // is EDIT-level (Undo/Delete/Clear). It was titled "Revert", which read as a sibling of
+            // Undo — and confusing the two was unrecoverable until revert became undoable.
+            ToolbarPillButton(title: "Discard Changes", icon: "arrow.counterclockwise") {
                 onRevert()
             }
 
@@ -266,32 +287,21 @@ struct WorkflowToolbarView: View {
             }
 
             // Logic
-            paletteSection(title: "LOGIC", icon: "arrow.triangle.branch", color: .yellow) {
+            paletteSection(title: "LOGIC", icon: "arrow.triangle.branch", color: theme.nodeIdentityColor(for: .router)) {
                 Button {
                     showNodePalette = false
                     onAddStructuralNode(
                         .condition(ConditionNodeConfig()),
-                        "Condition"
+                        "Router"
                     )
                 } label: {
-                    paletteItem(icon: "arrow.triangle.branch", label: "Condition (IF / ELSE)", color: .yellow)
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    showNodePalette = false
-                    onAddStructuralNode(
-                        .loop(LoopNodeConfig()),
-                        "Loop"
-                    )
-                } label: {
-                    paletteItem(icon: "arrow.trianglehead.2.clockwise", label: "Loop (Iterate)", color: .orange)
+                    paletteItem(icon: "arrow.triangle.branch", label: "Router (match → branch)", color: theme.nodeIdentityColor(for: .router))
                 }
                 .buttonStyle(.plain)
             }
 
             // Utility
-            paletteSection(title: "UTILITY", icon: "wrench", color: .cyan) {
+            paletteSection(title: "UTILITY", icon: "wrench", color: theme.nodeIdentityColor(for: .code)) {
                 Button {
                     showNodePalette = false
                     onAddStructuralNode(
@@ -299,7 +309,7 @@ struct WorkflowToolbarView: View {
                         "Code"
                     )
                 } label: {
-                    paletteItem(icon: "chevron.left.forwardslash.chevron.right", label: "Code / Transform", color: .cyan)
+                    paletteItem(icon: "chevron.left.forwardslash.chevron.right", label: "Code / Transform", color: theme.nodeIdentityColor(for: .code))
                 }
                 .buttonStyle(.plain)
 
@@ -310,7 +320,7 @@ struct WorkflowToolbarView: View {
                         "Gate"
                     )
                 } label: {
-                    paletteItem(icon: "hand.raised", label: "HITL Gate", color: .red)
+                    paletteItem(icon: "hand.raised", label: "HITL Gate", color: theme.nodeIdentityColor(for: .gate))
                 }
                 .buttonStyle(.plain)
 
@@ -321,7 +331,7 @@ struct WorkflowToolbarView: View {
                         "Action"
                     )
                 } label: {
-                    paletteItem(icon: "bolt.horizontal.fill", label: "Action (Run a Tool)", color: .teal)
+                    paletteItem(icon: "bolt.horizontal.fill", label: "Action (Run a Tool)", color: theme.nodeIdentityColor(for: .action))
                 }
                 .buttonStyle(.plain)
             }

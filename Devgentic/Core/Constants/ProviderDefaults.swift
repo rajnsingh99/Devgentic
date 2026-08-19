@@ -64,4 +64,59 @@ enum ProviderDefaults {
         default:   return baseURL(for: provider).absoluteString
         }
     }
+
+    // MARK: - Configured-endpoint resolution (register B21)
+
+    private static let logger = DGLogger(category: "ProviderDefaults")
+
+    /// Resolves a profile's configured endpoint, falling back to the vendor default.
+    ///
+    /// ⚠️ EXTRACTED because the three call sites that needed it had three different behaviours, one
+    /// of which was "ignore the setting entirely". `GeminiImageGenService` hardcoded
+    /// `geminiBaseURL` in both request builders while `GeminiService.verifyAndFetchModels` — the
+    /// model list for the SAME profile — honoured `baseURL`. So a profile pointed at a corporate
+    /// gateway listed its models through the gateway and then sent its gateway-scoped key to
+    /// `generativelanguage.googleapis.com` on every actual request: a credential leaving the
+    /// network it was issued for, to a host the user explicitly configured away from.
+    ///
+    /// ⚠️ An unparseable endpoint falls back rather than crashing. `OpenAIImageGenService` did
+    /// `URL(string: base)!` on a free-text field, so "my gateway" (or a pasted URL with a space)
+    /// was a force-unwrap crash on the first generate. Falling back is the wrong host too — hence
+    /// the error log; but the failure is now visible and survivable instead of terminal.
+    /// Whether a URL can actually carry an API request.
+    ///
+    /// ⚠️ `URL(string:)` is far more permissive than "usable". `"://nope"` parses with an EMPTY
+    /// scheme and a host of `nope`, and `"http:///path"` parses with no host at all — a
+    /// `scheme != nil, host != nil` check waves both through, and `URLSession` then fails on
+    /// something the user was told was fine. Requiring a real HTTP scheme also rejects a pasted
+    /// `file://` path. `http` stays allowed: `http://localhost` is how the local providers work,
+    /// and A52 warns about plaintext transport rather than blocking it.
+    static func isUsableEndpoint(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            return false
+        }
+        guard let host = url.host, !host.isEmpty else { return false }
+        return true
+    }
+
+    static func resolvedBaseURL(configured: String?, fallback: URL) -> URL {
+        guard let configured, !configured.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return fallback
+        }
+        let trimmed = configured.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed), isUsableEndpoint(url) else {
+            logger.error(
+                "[PROFILE] The configured endpoint '\(trimmed)' is not a usable URL. CONSEQUENCE: "
+                + "this request goes to the DEFAULT host \(fallback.absoluteString) instead — "
+                + "including its API key. Fix the endpoint field or clear it."
+            )
+            return fallback
+        }
+        return url
+    }
+
+    /// Same resolution, for a provider's canonical default.
+    static func resolvedBaseURL(configured: String?, for provider: ApiProvider) -> URL {
+        resolvedBaseURL(configured: configured, fallback: baseURL(for: provider))
+    }
 }

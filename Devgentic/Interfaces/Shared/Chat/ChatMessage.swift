@@ -981,32 +981,24 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         return true
     }
 
-    /// [TL-1] Closes top-level tool rows still marked executing at end-of-run — a
-    /// cancel or failure mid-tool used to leave the row's spinner running forever,
-    /// and it PERSISTED that way. Nested card rows are closed separately
-    /// (`CapabilityCardRouter.handleExecutionFinished` live,
-    /// `sanitizeCapabilityCardsForResume` on restart). Returns how many were closed
-    /// so the caller can log the repair.
+    /// [TL-1] Closes tool rows still marked executing at end-of-run — a cancel or failure
+    /// mid-tool used to leave the row's spinner running forever, and it PERSISTED that way.
+    ///
+    /// Walks NESTED card rows too. The earlier version iterated only `timelineEvents` and
+    /// documented nested rows as "closed separately by
+    /// `CapabilityCardRouter.handleExecutionFinished`" — that was not true: the router closes
+    /// step and attempt STATUSES and never touches a nested `ToolExecutionData.isExecuting`.
+    /// With Plan & Execute or Reflexion on (most agent runs) tool rows live nested rather than
+    /// top-level, so the common case was the uncovered one: a stop mid-tool closed nothing,
+    /// logged nothing, and persisted a row that renders an animating spinner forever, with no
+    /// output, no failure badge and no way to expand it (`isDisclosable` requires
+    /// `!isExecuting`). `sanitizeCapabilityCardsForResume` does reach nested rows but runs only
+    /// on the resume path, and REMOVES them rather than closing them.
+    ///
+    /// Returns how many were closed so the caller can log the repair.
     @discardableResult
     func closeDanglingToolRows(outcome: ExecutionOutcome?) -> Int {
-        var closed = 0
-        for i in timelineEvents.indices {
-            guard case .toolExecution(var data) = timelineEvents[i], data.isExecuting else { continue }
-            data.isExecuting = false
-            data.isSuccess = false
-            if outcome == .cancelled {
-                data.failureCategory = .cancelled
-            }
-            if data.output == nil {
-                // Persisted tool output — deliberately unlocalized (category-c, must stay stable).
-                data.output = outcome == .cancelled
-                    ? "Cancelled before the tool finished."
-                    : "Interrupted before the tool finished."
-            }
-            timelineEvents[i] = .toolExecution(data)
-            closed += 1
-        }
-        return closed
+        DanglingToolRowCloser.close(&timelineEvents, outcome: outcome)
     }
 
     /// [G1 resume] Prepares persisted capability cards for a resumed run: drops dangling
@@ -1307,6 +1299,16 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
             return nil
         }
         return response.variants[response.selectedVariantIndex].content
+    }
+
+    /// The content actually on screen for this message.
+    ///
+    /// `ChatBubbleView.contentToDisplay` and the search path's content selection were the same
+    /// expression written twice; search and render must never disagree about WHICH text a
+    /// message shows, or a regenerated response is searched in one variant and highlighted in
+    /// another. Note user messages use `content` directly, which this matches.
+    var displayedContent: MessageContent {
+        sender == .agent ? (currentAgentContent ?? content) : content
     }
 
     init(id: UUID = UUID(), conversationId: UUID, timestamp: Date = Date(), sender: SenderRole, content: MessageContent, attachedTextFiles: [AttachedTextFile]? = nil, attachedImageFiles: [AttachedImageFile]? = nil, isStreaming: Bool = false, backendEntityId: UUID? = nil) {

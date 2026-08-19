@@ -25,11 +25,29 @@ enum WorkflowNodeKind: Codable, Hashable, Sendable {
     /// A Bot, Agent, Workflow, or ImageGen profile node.
     case profile(profileID: UUID, profileType: ProfileType)
 
-    /// Conditional branch (IF/ELSE) — routes to different outputs based on upstream results.
+    /// The **Router** node — matches the upstream text against labelled rules and routes to the
+    /// matching output port. Renamed from "Condition" in the UI on 2026-08-13: with N labelled rules
+    /// and one port each it is a switch/router, not a boolean condition.
+    ///
+    /// ⚠️ THE SWIFT CASE NAME IS DELIBERATELY STILL `condition`, and must stay that way.
+    /// `WorkflowNodeKind` uses Swift's SYNTHESIZED enum `Codable`, which writes the case name as the
+    /// discriminator into every persisted layout blob. Renaming the case would fail to decode every
+    /// workflow ever saved — and the blob has no per-element resilience (WF24), so that is not a
+    /// degraded node, it is a lost layout.
+    ///
+    /// ⚠️ `ConditionRule` / `ConditionOp` / `ConditionField` also keep their names, and that is
+    /// correct rather than merely safe: the NODE is a Router; the RULES are conditions. It routes
+    /// by conditions.
     case condition(ConditionNodeConfig)
 
-    /// Loop/iteration — re-enters a subgraph until an exit condition is met.
-    case loop(LoopNodeConfig)
+    // ⚠️ `case loop(LoopNodeConfig)` was RETIRED AND DELETED 2026-08-15 (user decision). The node
+    // conflated retry (already served by per-node `maxNodeRetries`) with chained re-execution, and
+    // its one legitimate pattern (evaluator–optimizer refinement) was judged not worth the node.
+    // DELIBERATELY no decode shim: a saved layout containing a Loop node now fails to decode, which
+    // lands on the unreadable-layout refusal machinery (`WorkflowLayoutSD.hasUnreadableLayout` →
+    // canvas overlay + repair) rather than silently dropping the node — accepted because the app is
+    // pre-release (user decision, same date). Do NOT reuse the name `loop` for a future case: an
+    // old blob's `{"loop":{...}}` would decode into it.
 
     /// Code/transform — deterministic non-LLM processing (regex, JSON, format).
     case code(CodeNodeConfig)
@@ -44,7 +62,111 @@ enum WorkflowNodeKind: Codable, Hashable, Sendable {
     case action(ActionNodeConfig)
 }
 
+// MARK: - Node Identity Colour (WF-CU10)
+
+/// The structural node kinds that carry an identity colour on the canvas.
+///
+/// ⚠️ Profile-backed nodes are NOT here. Their colour comes from `ProfileType.displayColor`, which
+/// is already a single shared source with several non-canvas consumers (chat input, QuickAccess,
+/// profile detail, pickers). Folding it in here would drag those surfaces into a canvas change.
+enum WorkflowNodeRole: String, CaseIterable, Sendable {
+    case router      // `.condition` — the Swift case name is frozen for Codable reasons
+    case code
+    case gate
+    case trigger
+    case action
+}
+
+extension WorkflowNodeKind {
+    /// The card / port / edge / palette / legend colour for this node kind.
+    ///
+    /// ⚠️ SINGLE SOURCE. This mapping was open-coded in several places — `WorkflowNodeView`'s
+    /// `profileColor`, `WorkflowCanvasState.nodeColor(for:)` (which fed the EDGE gradient, so the
+    /// two had to agree for an edge to match the node it leaves), the Add-node palette and the
+    /// in-app legend. `ProfileType+Display.swift`'s own header records the last time this exact
+    /// class of duplication drifted.
+    func identityColor(in theme: any Theme) -> Color {
+        switch self {
+        case .profile(_, let pType): return pType.displayColor
+        case .condition: return theme.nodeIdentityColor(for: .router)
+        case .code:      return theme.nodeIdentityColor(for: .code)
+        case .gate:      return theme.nodeIdentityColor(for: .gate)
+        case .trigger:   return theme.nodeIdentityColor(for: .trigger)
+        case .action:    return theme.nodeIdentityColor(for: .action)
+        }
+    }
+}
+
 // MARK: - Node Kind Configs
+
+/// What a Router does when NO rule matches the input (2026-08-16, user decision).
+///
+/// Replaces the `always` catch-all-rule idiom, which was HARD-DELETED the same day: an `always`
+/// rule matched everything, so any input matching a real rule matched TWO rules and ambiguity
+/// arbitration fired on every ordinary routing decision (the "amplifier" defect). This setting is
+/// ORTHOGONAL to `askOnAmbiguity` — that answers "several rules matched", this answers "none did".
+///
+/// ⚠️ `.route` stores the target rule's stable `id`, NEVER its label. A stored label is the
+/// stale-`fallbackLabel` maintenance class that got the old Static Fallback picker retired (WF64):
+/// renames silently strand it and deletions silently re-point it. An id survives renames, and a
+/// deleted target becomes a design-time validation ERROR instead of a silent misroute.
+enum RouterNoMatchBehavior: Codable, Hashable, Sendable {
+    /// Fail the node — `error` port activates, wireable recovery. Today's behaviour; the pre-filled
+    /// default, so existing Routers change nothing.
+    case failNode
+    /// Route unmatched input to this rule's port, as if that rule had matched.
+    case route(ruleID: UUID)
+    /// End this BRANCH gracefully: the Router completes with NO active ports, everything downstream
+    /// skips as "not chosen", and — because terminality is computed over LIVE edges — the Router
+    /// becomes a terminal whose passthrough content lands in the run's final output.
+    /// ⚠️ Ends the BRANCH, not the run: parallel siblings are untouched (invariant W28). In a
+    /// linear workflow the two are the same thing.
+    case endWorkflow
+}
+
+/// What a Router does when its evidence yields anything but exactly ONE winner — zero rules matched
+/// (EMPTY) or several matched (AMBIGUOUS). One setting, both triggers (user decision 2026-08-17),
+/// superseding the `askOnAmbiguity` + `noMatchBehavior` pair.
+///
+/// ⚠️ EVERY CASE IS TOTAL — it means the same thing for EMPTY and for AMBIGUOUS. That property is
+/// load-bearing, not tidiness: it is what keeps the decision table free of per-situation footnotes.
+/// An earlier draft carried a `firstMatch` case ("take the first matching rule"), which was the one
+/// option that was NOT total — meaningful for ambiguity, undefined when nothing matched, requiring
+/// a special rule so it could not reinvent the WF-OB1 arbitrary-branch defect. **Dropped by user
+/// decision 2026-08-17. Do NOT reintroduce it**; an explicit default chosen from the dropdown is
+/// what replaced it, and the implicit "rule order is priority" behaviour it encoded was itself the
+/// kind of hidden coupling this redesign exists to remove (reordering rules on the canvas silently
+/// changed unattended routing).
+enum RouterDecisionPolicy: Codable, Hashable, Sendable {
+    /// Route to this rule's port, as if it had matched. ⚠️ On AMBIGUOUS this OVERRIDES the matched
+    /// rules — the branches that did match will not run.
+    case route(ruleID: UUID)
+
+    /// Pause and ask a human to pick. ⚠️ Attended runs only: an unattended run (scheduled, or
+    /// started from a chat bridge) renders no banner anyone can see, so it never parks — it takes
+    /// `fallback` immediately. The same `fallback` also covers an attended run nobody answers
+    /// (Stop, conversation closed), which must stay identical to the unattended path.
+    case ask(fallback: AskFallback)
+
+    /// End this BRANCH gracefully — no active ports, downstream skips as "not chosen", and the
+    /// Router's passthrough content becomes (part of) the final answer. Parallel siblings are
+    /// untouched (invariant W28).
+    case endBranch
+
+    /// Fail the node so its `error` port activates and a wired branch can recover. The stored
+    /// default of every pre-redesign Router, and the reason the error port is reachable at all —
+    /// the guide promises "a failure (and only a failure) activates the error port".
+    case failNode
+
+    /// What an `ask` does when nobody can answer. Mirrors the outer policy minus `ask` itself.
+    enum AskFallback: Codable, Hashable, Sendable {
+        /// Fail the node — the default. Strict and honest: the run stops with the reason on the
+        /// error port rather than guessing a branch nobody chose.
+        case failNode
+        case route(ruleID: UUID)
+        case endBranch
+    }
+}
 
 struct ConditionNodeConfig: Codable, Hashable, Sendable {
 
@@ -61,8 +183,19 @@ struct ConditionNodeConfig: Codable, Hashable, Sendable {
 
     // --- Output Behavior ---
 
-    /// When true, downstream nodes receive the full upstream content.
-    /// When false, they receive only the routing label (e.g. "Condition (pattern): route -> True").
+    /// ⚠️ RETIRED 2026-08-13 — decode/encode-only, never read at runtime. A Router always passes the
+    /// upstream content through.
+    ///
+    /// This was the "Pass Through Content" toggle. Switched OFF it emitted the literal string
+    /// `Condition (pattern): route → <Label>` in place of the payload — a debug line, not data, and
+    /// nothing downstream could consume it except a rule matching that exact text. It was also
+    /// LEAKY: artifacts were forwarded from every live upstream regardless of the toggle, so it
+    /// suppressed text only. The one real motivation (not spending context on a payload the
+    /// downstream does not need) is what the per-node context budget already handles.
+    ///
+    /// ⚠️ Deliberately NOT deleted, same reasoning as `onFailure` and `joinMode`: the layout blob
+    /// has no per-element resilience (WF24), so dropping a Codable key is not free. A stored `false`
+    /// is logged once per run and ignored — never rewritten, so a downgrade still reads the file.
     var passthroughContent: Bool = true
 
     // --- Pattern Match (always evaluated first) ---
@@ -88,8 +221,82 @@ struct ConditionNodeConfig: Codable, Hashable, Sendable {
 
     // --- Static Fallback ---
 
-    /// Label for the catch-all route. Must be one of the rule labels (enforced by picker).
-    var fallbackLabel: String = "False"
+    /// ⚠️ RETIRED FROM THE UI 2026-08-13 — the "Static Fallback / Catch-All Route" picker is gone.
+    /// A default branch is now an ordinary last rule with the `always` operator, which has a visible,
+    /// wireable port like every other rule instead of invisibly aliasing one.
+    ///
+    /// ⚠️ STILL HONOURED AT RUNTIME when non-empty, and that is deliberate. Every workflow saved
+    /// before today carries a `fallbackLabel`, and silently converting it on load would change where
+    /// unmatched input goes in every one of them. There is no safe automatic migration: the
+    /// equivalent rule must keep the SAME label (the label is the port, and edges are already wired
+    /// to it), which would duplicate an existing rule label; and moving the pointed-at rule to the
+    /// end to make it `always` would reorder precedence for inputs matching several rules.
+    ///
+    /// So: legacy configs keep their exact behaviour and log that they are doing so. NEW nodes
+    /// default to `""` and fail on no-match, which is the point of the redesign.
+    var fallbackLabel: String = ""
+
+    /// Ask a human which branch to take when MORE THAN ONE rule matches the same input.
+    ///
+    /// ⚠️ ON by default (user decision 2026-08-13). An overlapping-rule input is a decision the
+    /// author never actually made — rule order is an authoring artefact — so the default is to ask
+    /// rather than to guess silently.
+    ///
+    /// ⚠️ The DECODER also defaults to `true`, so layouts written before this field existed turn it
+    /// on. An absent key means "saved before the feature existed", not "the user switched it off";
+    /// once the user actually toggles it off, `false` is written explicitly and honoured.
+    ///
+    /// ⚠️ CONSEQUENCE for unattended runs, stated plainly because it is not obvious: the arbitration
+    /// now waits INDEFINITELY (no per-node timeout), and a scheduled run renders no banner at all —
+    /// `InteractionBannerStack` shows only the selected conversation and `SchedulerCoordinator`
+    /// deliberately creates its conversation without selecting it, with no remote mirror registered.
+    /// Such a run parks invisibly until the container's 600s deadline fires, which cancels the WHOLE
+    /// run rather than just this node. Switch this off on nodes used in scheduled workflows.
+    ///
+    /// ⚠️ This is NOT the same class of control as the retired `onFailure` and `joinMode` pickers.
+    /// Those asked the AUTHOR, at edit time, for something the graph already determined. This asks
+    /// the OPERATOR, at run time, about a data-dependent ambiguity the graph cannot answer: rule
+    /// order is an arbitrary authoring artefact being used as a tiebreak, and nothing in the graph
+    /// encodes which of two genuinely-matching rules the user meant.
+    ///
+    /// ⚠️ When nobody answers (Stop, conversation closed, or the arbitration timeout) the node falls
+    /// back to the FIRST match — today's deterministic winner — never to `fallbackLabel`. That keeps
+    /// the unattended path byte-identical to the setting being off.
+    var askOnAmbiguity: Bool = true
+
+    /// What to do when NO rule matches. See `RouterNoMatchBehavior`; `.failNode` preserves the
+    /// pre-2026-08-16 behaviour, so absent keys and untouched Routers behave identically.
+    ///
+    /// ⚠️ SUPERSEDED by `decisionPolicy` (2026-08-17). Still declared, still decoded, and still the
+    /// governing setting for any node whose `decisionPolicy` is nil — same retirement pattern as
+    /// `passthroughContent` and `fallbackLabel`. A node saved from the redesigned inspector carries
+    /// a policy, and then THIS FIELD IS IGNORED at runtime.
+    var noMatchBehavior: RouterNoMatchBehavior = .failNode
+
+    /// What this Router does when its evidence yields anything but exactly ONE winner.
+    ///
+    /// ⚠️ ONE setting, TWO triggers (user decision 2026-08-17): zero rules matched (EMPTY) and
+    /// several matched (AMBIGUOUS). They are mutually exclusive by construction, so a single
+    /// setting is coherent rather than a false merge — and it replaces two adjacent controls of
+    /// inconsistent shape (`askOnAmbiguity`, a Bool, and `noMatchBehavior`, an enum).
+    ///
+    /// ⚠️ The AI Classifier INHERITS it: exactly one recognised token routes, zero is EMPTY, two or
+    /// more is AMBIGUOUS. That is what retires WF-OB2 — a multi-token reply used to resolve by
+    /// unordered `Dictionary` iteration, so the same input could take a different branch after an
+    /// app restart.
+    ///
+    /// ⚠️ TWO OUTCOMES STAY OUTSIDE THIS SETTING, deliberately. A classifier that CRASHED produced
+    /// no verdict, so it fails the node regardless of the policy (WF-CC10); a Stop settles the node
+    /// `.canceled` and routes nowhere (WF-CC13). `noMatchBehavior` answers "no rule described this
+    /// input" — a statement about CONTENT — and neither of those is content.
+    ///
+    /// ⚠️ `nil` means "saved before the redesign": the legacy
+    /// `askOnAmbiguity` / `noMatchBehavior` / `fallbackLabel` trio governs, byte-identically. No
+    /// stored workflow changes behaviour until its author opens the node and saves it. Same refusal
+    /// to auto-migrate that `fallbackLabel` itself documents above — and here the merge is provably
+    /// lossy (a 2×3 legacy matrix onto one axis), so a decode-time collapse would silently change
+    /// untouched workflows.
+    var decisionPolicy: RouterDecisionPolicy?
 
     /// Default initializer — all properties use their declared defaults.
     init() {}
@@ -98,7 +305,8 @@ struct ConditionNodeConfig: Codable, Hashable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case rules, llmFallbackEnabled, llmPrompt, llmPortLabels, llmModelName
-        case fallbackLabel, passthroughContent
+        case fallbackLabel, passthroughContent, askOnAmbiguity, noMatchBehavior
+        case decisionPolicy
     }
 
     init(from decoder: Decoder) throws {
@@ -125,19 +333,123 @@ struct ConditionNodeConfig: Codable, Hashable, Sendable {
         llmModelName = try c.decodeIfPresent(String.self, forKey: .llmModelName)
         fallbackLabel = try c.decodeIfPresent(String.self, forKey: .fallbackLabel) ?? "False"
         passthroughContent = try c.decodeIfPresent(Bool.self, forKey: .passthroughContent) ?? true
+        askOnAmbiguity = try c.decodeIfPresent(Bool.self, forKey: .askOnAmbiguity) ?? true
+        // `try?` deliberately: a shape from a NEWER build must degrade to the safe default, not
+        // take the whole layout unreadable (WF24 — the blob has no per-element resilience).
+        noMatchBehavior = (try? c.decodeIfPresent(RouterNoMatchBehavior.self, forKey: .noMatchBehavior)) ?? .failNode
 
-        // Ensure fallbackLabel is one of the rule labels (fix legacy configs)
-        if !rules.contains(where: { $0.label == fallbackLabel }) {
-            fallbackLabel = rules.last?.label ?? "False"
+        // ⚠️ `try?` for the same WF24 reason as the line above, and `nil` is a MEANINGFUL result
+        // here, not a failure: it says "saved before the redesign", and the legacy trio then
+        // governs byte-identically. Decode must NEVER invent a policy — the legacy 2×3 matrix does
+        // not collapse onto this axis losslessly (see the migration table in
+        // `Router_Unified_Decision_Design.md` §3), so synthesising one at decode time would
+        // silently change stored workflows the user never opened. Seeding happens in the inspector,
+        // on an explicit Save, exactly as `fallbackLabel`'s retirement note above demands.
+        decisionPolicy = (try? c.decodeIfPresent(RouterDecisionPolicy.self, forKey: .decisionPolicy)) ?? nil
+
+        // Repair a legacy fallback that points at a rule which no longer exists. ⚠️ Guarded on
+        // NON-EMPTY: an empty `fallbackLabel` means "this node has no catch-all", which is the new
+        // default — without the guard the repair would invent one for every new node and quietly
+        // reinstate the retired behaviour.
+        if !fallbackLabel.isEmpty, !rules.contains(where: { $0.label == fallbackLabel }) {
+            fallbackLabel = rules.last?.label ?? ""
         }
+    }
+
+    /// ⚠️ HAND-WRITTEN so a node carrying a `decisionPolicy` ALSO mirror-writes the legacy keys it
+    /// supersedes. Without this, an older build reading a new blob would find `askOnAmbiguity` and
+    /// `noMatchBehavior` absent, fall back to their raw decode defaults (`true` / `.failNode`), and
+    /// route unmatched input somewhere the author never chose. Mirroring gives it the closest
+    /// legacy approximation of the policy instead.
+    ///
+    /// ⚠️ It is an APPROXIMATION and cannot be otherwise — the legacy pair has no way to express
+    /// "ask, and if nobody answers route to R", so the fallback is what survives for the no-match
+    /// axis. That is the whole reason `layoutBlobVersion` bumps alongside this: an old build gets a
+    /// sane read but is REFUSED the save, so it can never round-trip a policy back into a lossy
+    /// pair (WF-TS5's protection, doing exactly what it exists for).
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(rules, forKey: .rules)
+        try c.encode(llmFallbackEnabled, forKey: .llmFallbackEnabled)
+        try c.encode(llmPrompt, forKey: .llmPrompt)
+        try c.encode(llmPortLabels, forKey: .llmPortLabels)
+        try c.encodeIfPresent(llmModelName, forKey: .llmModelName)
+        try c.encode(fallbackLabel, forKey: .fallbackLabel)
+        try c.encode(passthroughContent, forKey: .passthroughContent)
+        try c.encodeIfPresent(decisionPolicy, forKey: .decisionPolicy)
+
+        guard let policy = decisionPolicy else {
+            // No policy: this node is still governed by the legacy pair, so write it verbatim.
+            try c.encode(askOnAmbiguity, forKey: .askOnAmbiguity)
+            try c.encode(noMatchBehavior, forKey: .noMatchBehavior)
+            return
+        }
+
+        // Mirror. `ask` is the only case an old build can represent as "pause on ambiguity"; every
+        // other case resolves without asking, so `askOnAmbiguity` is false for them.
+        switch policy {
+        case .ask(let fallback):
+            try c.encode(true, forKey: .askOnAmbiguity)
+            switch fallback {
+            case .failNode:            try c.encode(RouterNoMatchBehavior.failNode, forKey: .noMatchBehavior)
+            case .route(let ruleID):   try c.encode(RouterNoMatchBehavior.route(ruleID: ruleID), forKey: .noMatchBehavior)
+            case .endBranch:           try c.encode(RouterNoMatchBehavior.endWorkflow, forKey: .noMatchBehavior)
+            }
+        case .route(let ruleID):
+            try c.encode(false, forKey: .askOnAmbiguity)
+            try c.encode(RouterNoMatchBehavior.route(ruleID: ruleID), forKey: .noMatchBehavior)
+        case .endBranch:
+            try c.encode(false, forKey: .askOnAmbiguity)
+            try c.encode(RouterNoMatchBehavior.endWorkflow, forKey: .noMatchBehavior)
+        case .failNode:
+            try c.encode(false, forKey: .askOnAmbiguity)
+            try c.encode(RouterNoMatchBehavior.failNode, forKey: .noMatchBehavior)
+        }
+    }
+
+    // MARK: - AI Classifier prompt (2026-08-17)
+
+    /// The placeholder that expands to this Router's rule labels at RUN TIME.
+    ///
+    /// ⚠️ A placeholder, not baked text, and that is the whole mechanism. Materialising the rule
+    /// list into the stored prompt would force a choice between two bad options: rewrite the user's
+    /// prompt whenever a rule is added or renamed (clobbering their edits), or leave it alone and
+    /// let it go stale (the model told about categories that no longer exist). Expanding at run
+    /// time means the prompt is always current AND never overwritten.
+    static let rulesPlaceholder = "{{rules}}"
+
+    /// The prompt a Router starts with when its AI Classifier is switched on. Fully editable — the
+    /// user owns this text; only `{{rules}}` is substituted.
+    static let defaultRoutingPrompt = """
+        You are an intelligent router. Read the input and decide which ONE of these categories best         describes it:
+        \(rulesPlaceholder)
+        Answer with exactly one category.
+        """
+
+    /// The instruction actually sent to the model: the stored prompt with `{{rules}}` expanded.
+    ///
+    /// ⚠️ Labels only — never the opaque 4-char tokens. Those are assigned per invocation and live
+    /// in the system-owned `<labels>` block; letting a user-editable field name them would break the
+    /// parse protocol, and letting the model answer in readable rule names would let unescaped
+    /// upstream text name a route into being (the open WF-SE2 interpolation).
+    func resolvedRoutingPrompt() -> String {
+        guard llmPrompt.contains(Self.rulesPlaceholder) else { return llmPrompt }
+        var seen = Set<String>()
+        let list = rules
+            .map(\.label)
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+            .map { "- \($0)" }
+            .joined(separator: "\n")
+        return llmPrompt.replacingOccurrences(of: Self.rulesPlaceholder, with: list)
     }
 
     /// All output port labels — derived solely from pattern rule labels.
     /// The AI Classifier and static fallback route to these same ports.
     var outputPortLabels: [String] {
         var labels = rules.map(\.label)
-        // Guard against legacy configs where fallback might not be in rules
-        if !labels.contains(fallbackLabel) {
+        // A legacy `fallbackLabel` that names no rule still needs its port, or the edges already
+        // wired to it would dangle. Empty = no catch-all (the post-2026-08-13 default).
+        if !fallbackLabel.isEmpty, !labels.contains(fallbackLabel) {
             labels.append(fallbackLabel)
         }
         return labels
@@ -167,19 +479,87 @@ struct ConditionRule: Codable, Hashable, Sendable, Identifiable {
 }
 
 /// What a condition rule evaluates against.
-enum ConditionField: String, Codable, Hashable, Sendable, CaseIterable {
+/// ⚠️ RAW-PRESERVING catch-all (WF-PE3), the pattern `WorkflowRunRecord.RunStatus` established.
+///
+/// These layout enums used to be plain `String, Codable`: ONE unknown rawValue — written by a newer
+/// build, read after a rollback — threw at decode, which failed the node, which failed the array,
+/// which failed the WHOLE layout. A 15-node graph became unreadable and unsaveable over a single
+/// string, and the only in-app escape was the total-loss Discard. `.other(raw)` decodes ANY value
+/// and re-encodes it VERBATIM — lossless by construction, so a round-trip through an older build
+/// preserves the newer build's data byte-for-byte. Consumers treat `.other` as inert-and-visible:
+/// the validator flags it, the engine never matches on it, and no picker offers it
+/// (`allCases` excludes it by hand — the synthesized one would).
+enum ConditionField: RawRepresentable, Codable, Hashable, Sendable, CaseIterable {
     case upstreamOutput     // Concatenated text output of upstream nodes
     case variable           // A shared workflow variable by name
+    /// A field written by a newer build — preserved verbatim, never evaluated.
+    case other(String)
+
+    static var allCases: [ConditionField] { [.upstreamOutput, .variable] }
+
+    init?(rawValue: String) {
+        switch rawValue {
+        case "upstreamOutput": self = .upstreamOutput
+        case "variable":       self = .variable
+        default:               self = .other(rawValue)
+        }
+    }
+
+    var rawValue: String {
+        switch self {
+        case .upstreamOutput:  return "upstreamOutput"
+        case .variable:        return "variable"
+        case .other(let raw):  return raw
+        }
+    }
 }
 
 /// How a condition rule evaluates its field.
-enum ConditionOp: String, Codable, Hashable, Sendable, CaseIterable {
+enum ConditionOp: RawRepresentable, Codable, Hashable, Sendable, CaseIterable {
     case contains
     case notContains
     case equals
     case notEquals
     case isEmpty
     case isNotEmpty
+
+    // ⚠️ `case always` was HARD-DELETED 2026-08-16 (user decision). It was the recommended
+    // catch-all idiom after the Static Fallback picker retired (2026-08-13), but it AMPLIFIED
+    // ambiguity arbitration: an `always` rule matches everything, so any input matching a real
+    // rule matched TWO rules and the Router asked "which branch?" on every ordinary input. The
+    // catch-all's job moved to `ConditionNodeConfig.noMatchBehavior`. A stored `"always"` now
+    // decodes to `.other("always")` below — which NEVER MATCHES — so old catch-all rules become
+    // dead rules (flagged by the validator), and unmatched input follows `noMatchBehavior`.
+
+    /// An operator this build cannot evaluate — a newer build's operator (WF-PE3), or the retired
+    /// `always`. Preserved verbatim, never matches.
+    case other(String)
+
+    static var allCases: [ConditionOp] { [.contains, .notContains, .equals, .notEquals, .isEmpty, .isNotEmpty] }
+
+    init?(rawValue: String) {
+        switch rawValue {
+        case "contains":    self = .contains
+        case "notContains": self = .notContains
+        case "equals":      self = .equals
+        case "notEquals":   self = .notEquals
+        case "isEmpty":     self = .isEmpty
+        case "isNotEmpty":  self = .isNotEmpty
+        default:            self = .other(rawValue)
+        }
+    }
+
+    var rawValue: String {
+        switch self {
+        case .contains:     return "contains"
+        case .notContains:  return "notContains"
+        case .equals:       return "equals"
+        case .notEquals:    return "notEquals"
+        case .isEmpty:      return "isEmpty"
+        case .isNotEmpty:   return "isNotEmpty"
+        case .other(let raw): return raw
+        }
+    }
 
     var displayName: String {
         switch self {
@@ -189,33 +569,11 @@ enum ConditionOp: String, Codable, Hashable, Sendable, CaseIterable {
         case .notEquals: return "does not equal"
         case .isEmpty: return "is empty"
         case .isNotEmpty: return "is not empty"
+        // The raw value IS the most useful display for an op this build cannot evaluate.
+        case .other(let raw): return "\(raw) (newer version)"
         }
     }
 }
-struct LoopNodeConfig: Codable, Hashable, Sendable {
-    /// The workflow profile ID to execute as the loop body.
-    var bodyWorkflowID: UUID? = nil
-
-    /// Cached display name of the body workflow (for canvas subtitle).
-    var bodyWorkflowName: String? = nil
-
-    /// Maximum number of iterations (clamped 1–50 at execution time). Default: 3.
-    var maxIterations: Int = 3
-
-    /// Optional early-exit condition evaluated after each iteration.
-    /// When the condition matches, the loop exits before reaching maxIterations.
-    var exitCondition: ConditionRule? = nil
-
-    /// Human-readable summary for the canvas subtitle.
-    var subtitle: String {
-        let bodyLabel = bodyWorkflowName ?? "No body set"
-        if let exit = exitCondition {
-            return "\(maxIterations) max | \(bodyLabel) | exit: \(exit.op.displayName)"
-        }
-        return "\(maxIterations) iters | \(bodyLabel)"
-    }
-}
-
 /// Code/transform node — deterministic non-LLM processing via Mustache-like templates.
 /// Supports `{{ input }}` (upstream text) and `{{ var.name }}` (workflow variables).
 struct CodeNodeConfig: Codable, Hashable, Sendable {
@@ -290,9 +648,18 @@ struct WorkflowNodeConfig: Codable, Hashable, Sendable {
     /// Empty string = no explicit task; the node relies solely on its profile system instructions.
     var taskDescription: String = ""
 
-    /// How this node combines multiple incoming branches (fan-in).
-    /// Only has an effect when the node has 2+ incoming edges.
-    /// Defaults to `.all` (AND-join) to preserve historical behaviour.
+    /// ⚠️ RETIRED 2026-08-13 — decode/encode-only, never read at runtime.
+    ///
+    /// This was the "Fan-in Behavior" picker (Wait for all / Any one). It asked the user a question
+    /// the graph already answers, and its two values could not express the correct behaviour for a
+    /// node with BOTH independent and mutually-exclusive upstreams — `.all` never ran, `.any` ran on
+    /// too little. `WorkflowState.shouldExecuteNode` now DERIVES the join: every incoming branch is
+    /// required except a dead one whose live sibling depends on a different port of a common
+    /// ancestor. See that method for the full rule.
+    ///
+    /// ⚠️ Deliberately NOT deleted, same reasoning as `onFailure`: the layout blob has no
+    /// per-element resilience (WF24), so dropping a Codable key is not free. A stored value is
+    /// logged once per run and ignored — never rewritten, so a downgrade still reads the file.
     var joinMode: JoinMode = .all
 }
 
@@ -324,35 +691,91 @@ extension WorkflowNodeConfig {
 }
 
 /// Cascade policy when a workflow node fails.
-enum NodeFailurePolicy: String, Codable, Hashable, Sendable, CaseIterable {
-    /// Skip all downstream dependent nodes (default — current behavior).
+/// ⚠️ RETIRED 2026-08-12 — decode-only. Nothing reads this at run time.
+///
+/// Failure routing is now expressed on the CANVAS, via the `error` port:
+///   • error port unwired  → the branch stops (what `skipDependents` always was — it had ZERO
+///     runtime reads even before this; it was the fall-through)
+///   • error port wired    → the downstream node runs and receives the failure reason + partial
+///     output (what `continueAll` was trying to be)
+///   • `stopWorkflow` is GONE by design: a failure no longer cancels PARALLEL branches. Parallel
+///     branches are independent by construction — nothing connects them — so aborting them
+///     destroyed usable, already-finished work to save tokens. A real dependency is an edge, and
+///     the skip cascade already enforces those.
+///
+/// The cases and their rawValues MUST stay: they are persisted inside `WorkflowNodeConfig` in the
+/// layout blob, and there is no per-element decode resilience yet (WF24) — an unknown rawValue
+/// takes the ENTIRE layout unreadable, not just one node. `WorkflowExecutor` logs once per run
+/// when a stored policy is encountered and ignored.
+enum NodeFailurePolicy: RawRepresentable, Codable, Hashable, Sendable, CaseIterable {
     case skipDependents
-
-    /// Halt the entire workflow immediately.
     case stopWorkflow
-
-    /// Continue executing all remaining nodes regardless of this failure.
     case continueAll
+    /// Unrecognised stored value — preserved verbatim (WF-PE3). Safe here by construction: the
+    /// whole policy is RETIRED and never consulted at runtime.
+    case other(String)
+
+    static var allCases: [NodeFailurePolicy] { [.skipDependents, .stopWorkflow, .continueAll] }
+
+    init?(rawValue: String) {
+        switch rawValue {
+        case "skipDependents": self = .skipDependents
+        case "stopWorkflow":   self = .stopWorkflow
+        case "continueAll":    self = .continueAll
+        default:               self = .other(rawValue)
+        }
+    }
+
+    var rawValue: String {
+        switch self {
+        case .skipDependents:  return "skipDependents"
+        case .stopWorkflow:    return "stopWorkflow"
+        case .continueAll:     return "continueAll"
+        case .other(let raw):  return raw
+        }
+    }
 }
 
-/// How a node combines its incoming branches when several edges fan into it.
+/// ⚠️ RETIRED 2026-08-13 — kept for blob compatibility only. See `WorkflowNodeConfig.joinMode`.
 ///
-/// Both modes are *synchronizing*: the node still waits for every incoming
-/// branch in its dependency level to finish before it runs. They differ only
-/// in whether all branches must have *succeeded*:
-/// - `.all` (AND-join): runs only if every incoming branch is satisfied;
-///   if any branch failed or was skipped, this node is skipped too.
-/// - `.any` (OR-join / synchronizing merge): runs if at least one incoming
-///   branch succeeded, consuming only the successful branches' outputs.
-enum JoinMode: String, Codable, Hashable, Sendable, CaseIterable {
+/// The join is now derived from the graph, so neither case is consulted at runtime. The old doc
+/// comment described `.all` as "if any branch failed or was skipped, this node is skipped too" and
+/// `.any` as "consuming only the successful branches' outputs" — **both were wrong** (an activated
+/// `error` route makes a failed branch live, and data was never filtered by success), and the UI
+/// copy was written from this comment. Left here as a warning: help text derived from a doc comment
+/// inherits its errors.
+///
+/// ⚠️ rawValues are pinned — they appear in persisted layout blobs.
+enum JoinMode: RawRepresentable, Codable, Hashable, Sendable, CaseIterable {
     case all
     case any
+    /// Unrecognised stored value — preserved verbatim (WF-PE3). Retired setting; never consulted.
+    case other(String)
 
-    /// Short label for UI controls.
+    static var allCases: [JoinMode] { [.all, .any] }
+
+    init?(rawValue: String) {
+        switch rawValue {
+        case "all": self = .all
+        case "any": self = .any
+        default:    self = .other(rawValue)
+        }
+    }
+
+    var rawValue: String {
+        switch self {
+        case .all: return "all"
+        case .any: return "any"
+        case .other(let raw): return raw
+        }
+    }
+
+    /// Retained for log lines only — there is no UI control any more.
     var displayName: String {
         switch self {
         case .all: return "Wait for all"
         case .any: return "Any one"
+        case .other(let raw): return raw
         }
     }
 }
@@ -410,10 +833,20 @@ struct WorkflowNode: Identifiable, Codable, Hashable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
 
-        // Try new `kind` field first; fall back to legacy profileID + profileType
-        if let decodedKind = try? container.decode(WorkflowNodeKind.self, forKey: .kind) {
-            kind = decodedKind
-        } else {
+        // Try new `kind` field first; fall back to legacy profileID + profileType.
+        //
+        // ⚠️ The fallback is GATED on the legacy key being present (WF-PE4). This was `try?`, which
+        // swallowed the REAL kind-decode error unconditionally: any modern non-profile node whose
+        // `kind` failed to decode (an unknown case name after a rollback — PE3's dominant path)
+        // fell through here, failed on the absent `profileID`, and the one log line a field
+        // engineer got named `keyNotFound(profileID)` — a key that has nothing to do with the
+        // failure. Every legacy blob HAS `profileID` (it was mandatory then); every modern
+        // non-profile node does NOT — so the key's presence is exactly the "is this a legacy row"
+        // question, and when it is absent the true error is rethrown with its full coding path.
+        do {
+            kind = try container.decode(WorkflowNodeKind.self, forKey: .kind)
+        } catch let kindError {
+            guard container.contains(.profileID) else { throw kindError }
             let legacyProfileID = try container.decode(UUID.self, forKey: .profileID)
             let legacyProfileType = try container.decode(ProfileType.self, forKey: .profileType)
             kind = .profile(profileID: legacyProfileID, profileType: legacyProfileType)
@@ -448,6 +881,22 @@ struct WorkflowNode: Identifiable, Codable, Hashable {
 /// A directed connection between two nodes (source output port → target input port).
 /// For multi-port nodes (e.g., Condition), `sourcePortLabel` identifies which output port.
 struct WorkflowEdge: Identifiable, Codable, Hashable {
+
+    /// The reserved failure port label.
+    ///
+    /// ⚠️ ONE definition, deliberately. This string is load-bearing in two places that MUST agree —
+    /// `WorkflowCanvasState.outputPortLabels` (which port the canvas draws and the validator accepts)
+    /// and `WorkflowState.edgeIsLive` (which edge the engine follows on failure). A port the engine
+    /// activates but the canvas never renders is unwireable, which is exactly the defect WF61
+    /// recorded; a port the canvas draws but the engine never activates is a dead branch. Both are
+    /// invisible to pre-flight validation, because the validator checks edges against the canvas
+    /// list and can never see a runtime activation.
+    ///
+    /// ⚠️ It is also a RESERVED user-facing label: a Condition rule or Gate option named "error"
+    /// collides with it. `outputPortLabels` de-duplicates so no duplicate port renders, and the
+    /// validator warns — it does not block, since an existing workflow may already carry one.
+    static let errorPortLabel = "error"
+
     let id: UUID
     let sourceNodeID: UUID
     let targetNodeID: UUID
@@ -525,8 +974,35 @@ struct StickyNote: Identifiable, Codable, Hashable {
     }
 }
 
-enum StickyNoteColor: String, Codable, Hashable, CaseIterable {
+enum StickyNoteColor: RawRepresentable, Codable, Hashable, CaseIterable {
     case yellow, blue, green, pink, purple
+    /// A colour written by a newer build — preserved verbatim, DRAWN as yellow (WF-PE3). The note's
+    /// text is the data; the tint is cosmetic and must never brick a graph.
+    case other(String)
+
+    static var allCases: [StickyNoteColor] { [.yellow, .blue, .green, .pink, .purple] }
+
+    init?(rawValue: String) {
+        switch rawValue {
+        case "yellow": self = .yellow
+        case "blue":   self = .blue
+        case "green":  self = .green
+        case "pink":   self = .pink
+        case "purple": self = .purple
+        default:       self = .other(rawValue)
+        }
+    }
+
+    var rawValue: String {
+        switch self {
+        case .yellow: return "yellow"
+        case .blue:   return "blue"
+        case .green:  return "green"
+        case .pink:   return "pink"
+        case .purple: return "purple"
+        case .other(let raw): return raw
+        }
+    }
 
     var swiftUIColor: Color {
         switch self {
@@ -535,6 +1011,8 @@ enum StickyNoteColor: String, Codable, Hashable, CaseIterable {
         case .green:  return .green
         case .pink:   return .pink
         case .purple: return .purple
+        // Cosmetic fallback — the note's TEXT is the data; an unknown tint draws as the default.
+        case .other:  return .yellow
         }
     }
 }

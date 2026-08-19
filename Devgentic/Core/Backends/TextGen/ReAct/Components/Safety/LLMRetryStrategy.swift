@@ -27,6 +27,29 @@ struct LLMRetryStrategy: LLMRetryHandling {
     private(set) var consecutiveParseFailures = 0
     private(set) var consecutiveTransientFailures = 0  // 5xx + timeouts + connection drops
 
+    /// Consecutive MLX model-slot races (`MLXService.ServiceError.modelIdentityMismatch`).
+    ///
+    /// ⚠️ Its own budget on purpose. This is neither a transport failure — the MLX transport
+    /// budget is `maxTransientRetries: 0` BY DESIGN (ResiliencePolicy.swift:150-162, "In-process:
+    /// no transport"), so `transientAction` would fail on the FIRST hit and diagnose it as
+    /// "try reloading the model or switching to a smaller one", a memory verdict for a
+    /// concurrency fault — nor a parse failure, since the model produced nothing to parse.
+    private(set) var consecutiveModelSlotFailures = 0
+
+    /// ONE outer retry. `MLXService.container(expecting:)` already re-loads the expected model
+    /// TWICE back-to-back before it throws (MLXService.swift:120-129), and `loadModel` coalesces
+    /// behind any in-flight load (:210-212) — so the only thing an outer attempt adds is ELAPSED
+    /// TIME for a competitor to release the slot. One wait covers the short competitor (the
+    /// workflow AI Classifier loads, generates once, then unloads). A second would re-read
+    /// multi-GB weights against contention that has already proven sustained.
+    private static let maxModelSlotRetries = 1
+
+    /// Wait before the single re-run: long enough for a one-shot classifier to release the slot,
+    /// short enough that a genuinely stuck slot fails fast.
+    /// ⚠️ Judgement, not a measurement — nothing on device has timed a classifier's
+    /// load → generate → unload cycle. Measure one before treating this as tuned.
+    private static let modelSlotRetryDelay: TimeInterval = 2.0
+
     init(
         maxConsecutiveParseFailures: Int = 3,
         backoffStrategy: BackoffStrategy = .exponential,
@@ -55,6 +78,36 @@ struct LLMRetryStrategy: LLMRetryHandling {
             return apply(verdict, requestId: cloudError?.requestId, providerLabel: providerLabel)
         }
 
+        // --- Typed local-runtime errors (MUST precede the string tests below) ---
+        // Matched BY TYPE. The prose test this replaces classified `.noModelLoaded` only because
+        // its `errorDescription` happened to contain the literal being grepped for, and left its
+        // sibling `.modelIdentityMismatch` — the MLX model-slot race — falling through to the
+        // parse-failure catch-all, telling the user their prompt was malformed when the model had
+        // produced no output at all (WF-CC6).
+        //
+        // ⚠️ Placement is load-bearing, not cosmetic: every arm here returns, so control can never
+        // reach `consecutiveParseFailures += 1` below. Moving this block under the catch-all would
+        // keep the verdict correct while still charging the parse budget — after which three races
+        // abort the run with "please try rephrasing your request", the very lie this fixes.
+        //
+        // ⚠️ No `default:` on purpose: a new `ServiceError` case must BREAK THIS BUILD rather than
+        // silently inherit the parse-failure verdict. That compiler check is the actual fix; the
+        // missing branch was only the symptom.
+        if let mlxError = error as? MLXService.ServiceError {
+            switch mlxError {
+            case .noModelLoaded:
+                // ⚠️ Unreachable in production today: both `MLXLLMProvider` construction sites pin
+                // a non-nil `modelDirectory` (AgentConnect.swift:1256, WorkflowExecutor.swift:2997),
+                // so `container(expecting:)` never takes the nil-identity path that throws this.
+                // Kept — and routed by TYPE — so the exhaustive switch stays honest if that changes.
+                logger.warning("[MLX-LOAD] No MLX model resident and the request carried no expected model identity. CONSEQUENCE: the iteration is rewound and re-run after a reload attempt; the parse budget is untouched and no corrective alert enters the model's context.")
+                return .modelReload(message: "⏳ Model was released from memory. Reloading...")
+
+            case .modelIdentityMismatch(let expected, let actual):
+                return modelSlotAction(expected: expected, actual: actual)
+            }
+        }
+
         // --- Legacy String-Based Detection (local providers, wrapped errors) ---
         let errorDesc = error.localizedDescription
         let isRateLimit = errorDesc.contains("429") || errorDesc.localizedCaseInsensitiveContains("rate limit")
@@ -69,11 +122,20 @@ struct LLMRetryStrategy: LLMRetryHandling {
             return transientAction(detail: "request timed out", requestId: nil)
         }
 
-        // Model was unloaded (e.g., idle timer fired during HITL suspension).
-        // Must be detected BEFORE the catch-all parse failure to avoid futile retries.
-        let isModelUnloaded = errorDesc.contains("No MLX model is currently loaded") ||
-                              errorDesc.contains("No Ollama model")
-        if isModelUnloaded {
+        // Ollama's local-model-unloaded string.
+        //
+        // ⚠️ The MLX half of this test was DELETED 2026-08-16 (WF-CC6) and is now the typed
+        // `MLXService.ServiceError` switch above. It is NOT kept as belt-and-braces, deliberately:
+        // it could not catch anything the type test misses (one throw site, unwrapped all the way
+        // to here), but it COULD catch something it shouldn't — any future error whose prose
+        // happens to contain the substring, which is WF-CC6 again in the opposite direction. Two
+        // rules for one condition means neither is load-bearing.
+        //
+        // ⚠️ This remaining Ollama branch has NO PRODUCER in this repo (grep 2026-08-16: this line
+        // and its test only); Ollama's real model-missing error is an `LLMProviderError.httpError`
+        // 404 already classified by `classifyTransport` above. Left in place only so its removal
+        // is a separate, separately-testable change.
+        if errorDesc.contains("No Ollama model") {
             logger.warning("Model was unloaded during execution. Requesting reload.")
             return .modelReload(message: "⏳ Model was released from memory. Reloading...")
         }
@@ -98,8 +160,14 @@ struct LLMRetryStrategy: LLMRetryHandling {
         // Local captures to prevent escaping mutating 'self' in OSLog autoclosure
         let currentFailures = consecutiveParseFailures
         let maxFailures = maxConsecutiveParseFailures
+        let errorType = String(describing: type(of: error))
 
-        logger.error("Cognitive Generation Failed (\(currentFailures)/\(maxFailures)): \(errorDesc)")
+        // ⚠️ The TYPE and the word UNCLASSIFIED are the point (WF-CC6). The previous line named
+        // the event but not its consequence and never revealed that the error was unrecognised —
+        // so an MLX model-slot race read in the logs exactly like a model emitting bad JSON, and
+        // the misclassification was invisible from a field bundle. If this line names a type that
+        // is plainly not a model-output fault, that type needs a typed arm above.
+        logger.error("Cognitive Generation Failed (\(currentFailures)/\(maxFailures)) — UNCLASSIFIED \(errorType): \(errorDesc). CONSEQUENCE: counted as a MODEL parse failure — a 'your last output failed validation' alert is injected into the model's context and telemetry records .parseExhausted. Both are wrong if the model's output was not the cause.")
 
         if currentFailures >= maxFailures {
             logger.error("Maximum consecutive parse failures reached. Aborting execution.")
@@ -119,6 +187,9 @@ struct LLMRetryStrategy: LLMRetryHandling {
         consecutiveRetries = 0
         consecutiveParseFailures = 0
         consecutiveTransientFailures = 0
+        // Without this, an unrelated race later in the same run would arrive with the budget
+        // already spent and fail on its first occurrence with no retry.
+        consecutiveModelSlotFailures = 0
     }
 
     // MARK: - Budgeted Verdict Application
@@ -190,6 +261,51 @@ struct LLMRetryStrategy: LLMRetryHandling {
         logger.warning("Transient failure (\(detail)). request-id: \(requestId ?? "n/a"). Retrying in \(Int(delay))s (\(consecutiveTransientFailures)/\(transport.maxTransientRetries)).")
         return .networkRetry(
             message: "⏳ \(detail) — retrying in \(Int(delay))s (\(consecutiveTransientFailures)/\(transport.maxTransientRetries))...",
+            delaySeconds: delay
+        )
+    }
+
+    /// Model-slot contention on the single global MLX container: another run loaded a different
+    /// model and `MLXService` refused to answer from the wrong one (WF-CC6).
+    ///
+    /// ⚠️ Deliberately NOT `.modelReload`, which is the intuitive answer and hangs the run.
+    /// `reloadCurrentModel()` returns `true` immediately when a container is resident
+    /// (MLXService.swift:369-370) — and resident-but-wrong IS this state — so it would repair
+    /// nothing while reporting success; and the executor's `.modelReload` arm rewinds
+    /// `currentIteration` with no counter of its own, so the loop would spin unbounded at zero
+    /// cost, yielding a warning chip on every pass (WF-CC8).
+    ///
+    /// ⚠️ Also NOT `transientAction`: the MLX transport budget is 0, so it would fail on the first
+    /// hit and blame model size for a concurrency fault. See `consecutiveModelSlotFailures`.
+    ///
+    /// One bounded retry strictly dominates the pre-fix behaviour: today's defect ACCIDENTALLY
+    /// retries three times (`.parseRetry` re-enters the loop and `container(expecting:)` re-attempts
+    /// the load each pass), so a short race usually self-heals — at the cost of a false
+    /// "your last output failed validation" alert pinned in the model's own context and a burned
+    /// iteration. Bare `.fatal` would remove that recovery and produce MORE hard failures than
+    /// before; this keeps the recovery and drops the lie.
+    private mutating func modelSlotAction(expected: String, actual: String) -> RetryAction {
+        consecutiveModelSlotFailures += 1
+
+        // Locals only — a `mutating` func must not let `self` escape into a log autoclosure.
+        // "<none>" means the slot was EMPTIED by a concurrent load (MLXService.swift:135), not that
+        // a named model is squatting — never render it to the user as a model name.
+        let holder = (actual == "<none>") ? "another local model load" : "'\(actual)'"
+        let attempt = consecutiveModelSlotFailures
+        let cap = Self.maxModelSlotRetries
+        let delay = Self.modelSlotRetryDelay
+
+        if attempt > cap {
+            logger.error("[MLX-LOAD] Model-slot contention PERSISTED for '\(expected)' — \(holder) still holds the slot after \(cap) re-run(s). CONSEQUENCE: the run stops with a model-slot error card; it is NOT counted as a parse failure, so telemetry records .modelUnloaded instead of .parseExhausted and the reliability stats for '\(expected)' are not charged with a bad-output failure.")
+            return .fatal(
+                reason: "This run needs the local model '\(expected)', but \(holder) still held the model slot after a retry. Only one MLX model stays in memory at a time, so two local runs evict each other. Nothing was answered by the wrong model. Run them one at a time — or point both profiles at the same model — and try again.",
+                category: .modelUnloaded
+            )
+        }
+
+        logger.warning("[MLX-LOAD] Model-slot contention: expected '\(expected)', \(holder) is resident — MLXService refused rather than answering from the wrong model. Re-running the iteration in \(Int(delay))s (\(attempt)/\(cap)). CONSEQUENCE: no corrective alert enters the model's context, the parse budget is untouched, and this attempt is not charged against maxIterations.")
+        return .networkRetry(
+            message: "⏳ \(holder) is using the local model slot — reloading '\(expected)' and retrying in \(Int(delay))s (\(attempt)/\(cap))...",
             delaySeconds: delay
         )
     }

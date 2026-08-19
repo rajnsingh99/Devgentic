@@ -54,6 +54,17 @@ enum ProfileReferenceIndex {
         scheduledTaskReferences(to: profileID) + workflowReferences(to: profileID, in: profiles)
     }
 
+    /// Whether the scheduled-task half of the answer can be trusted.
+    ///
+    /// ⚠️ register B24 — `scheduledTasks` is empty both when there are none AND when
+    /// `loadAllTasks()` has not finished (or threw at launch, which leaves it empty for the whole
+    /// session). Reporting "nothing else uses this profile" in the second case is precisely the
+    /// silence A30 was filed to end, re-created by the fix's own data source. `SchedulerService`
+    /// already tracks `hasLoadedTasks` and consults it everywhere else.
+    static var scheduledTasksAreKnown: Bool {
+        SchedulerService.shared.hasLoadedTasks
+    }
+
     private static func scheduledTaskReferences(to profileID: UUID) -> [ProfileReference] {
         SchedulerService.shared.scheduledTasks
             .filter { $0.profileID == profileID }
@@ -99,6 +110,38 @@ enum ProfileReferenceIndex {
                 localized: "\(workflows.count) workflow(s) will refuse to run until the node is repointed: \(names(workflows))."))
         }
         return lines.joined(separator: "\n\n")
+    }
+
+    /// The COMPLETE confirmation body for deleting `profile` — the identity line plus whatever
+    /// else breaks. This is the one every delete entry point must use.
+    ///
+    /// ⚠️ register B10 — extracted rather than copied. A30 built this message inline in the sidebar
+    /// alert, and the three detail-view trash buttons kept the pre-fix "This action cannot be
+    /// undone", so the warning landed on the ONE path A26's own note calls the least discoverable.
+    /// Pasting the sidebar's twelve lines into three more views would have made four copies of a
+    /// message that then drift — this module's most-repeated defect. One function, four callers.
+    /// - Parameter tasksAreKnown: injectable so both branches are testable without driving the
+    ///   `SchedulerService` singleton. Defaults to the live answer.
+    static func deletionMessage(
+        for profile: BackendProfileModel,
+        in profiles: [BackendProfileModel],
+        tasksAreKnown: Bool? = nil
+    ) -> String {
+        let identity = String(localized: "Delete '\(profile.displayName)'? This can't be undone.")
+        var parts = [identity]
+
+        if let warning = deletionWarning(for: references(to: profile.id, in: profiles)) {
+            parts.append(warning)
+        }
+
+        // ⚠️ Only when nothing was found — if references exist we already have something concrete
+        // to show, and hedging on top of it would just dilute the specific warning.
+        if !(tasksAreKnown ?? scheduledTasksAreKnown) {
+            parts.append(String(
+                localized: "Scheduled tasks could not be checked, so any that use this profile are not listed here."))
+        }
+
+        return parts.joined(separator: "\n\n")
     }
 
     /// Caps the list so one profile used by thirty tasks does not produce an unreadable dialog.

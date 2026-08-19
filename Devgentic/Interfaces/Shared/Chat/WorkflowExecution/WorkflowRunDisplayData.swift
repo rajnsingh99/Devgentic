@@ -17,6 +17,9 @@
 //
 
 import SwiftUI
+import os
+
+private let logger = DGLogger(category: "WorkflowRunDisplay")
 
 struct WorkflowRunDisplayData {
     let isLive: Bool
@@ -24,7 +27,6 @@ struct WorkflowRunDisplayData {
     let nodeResults: [NodeDisplayData]
     let finalOutput: String
     let variables: [String: String]
-    let completedNodes: Int
     let totalNodes: Int
     let workflowError: String?
     let userInput: String
@@ -56,7 +58,15 @@ struct WorkflowRunDisplayData {
         let supportsTimeline: Bool
 
         enum NodeStatus: Sendable {
-            case pending, running, completed, failed, skipped
+            case pending, running, completed, failed, skipped, cancelled
+            /// A status written by a NEWER build than this one. The node FINISHED (its detail,
+            /// duration and trace are real and must render) — we just cannot classify how.
+            ///
+            /// ⚠️ This used to map to `.pending`, whose vocabulary is "Waiting" with no duration
+            /// and a waiting-for-execution panel — so a node that finished days ago under a newer
+            /// build read as never having started, and its decoded trace was suppressed. The
+            /// run-LEVEL `.other` already renders "Unknown"; the node level now agrees.
+            case unknown
 
             var icon: String {
                 switch self {
@@ -65,6 +75,8 @@ struct WorkflowRunDisplayData {
                 case .completed: return "checkmark.circle.fill"
                 case .failed:    return "xmark.circle.fill"
                 case .skipped:   return "arrow.right.circle.fill"
+                case .cancelled: return "stop.circle.fill"
+                case .unknown:   return "questionmark.circle.fill"
                 }
             }
 
@@ -74,7 +86,10 @@ struct WorkflowRunDisplayData {
                 case .completed:          return theme.successColor
                 case .failed:             return theme.errorColor
                 case .running:            return theme.accentColor
-                case .pending, .skipped:  return theme.secondaryText
+                case .pending, .skipped, .unknown:  return theme.secondaryText
+                // Amber, not red: the user asked for this. A cancelled node rendered in the
+                // failure colour reported the user's own Stop back to them as a fault.
+                case .cancelled:          return theme.warningColor
                 }
             }
 
@@ -84,7 +99,9 @@ struct WorkflowRunDisplayData {
                 case .running:   return String(localized: "Running...")
                 case .completed: return String(localized: "Completed")
                 case .failed:    return String(localized: "Failed")
-                case .skipped:   return String(localized: "Skipped")
+                case .skipped:   return String(localized: "Not run")
+                case .cancelled: return String(localized: "Cancelled")
+                case .unknown:   return String(localized: "Unknown")
                 }
             }
         }
@@ -135,12 +152,16 @@ struct WorkflowRunDisplayData {
             nodeResults: nodes,
             finalOutput: state.finalOutput,
             variables: state.variables,
-            completedNodes: state.completedNodes,
             totalNodes: state.totalNodes > 0 ? state.totalNodes : nodes.count,
             workflowError: state.workflowError,
             userInput: state.userInput,
             timestamp: state.startedAt,
-            status: nil,
+            // Normally nil for a live run — the derived heuristics are the right answer while it
+            // is still going. A CANCEL is the exception: `handleError` sets `workflowError` too,
+            // so every heuristic downstream reads "failed" and the user's own Stop came back as a
+            // red "Failed" pill for the whole window between stopping and the record freezing.
+            // The run genuinely is cancelled at this point, live or not.
+            status: state.wasCancelled ? .cancelled : nil,
             duration: elapsed
         )
     }
@@ -213,6 +234,43 @@ struct WorkflowRunDisplayData {
                 supportsTimeline: kindSupportsTimeline(layoutNode.kind)
             )
         }
+        + orphanedLiveResults(state: state, nodeByID: nodeByID)
+    }
+
+    /// Live results whose node is NOT in the current layout — appended, never dropped (WF-UI7).
+    ///
+    /// ⚠️ The two factories used to DISAGREE on this exact question: the record path appends the
+    /// orphan and logs ("Showing its persisted trace rather than hiding the evidence"), while this
+    /// live path silently `compactMap`-dropped it. The one reachable route is mid-run layout
+    /// divergence — delete/replace a node on the canvas, Save, return to Execution: the refreshed
+    /// `cachedLayout` no longer contains the node that is EXECUTING RIGHT NOW, and its row —
+    /// status, spine, live tool trace — vanished from the timeline while the step counter silently
+    /// changed denominator. Same policy as the record path now: evidence is never hidden.
+    private static func orphanedLiveResults(
+        state: WorkflowExecutionState,
+        nodeByID: [UUID: WorkflowNode]
+    ) -> [NodeDisplayData] {
+        let orphans = state.nodeResults.filter { nodeByID[$0.nodeID] == nil }
+        guard !orphans.isEmpty else { return [] }
+        logger.info("[WORKFLOW] \(orphans.count) live node result(s) not in the current layout — node deleted mid-run, or the layout diverged. Appending rather than hiding live evidence (same policy as the record path).")
+        return orphans.map { result in
+            NodeDisplayData(
+                id: result.id,
+                nodeID: result.nodeID,
+                profileName: result.profileName,
+                status: mapLiveStatus(result.status),
+                detail: result.detail,
+                duration: result.duration,
+                input: nil,
+                inputSourceLabel: nil,
+                nodeTimeline: state.nodeTimelines[result.nodeID] ?? [],
+                isStreaming: result.status == .running,
+                hasWarnings: result.hasWarnings,
+                // The node's kind is unknowable without its layout entry; default to showing the
+                // timeline — the orphan's live trace is exactly the evidence being preserved.
+                supportsTimeline: true
+            )
+        }
     }
 
     // MARK: - Factory: Frozen Run Record
@@ -230,7 +288,8 @@ struct WorkflowRunDisplayData {
     /// `layout` (the workflow's current layout) is used only to resolve each
     /// node's kind so the Timeline tab can be hidden for single-shot nodes
     /// (bots etc.). Node IDs are stable, so the live layout reliably classifies
-    /// a historical run's nodes; if it's missing the tab simply isn't suppressed.
+    /// a historical run's nodes; if it's missing the tab simply isn't suppressed (the
+    /// suppression is a display nicety — hiding a node's whole trace to achieve it is not).
     static func from(record: WorkflowRunRecord,
                      liveTimelines: [UUID: [TimelineEvent]]? = nil,
                      layout: WorkflowLayout? = nil) -> WorkflowRunDisplayData {
@@ -240,7 +299,15 @@ struct WorkflowRunDisplayData {
             let supportsTimeline: Bool = {
                 guard let layout else { return true }   // unknown layout → preserve prior behavior
                 guard let node = layout.nodes.first(where: { $0.id == snapshot.nodeID }) else {
-                    return false                        // node no longer in layout → treat as output-only
+                    // Do NOT suppress. `false` drops the node's persisted reasoning/tool-call
+                    // trace entirely (the consumer gates the whole AgentTimelineView on this) —
+                    // the very evidence `nodeTimeline` was added to keep for FAILED runs — and
+                    // the doc comment above already promised the opposite. The miss is EXPECTED,
+                    // not exotic: `runHistory` is keyed by conversation with no workflow-profile
+                    // filter, so every node of a run belonging to a different workflow profile
+                    // misses this lookup.
+                    logger.info("[WORKFLOW] Node \(snapshot.nodeID.uuidString.prefix(8)) ('\(snapshot.profileName)') is not in the current layout — deleted, or this run belongs to a different workflow. Showing its persisted trace rather than hiding the evidence.")
+                    return true
                 }
                 return kindSupportsTimeline(node.kind)
             }()
@@ -265,7 +332,6 @@ struct WorkflowRunDisplayData {
             nodeResults: nodes,
             finalOutput: record.finalOutput,
             variables: record.variables,
-            completedNodes: record.nodeResults.count,
             totalNodes: record.nodeResults.count,
             workflowError: record.error,
             userInput: record.userInput,
@@ -280,7 +346,7 @@ struct WorkflowRunDisplayData {
     /// Whether a node kind has a meaningful reasoning/tool-call timeline worth
     /// exposing via the Output/Timeline toggle. Agent profiles (including the
     /// agentic Code and nested Workflow profile types) and Action nodes do; bots,
-    /// image generators, and structural transform nodes (condition/loop/code/gate/
+    /// image generators, and structural transform nodes (condition/code/gate/
     /// trigger) are single-shot output, so their Timeline tab is hidden.
     static func kindSupportsTimeline(_ kind: WorkflowNodeKind) -> Bool {
         switch kind {
@@ -291,7 +357,9 @@ struct WorkflowRunDisplayData {
             }
         case .action:
             return true
-        case .condition, .loop, .code, .gate, .trigger:
+        case .condition, .code, .gate, .trigger:
+            // Genuinely nothing to show: these evaluate a rule or a template in-process and emit
+            // no tool, artifact or agent events.
             return false
         }
     }
@@ -302,6 +370,7 @@ struct WorkflowRunDisplayData {
         case .completed: return .completed
         case .failed:    return .failed
         case .skipped:   return .skipped
+        case .cancelled: return .cancelled
         }
     }
 
@@ -311,12 +380,146 @@ struct WorkflowRunDisplayData {
         case .completed: return .completed
         case .failed:    return .failed
         case .skipped:   return .skipped
-        // A status written by a newer build. Maps to `.pending` — the display vocabulary's
-        // neutral, non-committal state — rather than guessing at success or failure. The node
-        // itself, its detail, its duration and its whole agent trace still render; before the
-        // preserving `.other` case existed, an unrecognised status deleted all of it.
-        case .other:     return .pending
+        case .cancelled: return .cancelled
+        // A status written by a newer build maps to the honest `.unknown`, NOT `.pending`:
+        // pending's vocabulary ("Waiting", no duration, waiting-for-execution panel) claimed a
+        // finished node never started and suppressed its decoded trace. Unknown renders neutrally
+        // and routes the detail/duration/trace like a settled node.
+        case .other:     return .unknown
         }
+    }
+}
+
+// MARK: - Run roll-up (the verdict the user reads — WF-UI5)
+
+/// The run-level verdict logic, extracted OFF the view so it is testable.
+///
+/// ⚠️ These were private computed properties on `WorkflowExecutionTimelineView` — a second,
+/// independent implementation of "what happened to this run" that no test could reach, on a
+/// surface with a documented regression history (five "this regressed before" comments). During
+/// the 2026-08-15 verification the register's own claim about this surface was HALF-WRONG and no
+/// test existed to settle it — which is this extraction's whole justification. The view keeps only
+/// the Color mappings; everything that decides WHAT to say lives here.
+extension WorkflowRunDisplayData {
+
+    /// A node that never executed — rendered neutrally, never as the red of a genuine crash.
+    /// The legacy branch covers records written before 2026-08-15 (no `.skipped` status to read).
+    func nodeDidNotRun(_ node: NodeDisplayData) -> Bool {
+        if node.status == .skipped { return true }
+        return node.status == .failed && WorkflowNodeOutcome.isLegacyUpstreamSkip(detail: node.detail)
+    }
+
+    /// What to tell the user about a node that did not run. The engine writes the structural cause
+    /// into `detail` (`NodeSkipReason.displayText`); the fallback covers pre-2026-08-15 records.
+    func notRunMessage(for node: NodeDisplayData) -> String {
+        let detail = node.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        return detail.isEmpty ? String(localized: "Not run") : detail
+    }
+
+    /// ⚠️ GENUINE failures only. A skipped node is routing, a cancelled node is the user's own
+    /// Stop; counting either turned the pill red on healthy runs.
+    var hasGenuineFailure: Bool {
+        workflowError != nil || nodeResults.contains { $0.status == .failed && !nodeDidNotRun($0) }
+    }
+
+    /// Nodes that have reached a terminal state (`.unknown` is terminal — it FINISHED, under a
+    /// newer build).
+    var settledNodeCount: Int {
+        nodeResults.filter {
+            switch $0.status {
+            case .completed, .failed, .skipped, .cancelled, .unknown: return true
+            case .pending, .running: return false
+            }
+        }.count
+    }
+
+    var hasRunningNode: Bool { nodeResults.contains { $0.status == .running } }
+
+    /// 1-based "step X of N" — the settled nodes plus the one currently executing.
+    var currentStepNumber: Int {
+        min(settledNodeCount + (hasRunningNode ? 1 : 0), max(nodeResults.count, 1))
+    }
+
+    var isCancelledRun: Bool { status == .cancelled }
+
+    /// True when the record was stamped by a NEWER build with a status this build cannot classify.
+    /// The Final Outcome row must not assert success over it (WF-UI1): the pill honestly said
+    /// "Unknown" while the row one line below said a green "Completed".
+    var hasUnknownPersistedStatus: Bool {
+        if case .other = status { return true }
+        return false
+    }
+
+    /// The Final Outcome row / spine state. `.pending` here means "awaiting inputs", which the
+    /// spine and awaiting logic depend on — run-level overrides (cancelled, unknown) are applied
+    /// at the ROW, not here.
+    var rollupOutcome: NodeDisplayData.NodeStatus {
+        if isRunning {
+            let allSettled = !nodeResults.isEmpty && settledNodeCount == nodeResults.count
+            return allSettled ? .running : .pending
+        }
+        if workflowError != nil { return .failed }
+        if nodeResults.contains(where: { $0.status == .failed && !nodeDidNotRun($0) }) { return .failed }
+        if nodeResults.isEmpty { return .pending }
+        return .completed
+    }
+
+    /// The header pill's verdict. ⚠️ The PERSISTED status wins over the derived heuristics — a
+    /// `.running` orphan stub must say "Running", and `.other` must say "Unknown", never a
+    /// derived "Completed" (see the regression history on the view).
+    enum PillVerdict { case running, cancelled, failed, unknown, completed }
+
+    var pillVerdict: PillVerdict {
+        if let status {
+            switch status {
+            case .running:   return .running
+            case .cancelled: return .cancelled
+            case .failed:    return .failed
+            case .other:     return .unknown
+            // A record marked completed that nonetheless carries a failed node is reported as
+            // failed — the nodes are the evidence, the roll-up is a summary of them.
+            case .completed: return hasGenuineFailure ? .failed : .completed
+            }
+        }
+        if isRunning { return .running }
+        if isCancelledRun { return .cancelled }
+        if hasGenuineFailure { return .failed }
+        return .completed
+    }
+
+    var pillLabel: String {
+        switch pillVerdict {
+        case .running:   return String(localized: "Running")
+        case .cancelled: return String(localized: "Cancelled")
+        case .failed:    return String(localized: "Failed")
+        case .unknown:   return String(localized: "Unknown")
+        case .completed: return String(localized: "Completed")
+        }
+    }
+
+    /// The header's step counter ("step 2 of 6 · 12s", "failed at step 3 of 6", "6 steps").
+    var stepCounterDescription: String {
+        let total = nodeResults.count
+        let time = DurationFormat.seconds(duration)
+        let suffix = time.isEmpty ? "" : " · \(time)"
+        guard total > 0 else { return time }
+
+        if isRunning {
+            return String(localized: "step \(currentStepNumber) of \(total)\(suffix)")
+        }
+        if isCancelledRun {
+            return String(localized: "stopped\(suffix)")
+        }
+        if hasGenuineFailure {
+            // First genuinely-failed node (skip the not-run cascade) = where it broke.
+            let failedIndex = nodeResults.firstIndex { $0.status == .failed && !nodeDidNotRun($0) }
+                ?? nodeResults.firstIndex { $0.status == .failed }
+            if let failedIndex {
+                return String(localized: "failed at step \(failedIndex + 1) of \(total)\(suffix)")
+            }
+            return String(localized: "failed\(suffix)")
+        }
+        return "\(total) step\(total == 1 ? "" : "s")\(suffix)"
     }
 }
 

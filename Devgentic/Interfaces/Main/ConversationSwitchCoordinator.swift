@@ -60,6 +60,11 @@ final class ConversationSwitchCoordinator {
     /// change so only the newest selection's work reaches completion.
     private var loadTask: Task<Void, Never>?
 
+    /// Conversations whose persisted workflow run history has been read from disk this session.
+    /// Tracked explicitly because `workflowRunHistory` key presence does NOT mean "loaded" —
+    /// starting a run creates the key too. See `loadWorkflowRunHistoryIfNeeded`.
+    private var loadedRunHistoryConversationIDs: Set<UUID> = []
+
     // MARK: - Init
 
     init(
@@ -124,9 +129,14 @@ final class ConversationSwitchCoordinator {
 
             // [QA revival P1e] Unload models only if NO stream is active anywhere AND the new
             // conversation uses a different backend profile. `streamingActive` covers only the
-            // main window's slot; also consult the shared ActiveStreamManager so a QuickAccess /
-            // ChatOps / scheduler run (which never sets streamingMessageID) isn't rug-pulled
-            // mid-generation. Re-read after the debounce so a run that began during it counts.
+            // main window's slot; also consult the shared ActiveStreamManager so a QuickAccess or
+            // Jarvis run — which keep their own PRIVATE slots and never set the shared
+            // streamingMessageID — isn't rug-pulled mid-generation. Re-read after the debounce so
+            // a run that began during it counts.
+            // ⚠️ CORRECTED 2026-08-17: this comment previously claimed ChatOps and scheduler runs
+            // "never set streamingMessageID". They demonstrably DO — MessagingCoordinator:690 and
+            // SchedulerCoordinator:186 — so they are covered by the `streamingActive` term, not by
+            // the activeStreams scan. That is not the same as being covered CORRECTLY; see [C7].
             // [C7] Count only ACTIVELY-STREAMING runs. A run parked on a HITL sits in
             // activeStreams until answered (possibly hours) but is idle — excluding it lets the
             // model unload while parked (reloading cheaply on resume) instead of pinning multiple
@@ -179,10 +189,44 @@ final class ConversationSwitchCoordinator {
     /// dictionary so SwiftUI views see them.
     private func loadWorkflowRunHistoryIfNeeded(for conversationID: UUID) {
         guard let vm = viewModel else { return }
-        guard vm.workflowRunHistory[conversationID] == nil else { return }
-        let records = WorkflowRunHistoryStore.shared.load(forConversation: conversationID)
-        if !records.isEmpty {
-            vm.workflowRunHistory[conversationID] = records
+
+        // Load state is tracked EXPLICITLY. This used to guard on
+        // `vm.workflowRunHistory[conversationID] == nil`, inferring "already loaded from disk"
+        // from key presence — but `MessagingCoordinator.sendMessage` creates that key itself at
+        // run start (`workflowRunHistory[cid, default: []].insert(initialRecord, at: 0)`). This
+        // loader runs at the END of a debounced task (250 ms sleep, then the MLX/Ollama unloads,
+        // then `loadConversation`), so a send landing inside that window won the race and the
+        // disk load was then skipped FOREVER — the function has no other caller and no
+        // invalidation. The run picker, the "1/N" badge and the whole history list showed only
+        // the new run until relaunch.
+        guard !loadedRunHistoryConversationIDs.contains(conversationID) else { return }
+        loadedRunHistoryConversationIDs.insert(conversationID)
+
+        // Decode OFF-MAIN (WF-UI6): this used to block the main thread for the full JSON decode
+        // of up to 20 run blobs on first visit. The once-only guard above ran synchronously, so
+        // the Task cannot double-load; the merge below is keyed by id and in-memory wins, so a
+        // run started while the decode was in flight survives regardless of ordering.
+        Task { [weak self] in
+            let records = await WorkflowRunHistoryStore.shared.loadFinalized(forConversation: conversationID)
+            guard let self, let vm = self.viewModel else { return }
+            self.applyLoadedRunHistory(records, for: conversationID, vm: vm)
         }
+    }
+
+    /// Merges disk records into the observable history — split out so the async load above stays
+    /// readable. MERGE rather than replace: an in-flight run inserted while we were loading is
+    /// newer than anything on disk and must survive. Keyed by id, in-memory wins.
+    private func applyLoadedRunHistory(_ records: [WorkflowRunRecord], for conversationID: UUID, vm: MainApplicationViewModel) {
+        guard !records.isEmpty else { return }
+        let inMemory = vm.workflowRunHistory[conversationID] ?? []
+        if inMemory.isEmpty {
+            vm.workflowRunHistory[conversationID] = records
+            logger.info("[WORKFLOW] Loaded \(records.count) persisted run(s) for conversation \(conversationID.uuidString.prefix(8)).")
+            return
+        }
+        let inMemoryIDs = Set(inMemory.map(\.id))
+        let merged = inMemory + records.filter { !inMemoryIDs.contains($0.id) }
+        vm.workflowRunHistory[conversationID] = merged
+        logger.info("[WORKFLOW] Merged \(records.count) persisted run(s) with \(inMemory.count) already in memory for conversation \(conversationID.uuidString.prefix(8)) — \(merged.count) total; the in-memory rows are a run started during the load and win on id.")
     }
 }

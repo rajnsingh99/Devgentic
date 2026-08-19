@@ -37,6 +37,19 @@ struct Advisory: Identifiable, Equatable {
         /// The selected profile's stored configuration could not be decoded, so the app is showing a
         /// placeholder rather than what the user configured.
         case profileUnreadable
+        /// The selected agent/bot has no system instructions. Register B14.
+        ///
+        /// ⚠️ This category exists because `ProfileValidator`'s `.advisory` for missing
+        /// instructions had **no reachable surface**. The save-advisory banner (A34) lives in the
+        /// three editors, and both editors that could generate this finding hard-block the save
+        /// before `saveProfile` is ever called — so the only paths that actually produce it are
+        /// the out-of-band writers (the thinking auto-heal, the capability chips, the Tool
+        /// Library, the quit-time save), every one of which discards the returned array.
+        /// The finding was real, correctly computed, and structurally invisible.
+        ///
+        /// Chat is the right surface precisely because it is where the consequence lands: an agent
+        /// with no instructions is about to answer with no guidance at all.
+        case profileMissingInstructions
     }
 
     enum Action: Equatable {

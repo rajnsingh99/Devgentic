@@ -199,7 +199,17 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
             case .gate(let g):
                 // [D1] Real gate prompt — the transport renders one tappable button per option, and a
                 // tap routes back through `hitl:gate:<opID>:<idx>` → resumeGate.
-                hitlType = .gate(prompt: g.prompt, options: g.options)
+                //
+                // ⚠️ A Router's ambiguity arbitration carries the text being routed in `inputText`,
+                // not in the prompt, because the highlight spans are measured against that exact
+                // string. Slack/Discord/Telegram cannot render coloured spans, so the input is folded
+                // into the prompt text here — without this the remote reader sees "2 rules match
+                // this input — which branch?" with no way to know what the input was.
+                let remotePrompt: String = {
+                    guard let input = g.inputText, !input.isEmpty else { return g.prompt }
+                    return "\(g.prompt)\n\n\(input)"
+                }()
+                hitlType = .gate(prompt: remotePrompt, options: g.options)
             }
 
             do {

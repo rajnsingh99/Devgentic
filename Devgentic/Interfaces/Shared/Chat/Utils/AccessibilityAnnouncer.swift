@@ -71,22 +71,8 @@ enum AccessibilityAnnouncer {
     }
 }
 
-// MARK: - View integration
-
-extension View {
-    /// Announces when `value` becomes non-nil — the shape almost every case here takes
-    /// (a banner appears, an error arrives, a gate opens).
-    ///
-    /// Announcing on *appearance* rather than on every change matters: a timer that ticks
-    /// each second would otherwise talk over everything else in the app.
-    func announceOnAppear<V: Equatable>(
-        _ value: V?,
-        urgency: AccessibilityAnnouncer.Urgency = .polite,
-        message: @escaping (V) -> String
-    ) -> some View {
-        onChange(of: value, initial: true) { _, newValue in
-            guard let newValue else { return }
-            AccessibilityAnnouncer.announce(message(newValue), urgency: urgency)
-        }
-    }
-}
+// NOTE: a `View.announceOnAppear(_:urgency:message:)` convenience lived here and was deleted
+// on 2026-08-11 — it had ZERO call sites since the day it was written. Every announcement site
+// (ChatSearchBar, ErrorMessageView, InteractionBannerStack ×2) calls `announce` directly from
+// its own `.task(id:)`/`.onChange`, which is the same amount of code. Re-add it only when
+// something actually adopts it.

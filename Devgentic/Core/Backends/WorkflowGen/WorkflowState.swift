@@ -5,9 +5,9 @@
 //  Created by Raj Singh on 11/04/26.
 //
 //  Typed workflow execution state. Stores full per-node outputs (not truncated),
-//  shared mutable variables, loop counters, and execution log.
-//  Context compression is deferred to injection time (ContextCompressor)
-//  rather than storage time.
+//  shared mutable variables, and execution log.
+//  Upstream input assembly happens at injection time (WorkflowInputAssembler),
+//  not at storage time.
 //
 
 import Foundation
@@ -20,6 +20,12 @@ private let wfStateLogger = DGLogger(category: "WorkflowState")
 /// Full output from a single node's execution. Unlike NodeResultEnvelope
 /// (which carries profile metadata for UI/tracing), NodeOutput focuses on
 /// the data a downstream node needs: text, artifacts, status.
+/// Whether a node runs, and — when it does not — why. See `WorkflowState.runDecision(for:edges:nodes:)`.
+enum NodeRunDecision: Sendable, Equatable {
+    case run
+    case skip(NodeSkipReason)
+}
+
 struct NodeOutput: Sendable {
     let text: String
     /// Structured form of `text` when the node produced JSON (object/array).
@@ -36,12 +42,10 @@ struct NodeOutput: Sendable {
 
 // MARK: - Workflow State
 
-/// Typed workflow execution state that tracks per-node outputs, shared variables,
-/// and loop counters.
+/// Typed workflow execution state that tracks per-node outputs and shared variables.
 ///
 /// - Stores `NodeOutput` (text + artifacts + metadata) instead of full `NodeResultEnvelope`
-/// - `variables` for shared mutable state (Code/Loop nodes can write)
-/// - `loopCounters` for iteration tracking
+/// - `variables` for shared mutable state (Code nodes can write)
 /// - Context compression happens at injection time (per-LLM-node), not storage time
 struct WorkflowState: Sendable {
 
@@ -49,11 +53,8 @@ struct WorkflowState: Sendable {
     private(set) var nodeOutputs: [UUID: NodeOutput] = [:]
 
     /// Shared mutable variables across nodes.
-    /// Code nodes and Loop nodes can write to these; any node can read.
+    /// Code nodes can write to these; any node can read.
     private(set) var variables: [String: String] = [:]
-
-    /// Loop iteration counters keyed by loop node ID.
-    private(set) var loopCounters: [UUID: Int] = [:]
 
     /// Active output ports per node. When set, only edges from these port labels are followed.
     /// Used by condition nodes to selectively activate downstream branches.
@@ -65,15 +66,20 @@ struct WorkflowState: Sendable {
 
     // MARK: - Record
 
+    /// Human-readable status for logs. Shared so a routing log and a record log describe the same
+    /// status the same way when correlating a run.
+    static func statusLabel(_ status: NodeExecutionStatus) -> String {
+        switch status {
+        case .completed: return "completed"
+        case .failed(let reason): return "failed(\(reason.localizedDescription))"
+        case .canceled: return "canceled"
+        case .skipped(let reason): return "skipped(\(reason.rawValue))"
+        }
+    }
+
     /// Records a node's execution result from a NodeResultEnvelope.
     mutating func recordResult(from envelope: NodeResultEnvelope) {
-        let statusLabel: String
-        switch envelope.status {
-        case .completed: statusLabel = "completed"
-        case .failed(let reason): statusLabel = "failed(\(reason.localizedDescription))"
-        case .canceled: statusLabel = "canceled"
-        case .skipped(let reason): statusLabel = "skipped(\(reason))"
-        }
+        let statusLabel = Self.statusLabel(envelope.status)
         wfStateLogger.info("Recording result: node=\(envelope.profileName) [\(envelope.nodeID)] status=\(statusLabel) duration=\(String(format: "%.1f", envelope.metadata.duration))s output=\(envelope.output.count) chars")
         wfStateLogger.debug("Node '\(envelope.profileName)' output preview: \(String(envelope.output.prefix(300)))")
 
@@ -98,22 +104,10 @@ struct WorkflowState: Sendable {
         ))
     }
 
-    /// Sets a shared variable (for Code/Loop nodes).
+    /// Sets a shared variable (for Code nodes).
     mutating func setVariable(_ key: String, value: String) {
         wfStateLogger.info("Variable set: '\(key)' = \(String(value.prefix(200))) (\(value.count) chars)")
         variables[key] = value
-    }
-
-    /// Increments a loop counter and returns the new value.
-    @discardableResult
-    mutating func incrementLoopCounter(for nodeID: UUID) -> Int {
-        loopCounters[nodeID, default: 0] += 1
-        return loopCounters[nodeID]!
-    }
-
-    /// Resets a loop counter (when loop exits).
-    mutating func resetLoopCounter(for nodeID: UUID) {
-        loopCounters.removeValue(forKey: nodeID)
     }
 
     /// Sets which output ports are active for a node (used by condition nodes).
@@ -138,11 +132,88 @@ struct WorkflowState: Sendable {
         return upstreamNodeIDs.compactMap { nodeOutputs[$0] }
     }
 
-    /// Returns upstream results as NodeResultEnvelope, filtered by active output ports.
+    // MARK: - The edge-liveness predicate (single source of truth)
+
+    /// Is this one incoming edge "live" — i.e. did the upstream actually send something down it?
     ///
-    /// When an upstream node has explicit port activation (e.g., condition routing or error port),
-    /// only edges whose `sourcePortLabel` matches an active port are included. This prevents
-    /// inactive branch data from leaking into downstream nodes.
+    /// ⚠️ THE ONE PLACE THIS IS DECIDED. Routing ("does the node run?", `shouldExecuteNode`) and
+    /// data ("what does it receive?", `upstreamResultEnvelopes`) are two questions over the same
+    /// edges, and EVERY historical case where they answered differently was a bug (WF13, and the
+    /// `.canceled` data leak found 2026-08-12). They used to be two implementations with a comment
+    /// telling the next reader to keep them in step; they are now one predicate called twice, so
+    /// agreement is structural rather than maintained by hand. Do not inline a copy of this.
+    ///
+    /// Two rules, in order:
+    ///   1. LIVENESS — the upstream completed, or this is an activated `error` route. The per-node
+    ///      failure policy (`skipDependents`/`stopWorkflow`/`continueAll`) was retired 2026-08-12:
+    ///      failure routing is expressed on the CANVAS by wiring the `error` port. Leave it unwired
+    ///      and the branch stops, which is exactly what `skipDependents` always was.
+    ///      ⚠️ This rule is what catches `.canceled`. `.failed` and cascade-`.skipped` both activate
+    ///      `["error"]` and so would be caught by rule 2 alone; `.canceled` activates NOTHING, and
+    ///      without this rule it falls through to the default-edge allow and reads as a success.
+    ///   2. PORT MATCH — if the upstream made an explicit routing decision, only the ports it
+    ///      activated may fire.
+    func edgeIsLive(_ edge: WorkflowEdge) -> Bool {
+        let upstreamID = edge.sourceNodeID
+        guard let output = nodeOutputs[upstreamID] else { return false }
+
+        let isCompleted: Bool
+        if case .completed = output.status {
+            isCompleted = true
+        } else {
+            isCompleted = false
+        }
+
+        // Error routing: this edge leaves an `error` port that the upstream activated (on failure,
+        // or on an upstream-cascade skip so recovery chains don't dead-end).
+        let isErrorRoute = edge.sourcePortLabel == WorkflowEdge.errorPortLabel
+            && activeOutputPorts[upstreamID]?.contains(WorkflowEdge.errorPortLabel) == true
+
+        guard isCompleted || isErrorRoute else { return false }
+
+        if let activePorts = activeOutputPorts[upstreamID] {
+            // Upstream made an explicit routing decision (condition rule, gate option, or `error`
+            // on failure/skip). Only the ports it activated may fire.
+            return activePorts.contains(edge.sourcePortLabel ?? "")
+        }
+
+        // No explicit port activation, and liveness above means the upstream COMPLETED. Every edge
+        // passes EXCEPT a dedicated `error` branch — an error handler must never run on success.
+        return edge.sourcePortLabel != WorkflowEdge.errorPortLabel
+    }
+
+    /// Whether the `error` signal should keep travelling down a branch that is dying HERE.
+    ///
+    /// ⚠️ THE PREDICATE FOR "may a skipped node activate its `error` port". A skip used to activate
+    /// `error` UNCONDITIONALLY, which meant an error handler wired to a node that was merely
+    /// ROUTED PAST fired on a run where nothing failed — a recovery branch running against a
+    /// healthy workflow, with the run still reporting success. (Sharpest shape: `A → Handler` on
+    /// `A.error`, `Handler → Notify` on `Handler.error`. A SUCCEEDS, Handler correctly stands down
+    /// with `.errorPortNotTaken` — and then told Notify that Handler had failed.)
+    ///
+    /// ⚠️ The test is the upstream's ACTIVE PORTS, deliberately NOT the skip reason. Two reasons:
+    ///   1. `NodeSkipReason.indicatesProblem` is documented as presentation-only, and `.upstreamSkipped`
+    ///      is genuinely ambiguous — it covers both "cascade from a crash" and "cascade from a Router
+    ///      going the other way". Gating on it fixes the first hop and re-breaks the second.
+    ///   2. `error` only ever enters `activeOutputPorts` from a node that FAILED (the four driver
+    ///      failure paths) or from a skip that inherited it through this very method. So the flag IS
+    ///      the provenance: it is present on a dead branch exactly when a real failure started it.
+    /// That makes the propagation correct at ANY depth without a separate cascade-tracking channel,
+    /// and leaves every `NodeSkipReason` label — which users read — untouched.
+    ///
+    /// ⚠️ A CANCELLED upstream activates nothing (see `edgeIsLive` rule 1), so it does not propagate
+    /// either. That is intended: Stop is a teardown, not a failure to recover from.
+    func upstreamSignalledError(for nodeID: UUID, edges: [WorkflowEdge]) -> Bool {
+        edges.contains { edge in
+            edge.targetNodeID == nodeID
+                && activeOutputPorts[edge.sourceNodeID]?.contains(WorkflowEdge.errorPortLabel) == true
+        }
+    }
+
+    /// Returns upstream results as NodeResultEnvelope, filtered to the LIVE incoming edges.
+    ///
+    /// "Live" is decided by `edgeIsLive` — the same predicate `shouldExecuteNode` routes on — so a
+    /// node can never receive data down an edge that did not fire. See that method for the rules.
     func upstreamResultEnvelopes(for nodeID: UUID, edges: [WorkflowEdge]) -> [NodeResultEnvelope] {
         let incomingEdges = edges.filter { $0.targetNodeID == nodeID }
 
@@ -150,14 +221,11 @@ struct WorkflowState: Sendable {
             let uid = edge.sourceNodeID
             guard let output = nodeOutputs[uid] else { return nil }
 
-            // Port-level filtering: if upstream has explicit active ports,
-            // only include results from edges matching an active port.
-            if let activePorts = activeOutputPorts[uid] {
-                let edgePort = edge.sourcePortLabel ?? ""
-                guard activePorts.contains(edgePort) else {
-                    wfStateLogger.info("Upstream '\(output.profileName)' filtered out: port '\(edgePort)' not in active ports [\(activePorts.sorted().joined(separator: ", "))]")
-                    return nil
-                }
+            guard edgeIsLive(edge) else {
+                let edgePort = edge.sourcePortLabel ?? "(default)"
+                let ports = activeOutputPorts[uid].map { "[\($0.sorted().joined(separator: ", "))]" } ?? "(none)"
+                wfStateLogger.info("[WF_ROUTE] Upstream '\(output.profileName)' filtered out of node \(nodeID) input: edge port '\(edgePort)' is not live (upstream status=\(Self.statusLabel(output.status)), active ports=\(ports)). CONSEQUENCE: this node will not see that upstream's output.")
+                return nil
             }
 
             return NodeResultEnvelope(
@@ -187,95 +255,220 @@ struct WorkflowState: Sendable {
         return dedupedEnvelopes
     }
 
-    /// Whether a downstream node should execute based on upstream status and port activation.
-    /// Checks: (1) upstream completed, has continueAll policy, or edge is an error route,
-    /// (2) the connecting edge's port label matches the upstream's active output ports.
-    func shouldExecuteNode(_ nodeID: UUID, edges: [WorkflowEdge], nodes: [WorkflowNode]) -> Bool {
-        let incomingEdges = edges.filter { $0.targetNodeID == nodeID }
-        let targetNode = nodes.first(where: { $0.id == nodeID })
-        let nodeName = targetNode?.displayName ?? nodeID.uuidString
+    // MARK: - Routing provenance (what makes the join graph-derived)
 
-        guard !incomingEdges.isEmpty else {
-            wfStateLogger.info("Routing: '\(nodeName)' → EXECUTE (entry node, no incoming edges)")
-            return true
+    /// For every node, which ancestor output ports it is reachable from:
+    /// `portReach[node][ancestor] = the set of that ancestor's ports with a path to node`.
+    ///
+    /// This is what lets the engine work out, with no user input, whether two incoming branches are
+    /// **alternatives** (they hang off different ports of a common ancestor, so at most one can ever
+    /// be live) or **independent** (both are genuinely expected). See `shouldExecuteNode`.
+    ///
+    /// Pure function of the graph — no run state — so it says nothing about what *did* happen, only
+    /// what *could*. Fixpoint rather than topological order so a malformed layout with a cycle
+    /// terminates instead of hanging; the iteration bound is the node count, since a simple path
+    /// cannot be longer than that.
+    ///
+    /// Cost is O(V·E) per call on a graph of tens of nodes — negligible, and deliberately not
+    /// cached: a stale reachability map is a routing bug, and `WorkflowState` is a value type
+    /// snapshotted for parallel execution.
+    static func computePortReach(nodes: [WorkflowNode], edges: [WorkflowEdge]) -> [UUID: [UUID: Set<String>]] {
+        var reach: [UUID: [UUID: Set<String>]] = [:]
+        var changed = true
+        var iterations = 0
+
+        while changed && iterations <= nodes.count {
+            changed = false
+            iterations += 1
+
+            for edge in edges {
+                // What the SOURCE depends on, plus the source's own port for this edge.
+                var inherited = reach[edge.sourceNodeID] ?? [:]
+                inherited[edge.sourceNodeID, default: []].insert(edge.sourcePortLabel ?? "")
+
+                var target = reach[edge.targetNodeID] ?? [:]
+                var grew = false
+                for (ancestor, ports) in inherited {
+                    let before = target[ancestor]?.count ?? 0
+                    target[ancestor, default: []].formUnion(ports)
+                    if target[ancestor]!.count != before { grew = true }
+                }
+                if grew {
+                    reach[edge.targetNodeID] = target
+                    changed = true
+                }
+            }
         }
-
-        // Per-edge predicate: is this single incoming branch "live" (succeeded,
-        // or routed through via continueAll / an active error port)? This is the
-        // unit the join quantifier below is applied over.
-        let edgeIsSatisfied: (WorkflowEdge) -> Bool = { edge in
-            let upstreamID = edge.sourceNodeID
-
-            guard let output = nodeOutputs[upstreamID] else { return false }
-            let upstreamNode = nodes.first(where: { $0.id == upstreamID })
-            let isCompleted: Bool
-            if case .completed = output.status {
-                isCompleted = true
-            } else {
-                isCompleted = false
-            }
-            let isContinueAll = upstreamNode?.nodeConfig?.onFailure == .continueAll
-
-            // Error routing: if this edge comes from an "error" port and the upstream
-            // has activated that port (due to failure), allow execution regardless of status.
-            let isErrorRoute = edge.sourcePortLabel == "error"
-                && activeOutputPorts[upstreamID]?.contains("error") == true
-
-            guard isCompleted || isContinueAll || isErrorRoute else { return false }
-
-            // Port-level activation check.
-            if let activePorts = activeOutputPorts[upstreamID] {
-                // Upstream has explicit port activation (condition routing or error port).
-                // Skip port filtering only when upstream passed via continueAll and failed.
-                if isContinueAll && !isCompleted { return true }
-                let edgePort = edge.sourcePortLabel ?? ""
-                return activePorts.contains(edgePort)
-            }
-
-            // No explicit port activation on upstream.
-            // Completed nodes: every edge passes EXCEPT a dedicated `error` branch.
-            // An `error` edge fires only when the node actually FAILED (handled by
-            // the explicit-ports block above, since failure activates ["error"]);
-            // on success it never fires. Without this, an `error`-port handler would
-            // also run on success, because a succeeded node sets no explicit ports.
-            // Non-completed (continueAll): only default edges pass; labeled routes
-            // like "error" require explicit activation via setActiveOutputPorts.
-            if isCompleted {
-                return edge.sourcePortLabel != "error"
-            }
-            if let label = edge.sourcePortLabel, !label.isEmpty {
-                return false // Non-completed: block labeled edges without active port
-            }
-            return true
-        }
-
-        // Join quantifier — applied per UPSTREAM BRANCH, not per edge. An upstream
-        // activates exactly ONE port-outcome per run (a profile's success default vs
-        // its `error` port; a condition's single matched rule), so multiple edges
-        // from the SAME upstream are inherently OR: the branch is "live" if ANY of its
-        // edges fired. The quantifier then applies across distinct upstream branches:
-        //   .all (AND-join, default) — every upstream branch must be live.
-        //   .any (OR-join / merge)   — at least one live upstream branch is enough.
-        // This is what lets a node wired to both an upstream's default and `error`
-        // ports run whether that upstream succeeds or fails — per-edge AND would make
-        // it permanently unreachable (the two ports are mutually exclusive).
-        let joinMode = targetNode?.nodeConfig?.joinMode ?? .all
-        let branchLive = Dictionary(grouping: incomingEdges, by: { $0.sourceNodeID })
-            .mapValues { edges in edges.contains(where: edgeIsSatisfied) }
-        let result: Bool
-        switch joinMode {
-        case .all: result = branchLive.values.allSatisfy { $0 }
-        case .any: result = branchLive.values.contains(true)
-        }
-
-        wfStateLogger.info("Routing: '\(nodeName)' → \(result ? "EXECUTE" : "SKIP") (join: \(joinMode.rawValue), upstream branches: \(branchLive.count), incoming edges: \(incomingEdges.count))")
-        return result
+        return reach
     }
 
-    /// Returns outputs from all terminal nodes (nodes with no outgoing edges).
+    /// Whether a downstream node should execute.
+    ///
+    /// ## The join is DERIVED from the graph — there is no user setting
+    ///
+    /// The old `joinMode` picker ("Fan-in Behavior": Wait for all / Any one) was retired on
+    /// 2026-08-13 by user decision. It asked the user a question the topology already answers, and
+    /// its two values could not express the correct behaviour for a node that has both independent
+    /// and mutually-exclusive upstreams. The rule now is:
+    ///
+    /// > **AND across independent inputs, OR within alternatives.**
+    /// >
+    /// > Every incoming branch is REQUIRED to be live, *except* a dead branch that has a live
+    /// > sibling depending on a different port of a common ancestor — an alternative that won.
+    ///
+    /// Worked through, in order of how often it bites:
+    ///
+    /// - **Diamond over a Condition** (C→A on "True", C→B on "False", A and B→M). One arm always
+    ///   cascade-skips. A and B are exclusive on C, so the dead arm is excused by the live one and
+    ///   M runs. Under the old default this merge could NEVER run — the single most common broken
+    ///   canvas shape.
+    /// - **N parallel branches, one fails.** Nothing is exclusive, so every branch is required and M
+    ///   skips. ⚠️ **This is the fail-safe half and it must stay** — running a synthesiser on 2 of 3
+    ///   researchers is silent partial output.
+    /// - **M wired to ONE arm of a Condition plus an independent node.** The arm's branch has no
+    ///   live exclusive sibling reaching M, so it stays required: routing away from that arm skips
+    ///   M, which is what drawing an edge from a single port means.
+    /// - **M wired to `A.error` and to a node downstream of `A.default`.** Exclusive on A's own
+    ///   ports, so M runs whichever way A went — the finaliser pattern, free.
+    /// - **Independent branch + an exclusive pair.** The pair OR-satisfies each other, the
+    ///   independent one is still required. ⚠️ Neither old setting could express this.
+    /// - **Diamond where the TAKEN arm fails.** The exclusive group has no *live* member, so nothing
+    ///   is excused and M skips. Failure safety needs no separate mechanism: a failed branch simply
+    ///   is not live.
+    ///
+    /// Multiple edges from the SAME upstream are still one branch, OR'd — an upstream activates
+    /// exactly one port-outcome per run, so per-edge AND would make a default+`error` double-wire
+    /// permanently unreachable.
+    func shouldExecuteNode(_ nodeID: UUID, edges: [WorkflowEdge], nodes: [WorkflowNode]) -> Bool {
+        if case .run = runDecision(for: nodeID, edges: edges, nodes: nodes) { return true }
+        return false
+    }
+
+    /// Whether a node runs, and — when it does not — WHY.
+    ///
+    /// ⚠️ The reason is the point. `shouldExecuteNode` answers only yes/no, and for a long time that
+    /// was all the engine told anyone: every non-running node was reported to the UI as a failure
+    /// carrying the literal "Upstream dependency failed". On a healthy conditional workflow that
+    /// sentence is simply untrue — the Router routed, nothing failed — and the user was shown a
+    /// failure they then had to go looking for. Deciding the reason HERE is what makes it honest,
+    /// because this is the only place that knows which branch was dead and what its upstream did.
+    ///
+    /// `shouldExecuteNode` is kept as a thin wrapper so the routing rules below have exactly one
+    /// implementation; the two must never be allowed to become separate answers to the same
+    /// question (see `edgeIsLive` for what that cost last time).
+    func runDecision(for nodeID: UUID, edges: [WorkflowEdge], nodes: [WorkflowNode]) -> NodeRunDecision {
+        let incomingEdges = edges.filter { $0.targetNodeID == nodeID }
+        let nodeName = nodes.first(where: { $0.id == nodeID })?.displayName ?? nodeID.uuidString
+
+        guard !incomingEdges.isEmpty else {
+            wfStateLogger.info("[WF_ROUTE] Routing: '\(nodeName)' → EXECUTE (entry node, no incoming edges)")
+            return .run
+        }
+
+        let byUpstream = Dictionary(grouping: incomingEdges, by: { $0.sourceNodeID })
+        let reach = Self.computePortReach(nodes: nodes, edges: edges)
+
+        // Each branch's provenance = what its upstream depends on, plus the ports THIS branch
+        // leaves the upstream by (so a branch off `A.error` is distinguishable from one off
+        // `A.default` even though both share the upstream).
+        var provenance: [UUID: [UUID: Set<String>]] = [:]
+        var live: [UUID: Bool] = [:]
+        for (upstreamID, branchEdges) in byUpstream {
+            var p = reach[upstreamID] ?? [:]
+            p[upstreamID, default: []].formUnion(branchEdges.map { $0.sourcePortLabel ?? "" })
+            provenance[upstreamID] = p
+            live[upstreamID] = branchEdges.contains(where: edgeIsLive)
+        }
+
+        /// Can both branches be live on the same run? No, if they need different ports of a
+        /// common ancestor — that ancestor fires exactly one port-outcome.
+        func mutuallyExclusive(_ a: UUID, _ b: UUID) -> Bool {
+            guard let pa = provenance[a], let pb = provenance[b] else { return false }
+            for (ancestor, portsA) in pa {
+                guard let portsB = pb[ancestor], !portsA.isEmpty, !portsB.isEmpty else { continue }
+                if portsA.isDisjoint(with: portsB) { return true }
+            }
+            return false
+        }
+
+        var unsatisfied: [String] = []
+        var reasons: [NodeSkipReason] = []
+        for (upstreamID, isLive) in live where !isLive {
+            let excusedBy = live.first { other, otherLive in
+                otherLive && mutuallyExclusive(upstreamID, other)
+            }
+            if excusedBy == nil {
+                let name = nodes.first(where: { $0.id == upstreamID })?.displayName ?? upstreamID.uuidString
+                unsatisfied.append(name)
+                reasons.append(skipReason(forDeadUpstream: upstreamID, branchEdges: byUpstream[upstreamID] ?? []))
+            }
+        }
+
+        guard !unsatisfied.isEmpty else {
+            wfStateLogger.info("[WF_ROUTE] Routing: '\(nodeName)' → EXECUTE (\(live.count) upstream branch(es), \(live.values.filter { $0 }.count) live; any dead branch was an unchosen alternative)")
+            return .run
+        }
+
+        // Most alarming cause wins — a node fed by both a crashed branch and an unchosen one should
+        // report the crash, not the routing.
+        let reason = reasons.min(by: { $0.severityRank < $1.severityRank }) ?? .notChosen
+        wfStateLogger.info("[WF_ROUTE] Routing: '\(nodeName)' → SKIP (\(reason.rawValue)) — required upstream branch(es) not live: [\(unsatisfied.sorted().joined(separator: ", "))]. CONSEQUENCE: this node and everything downstream of it will not run. These branches are REQUIRED because no live sibling branch is a mutually-exclusive alternative to them (a branch is only optional when a Condition/Gate chose a different port that also reaches here).")
+        return .skip(reason)
+    }
+
+    /// Classifies a single dead upstream branch.
+    ///
+    /// The upstream's own recorded status answers most of it. The interesting case is a COMPLETED
+    /// upstream: the branch is dead not because anything went wrong but because the upstream made a
+    /// routing decision — and whether that reads as "the error handler correctly stood down" or
+    /// "the workflow branched elsewhere" depends on which port this branch leaves by.
+    private func skipReason(forDeadUpstream upstreamID: UUID, branchEdges: [WorkflowEdge]) -> NodeSkipReason {
+        guard let output = nodeOutputs[upstreamID] else { return .notReached }
+        switch output.status {
+        case .failed:  return .upstreamFailed
+        case .canceled: return .upstreamCancelled
+        case .skipped: return .upstreamSkipped
+        case .completed:
+            // Upstream succeeded, so nothing failed anywhere on this branch. An edge leaving the
+            // `error` port is the handler that correctly had nothing to handle; anything else is
+            // ordinary branching.
+            let allErrorRoutes = !branchEdges.isEmpty
+                && branchEdges.allSatisfy { $0.sourcePortLabel == WorkflowEdge.errorPortLabel }
+            return allErrorRoutes ? .errorPortNotTaken : .notChosen
+        }
+    }
+
+    /// Every node that actually FAILED, as "Name: reason".
+    ///
+    /// The run verdict needs this because "no terminal succeeded" and "the run failed" are different
+    /// questions. A workflow whose every terminal was skipped by ordinary routing has failed nothing;
+    /// one whose mid-graph node crashed has, even though the crash is not itself a terminal — and
+    /// reporting the terminals alone described the symptom while hiding the cause.
+    func failedNodeSummaries() -> [String] {
+        nodeOutputs.values.compactMap { output in
+            guard case .failed(let reason) = output.status else { return nil }
+            return "\(output.profileName): \(reason.localizedDescription)"
+        }.sorted()
+    }
+
+    /// Returns outputs from all terminal nodes — the nodes where a path that actually RAN ended.
+    ///
+    /// ⚠️ "Terminal" is decided over LIVE edges, not drawn ones, and the difference is a whole class
+    /// of wrong run verdicts. This used to be `Set(edges.map(\.sourceNodeID))` — every edge on the
+    /// canvas, taken or not — so on the most ordinary error-handling shape there is:
+    ///
+    ///     Input → A,  A --error--> Handler
+    ///
+    /// a SUCCESSFUL run had no terminal at all. `A` was excluded because it has an outgoing edge
+    /// (the error edge, which never fired), and `Handler` — correctly skipped — was the only
+    /// terminal. The run reported "all terminal nodes failed", A's answer was never emitted, and the
+    /// user was shown a failure for a workflow that had just done exactly what it was asked to.
+    ///
+    /// `edgeIsLive` is the same predicate routing and data-passing already use, so a node is a
+    /// terminal precisely when nothing downstream of it ran — which is what the word means.
     func terminalOutputs(edges: [WorkflowEdge], allNodeIDs: [UUID]) -> [NodeOutput] {
-        let nodesWithOutgoing = Set(edges.map(\.sourceNodeID))
-        let terminalNodeIDs = allNodeIDs.filter { !nodesWithOutgoing.contains($0) }
+        let nodesWithLiveOutgoing = Set(edges.filter { edgeIsLive($0) }.map(\.sourceNodeID))
+        let terminalNodeIDs = allNodeIDs.filter { !nodesWithLiveOutgoing.contains($0) }
         return terminalNodeIDs.compactMap { nodeOutputs[$0] }
     }
 }

@@ -31,6 +31,17 @@ final class WorkflowEditGuard {
     @ObservationIgnored var saveHook: (() -> Void)?
     @ObservationIgnored var discardHook: (() -> Void)?
 
+    /// The workflow profile whose canvas installed the current hooks, or nil when none is
+    /// registered.
+    ///
+    /// ⚠️ Exists so an exit point can tell whether the canvas behind `saveHook` is the SAME canvas
+    /// a bulk drain has already persisted (WF-PE1). Without it, quit ran `saveHook()` on top of
+    /// `persistDirtyWorkflowCanvases` with no way to know the two were writing the same
+    /// `WorkflowLayoutSD` row — which is harmless only for as long as both resolve to one shared
+    /// `WorkflowCanvasState`. Recording the identity makes that assumption checkable instead of
+    /// assumed, so a future divergence is caught by a log rather than by a user losing a graph.
+    @ObservationIgnored private(set) var registeredProfileID: UUID?
+
     /// The navigation deferred while the prompt is up.
     @ObservationIgnored private var pendingNavigation: (() -> Void)?
 
@@ -73,7 +84,8 @@ final class WorkflowEditGuard {
     // MARK: - Canvas registration
 
     /// Called by the active `WorkflowCanvasView` to (re)install its hooks.
-    func register(save: @escaping () -> Void, discard: @escaping () -> Void) {
+    func register(profileID: UUID, save: @escaping () -> Void, discard: @escaping () -> Void) {
+        registeredProfileID = profileID
         saveHook = save
         discardHook = discard
     }
@@ -84,5 +96,6 @@ final class WorkflowEditGuard {
         hasUnsavedChanges = false
         saveHook = nil
         discardHook = nil
+        registeredProfileID = nil
     }
 }

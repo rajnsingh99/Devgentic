@@ -27,6 +27,10 @@ struct WorkflowExecutionTimelineView: View {
     /// Re-runs this run's original input through the normal send path. Nil (or a live run) hides
     /// the button.
     var onRerun: (() -> Void)? = nil
+    /// True while another send/stream is in flight. The pill stays VISIBLE but disabled with an
+    /// honest tooltip — it used to be fully enabled during a stream and the click was dropped
+    /// downstream with only a log line, which reads as a broken button (WF-UI4).
+    var rerunBlocked: Bool = false
 
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -42,59 +46,62 @@ struct WorkflowExecutionTimelineView: View {
 
     // MARK: - Derived run state
 
-    private var settledCount: Int {
-        displayData.nodeResults.filter { $0.status == .completed || $0.status == .failed || $0.status == .skipped }.count
-    }
+    // ⚠️ ALL verdict logic lives on `WorkflowRunDisplayData` (the "Run roll-up" extension) so it
+    // is testable — these are one-line delegates kept only so the view reads naturally. Do not
+    // grow logic back into them; that is how this surface became an untested second implementation
+    // of "what happened to this run" (WF-UI5).
+    private var settledCount: Int { displayData.settledNodeCount }
+    private var isCancelled: Bool { displayData.isCancelledRun }
 
-    private var hasRunningNode: Bool {
-        displayData.nodeResults.contains { $0.status == .running }
-    }
+    /// ⚠️ Counts only GENUINE failures. A node that did not run — because a Condition or Gate
+    /// routed the other way, or because its error handler had nothing to handle — carries
+    /// `.skipped`, and nothing about it is a failure. Omitting `isNotRun` here turned the header
+    /// pill red on every successful conditional run. Cancelled nodes are excluded for the same
+    /// reason: the user asked for that one.
+    private var hasFailure: Bool { displayData.hasGenuineFailure }
 
-    /// 1-based "step X of N" — the settled nodes plus the one currently executing.
-    private var currentStep: Int {
-        min(settledCount + (hasRunningNode ? 1 : 0), max(displayData.nodeResults.count, 1))
-    }
-
-    private var isCancelled: Bool { displayData.status == .cancelled }
-
-    private var hasFailure: Bool {
-        displayData.workflowError != nil || displayData.nodeResults.contains(where: { $0.status == .failed })
-    }
-
-    /// A node marked `.failed` that never actually executed (its upstream failed). Rendered as a
-    /// neutral "Not run" instead of the same red as the node that genuinely crashed.
+    /// A node that never executed. Rendered as a neutral "Not run" instead of the same red as the
+    /// node that genuinely crashed.
+    ///
+    /// ⚠️ Reads the STATUS now. This used to be `status == .failed && detail.hasPrefix("Upstream
+    /// dependency")` — the skip was only knowable by parsing English out of a free-text field, and
+    /// three of the nine surfaces that needed the test forgot to apply it. The legacy branch below
+    /// is for records written before 2026-08-15, which have no `.skipped` status to read.
     private func isNotRun(_ node: WorkflowRunDisplayData.NodeDisplayData) -> Bool {
-        node.status == .failed && node.detail.hasPrefix("Upstream dependency")
+        displayData.nodeDidNotRun(node)
     }
 
-    /// Mirrors WorkflowFinalOutcomeCardView.aggregateStatus (incl. the pending-while-waiting fix).
-    private var finalOutcomeStatus: WorkflowRunDisplayData.NodeDisplayData.NodeStatus {
-        if displayData.isRunning {
-            let allSettled = !displayData.nodeResults.isEmpty
-                && displayData.nodeResults.allSatisfy {
-                    $0.status == .completed || $0.status == .failed || $0.status == .skipped
-                }
-            return allSettled ? .running : .pending
-        }
-        if displayData.workflowError != nil { return .failed }
-        if displayData.nodeResults.contains(where: { $0.status == .failed }) { return .failed }
-        if displayData.nodeResults.isEmpty { return .pending }
-        return .completed
+    /// What to tell the user about a node that did not run.
+    ///
+    /// The engine now writes the structural cause into `detail` via `NodeSkipReason.displayText`, so
+    /// a Router that branched elsewhere says so instead of claiming an upstream failure. The
+    /// fallback covers records written before 2026-08-15, whose detail is the old sentence.
+    private func notRunMessage(for node: WorkflowRunDisplayData.NodeDisplayData) -> String {
+        displayData.notRunMessage(for: node)
     }
+
+    /// The ONE aggregate-status implementation. It used to be a copy-paste pair with
+    /// `WorkflowFinalOutcomeCardView.aggregateStatus`, whose file had no call sites at all and was
+    /// deleted on 2026-08-11 — two prior sessions had spent effort fixing accessibility and
+    /// reduce-motion issues on workflow views that turned out to be unreachable.
+    private var finalOutcomeStatus: WorkflowRunDisplayData.NodeDisplayData.NodeStatus {
+        displayData.rollupOutcome
+    }
+
+// The persisted-status precedence (and its regression history) lives on
+    // `WorkflowRunDisplayData.pillVerdict` — the testable side of this seam.
 
     private var runPillColor: Color {
-        if displayData.isRunning { return theme.accentColor }
-        if isCancelled { return theme.warningColor }
-        if hasFailure { return theme.errorColor }
-        return theme.successColor
+        switch displayData.pillVerdict {
+        case .running:   return theme.accentColor
+        case .cancelled: return theme.warningColor
+        case .failed:    return theme.errorColor
+        case .unknown:   return theme.secondaryText
+        case .completed: return theme.successColor
+        }
     }
 
-    private var runPillLabel: String {
-        if displayData.isRunning { return String(localized: "Running") }
-        if isCancelled { return String(localized: "Cancelled") }
-        if hasFailure { return String(localized: "Failed") }
-        return String(localized: "Completed")
-    }
+    private var runPillLabel: String { displayData.pillLabel }
 
     // MARK: - Body
 
@@ -183,14 +190,18 @@ struct WorkflowExecutionTimelineView: View {
                         Text("Re-run")
                             .font(.system(size: 11, weight: .medium))
                     }
-                    .foregroundColor(theme.secondaryText)
+                    .foregroundColor(theme.secondaryText.opacity(rerunBlocked ? 0.45 : 1.0))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
                     .background(Capsule().fill(theme.surfaceOverlay))
                 }
                 .buttonStyle(.plain)
-                .help("Run this workflow again with the same input")
+                .disabled(rerunBlocked)
+                .help(rerunBlocked
+                      ? "Another run is in progress — wait for it to finish"
+                      : "Run this workflow again with the same input")
                 .accessibilityLabel("Re-run workflow")
+                .accessibilityHint(rerunBlocked ? Text("Disabled while another run is in progress") : Text(""))
             }
         }
         .padding(.horizontal, 20)
@@ -199,37 +210,17 @@ struct WorkflowExecutionTimelineView: View {
 
     /// Mid-flight: "step X of N · time". Terminal runs phrase the outcome instead — a completed
     /// counter ("step 2 of 2") on a FAILED run would imply the run got through everything.
-    private var stepCounterText: String {
-        let total = displayData.nodeResults.count
-        let time = DurationFormat.seconds(displayData.duration)
-        let suffix = time.isEmpty ? "" : " · \(time)"
-        guard total > 0 else { return time }
-
-        if displayData.isRunning {
-            return String(localized: "step \(currentStep) of \(total)\(suffix)")
-        }
-        if isCancelled {
-            return String(localized: "stopped\(suffix)")
-        }
-        if hasFailure {
-            // First genuinely-failed node (skip the not-run cascade) = where it broke.
-            let failedIndex = displayData.nodeResults.firstIndex { $0.status == .failed && !isNotRun($0) }
-                ?? displayData.nodeResults.firstIndex { $0.status == .failed }
-            if let failedIndex {
-                return String(localized: "failed at step \(failedIndex + 1) of \(total)\(suffix)")
-            }
-            return String(localized: "failed\(suffix)")
-        }
-        return "\(total) step\(total == 1 ? "" : "s")\(suffix)"
-    }
+    private var stepCounterText: String { displayData.stepCounterDescription }
 
     private func segmentColor(for status: WorkflowRunDisplayData.NodeDisplayData.NodeStatus) -> Color {
         switch status {
         case .completed:          return theme.successColor
         case .failed:             return theme.errorColor
         case .skipped:            return theme.secondaryText.opacity(0.4)
+        case .cancelled:          return theme.warningColor
         case .running:            return theme.accentColor.opacity(runningPulse ? 0.9 : 0.45)
         case .pending:            return theme.surfaceOverlayStrong
+        case .unknown:            return theme.secondaryText.opacity(0.6)
         }
     }
 
@@ -299,17 +290,29 @@ struct WorkflowExecutionTimelineView: View {
         }
         .onTapGesture { selectedNodeID = node.nodeID }
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel("\(node.profileName), \(node.status.label)")
+        // ⚠️ Must agree with the visible tag. This read the RAW status, so on every conditional
+        // run VoiceOver announced "Failed" for a node the screen labelled "Not run" — the two
+        // descriptions of the same row contradicted each other.
+        .accessibilityLabel("\(node.profileName), \(isNotRun(node) ? String(localized: "Not run") : node.status.label)")
         .accessibilityHint(isSelected ? "Selected step" : "Show step details")
         .accessibilityAction { selectedNodeID = node.nodeID }
     }
 
     private func collapsedPreview(for node: WorkflowRunDisplayData.NodeDisplayData) -> String? {
         switch node.status {
-        case .pending, .running, .skipped:
+        case .pending, .running:
             let input = node.input?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return input.isEmpty ? nil : input
-        case .completed, .failed:
+        case .skipped:
+            // ⚠️ The REASON, not the input. This arm used to fall through to the input preview,
+            // and for legacy records the detail underneath printed the raw engine sentence
+            // "Upstream dependency failed" directly below a grey "Not run" tag — restoring the
+            // exact failure wording the tag exists to suppress.
+            let detail = node.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+            return detail.isEmpty ? nil : detail
+        // `.unknown` is a FINISHED node (newer-build status) — its detail is real; show it like
+        // any settled node rather than the input preview a pending node gets.
+        case .completed, .failed, .cancelled, .unknown:
             let detail = node.detail.trimmingCharacters(in: .whitespacesAndNewlines)
             return detail.isEmpty ? nil : detail
         }
@@ -321,7 +324,21 @@ struct WorkflowExecutionTimelineView: View {
     private var finalOutcomeStep: some View {
         let isSelected = selectedNodeID == nil
         let status = finalOutcomeStatus
-        let statusColor = status.color(theme)
+        // A cancelled run has no `.cancelled` in `NodeStatus` to fall back on, and `workflowError`
+        // ("Cancelled") drives `finalOutcomeStatus` to `.failed` — so the Final Outcome row said
+        // "Failed" in red under a header pill that correctly said "Cancelled". Overridden here
+        // rather than in `finalOutcomeStatus`, which the spine and the pending/awaiting logic also
+        // read and which are right as they are.
+        // Same override pattern for UNKNOWN (WF-UI1): a record stamped by a newer build derives
+        // `.completed` from its settled nodes, so the row asserted a green "Completed" one line
+        // under a pill honestly saying "Unknown". The spine/awaiting logic still read `status`.
+        let isUnknown = displayData.hasUnknownPersistedStatus
+        let statusColor = isCancelled ? theme.warningColor
+            : isUnknown ? theme.secondaryText
+            : status.color(theme)
+        let statusLabel = isCancelled ? String(localized: "Cancelled")
+            : isUnknown ? String(localized: "Unknown")
+            : status.label
         let isHovered = hoveredRowKey == AnyHashable(Self.finalOutcomeAnchor)
 
         HStack(alignment: .top, spacing: 14) {
@@ -336,7 +353,7 @@ struct WorkflowExecutionTimelineView: View {
                     nameColor: status == .pending ? theme.secondaryText : theme.primaryText,
                     tagLabel: status == .pending && displayData.isRunning
                         ? "Awaiting inputs · \(settledCount)/\(max(displayData.nodeResults.count, 1))"
-                        : status.label,
+                        : statusLabel,
                     tagColor: status == .pending ? theme.secondaryText : statusColor,
                     tagIcon: nil,
                     tagAction: nil,
@@ -530,7 +547,10 @@ struct WorkflowExecutionTimelineView: View {
 
         detailContainer(edgeColor: statusColor) {
             if isNotRun(node) {
-                inlineStatusLine(message: "Not run — an upstream node failed.", showsSpinner: false)
+                // The node's own reason, never a hardcoded sentence. "an upstream node failed" was
+                // asserted over ordinary Router/Gate routing and over an error handler that
+                // correctly stood down — on runs where nothing failed at all.
+                inlineStatusLine(message: notRunMessage(for: node), showsSpinner: false)
             } else {
                 switch node.status {
                 case .running:
@@ -549,9 +569,15 @@ struct WorkflowExecutionTimelineView: View {
                     inlineStatusLine(message: "Waiting for execution", showsSpinner: false)
 
                 case .skipped:
-                    inlineStatusLine(message: "Skipped — upstream condition not met.", showsSpinner: false)
+                    inlineStatusLine(message: notRunMessage(for: node), showsSpinner: false)
 
-                case .completed, .failed:
+                case .cancelled:
+                    inlineStatusLine(message: String(localized: "Cancelled before this node finished."), showsSpinner: false)
+
+                // `.unknown` routes with the settled arms: the node FINISHED under a newer build,
+                // so its detail, duration and full agent trace must render — suppressing them was
+                // the WF-UI3 defect ("Waiting" over a node that finished days ago).
+                case .completed, .failed, .unknown:
                     let isError = node.status == .failed
                     let (errorBody, suggestion) = isError ? splitDetail(node.detail) : (node.detail, nil)
                     let bodyIsDuplicated = isError

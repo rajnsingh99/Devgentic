@@ -47,7 +47,11 @@ struct FileContextStrategyPicker: View {
                 HStack(spacing: 4) {
                     Image(systemName: "info.circle")
                         .accessibilityHidden(true)
-                    Text("Custom override. Default for \(profileType.rawValue) is \(defaultStrategy.displayName).")
+                    // ⚠️ register A63 — the FORMAT string was already an extractable key, but both
+                    // interpolated values were English-only runtime strings, so a translated build
+                    // rendered a half-English sentence. `LocalizedStringKey` interpolates a `Text`,
+                    // which keeps the key extractable AND localizes the substitutions.
+                    Text("Custom override. Default for \(Text(profileType.localizedTitle)) is \(Text(defaultStrategy.localizedTitle)).")
                 }
                 .font(theme.fontCaption)
                 .foregroundColor(theme.secondaryText)
@@ -75,7 +79,7 @@ private struct FileContextStrategyCard: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
-                        Text(strategy.displayName)
+                        Text(strategy.localizedTitle)
                             .font(theme.fontSubheadline.weight(.medium))
                             .foregroundColor(theme.primaryText)
 
@@ -90,7 +94,7 @@ private struct FileContextStrategyCard: View {
                         }
                     }
 
-                    Text(strategy.description)
+                    Text(strategy.localizedDescription)
                         .font(theme.fontCaption)
                         .foregroundColor(theme.secondaryText)
                         .lineLimit(2)

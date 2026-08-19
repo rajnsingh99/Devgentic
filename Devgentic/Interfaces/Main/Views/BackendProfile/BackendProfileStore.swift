@@ -129,23 +129,51 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
             return
         }
 
+        var attempted = 0
         var migrated = 0
+        var stillInline = 0
         for model in models {
             guard model.hasInlineAPIKeyInStoredBlob else { continue }
+            attempted += 1
             // Assigning through the setter performs the strip-and-store: it writes the key to the
             // Keychain and re-encodes `configData` without it.
             model.details = model.details
-            migrated += 1
+
+            // ⚠️ register B25 — count what actually HAPPENED, not what was tried. This used to be
+            // an unconditional `migrated += 1` right after the assignment, and the assignment
+            // succeeds even when the Keychain write inside it failed: the setter deliberately
+            // keeps the key inline in that case rather than destroying it. So on a launch where
+            // the Keychain was unavailable — a login-item start before unlock is the ordinary
+            // case — every row kept its inline key and the log still announced that N keys were
+            // "no longer readable from DevgenticSD.store". A security claim stated as achieved
+            // when it was not is worse than no log line at all.
+            if model.hasInlineAPIKeyInStoredBlob {
+                stillInline += 1
+            } else {
+                migrated += 1
+            }
         }
 
-        guard migrated > 0 else { return }
+        if stillInline > 0 {
+            logger.error(
+                "[SECRETS] \(stillInline) of \(attempted) profile(s) still hold their API key "
+                + "INLINE after the migration pass — the Keychain write failed for them, so the "
+                + "key was deliberately left in the blob rather than destroyed. CONSEQUENCE: those "
+                + "credentials remain readable from DevgenticSD.store and from any backup of "
+                + "Application Support; the sweep retries on the next launch."
+            )
+        }
+
+        guard attempted > 0 else { return }
         do {
             try context.save()
-            logger.notice(
-                "[SECRETS] Migrated \(migrated) provider API key(s) out of the profile blobs and "
-                + "into the Keychain. CONSEQUENCE: the keys are no longer readable from "
-                + "DevgenticSD.store or from any backup of Application Support."
-            )
+            if migrated > 0 {
+                logger.notice(
+                    "[SECRETS] Migrated \(migrated) provider API key(s) out of the profile blobs and "
+                    + "into the Keychain. CONSEQUENCE: those keys are no longer readable from "
+                    + "DevgenticSD.store or from any backup of Application Support."
+                )
+            }
         } catch {
             logger.error(
                 "[SECRETS] The API-key migration could not be saved: \(error.localizedDescription). "

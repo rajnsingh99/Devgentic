@@ -14,7 +14,8 @@ private let logger = DGLogger(category: "CodeToolPreset")
 enum CodeToolPreset {
 
     /// The fixed source UUID for built-in tools (matches UnifiedToolStore's built-in ID).
-    private static let builtInSourceID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    /// Aliased to the canonical constant — this was the third re-spelled copy of the UUID.
+    private static let builtInSourceID = ToolSource.builtInSourceID
 
     /// Default coding tools — auto-enabled in every Code session.
     ///

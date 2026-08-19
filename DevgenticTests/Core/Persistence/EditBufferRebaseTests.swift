@@ -304,4 +304,41 @@ final class BackendProfileServiceRebaseTests: XCTestCase {
         service.flushPendingEditorText()
         XCTAssertFalse(service.hasUnsavedEditorChanges)
     }
+
+    // MARK: - WF-LC1: the delete cascade must reach per-profile caches
+
+    /// ⚠️ Pins the SEAM, which is the half that was missing. `MainApplicationViewModel` caches a
+    /// `WorkflowCanvasState` per profile and nothing pruned it, so deleting a workflow whose canvas
+    /// was dirty left a live state behind — and the quit-time drain then RE-INSERTED a
+    /// `WorkflowLayoutSD` row for a profile that no longer exists, resurrecting the layout the
+    /// delete had just removed as a permanently orphaned row.
+    ///
+    /// ⚠️ The view model's own `discardWorkflowCanvasState` body is NOT covered here: constructing a
+    /// `MainApplicationViewModel` claims `HITLPresenter` globally and loads settings, so building one
+    /// in a unit test leaks state across the suite (this file's header documents the same
+    /// constraint). What is covered is that the delete path FIRES the cascade — the part a future
+    /// delete path could forget.
+    func testDeletingAProfileFiresTheCacheEvictionCascade() throws {
+        let victim = service.profiles[0].id
+        var evicted: [UUID] = []
+        service.onProfileDeleted = { evicted.append($0) }
+
+        try service.deleteProfile(withId: victim)
+
+        XCTAssertEqual(evicted, [victim],
+                       "a per-profile cache owner must be told, or the quit drain can resurrect the deleted layout")
+    }
+
+    /// The cascade is unconditional — a non-workflow profile has no cached canvas, and the owner is
+    /// responsible for ignoring it. Keeping the call site free of type tests means a future profile
+    /// kind cannot be forgotten here.
+    func testTheCascadeFiresRegardlessOfProfileType() throws {
+        let victim = service.profiles[1].id   // a .bot
+        var fired = false
+        service.onProfileDeleted = { _ in fired = true }
+
+        try service.deleteProfile(withId: victim)
+
+        XCTAssertTrue(fired)
+    }
 }

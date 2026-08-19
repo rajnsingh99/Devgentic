@@ -76,7 +76,11 @@ enum RunCardSpeech {
     /// so VoiceOver read the card as a pile of disconnected fragments:
     /// "checkmark.circle.fill, 12.4s, text.bubble, <input>, square.on.square, 3 nodes, Failed".
     /// Ordered by what identifies a run: what happened, then what was asked, then the result.
-    static func label(for record: WorkflowRunRecord, totalNodes: Int, failedNodes: Int) -> String {
+    /// - Parameter notRunNodes: nodes that never ran because something upstream failed. Spoken
+    ///   separately from `failedNodes`, which used to absorb them. Defaulted so the existing
+    ///   contract tests keep compiling.
+    static func label(for record: WorkflowRunRecord, totalNodes: Int, failedNodes: Int,
+                      notRunNodes: Int = 0) -> String {
         var parts: [String] = []
         let startedAt = record.timestamp.formatted(date: .omitted, time: .shortened)
 
@@ -101,6 +105,7 @@ enum RunCardSpeech {
 
         var nodes = "\(totalNodes) node\(totalNodes == 1 ? "" : "s")"
         if failedNodes > 0 { nodes += ", \(failedNodes) failed" }
+        if notRunNodes > 0 { nodes += ", \(notRunNodes) not run" }
         parts.append(nodes)
 
         return parts.joined(separator: ". ")
@@ -136,15 +141,20 @@ private struct WorkflowRunCardView: View {
 
     private var durationText: String { DurationFormat.seconds(record.duration) }
 
-    private var nodeStats: (total: Int, failed: Int) {
+    /// A cascade skip is recorded as `.failed` by the engine, so counting raw `.failed`
+    /// reported "5 failed" for a 6-node workflow where exactly one node broke and four never
+    /// ran. The timeline and the auto-focus already excluded them; this card did not.
+    private var nodeStats: (total: Int, failed: Int, notRun: Int) {
         let total = record.nodeResults.count
-        let failed = record.nodeResults.filter { $0.status == .failed }.count
-        return (total, failed)
+        let failed = record.nodeResults.filter(\.isGenuineFailure).count
+        let notRun = record.nodeResults.filter(\.didNotRun).count
+        return (total, failed, notRun)
     }
 
     private var cardAccessibilityLabel: String {
         let stats = nodeStats
-        return RunCardSpeech.label(for: record, totalNodes: stats.total, failedNodes: stats.failed)
+        return RunCardSpeech.label(for: record, totalNodes: stats.total,
+                                   failedNodes: stats.failed, notRunNodes: stats.notRun)
     }
 
     var body: some View {
@@ -224,6 +234,20 @@ private struct WorkflowRunCardView: View {
                             .padding(.vertical, 1)
                             .background(
                                 Capsule().fill(theme.errorColor.opacity(0.12))
+                            )
+                    }
+
+                    // Neutral, not red: these nodes never ran. The split was computed and SPOKEN
+                    // from the day CH47 landed but never rendered, so the card still showed only
+                    // "1 failed" for a 6-node cascade — sighted users saw less than VoiceOver did.
+                    if stats.notRun > 0 {
+                        Text("\(stats.notRun) not run")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(theme.tertiaryText)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(
+                                Capsule().fill(theme.surfaceOverlayStrong.opacity(0.6))
                             )
                     }
 

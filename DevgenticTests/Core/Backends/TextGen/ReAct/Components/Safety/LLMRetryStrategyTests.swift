@@ -46,6 +46,28 @@ final class LLMRetryStrategyTests: XCTestCase {
         ResolvedResiliencePolicy.resolved(for: .ollama).transport
     }
 
+    // MARK: - WF-CC6 fixtures
+
+    /// ⚠️ `maxTransientRetries` is 0 here BY DESIGN (ResiliencePolicy.swift:150-162) — which is why
+    /// the model-slot race cannot be routed through `transientAction`.
+    private var mlxTransport: TransportResiliencePolicy {
+        ResolvedResiliencePolicy.resolved(for: .mlx).transport
+    }
+
+    private func makeIdentityMismatch(
+        expected: String = "Phi-4-mini-instruct-4bit",
+        actual: String = "Qwen3.5-9B-MLX-8bit"
+    ) -> MLXService.ServiceError {
+        .modelIdentityMismatch(expected: expected, actual: actual)
+    }
+
+    /// The REAL parse-failure producer — an empty-response guard in the generation strategies,
+    /// not a hand-written string. The negative control depends on this staying genuine.
+    private func makeEmptyResponseError() -> NSError {
+        NSError(domain: "MLXModern", code: 422,
+                userInfo: [NSLocalizedDescriptionKey: "Empty response from model."])
+    }
+
     // MARK: - Parse Failure Counting (unchanged contract)
 
     func testParseFailure_IncrementedCorrectly() {
@@ -420,15 +442,11 @@ final class LLMRetryStrategyTests: XCTestCase {
 
     // MARK: - Model Unloaded (unchanged contract)
 
-    func testModelUnloaded_MLX_ReturnsModelReload() {
-        var strategy = LLMRetryStrategy()
-        let error = makeGenericError("No MLX model is currently loaded. Please select a model first.")
-        let action = strategy.handleError(error)
-
-        if case .modelReload = action {} else {
-            XCTFail("Expected .modelReload for MLX unloaded, got \(action)")
-        }
-    }
+    // ⚠️ `testModelUnloaded_MLX_ReturnsModelReload` was DELETED 2026-08-16 (WF-CC6). It fabricated
+    // a generic `NSError` carrying the string "No MLX model is currently loaded…" — prose no
+    // production code path emits in that form — and so passed whether or not the TYPED routing
+    // worked. That is precisely how WF-CC6 survived: the enum had tests, its ROUTING had none.
+    // `testNoModelLoaded_TypedError_RoutesToModelReload` below replaces it and is prose-independent.
 
     func testModelUnloaded_Ollama_ReturnsModelReload() {
         var strategy = LLMRetryStrategy()
@@ -455,5 +473,152 @@ final class LLMRetryStrategyTests: XCTestCase {
         XCTAssertEqual(strategy.consecutiveRetries, 0)
         XCTAssertEqual(strategy.consecutiveTransientFailures, 0)
         XCTAssertEqual(strategy.consecutiveParseFailures, 0)
+    }
+
+    // MARK: - WF-CC6: the MLX model-slot race is not a parse failure
+    //
+    // ⚠️ `MLXService` keeps ONE model container. When another run loads a different model,
+    // `container(expecting:)` refuses rather than answering from the wrong one and throws
+    // `.modelIdentityMismatch`. That error matched NO branch here and fell to the parse-failure
+    // catch-all — so the user was told "your last output failed validation… please try rephrasing
+    // your request" for a fault that had nothing to do with their prompt or the model's output.
+    //
+    // ⚠️ The counter assertions are not decoration. Correcting only the ACTION would still charge
+    // the parse budget, and three races would still abort the run with the "rephrase" message.
+
+    func testModelSlotRace_IsNeverAParseFailure() {
+        var strategy = LLMRetryStrategy(transport: mlxTransport)
+        let action = strategy.handleError(makeIdentityMismatch())
+
+        if case .parseRetry = action { XCTFail("a model-slot race is not a parse failure — got \(action)") }
+        if case .abort = action { XCTFail("must not abort on the first race — got \(action)") }
+        XCTAssertEqual(strategy.consecutiveParseFailures, 0,
+                       "the parse budget must be untouched — otherwise three races still end the run with 'please try rephrasing your request'")
+    }
+
+    func testModelSlotRace_FirstHitRetriesAndNamesBothModels() {
+        var strategy = LLMRetryStrategy(transport: mlxTransport)
+        let action = strategy.handleError(makeIdentityMismatch())
+
+        guard case .networkRetry(let message, let delay) = action else {
+            return XCTFail("Expected a bounded retry, got \(action)")
+        }
+        XCTAssertEqual(delay, 2.0, accuracy: 0.001)
+        XCTAssertTrue(message.contains("Phi-4-mini-instruct-4bit"), "the needed model must be named: \(message)")
+        XCTAssertTrue(message.contains("Qwen3.5-9B-MLX-8bit"), "the model holding the slot must be named: \(message)")
+        XCTAssertFalse(message.localizedCaseInsensitiveContains("rephras"),
+                       "the user's prompt must never be blamed for a slot race: \(message)")
+    }
+
+    func testModelSlotRace_SecondHitIsFatalWithModelUnloadedCategory() {
+        var strategy = LLMRetryStrategy(transport: mlxTransport)
+        _ = strategy.handleError(makeIdentityMismatch())
+        let action = strategy.handleError(makeIdentityMismatch())
+
+        guard case .fatal(let reason, let category) = action else {
+            return XCTFail("Expected .fatal once the slot budget is spent, got \(action)")
+        }
+        XCTAssertEqual(category, .modelUnloaded,
+                       "telemetry must record a model-slot fault, not a parse failure")
+        XCTAssertTrue(reason.contains("Phi-4-mini-instruct-4bit") && reason.contains("Qwen3.5-9B-MLX-8bit"),
+                      "the error card must name both models: \(reason)")
+        XCTAssertFalse(reason.localizedCaseInsensitiveContains("rephras"), reason)
+    }
+
+    /// ⚠️ THE ASSERTION THAT SEPARATES A REAL FIX FROM A COSMETIC ONE. Moving the typed block
+    /// BELOW `consecutiveParseFailures += 1` leaves every action above correct while still burning
+    /// the parse budget — so a genuine parse failure afterwards would arrive pre-charged and the
+    /// run would abort early with the false "rephrase" message.
+    func testModelSlotRace_DoesNotBurnTheParseBudget() {
+        var strategy = LLMRetryStrategy(transport: mlxTransport)
+        _ = strategy.handleError(makeIdentityMismatch())
+        _ = strategy.handleError(makeIdentityMismatch())
+
+        let action = strategy.handleError(makeEmptyResponseError())
+        guard case .parseRetry(_, let attempt, _) = action else {
+            return XCTFail("a real empty response is still a parse failure, got \(action)")
+        }
+        XCTAssertEqual(attempt, 1, "the first REAL parse failure must be attempt 1, not pre-charged by two races")
+        XCTAssertEqual(strategy.consecutiveParseFailures, 1)
+    }
+
+    /// `"<none>"` means the slot was EMPTIED by a concurrent load, not that a model named
+    /// "<none>" is squatting. It must never be rendered to the user as a model name.
+    func testModelSlotRace_NoneHolderIsNotRenderedAsAModelName() {
+        var strategy = LLMRetryStrategy(transport: mlxTransport)
+        let action = strategy.handleError(makeIdentityMismatch(actual: "<none>"))
+
+        guard case .networkRetry(let message, _) = action else {
+            return XCTFail("Expected a bounded retry, got \(action)")
+        }
+        XCTAssertTrue(message.contains("another local model load"), message)
+        XCTAssertFalse(message.contains("'<none>'"), "'<none>' must not surface as a model name: \(message)")
+    }
+
+    /// ⚠️ The verdict must not depend on which transport policy happens to be resolved. Routing
+    /// this through `transientAction` would make it `.fatal` under MLX (budget 0) but
+    /// `.networkRetry` under cloud — a fault whose classification changes with the provider class.
+    func testModelSlotRace_ClassificationIsTransportIndependent() {
+        for (label, transport) in [("mlx", mlxTransport), ("cloud", cloudTransport), ("ollama", ollamaTransport)] {
+            var strategy = LLMRetryStrategy(transport: transport)
+            let action = strategy.handleError(makeIdentityMismatch())
+            guard case .networkRetry = action else {
+                return XCTFail("[\(label)] expected a bounded retry regardless of transport, got \(action)")
+            }
+            XCTAssertEqual(strategy.consecutiveTransientFailures, 0,
+                           "[\(label)] the slot race has its own budget and must not consume the transport budget")
+        }
+    }
+
+    /// ⚠️ PROSE-INDEPENDENT by construction: this passes a TYPED `.noModelLoaded`, so it holds
+    /// even if `errorDescription`'s wording changes. The deleted test asserted the opposite —
+    /// it depended entirely on the wording.
+    func testNoModelLoaded_TypedError_RoutesToModelReload() {
+        var strategy = LLMRetryStrategy(transport: mlxTransport)
+        let action = strategy.handleError(MLXService.ServiceError.noModelLoaded)
+
+        if case .modelReload = action {} else {
+            XCTFail("a typed .noModelLoaded must route to .modelReload, got \(action)")
+        }
+        XCTAssertEqual(strategy.consecutiveParseFailures, 0)
+    }
+
+    /// ⚠️ NEGATIVE CONTROL. A fix that routed EVERYTHING away from `.parseRetry` would pass every
+    /// test above. A genuine malformed/empty model response must still be treated as one.
+    func testEmptyModelResponse_IsStillAParseRetry() {
+        var strategy = LLMRetryStrategy(transport: mlxTransport)
+        let action = strategy.handleError(makeEmptyResponseError())
+
+        guard case .parseRetry(let alert, let attempt, _) = action else {
+            return XCTFail("a real empty response IS a parse failure, got \(action)")
+        }
+        XCTAssertEqual(attempt, 1)
+        XCTAssertEqual(strategy.consecutiveParseFailures, 1)
+        XCTAssertTrue(alert.contains("reasoning"), "the corrective alert is still correct HERE: \(alert)")
+    }
+
+    func testResetClearsModelSlotBudget() {
+        var strategy = LLMRetryStrategy(transport: mlxTransport)
+        _ = strategy.handleError(makeIdentityMismatch())
+        strategy.resetParseFailures()
+
+        let action = strategy.handleError(makeIdentityMismatch())
+        guard case .networkRetry = action else {
+            return XCTFail("after a successful parse the slot budget must be fresh, got \(action)")
+        }
+    }
+
+    /// ⚠️ Documents WHY the production `switch` has no `default:`. If a third `ServiceError` case
+    /// is ever added, the production switch fails to BUILD — that compiler check is the real fix.
+    /// This test fails to build alongside it, pointing here.
+    func testMLXServiceErrorCaseInventoryIsComplete() {
+        let all: [MLXService.ServiceError] = [.noModelLoaded, makeIdentityMismatch()]
+        for error in all {
+            switch error {
+            case .noModelLoaded, .modelIdentityMismatch:
+                continue    // exhaustive by design — add the new case to the production switch too
+            }
+        }
+        XCTAssertEqual(all.count, 2, "a new ServiceError case needs a typed arm in LLMRetryStrategy")
     }
 }

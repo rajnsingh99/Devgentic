@@ -21,7 +21,6 @@ struct CodeNodeInspectorView: View {
 
     @State private var template: String = "{{ input }}"
     @State private var outputVariable: String = ""
-    @State private var joinMode: JoinMode = .all
     @State private var showGuide: Bool = false
 
     // MARK: - Body
@@ -35,7 +34,6 @@ struct CodeNodeInspectorView: View {
                     guideCard
                     templateCard
                     outputVariableCard
-                    JoinModeCard(joinMode: $joinMode)
                 }
                 .padding(24)
             }
@@ -103,18 +101,18 @@ struct CodeNodeInspectorView: View {
                         number: "2",
                         title: "Placeholders",
                         subtitle: "variable substitution",
-                        description: "{{ input }} = upstream output, {{ var.name }} = workflow variable.",
+                        description: "{{ input }} = upstream text · {{ input.json.path }} = a field of upstream JSON · {{ var.name }} = a workflow variable.",
                         color: .blue
                     )
                     guideStep(
                         number: "3",
                         title: "Output Variable",
                         subtitle: "optional",
-                        description: "Optionally store the result in a named variable for downstream nodes to reference.",
+                        description: "Optionally store the result in a named variable. Code nodes are the ONLY writers of workflow variables — Routers can test them, and other templates can substitute them.",
                         color: .green
                     )
 
-                    guideTip("Variables are substituted before input to prevent template injection. The order matters for security.")
+                    guideTip("A placeholder that can't be resolved — a misspelled variable, say — is left in the output VERBATIM, and validation does not catch it: check spelling. The template renders in a single pass, so upstream text can never inject new placeholders. Deterministic; never retries; a failure routes to the error port.")
                 }
                 .padding(.top, 10)
             } label: {
@@ -267,7 +265,6 @@ struct CodeNodeInspectorView: View {
     // MARK: - Helpers
 
     private func loadFromNode() {
-        joinMode = node.nodeConfig?.joinMode ?? .all
         guard case .code(let config) = node.kind else { return }
         template = config.template
         outputVariable = config.outputVariable ?? ""
@@ -282,7 +279,6 @@ struct CodeNodeInspectorView: View {
 
         // Persist fan-in behaviour on the shared per-node config.
         if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }
-        node.nodeConfig?.joinMode = joinMode
 
         closeInspector()
     }

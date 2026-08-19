@@ -109,6 +109,20 @@ struct ProfileSidebarListView: View {
             }
             .padding(.bottom, 10)
 
+            // ⚠️ register B23 — the A47 error state lives inside the `profiles.isEmpty` arm below,
+            // which covers exactly ONE of the two failure shapes. `loadProfiles()` deliberately
+            // keeps the in-memory list when a fetch throws, so every failure AFTER the first
+            // successful load — the ones a running app actually hits, e.g. a save elsewhere
+            // triggering a reload against a store that has gone away — leaves a fully populated
+            // sidebar that is silently stale. `lastLoadError` was set and rendered nowhere, so the
+            // list read as current: a profile deleted or edited in another window still appears,
+            // and selecting it routes to a detail view built from a snapshot the store no longer
+            // agrees with. Same principle as A47 itself — "we could not read this" must never
+            // render identically to "this is what you have".
+            if let loadError = profileService.lastLoadError, !profileService.profiles.isEmpty {
+                staleListBanner(loadError)
+            }
+
             // Profile list
             if filteredProfiles.isEmpty {
                 if profileService.profiles.isEmpty {
@@ -152,6 +166,17 @@ struct ProfileSidebarListView: View {
                                 profile: profile,
                                 isSelected: activeProfileID == profile.id,
                                 onSelect: {
+                                    // ⚠️ register B46 — FLUSH BEFORE THE CHECK. Text still sitting
+                                    // in the floating Advanced prompt editor is invisible to
+                                    // `hasUnsavedEditorChanges` until it is committed, and the
+                                    // service's doc comment says so. Switching rows without this
+                                    // destroyed it silently: `navigateToProfile` calls
+                                    // `activateEditBuffer`, which assigns a BRAND-NEW
+                                    // `ProfileEditBuffer`, before the old view's teardown commit
+                                    // runs — and that commit captured the OLD buffer by value
+                                    // (register B27), so it landed on an orphan while the new
+                                    // buffer was already clean. No prompt, no log, no text.
+                                    profileService.flushPendingEditorText()
                                     // ⚠️ `hasUnsavedEditorChanges`, not `editBuffer?.isDirty`: a
                                     // workflow canvas keeps its dirt in `WorkflowCanvasState`, so
                                     // the buffer check alone reported "clean" for a canvas full of
@@ -213,13 +238,7 @@ struct ProfileSidebarListView: View {
             // useless: it names no consequence beyond the profile itself, so a user deleting an
             // agent had no way to learn that a nightly scheduled task depended on it. The warning
             // is only useful BEFORE the delete; afterwards there is nothing to decide.
-            if let warning = ProfileReferenceIndex.deletionWarning(
-                for: ProfileReferenceIndex.references(to: profile.id, in: profileService.profiles)
-            ) {
-                Text("Delete '\(profile.displayName)'? This can't be undone.\n\n\(warning)")
-            } else {
-                Text("Are you sure you want to delete '\(profile.displayName)'? This action cannot be undone.")
-            }
+            Text(ProfileReferenceIndex.deletionMessage(for: profile, in: profileService.profiles))
         }
         .sheet(item: $profileToDuplicate) { source in
             DuplicateProfileSheet(
@@ -265,5 +284,44 @@ struct ProfileSidebarListView: View {
             Text("You have unsaved changes. Discard them?")
         }
         }
+    }
+
+    /// Compact "this list may be stale" strip for a load failure that left profiles in memory.
+    ///
+    /// ⚠️ Deliberately NOT the full `SidebarEmptyStateView` treatment the empty case gets: there is
+    /// a usable list underneath and the app is not blocked, so this warns and offers a retry
+    /// without taking the list away. Warn, don't clamp.
+    @ViewBuilder
+    private func staleListBanner(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundColor(theme.warningColor)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("This list may be out of date")
+                    .font(theme.fontCaption)
+                    .foregroundColor(theme.primaryText)
+                Text(message)
+                    .font(theme.fontCaption)
+                    .foregroundColor(theme.secondaryText)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 0)
+
+            Button("Retry") { profileService.loadProfiles() }
+                .buttonStyle(.plain)
+                .font(theme.fontCaption)
+                .foregroundColor(theme.accentColor)
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(theme.warningColor.opacity(0.12))
+        )
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
+        .accessibilityElement(children: .combine)
     }
 }

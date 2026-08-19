@@ -3,7 +3,7 @@
 //  DevgenticTests
 //
 //  Integration tests for WorkflowExecutor DAG orchestration.
-//  Exercises real WorkflowExecutor, WorkflowState, ContextCompressor, and DAG
+//  Exercises real WorkflowExecutor, WorkflowState, WorkflowInputAssembler, and DAG
 //  algorithms with a mock stream provider (no LLM/network calls).
 //
 //  Red-green approach: synthetic real-world scenarios covering single, chained,
@@ -11,6 +11,7 @@
 //
 
 import XCTest
+import SwiftData
 @testable import devgentic
 
 @MainActor
@@ -19,12 +20,18 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
     private var mockProvider: MockWorkflowStreamProvider!
     private var traceContext: TraceContext!
     private var innerBuilders: [InnerWorkflowBuilder] = []
+    /// Rows written directly to the SHARED stores by tests that must exercise the
+    /// nothing-is-injected production path. Torn down unconditionally below.
+    private var savedProfileIDs: [UUID] = []
+    private var savedLayoutIDs: [UUID] = []
 
     override func setUp() {
         super.setUp()
         mockProvider = MockWorkflowStreamProvider()
         traceContext = TestTraceContext.make()
         innerBuilders = []
+        savedProfileIDs = []
+        savedLayoutIDs = []
     }
 
     override func tearDown() {
@@ -32,29 +39,56 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             builder.cleanup()
         }
         innerBuilders = []
+        for id in savedLayoutIDs {
+            WorkflowLayoutStore.shared.delete(for: id)
+        }
+        savedLayoutIDs = []
+        for id in savedProfileIDs {
+            try? BackendProfileStore.shared.deleteProfile(withId: id)
+        }
+        savedProfileIDs = []
         super.tearDown()
     }
 
     // MARK: - Helpers
 
     /// Executes a workflow scenario and collects all stream events.
+    /// - Parameter startingDepth: binds `WorkflowDepth.current` around the CALL, simulating a run
+    ///   that began inside `startingDepth` enclosing workflows (WF-TS10). `nil` = a top-level run.
     private func execute(
         _ scenario: WorkflowTestScenario,
-        userInput: String = "Test input"
+        userInput: String = "Test input",
+        startingDepth: Int? = nil
     ) async throws -> [AgentStreamEvent] {
         let executor = WorkflowExecutor(workflowProfileID: UUID())
-        let stream = executor.executeWorkflow(
-            userInput: userInput,
-            chatHistory: [],
-            conversationID: UUID(),
-            ragContext: nil,
-            traceContext: traceContext,
-            onTraceUpdate: { _ in },
-            layout: scenario.layout,
-            profileMap: scenario.profileMap,
-            streamProvider: mockProvider
-        )
-        return try await StreamCollector.collect(from: stream)
+        let makeStream = {
+            executor.executeWorkflow(
+                userInput: userInput,
+                chatHistory: [],
+                conversationID: UUID(),
+                ragContext: nil,
+                traceContext: self.traceContext,
+                onTraceUpdate: { _ in },
+                layout: scenario.layout,
+                profileMap: scenario.profileMap,
+                streamProvider: self.mockProvider
+            )
+        }
+        // ⚠️ The binding must wrap the CALL, not the consumption: `AsyncThrowingStream`'s build
+        // closure runs synchronously during init, so the `Task` created inside it captures the
+        // task-locals in effect HERE. Binding around the `for try await` would be a no-op.
+        let stream = startingDepth.map { WorkflowDepth.$current.withValue($0, operation: makeStream) }
+            ?? makeStream()
+        // ⚠️ Resolves any HITL gate with nil instead of ignoring it. Since 2026-08-13 a Router asks
+        // on overlapping rules BY DEFAULT and waits INDEFINITELY, so a plain collect would park
+        // forever on any scenario whose rules double-match — a hang, not a failure. It bit a
+        // pre-existing test (`testCondition_MultipleRules_FirstMatchWins`) written years before the
+        // feature existed, whose input matches both a `contains` and an `isNotEmpty` rule.
+        //
+        // nil resolves to first-match, which is exactly what these tests asserted before arbitration
+        // existed, so no expectation changes. Tests that care about the ask use `executeWithGate`,
+        // and tests asserting no ask still catch a spurious one via `gateRequests`.
+        return try await WorkflowStreamCollector.collectWithGateChoice(from: stream, choosing: nil)
     }
 
     /// Creates a workflow stream (without consuming it) for cancellation tests.
@@ -226,7 +260,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         // Sequential execution
         WorkflowStreamCollector.assertNodeExecutionOrder(events, expectedNodeIDs: [botA, botB, botC])
 
-        // B receives A's output via ContextCompressor (check mock invocations)
+        // B receives A's output via WorkflowInputAssembler (check mock invocations)
         let bProfileID = scenario.profileID(for: botB)!
         let bInvocation = mockProvider.invocations.first(where: { $0.profileID == bProfileID })
         XCTAssertNotNil(bInvocation)
@@ -254,8 +288,14 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let events = try await execute(scenario)
 
         // A fails, B and C skipped
+        // ⚠️ The old assertion was `failed.count == 3` — it encoded the defect as the
+        // expectation, counting two nodes that never ran as failures.
         let failed = WorkflowStreamCollector.nodeFailedEvents(from: events)
-        XCTAssertEqual(failed.count, 3, "A fails + B skipped + C skipped")
+        let skipped = WorkflowStreamCollector.nodeSkippedEvents(from: events)
+        XCTAssertEqual(failed.map(\.nodeID), [botA], "only A actually failed")
+        XCTAssertEqual(Set(skipped.map(\.nodeID)), [botB, botC], "B and C did not run")
+        XCTAssertTrue(skipped.allSatisfy { $0.reason == .upstreamFailed || $0.reason == .upstreamSkipped },
+                      "the cause must trace back to A's failure, got \(skipped.map(\.reason))")
 
         // B and C never had their streams invoked
         let bProfileID = scenario.profileID(for: botB)!
@@ -283,8 +323,9 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
 
         // B fails, C skipped
         let failed = WorkflowStreamCollector.nodeFailedEvents(from: events)
-        XCTAssertTrue(failed.contains(where: { $0.nodeID == botB }))
-        XCTAssertTrue(failed.contains(where: { $0.nodeID == botC }))
+        let skipped = WorkflowStreamCollector.nodeSkippedEvents(from: events)
+        XCTAssertTrue(failed.contains(where: { $0.nodeID == botB }), "B failed")
+        XCTAssertTrue(skipped.contains(where: { $0.nodeID == botC }), "C did not run")
     }
 
     // MARK: - Group 3: Condition Branching
@@ -545,51 +586,70 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertEqual(occurrences, 1, "Upstream output should be injected once, not duplicated per edge")
     }
 
-    func testContinueAll_ExecutesDespiteFailure() async throws {
+    /// A RETIRED per-node policy is decoded and ignored. `continueAll` used to make the downstream
+    /// run; failure routing is now the `error` port, so an unwired one stops the branch.
+    func testRetiredContinueAllPolicyIsIgnored_BranchStops() async throws {
         let scenario = WorkflowTestScenario()
         let botA = scenario.addBotNode(name: "Failing Bot")
         let botB = scenario.addBotNode(name: "Downstream Bot")
 
         scenario.connect(from: botA, to: botB)
-        scenario.setNodeConfig(
-            WorkflowNodeConfig(onFailure: .continueAll),
-            for: botA
-        )
+        scenario.setNodeConfig(WorkflowNodeConfig(onFailure: .continueAll), for: botA)
 
         mockProvider.scriptError(for: scenario.profileID(for: botA)!, error: NSError(domain: "test", code: 1))
-        mockProvider.scriptStream(for: scenario.profileID(for: botB)!, events: [.content("B ran anyway")])
+        mockProvider.scriptStream(for: scenario.profileID(for: botB)!, events: [.content("must not run")])
 
         let events = try await execute(scenario)
 
-        // B executes despite A's failure (continueAll policy)
         let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
-        XCTAssertTrue(started.contains(botB), "Bot B should execute with continueAll policy on A")
+        XCTAssertFalse(started.contains(botB),
+                       "the stored policy must be ignored — with no error edge the branch stops")
     }
 
-    func testStopWorkflow_HaltsImmediately() async throws {
+    /// The replacement for it: wire the `error` port and the downstream runs, with the failure.
+    func testErrorPortWired_DownstreamRunsWithFailure() async throws {
+        let scenario = WorkflowTestScenario()
+        let botA = scenario.addBotNode(name: "Failing Bot")
+        let handler = scenario.addBotNode(name: "Handler")
+
+        scenario.connect(from: botA, to: handler, portLabel: "error")
+
+        mockProvider.scriptError(for: scenario.profileID(for: botA)!, error: NSError(domain: "test", code: 1))
+        mockProvider.scriptStream(for: scenario.profileID(for: handler)!, events: [.content("handled")])
+
+        let events = try await execute(scenario)
+
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == handler },
+                      "an error-wired handler must run when its upstream fails")
+
+        guard let invocation = mockProvider.workflowInvocations.first(where: {
+            $0.profileID == scenario.profileID(for: handler)
+        }) else { return XCTFail("handler never invoked") }
+        XCTAssertTrue(invocation.context.upstreamInput.contains("[Upstream node \"Failing Bot\" failed:"),
+                      "…and must receive the annotated failure, got: \(invocation.context.upstreamInput.prefix(160))")
+    }
+
+
+    /// A retired `stopWorkflow` no longer halts anything. Its branch stops (no error edge), which
+    /// is the same shape any failure produces now.
+    func testRetiredStopWorkflowPolicyIsIgnored() async throws {
         let scenario = WorkflowTestScenario()
         let botA = scenario.addBotNode(name: "Failing Bot")
         let botB = scenario.addBotNode(name: "Downstream Bot")
 
         scenario.connect(from: botA, to: botB)
-        scenario.setNodeConfig(
-            WorkflowNodeConfig(onFailure: .stopWorkflow),
-            for: botA
-        )
+        scenario.setNodeConfig(WorkflowNodeConfig(onFailure: .stopWorkflow), for: botA)
 
         mockProvider.scriptError(for: scenario.profileID(for: botA)!, error: NSError(domain: "test", code: 1))
         mockProvider.scriptStream(for: scenario.profileID(for: botB)!, events: [.content("should not run")])
 
         let events = try await execute(scenario)
 
-        // Workflow halts — B never starts
         let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
-        XCTAssertFalse(started.contains(botB), "Bot B should NOT execute with stopWorkflow policy")
-
-        // A failed event exists
-        let failed = WorkflowStreamCollector.nodeFailedEvents(from: events)
-        XCTAssertTrue(failed.contains(where: { $0.nodeID == botA }))
+        XCTAssertFalse(started.contains(botB), "B is downstream of a failure with no error edge")
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == botA })
     }
+
 
     // MARK: - Group 7: Retry & Complex
 
@@ -839,8 +899,136 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
 
         // A fails, B completes, C skipped (allSatisfy requires ALL upstream to pass)
         let failed = WorkflowStreamCollector.nodeFailedEvents(from: events).map(\.nodeID)
+        let skipped = WorkflowStreamCollector.nodeSkippedEvents(from: events).map(\.nodeID)
         XCTAssertTrue(failed.contains(botA))
-        XCTAssertTrue(failed.contains(botC), "C should be skipped when any parent fails")
+        XCTAssertTrue(skipped.contains(botC), "C should be SKIPPED when any parent fails — not failed")
+    }
+
+    // MARK: - Run-level terminal verdict (WF-EX5)
+    //
+    // ⚠️ The run's `executionFinished(outcome:reason:)` is what `ActiveStreamManager` turns into
+    // the run chip, the persisted status and the trace span's outcome — and NOTHING in this
+    // 151-case suite looked at it. The verdict logic was rewritten on 2026-08-15 into three
+    // branches; the third (every terminal skipped ⇒ a COMPLETED run with an explanatory answer,
+    // deliberately not a failure) shipped with no test at all. These pin all three.
+
+    /// A run with a successful terminal reports `.completed` — and exactly ONE terminal event.
+    func testSuccessfulRunReportsCompletedExactlyOnce() async throws {
+        let scenario = WorkflowTestScenario()
+        let bot = scenario.addBotNode(name: "Bot A")
+        mockProvider.scriptStream(for: scenario.profileID(for: bot)!, events: [.content("the answer")])
+
+        let events = try await execute(scenario)
+        let outcomes = WorkflowStreamCollector.terminalOutcomes(from: events)
+
+        XCTAssertEqual(outcomes.count, 1, "a run must report its verdict exactly once")
+        XCTAssertEqual(outcomes.first?.outcome, .completed)
+        XCTAssertNil(outcomes.first?.reason, "a clean completion carries no reason")
+        XCTAssertTrue(WorkflowStreamCollector.contentText(from: events).contains("the answer"))
+    }
+
+    /// A genuine failure reports `.failed`, and the reason NAMES the failing node count — the
+    /// message the chat surfaces instead of the old "all terminal nodes failed".
+    func testFailedRunReportsFailedWithAReason() async throws {
+        let scenario = WorkflowTestScenario()
+        let bot = scenario.addBotNode(name: "Bot A")
+        mockProvider.scriptError(for: scenario.profileID(for: bot)!, error: NSError(domain: "test", code: 1))
+
+        let events = try await execute(scenario)
+        let outcomes = WorkflowStreamCollector.terminalOutcomes(from: events)
+
+        XCTAssertEqual(outcomes.count, 1)
+        XCTAssertEqual(outcomes.first?.outcome, .failed)
+        XCTAssertEqual(outcomes.first?.reason, "1 node failed",
+                       "the verdict must count the nodes that actually failed — got: \(String(describing: outcomes.first?.reason))")
+    }
+
+    /// ⚠️ THE BRANCH SHIPPED TODAY WITH NO TEST — a run where nothing failed but no terminal
+    /// produced an answer. It must COMPLETE, never be reported as a failure (that was WF-EX1's
+    /// defect in its second shape).
+    ///
+    /// Built with `fallbackLabel: "False"` (the builder's default), so the Router MATCHES its
+    /// fallback port and completes; the handler hangs off a different port and is skipped, leaving
+    /// the Router itself as the only terminal — successful, but with no text.
+    func testRunThatProducesNoAnswerCompletesWithAnExplanation() async throws {
+        let scenario = WorkflowTestScenario()
+        let router = scenario.addConditionNode(
+            name: "Router",
+            rules: [ConditionRule(label: "Taken", field: .upstreamOutput, op: .contains, value: "zzz-never")]
+        )
+        let handler = scenario.addCodeNode(name: "OnlyTerminal")
+        scenario.connect(from: router, to: handler, portLabel: "Taken")
+
+        let events = try await execute(scenario)
+        let outcomes = WorkflowStreamCollector.terminalOutcomes(from: events)
+
+        XCTAssertEqual(outcomes.count, 1)
+        XCTAssertEqual(outcomes.first?.outcome, .completed,
+                       "nothing failed — an unwired branch is not a run failure")
+        XCTAssertTrue(WorkflowStreamCollector.errorMessages(from: events).isEmpty,
+                      "nothing failed, so no error may be surfaced — got: \(WorkflowStreamCollector.errorMessages(from: events))")
+        // ⚠️ Deliberately NOT asserting explanatory content: a terminal can succeed with empty text
+        // and still have done its job (an artifact, a written file), so the engine stays silent and
+        // logs instead — see `testTerminalNode_EmptyOutput_NotInFinalContent`.
+    }
+
+    /// A Router with NO fallback that matches nothing genuinely fails — and the verdict must name
+    /// the failure rather than describing the skipped terminal downstream of it.
+    func testRouterWithNoMatchAndNoFallbackFailsTheRun() async throws {
+        let scenario = WorkflowTestScenario()
+        let router = scenario.addConditionNode(
+            name: "Router",
+            rules: [
+                ConditionRule(label: "Taken", field: .upstreamOutput, op: .contains, value: "zzz-never"),
+                ConditionRule(label: "Other", field: .upstreamOutput, op: .contains, value: "qqq-never")
+            ],
+            fallbackLabel: ""
+        )
+        let handler = scenario.addCodeNode(name: "Downstream")
+        scenario.connect(from: router, to: handler, portLabel: "Taken")
+
+        let events = try await execute(scenario)
+        let outcomes = WorkflowStreamCollector.terminalOutcomes(from: events)
+
+        XCTAssertEqual(outcomes.first?.outcome, .failed)
+        XCTAssertTrue(WorkflowStreamCollector.errorMessages(from: events).contains { $0.contains("The workflow failed.") },
+                      "the failure must name the node that failed — got: \(WorkflowStreamCollector.errorMessages(from: events))")
+        XCTAssertTrue(WorkflowStreamCollector.nodeSkippedEvents(from: events).contains { $0.nodeID == handler },
+                      "the downstream node did not run — that is a skip, not a failure")
+    }
+
+    /// The verdict must not be emitted twice, and must be the LAST workflow event — everything
+    /// downstream (chip, persisted status, span) keys off exactly one.
+    func testTerminalVerdictIsTheFinalEvent() async throws {
+        let scenario = WorkflowTestScenario()
+        let a = scenario.addBotNode(name: "A")
+        let b = scenario.addBotNode(name: "B")
+        scenario.connect(from: a, to: b)
+        mockProvider.scriptStream(for: scenario.profileID(for: a)!, events: [.content("one")])
+        mockProvider.scriptStream(for: scenario.profileID(for: b)!, events: [.content("two")])
+
+        let events = try await execute(scenario)
+
+        XCTAssertEqual(WorkflowStreamCollector.terminalOutcomes(from: events).count, 1)
+        guard case .executionFinished = events.last else {
+            return XCTFail("the run's verdict must be the final event, got: \(String(describing: events.last))")
+        }
+    }
+
+    /// ⚠️ WF-EX4: exactly ONE terminal event per structural node. The node's own emit and the
+    /// timeout wrapper's used to both fire, logging a green success and a red failure for the same
+    /// node seconds apart.
+    func testStructuralNodeEmitsExactlyOneTerminalEvent() async throws {
+        let scenario = WorkflowTestScenario()
+        let code = scenario.addCodeNode(name: "Transform")
+
+        let events = try await execute(scenario)
+
+        let terminals = WorkflowStreamCollector.nodeCompletedEvents(from: events).filter { $0.nodeID == code }.count
+            + WorkflowStreamCollector.nodeFailedEvents(from: events).filter { $0.nodeID == code }.count
+            + WorkflowStreamCollector.nodeSkippedEvents(from: events).filter { $0.nodeID == code }.count
+            + WorkflowStreamCollector.nodeCancelledEvents(from: events).filter { $0.nodeID == code }.count
+        XCTAssertEqual(terminals, 1, "a node must report its outcome exactly once")
     }
 
     func testAllTerminalsFailed_EmitsErrorMessage() async throws {
@@ -856,8 +1044,12 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             if case .error(let err) = event { return err.message }
             return nil
         }
-        XCTAssertTrue(errors.contains(where: { $0.contains("all terminal nodes failed") }),
-                       "Should report all terminals failed, got errors: \(errors)")
+        // ⚠️ The message names the nodes that ACTUALLY FAILED. "all terminal nodes failed"
+        // described the symptom and hid the cause — the failing node is usually mid-graph.
+        XCTAssertTrue(errors.contains(where: { $0.contains("The workflow failed.") }),
+                       "Should report the run as failed, got errors: \(errors)")
+        XCTAssertTrue(errors.contains(where: { $0.contains("Bot A") }),
+                       "…and must NAME the node that failed, got errors: \(errors)")
     }
 
     func testTriggerNode_AsEntryPoint() async throws {
@@ -928,12 +1120,17 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
 
     // MARK: - Group 11: Structural Node Failure Policies
 
-    func testStructuralNode_StopWorkflow() async throws {
-        // Code node configured with stopWorkflow — simulate failure via missing variable
-        // Actually code nodes can't fail in current implementation (template substitution never throws)
-        // Use a condition node scenario instead: condition with stopWorkflow + skipped downstream
-        // Actually structural nodes don't currently fail in ways we can control easily.
-        // Instead, test gate rejection with stopWorkflow policy.
+    /// An unanswered gate fails, and its branch stops — here because no `error` edge was drawn,
+    /// so the `["error"]` activation reaches nothing. Previously this test relied on the retired
+    /// `stopWorkflow` policy; the outcome is now graph-driven.
+    ///
+    /// ⚠️ WF-TS9: the doc comment used to claim "a gate exposes only its option ports, so the
+    /// `["error"]` activation matches no drawable edge". That has been false since WF61 —
+    /// `WorkflowCanvasState.outputPortLabels(for:)` returns `withErrorPort(config.options)`, and
+    /// `testGateWithTimeout_Unanswered_FailsOntoErrorPortAndSkipsOptionBranch` (Group 32) proves
+    /// the edge is live. Also note this test reaches `chosenOption == nil` through the HARNESS,
+    /// not through the gate's timer — Group 32 is what covers the timer.
+    func testUnansweredGate_BranchStops() async throws {
         let scenario = WorkflowTestScenario()
         let botA = scenario.addBotNode(name: "Bot A")
         let gate = scenario.addGateNode(name: "Critical Gate")
@@ -943,19 +1140,18 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         scenario.connect(from: botA, to: gate)
         scenario.connect(from: gate, to: botB)
         scenario.connect(from: botB, to: botC)
-        scenario.setNodeConfig(WorkflowNodeConfig(onFailure: .stopWorkflow), for: gate)
 
         mockProvider.scriptStream(for: scenario.profileID(for: botA)!, events: [.content("data")])
         mockProvider.scriptStream(for: scenario.profileID(for: botB)!, events: [.content("should not run")])
         mockProvider.scriptStream(for: scenario.profileID(for: botC)!, events: [.content("should not run")])
 
-        // No choice (nil = timeout / cancel) → the gate FAILS; with stopWorkflow the whole run halts.
         let events = try await executeWithGate(scenario, choosing: nil)
 
         let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
-        XCTAssertFalse(started.contains(botB), "Bot B should NOT run after gate failure + stopWorkflow")
-        XCTAssertFalse(started.contains(botC), "Bot C should NOT run")
+        XCTAssertFalse(started.contains(botB), "no gate option was chosen, so no branch is taken")
+        XCTAssertFalse(started.contains(botC), "and the skip cascades transitively")
     }
+
 
     // MARK: - Group 12: Retry Edge Cases
 
@@ -1003,59 +1199,11 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertTrue(failed.contains(where: { $0.nodeID == botA }))
     }
 
-    // MARK: - Group 13: ContextCompressor Unit Tests
-
-    func testContextCompressor_EmptyResults() {
-        let result = ContextCompressor.compile(results: [])
-        XCTAssertEqual(result, "", "Empty results should produce empty string")
-    }
-
-    func testContextCompressor_StatusLabels() {
-        let completedEnvelope = NodeResultEnvelope(
-            taskID: UUID(), nodeID: UUID(), sourceProfileID: UUID(),
-            profileName: "Bot A", profileType: .bot, status: .completed,
-            output: "success", artifacts: [], metadata: .simple(start: Date(), end: Date(), output: "")
-        )
-        let failedEnvelope = NodeResultEnvelope(
-            taskID: UUID(), nodeID: UUID(), sourceProfileID: UUID(),
-            profileName: "Bot B", profileType: .bot,
-            status: .failed(.modelError(provider: "test", error: "oops")),
-            output: "failed", artifacts: [], metadata: .simple(start: Date(), end: Date(), output: "")
-        )
-        let skippedEnvelope = NodeResultEnvelope(
-            taskID: UUID(), nodeID: UUID(), sourceProfileID: UUID(),
-            profileName: "Bot C", profileType: .bot, status: .skipped(reason: "upstream failed"),
-            output: "", artifacts: [], metadata: .simple(start: Date(), end: Date(), output: "")
-        )
-
-        let result = ContextCompressor.compile(results: [completedEnvelope, failedEnvelope, skippedEnvelope])
-
-        XCTAssertTrue(result.contains("Status: Completed"))
-        XCTAssertTrue(result.contains("Status: Failed"))
-        XCTAssertTrue(result.contains("Status: Skipped"))
-        XCTAssertTrue(result.contains("Bot A"))
-        XCTAssertTrue(result.contains("Bot B"))
-        XCTAssertTrue(result.contains("Bot C"))
-    }
-
-    func testContextCompressor_TruncatesLargeOutput() {
-        let longOutput = String(repeating: "x", count: 5000)
-        let envelope = NodeResultEnvelope(
-            taskID: UUID(), nodeID: UUID(), sourceProfileID: UUID(),
-            profileName: "Verbose Bot", profileType: .bot, status: .completed,
-            output: longOutput, artifacts: [], metadata: .simple(start: Date(), end: Date(), output: "")
-        )
-
-        let result = ContextCompressor.compile(results: [envelope], budget: 3000)
-
-        XCTAssertLessThanOrEqual(result.count, 3100, "Should be near budget (3000 + truncation marker)")
-        XCTAssertTrue(result.contains("truncated"), "Should contain truncation marker")
-    }
-
-    // MARK: - Group 13b: ContextCompressor.compileForWorkflow() Unit Tests
+    // MARK: - Group 13: compileForWorkflow Unit Tests
+    // (The former Group 13 tested the legacy `compile()` — dead code, deleted with it 2026-08-15.)
 
     func testCompileForWorkflow_EmptyResults() {
-        let result = ContextCompressor.compileForWorkflow(results: [])
+        let result = WorkflowInputAssembler.compileForWorkflow(results: [])
         XCTAssertEqual(result, "", "Empty results should produce empty string")
     }
 
@@ -1069,11 +1217,11 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let skippedB = NodeResultEnvelope(
             taskID: UUID(), nodeID: UUID(), sourceProfileID: UUID(),
             profileName: "Bot B", profileType: .bot,
-            status: .skipped(reason: "upstream"),
+            status: .skipped(reason: .upstreamFailed),
             output: "skipped output", artifacts: [], metadata: .simple(start: Date(), end: Date(), output: "")
         )
 
-        let result = ContextCompressor.compileForWorkflow(results: [failedA, skippedB])
+        let result = WorkflowInputAssembler.compileForWorkflow(results: [failedA, skippedB])
         XCTAssertEqual(result, "", "All failed/skipped should produce empty string")
     }
 
@@ -1085,7 +1233,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             metadata: .simple(start: Date(), end: Date(), output: "")
         )
 
-        let result = ContextCompressor.compileForWorkflow(results: [envelope])
+        let result = WorkflowInputAssembler.compileForWorkflow(results: [envelope])
         XCTAssertEqual(result, "The research shows three key findings.", "Single result should be raw text, no separator")
         XCTAssertFalse(result.contains("---"), "Single result should have no separator")
         XCTAssertFalse(result.contains("Step"), "Should have no metadata labels")
@@ -1106,7 +1254,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             metadata: .simple(start: Date(), end: Date(), output: "")
         )
 
-        let result = ContextCompressor.compileForWorkflow(results: [envelopeA, envelopeB])
+        let result = WorkflowInputAssembler.compileForWorkflow(results: [envelopeA, envelopeB])
         XCTAssertTrue(result.contains("Research output"), "Should contain first output")
         XCTAssertTrue(result.contains("SEO keywords"), "Should contain second output")
         XCTAssertTrue(result.contains("---"), "Multiple results should be separated by ---")
@@ -1129,13 +1277,17 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             metadata: .simple(start: Date(), end: Date(), output: "")
         )
 
-        let result = ContextCompressor.compileForWorkflow(results: [completed, failed])
+        let result = WorkflowInputAssembler.compileForWorkflow(results: [completed, failed])
         XCTAssertEqual(result, "Useful data", "Only completed results should be included")
         XCTAssertFalse(result.contains("Error garbage"), "Failed output should be excluded")
     }
 
-    func testCompileForWorkflow_BudgetEnforcement() {
-        let longOutput = String(repeating: "word ", count: 1000) // 5000 chars
+    /// ⚠️ INVERTED 2026-08-13 (user decision): a workflow no longer truncates upstream output at
+    /// all. The old version of this test asserted the opposite — that a 5,000-char output was cut to
+    /// 2,000 — which is exactly the silent loss the change removes. Fitting the input is now a
+    /// function of which model the downstream node runs, and that is the author's choice.
+    func testCompileForWorkflow_PassesLongOutputThroughUntruncated() {
+        let longOutput = String(repeating: "word ", count: 1000) // 5,000 chars
         let envelope = NodeResultEnvelope(
             taskID: UUID(), nodeID: UUID(), sourceProfileID: UUID(),
             profileName: "Verbose Bot", profileType: .bot, status: .completed,
@@ -1143,8 +1295,29 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             metadata: .simple(start: Date(), end: Date(), output: "")
         )
 
-        let result = ContextCompressor.compileForWorkflow(results: [envelope], budget: 2000)
-        XCTAssertLessThanOrEqual(result.count, 2000, "Output should respect budget")
+        let result = WorkflowInputAssembler.compileForWorkflow(results: [envelope])
+        XCTAssertEqual(result, longOutput, "the output must arrive byte-for-byte")
+        XCTAssertFalse(result.contains("truncated"), "no truncation marker may be injected")
+    }
+
+    /// Several verbose upstreams also pass through whole — the old TOTAL budget divided 6,000 chars
+    /// between them, so three chatty nodes each lost most of their output.
+    func testCompileForWorkflow_MultipleVerboseUpstreamsAllSurvive() {
+        let envelopes = (1...3).map { i in
+            NodeResultEnvelope(
+                taskID: UUID(), nodeID: UUID(), sourceProfileID: UUID(),
+                profileName: "Bot \(i)", profileType: .bot, status: .completed,
+                output: String(repeating: "chunk\(i) ", count: 1000), artifacts: [],
+                metadata: .simple(start: Date(), end: Date(), output: "")
+            )
+        }
+
+        let result = WorkflowInputAssembler.compileForWorkflow(results: envelopes)
+        for i in 1...3 {
+            XCTAssertEqual(result.components(separatedBy: "chunk\(i) ").count - 1, 1000,
+                           "every occurrence from Bot \(i) must survive")
+        }
+        XCTAssertFalse(result.contains("truncated"))
     }
 
     func testCompileForWorkflow_EmptyOutputCompleted() {
@@ -1155,7 +1328,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             metadata: .simple(start: Date(), end: Date(), output: "")
         )
 
-        let result = ContextCompressor.compileForWorkflow(results: [envelope])
+        let result = WorkflowInputAssembler.compileForWorkflow(results: [envelope])
         XCTAssertEqual(result, "", "Completed but empty output should produce empty string")
     }
 
@@ -1170,13 +1343,13 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
 
         // Default: failed upstream excluded (error handler would see nothing).
         XCTAssertEqual(
-            ContextCompressor.compileForWorkflow(results: [failed]), "",
+            WorkflowInputAssembler.compileForWorkflow(results: [failed]), "",
             "Failed upstream should be excluded by default"
         )
 
         // includeFailures: surfaced with a reason annotation + the partial output,
         // so an error-handler node can act on what failed.
-        let recovered = ContextCompressor.compileForWorkflow(results: [failed], includeFailures: true)
+        let recovered = WorkflowInputAssembler.compileForWorkflow(results: [failed], includeFailures: true)
         XCTAssertTrue(recovered.contains("Risky Bot"), "Should name the failed upstream")
         XCTAssertTrue(recovered.contains("failed"), "Should mark the upstream as failed")
         XCTAssertTrue(recovered.contains("partial result before failure"), "Should include the partial output")
@@ -1197,7 +1370,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             metadata: .simple(start: Date(), end: Date(), output: "")
         )
 
-        let result = ContextCompressor.compileForWorkflow(results: [completed, failed], includeFailures: true)
+        let result = WorkflowInputAssembler.compileForWorkflow(results: [completed, failed], includeFailures: true)
         XCTAssertTrue(result.contains("useful data"), "Completed output should be included")
         XCTAssertTrue(result.contains("Bad Bot"), "Failed upstream should be annotated and included")
         XCTAssertTrue(result.contains("---"), "Two usable upstreams should be separated by ---")
@@ -1601,20 +1774,20 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
 
         let events = try await execute(scenario)
 
-        let failed = WorkflowStreamCollector.nodeFailedEvents(from: events).map(\.nodeID)
-        XCTAssertTrue(failed.contains(botC), "C should be skipped when ANY parent fails (allSatisfy)")
+        let skipped = WorkflowStreamCollector.nodeSkippedEvents(from: events).map(\.nodeID)
+        XCTAssertTrue(skipped.contains(botC), "C should be SKIPPED when ANY parent fails (allSatisfy)")
     }
 
-    func testFanIn_ContinueAllParent_ChildStillExecutes() async throws {
-        // A(continueAll, fails)→C, B(ok)→C: C should execute because A has continueAll
+    /// Fan-in with a failed parent: the child SKIPS under the default `.all` join, because the
+    /// failed parent's branch is not live. (This previously passed via `continueAll`.)
+    func testFanIn_FailedParent_ChildSkipsUnderAllJoin() async throws {
         let scenario = WorkflowTestScenario()
-        let botA = scenario.addBotNode(name: "ContinueAll Parent")
+        let botA = scenario.addBotNode(name: "Failing Parent")
         let botB = scenario.addBotNode(name: "Good Parent")
         let botC = scenario.addBotNode(name: "Child")
 
         scenario.connect(from: botA, to: botC)
         scenario.connect(from: botB, to: botC)
-        scenario.setNodeConfig(WorkflowNodeConfig(onFailure: .continueAll), for: botA)
 
         mockProvider.scriptError(for: scenario.profileID(for: botA)!, error: NSError(domain: "t", code: 1))
         mockProvider.scriptStream(for: scenario.profileID(for: botB)!, events: [.content("B ok")])
@@ -1623,7 +1796,1139 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let events = try await execute(scenario)
 
         let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
-        XCTAssertTrue(started.contains(botC), "C should execute when failing parent has continueAll")
+        XCTAssertFalse(started.contains(botC), "an `.all` join needs every branch live")
+
+        // The healthy parent still completed — a failure never touches a parallel branch.
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == botB })
+    }
+
+
+    // MARK: - Router: arbitration highlights
+
+    /// Spans are attributed to the rule that matched them, and each one really covers the matched
+    /// text in `inputText`. ⚠️ The input deliberately differs in CASE from the needles — that is what
+    /// proves start/end come from the returned `Range` rather than from `needle.count`.
+    func testArbitrationHighlights_SpansCoverTheMatchedTextPerRule() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ]
+        config.askOnAmbiguity = true
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let a = scenario.addBotNode(name: "A"), b = scenario.addBotNode(name: "B")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: a, portLabel: "Urgent")
+        scenario.connect(from: router, to: b, portLabel: "Billing")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("URGENT problem with my Invoice")])
+        mockProvider.scriptStream(for: scenario.profileID(for: a)!, events: [.content("a")])
+        mockProvider.scriptStream(for: scenario.profileID(for: b)!, events: [.content("b")])
+
+        let events = try await executeWithGate(scenario, choosing: "Urgent")
+        let request = try XCTUnwrap(WorkflowStreamCollector.gateRequests(from: events).first)
+        let input = try XCTUnwrap(request.inputText)
+
+        XCTAssertEqual(Set(request.highlights.map(\.label)), ["Urgent", "Billing"])
+
+        // Every span must resolve, inside the carried string, to text equal to its rule's needle.
+        let needles = ["Urgent": "urgent", "Billing": "invoice"]
+        for span in request.highlights {
+            let chars = Array(input)
+            XCTAssertLessThanOrEqual(span.end, chars.count, "span must stay inside inputText")
+            let matched = String(chars[span.start..<span.end])
+            XCTAssertEqual(matched.lowercased(), needles[span.label], "span \(span) covered '\(matched)'")
+        }
+    }
+
+    /// Only `contains` has a locatable span. Operators that match by absence or unconditionally have
+    /// nothing to paint — highlighting a near-miss for `does not contain` would colour exactly the
+    /// text that would have made the rule NOT match.
+    func testArbitrationHighlights_NonLocatableOperatorsProduceNoSpans() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "Any", field: .upstreamOutput, op: .isNotEmpty, value: ""),
+            // `.notContains` of an absent needle: matches by ABSENCE, so nothing to highlight —
+            // the same non-locatable property the deleted `always` operator provided here.
+            ConditionRule(label: "All", field: .upstreamOutput, op: .notContains, value: "xyzzy")
+        ]
+        config.askOnAmbiguity = true
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let a = scenario.addBotNode(name: "A"), b = scenario.addBotNode(name: "B")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: a, portLabel: "Any")
+        scenario.connect(from: router, to: b, portLabel: "All")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("anything at all")])
+        mockProvider.scriptStream(for: scenario.profileID(for: a)!, events: [.content("a")])
+        mockProvider.scriptStream(for: scenario.profileID(for: b)!, events: [.content("b")])
+
+        let events = try await executeWithGate(scenario, choosing: "Any")
+        let request = try XCTUnwrap(WorkflowStreamCollector.gateRequests(from: events).first)
+
+        XCTAssertEqual(request.options, ["Any", "All"], "both rules matched, so both are offered")
+        XCTAssertTrue(request.highlights.isEmpty, "neither operator has a locatable span")
+        XCTAssertEqual(request.inputText, "anything at all", "…but the input is still shown")
+    }
+
+    /// ⚠️ One rule's comma-separated needles can match overlapping text ("urgent, urgently"). The
+    /// spans must come back merged, sorted and non-overlapping — the banner's painter walks them
+    /// with a forward-only cursor and would mis-paint on an unsorted or overlapping list.
+    func testArbitrationHighlights_OverlappingNeedlesAreMerged() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent, urgently"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ]
+        config.askOnAmbiguity = true
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let a = scenario.addBotNode(name: "A"), b = scenario.addBotNode(name: "B")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: a, portLabel: "Urgent")
+        scenario.connect(from: router, to: b, portLabel: "Billing")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("please urgently fix the invoice")])
+        mockProvider.scriptStream(for: scenario.profileID(for: a)!, events: [.content("a")])
+        mockProvider.scriptStream(for: scenario.profileID(for: b)!, events: [.content("b")])
+
+        let events = try await executeWithGate(scenario, choosing: "Urgent")
+        let request = try XCTUnwrap(WorkflowStreamCollector.gateRequests(from: events).first)
+
+        let urgent = request.highlights.filter { $0.label == "Urgent" }
+        XCTAssertEqual(urgent.count, 1, "'urgent' and 'urgently' overlap and must merge — got \(urgent)")
+        let input = try XCTUnwrap(request.inputText)
+        XCTAssertEqual(String(Array(input)[urgent[0].start..<urgent[0].end]), "urgently",
+                       "the merged span covers the longer alternative")
+
+        // Sorted and non-overlapping across the whole set.
+        let sorted = request.highlights.sorted { $0.start < $1.start }
+        for (lhs, rhs) in zip(sorted, sorted.dropFirst()) {
+            XCTAssertLessThanOrEqual(lhs.end, rhs.start, "spans must not overlap: \(lhs) vs \(rhs)")
+        }
+    }
+
+    /// ⚠️ THE FOLDING CASE — the reason start AND end must both come from the returned `Range`.
+    ///
+    /// `range(of:options:.caseInsensitive)` performs full case folding, so the 7-character needle
+    /// "strasse" matches the 6-character text "straße". Computing `end = start + needle.count` would
+    /// paint one character too many and drift every later span in the string. Verified empirically:
+    /// ß/ss and the ﬁ ligature both differ in length; precomposed vs decomposed accents do not,
+    /// because grapheme-cluster counting already normalises those away.
+    ///
+    /// Found by mutation-checking — the original highlight tests all used needles whose length
+    /// happened to equal the match, so the bug passed them all.
+    func testArbitrationHighlights_FoldedMatchUsesTheRangeNotTheNeedleLength() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "Street", field: .upstreamOutput, op: .contains, value: "strasse"),
+            ConditionRule(label: "Here", field: .upstreamOutput, op: .contains, value: "hier")
+        ]
+        config.askOnAmbiguity = true
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let a = scenario.addBotNode(name: "A"), b = scenario.addBotNode(name: "B")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: a, portLabel: "Street")
+        scenario.connect(from: router, to: b, portLabel: "Here")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("die straße hier")])
+        mockProvider.scriptStream(for: scenario.profileID(for: a)!, events: [.content("a")])
+        mockProvider.scriptStream(for: scenario.profileID(for: b)!, events: [.content("b")])
+
+        let events = try await executeWithGate(scenario, choosing: "Street")
+        let request = try XCTUnwrap(WorkflowStreamCollector.gateRequests(from: events).first)
+        let input = try XCTUnwrap(request.inputText)
+
+        let street = try XCTUnwrap(request.highlights.first { $0.label == "Street" })
+        XCTAssertEqual(street.end - street.start, 6, "the MATCH is 6 chars ('straße'), the needle is 7")
+        XCTAssertEqual(String(Array(input)[street.start..<street.end]), "straße")
+
+        // …and the later span is still correctly placed, which an off-by-one would break.
+        let here = try XCTUnwrap(request.highlights.first { $0.label == "Here" })
+        XCTAssertEqual(String(Array(input)[here.start..<here.end]), "hier")
+    }
+
+    /// ⚠️ `equals` is excluded from highlighting on purpose: a match covers the ENTIRE field, so
+    /// painting it colours the whole input and tells the reader nothing. Only `contains` has a
+    /// span worth showing. (Also found by mutation-checking — dropping the operator guard changed
+    /// nothing until this case existed.)
+    func testArbitrationHighlights_EqualsProducesNoSpan() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "Exact", field: .upstreamOutput, op: .equals, value: "escalate now"),
+            ConditionRule(label: "Partial", field: .upstreamOutput, op: .contains, value: "escalate")
+        ]
+        config.askOnAmbiguity = true
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let a = scenario.addBotNode(name: "A"), b = scenario.addBotNode(name: "B")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: a, portLabel: "Exact")
+        scenario.connect(from: router, to: b, portLabel: "Partial")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("escalate now")])
+        mockProvider.scriptStream(for: scenario.profileID(for: a)!, events: [.content("a")])
+        mockProvider.scriptStream(for: scenario.profileID(for: b)!, events: [.content("b")])
+
+        let events = try await executeWithGate(scenario, choosing: "Exact")
+        let request = try XCTUnwrap(WorkflowStreamCollector.gateRequests(from: events).first)
+
+        XCTAssertEqual(request.options, ["Exact", "Partial"], "both rules matched")
+        XCTAssertTrue(request.highlights.filter { $0.label == "Exact" }.isEmpty,
+                      "`equals` covers the whole field — no useful span")
+        XCTAssertFalse(request.highlights.filter { $0.label == "Partial" }.isEmpty,
+                       "`contains` still highlights")
+    }
+
+    /// An ordinary Gate node carries no input and no spans — the new fields must stay empty rather
+    /// than leaking a Router concept into every gate.
+    func testOrdinaryGate_CarriesNoInputOrHighlights() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let gate = scenario.addGateNode(name: "Approve?", options: ["Yes", "No"])
+        let yes = scenario.addBotNode(name: "Yes Arm")
+        scenario.connect(from: source, to: gate)
+        scenario.connect(from: gate, to: yes, portLabel: "Yes")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("data")])
+        mockProvider.scriptStream(for: scenario.profileID(for: yes)!, events: [.content("ok")])
+
+        let events = try await executeWithGate(scenario, choosing: "Yes")
+        let request = try XCTUnwrap(WorkflowStreamCollector.gateRequests(from: events).first)
+
+        XCTAssertNil(request.inputText)
+        XCTAssertTrue(request.highlights.isEmpty)
+    }
+
+    // MARK: - Retries: per-node, and only where retrying is safe
+
+    /// A per-node retry count still works on a Profile node — the one kind where a transient
+    /// provider error is worth another attempt.
+    func testProfileNode_PerNodeRetry_RetriesTransientFailure() async throws {
+        let scenario = WorkflowTestScenario()
+        let bot = scenario.addBotNode(name: "Flaky Bot")
+        var cfg = WorkflowNodeConfig()
+        cfg.maxNodeRetries = 2
+        scenario.setNodeConfig(cfg, for: bot)
+
+        let pid = scenario.profileID(for: bot)!
+        mockProvider.scriptError(for: pid, error: NSError(domain: "t", code: 1))
+        mockProvider.scriptStream(for: pid, events: [.content("succeeded on retry")])
+
+        let events = try await execute(scenario)
+        XCTAssertTrue(StreamCollector.contentText(from: events).contains("succeeded on retry"),
+                      "a per-node retry must still fire")
+    }
+
+    /// ⚠️ A workflow-level default from before 2026-08-13 is STILL HONOURED at runtime — dropping it
+    /// outright would silently stop retrying for anyone who had opted in, and a flaky provider would
+    /// start failing runs that used to succeed.
+    ///
+    /// ⚠️ COVERED BY INSPECTION, NOT END-TO-END. `executeWorkflow` resolves its `WorkflowConfig` from
+    /// the workflow's own stored profile rather than accepting one, so an integration test cannot
+    /// inject a legacy value. What is pinned here is the accessor's semantics; the two call sites
+    /// that consult it (`executeProfileNodeWithRetry` and the Action path) are verified by reading,
+    /// which is worth knowing before trusting this row.
+    func testLegacyWorkflowRetryDefault_AccessorSemantics() {
+        var config = WorkflowConfig(agentProfileIDs: [])
+        XCTAssertEqual(config.resolvedMaxRetries, 0,
+                       "a new workflow does not retry unless a node asks for it")
+
+        config.defaultMaxRetries = 2
+        XCTAssertEqual(config.resolvedMaxRetries, 2, "a stored legacy value survives")
+
+        // And it round-trips, so an existing layout keeps it.
+        let data = try? JSONEncoder().encode(config)
+        let decoded = data.flatMap { try? JSONDecoder().decode(WorkflowConfig.self, from: $0) }
+        XCTAssertEqual(decoded?.resolvedMaxRetries, 2)
+    }
+
+    /// ⚠️ Retry NEVER applies to structural kinds, and must not start. Re-running a Router is
+    /// pointless (deterministic — same input, same rules, same no-match); re-running a
+    /// sub-workflow re-runs everything inside it. A stored `maxNodeRetries` is inert there.
+    ///
+    /// ⚠️ WF-TS8 — WHY THE VEHICLE IS A ROUTER AND NOT A CODE NODE. This test used to configure
+    /// `maxNodeRetries = 3` on a Code node with an unresolvable template and assert
+    /// `starts.count <= 1`. But a Code node **cannot fail**: `WorkflowTemplate.render` is
+    /// non-throwing and leaves the placeholder verbatim, and the `.code` arm of
+    /// `executeStructuralNode` never assigns `.failed`. With no failure there is no state a retry
+    /// could even be attempted from, so the assertion held for a reason that had nothing to do
+    /// with the retry guard — and `<=` also passes at 0 starts, i.e. if the node never ran at all.
+    /// A Router with `noMatchBehavior == .failNode` and no matching rule is the one structural
+    /// node that reliably DOES fail, which is what makes the retry guard observable.
+    func testStructuralNode_NeverRetries_EvenWithRetriesConfigured() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "URGENT"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ]
+        config.noMatchBehavior = .failNode   // stated explicitly — this is what makes it fail
+        let router = scenario.addConditionNode(name: "Router", config: config)
+
+        var cfg = WorkflowNodeConfig()
+        cfg.maxNodeRetries = 3
+        cfg.retryDelay = 0                   // keep the test fast if the guard ever regresses
+        scenario.setNodeConfig(cfg, for: router)
+
+        let urgent = scenario.addBotNode(name: "Urgent Arm")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: urgent, portLabel: "Urgent")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!,
+                                  events: [.content("nothing here matches those rules")])
+        mockProvider.scriptStream(for: scenario.profileID(for: urgent)!, events: [.content("must not run")])
+
+        let events = try await execute(scenario)
+
+        // PRECONDITION — the assertion the old test lacked. Without a real failure the retry
+        // guard is never even reached and everything below is vacuous.
+        let failures = WorkflowStreamCollector.nodeFailedEvents(from: events).filter { $0.nodeID == router }
+        XCTAssertEqual(failures.count, 1,
+                       "precondition: the Router must FAIL exactly once (no rule matched, .failNode) — got \(failures.map(\.error))")
+
+        // THE ASSERTION. A retry re-enters the structural path, which yields
+        // `.workflowNodeStarted` at its top — so attempt 2 would show as a second start event.
+        // EQUAL, not `<=`: `<=` also passes when the node never ran at all.
+        let starts = WorkflowStreamCollector.nodeStartedEvents(from: events).filter { $0.nodeID == router }
+        XCTAssertEqual(starts.count, 1,
+                       "a structural node must not be retried — got \(starts.count) starts with maxNodeRetries = 3")
+    }
+
+    // MARK: - Node timeout: applies everywhere, counts compute not waiting
+
+    /// ⚠️ WF22: structural nodes had NO timeout at all — the race existed only on the profile-stream
+    /// and Action-tool paths, while the settings sheet promised a "maximum wall-clock time per node".
+    /// A sub-workflow whose body runs long is now bounded like anything else.
+    /// (Originally exercised through a Loop node; rewritten onto a sub-workflow node when the Loop
+    /// was retired 2026-08-15 — the behaviour under test is the structural-path timeout, not the
+    /// vehicle.)
+    func testStructuralNode_ExceedingItsTimeout_Fails() async throws {
+        let scenario = WorkflowTestScenario()
+        let (innerID, _) = makeInnerBotWorkflow(botName: "Slow Body Bot", scenario: scenario)
+        let nested = scenario.addSubWorkflowNode(name: "Slow Nested", workflowProfileID: innerID)
+
+        var cfg = WorkflowNodeConfig()
+        cfg.hardTimeout = 0.3
+        scenario.setNodeConfig(cfg, for: nested)
+
+        // The body sleeps 1s, blowing a 0.3s budget with no park involved.
+        let innerPid = scenario.profileMap.first(where: { $0.value.displayName == "Slow Body Bot" })!.key
+        mockProvider.scriptDelayedStream(for: innerPid, events: [.content("late")], milliseconds: 1000)
+
+        let events = try await execute(scenario)
+        let failed = WorkflowStreamCollector.nodeFailedEvents(from: events)
+        let failure = failed.first { $0.nodeID == nested }
+        XCTAssertNotNil(failure,
+                        "a structural node must be bounded by its timeout — got \(failed.map(\.profileName))")
+        // ⚠️ The REASON is asserted too, not just "it failed": the dispatch guard (missing profile)
+        // and a child layout that fails to load produce the identical `.workflowNodeFailed`, so
+        // without this a broken test setup would keep passing as a fast failure and the timeout
+        // itself could regress unnoticed.
+        XCTAssertTrue(failure?.error.localizedCaseInsensitiveContains("timeout") == true,
+                      "the failure must BE the timeout, not a setup failure wearing its event — got: \(failure?.error ?? "<none>")")
+    }
+
+    /// ⚠️ THE PRINCIPLE: the clock counts COMPUTE, not waiting for a human.
+    ///
+    /// A Router with a 1s timeout parks for ambiguity arbitration and is answered after ~2s. Under
+    /// the old raw `Task.sleep` race that node would have died; the parked time is excluded, so it
+    /// completes and routes to the chosen branch.
+    ///
+    /// This is also the pre-existing profile-path defect in miniature — an agent asking for tool
+    /// confirmation killed its own node at 120s if the user was slow.
+    func testParkedTimeDoesNotCountAgainstTheNodeTimeout() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ]
+        config.askOnAmbiguity = true
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        var cfg = WorkflowNodeConfig()
+        cfg.hardTimeout = 1.0                      // shorter than the answer delay below
+        scenario.setNodeConfig(cfg, for: router)
+        let a = scenario.addBotNode(name: "A"), b = scenario.addBotNode(name: "B")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: a, portLabel: "Urgent")
+        scenario.connect(from: router, to: b, portLabel: "Billing")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("URGENT invoice")])
+        mockProvider.scriptStream(for: scenario.profileID(for: a)!, events: [.content("a")])
+        mockProvider.scriptStream(for: scenario.profileID(for: b)!, events: [.content("b")])
+
+        // Answer well after the 1s budget would have expired on a wall-clock race.
+        let executor = WorkflowExecutor(workflowProfileID: UUID())
+        let stream = executor.executeWorkflow(
+            userInput: "Test input", chatHistory: [], conversationID: UUID(), ragContext: nil,
+            traceContext: traceContext, onTraceUpdate: { _ in },
+            layout: scenario.layout, profileMap: scenario.profileMap, streamProvider: mockProvider)
+
+        var events: [AgentStreamEvent] = []
+        for try await event in stream {
+            events.append(event)
+            if case .requestGate(_, _, let opID, _, _, _, _) = event {
+                try await Task.sleep(for: .milliseconds(2200))
+                await ExecutionSuspensionService.shared.resumeGate(for: opID, chosenOption: "Billing")
+            }
+        }
+
+        XCTAssertFalse(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == router },
+                       "2.2s parked against a 1s COMPUTE budget must not time out")
+        XCTAssertTrue(WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID).contains(b),
+                      "…and the human's choice must still route")
+    }
+
+    // MARK: - Router: catch-all is a rule, no-match is a failure
+
+    /// ⚠️ THE CORE CHANGE. With no rule matching and no legacy fallback, the Router FAILS rather
+    /// than silently swallowing the input. The failure is visible in the run instead of the input
+    /// vanishing down a catch-all nobody chose.
+    ///
+    /// ⚠️ Deliberately a NODE failure, not a run-level stop — that would be `stopWorkflow` under a
+    /// new name, retired 2026-08-12.
+    func testRouter_NoRuleMatches_NodeFails() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ]
+        config.fallbackLabel = ""                      // no legacy catch-all
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let arm = scenario.addBotNode(name: "Urgent Arm")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: arm, portLabel: "Urgent")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("something else entirely")])
+        mockProvider.scriptStream(for: scenario.profileID(for: arm)!, events: [.content("handled")])
+
+        let events = try await execute(scenario)
+
+        let failed = WorkflowStreamCollector.nodeFailedEvents(from: events)
+        XCTAssertTrue(failed.contains { $0.nodeID == router }, "the Router must fail, not route silently")
+        XCTAssertFalse(WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID).contains(arm),
+                       "no branch is taken")
+    }
+
+    /// A failed Router activates its `error` port (WF61), so a recovery branch runs. This is what
+    /// makes "no match is a failure" safe rather than a dead end.
+    func testRouter_NoRuleMatches_ErrorPortRunsRecovery() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ]
+        config.fallbackLabel = ""
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let arm = scenario.addBotNode(name: "Urgent Arm")
+        let recovery = scenario.addBotNode(name: "Unmatched Handler")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: arm, portLabel: "Urgent")
+        scenario.connect(from: router, to: recovery, portLabel: WorkflowEdge.errorPortLabel)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("something else entirely")])
+        mockProvider.scriptStream(for: scenario.profileID(for: arm)!, events: [.content("handled")])
+        mockProvider.scriptStream(for: scenario.profileID(for: recovery)!, events: [.content("caught it")])
+
+        let events = try await execute(scenario)
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+
+        XCTAssertTrue(started.contains(recovery), "the error port carries the unmatched case")
+        XCTAssertFalse(started.contains(arm))
+    }
+
+    /// The catch-all's successor (2026-08-16): `noMatchBehavior = .route` sends unmatched input to
+    /// a chosen rule's branch. (The previous incarnation of this test used the `always` operator,
+    /// hard-deleted the same day for amplifying ambiguity arbitration.)
+    func testRouter_NoMatchRoutesToConfiguredDefault() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        let generalRule = ConditionRule(label: "General", field: .upstreamOutput, op: .contains, value: "generalstuff")
+        config.rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            generalRule
+        ]
+        // ⚠️ Stored by the rule's STABLE ID, not its label — renames must not strand the default.
+        config.noMatchBehavior = .route(ruleID: generalRule.id)
+        config.fallbackLabel = ""
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let urgent = scenario.addBotNode(name: "Urgent Arm")
+        let general = scenario.addBotNode(name: "General Arm")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: urgent, portLabel: "Urgent")
+        scenario.connect(from: router, to: general, portLabel: "General")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("just a normal question")])
+        mockProvider.scriptStream(for: scenario.profileID(for: urgent)!, events: [.content("urgent")])
+        mockProvider.scriptStream(for: scenario.profileID(for: general)!, events: [.content("general")])
+
+        let events = try await execute(scenario)
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+
+        XCTAssertTrue(started.contains(general), "`always` as the last rule is the catch-all")
+        XCTAssertFalse(started.contains(urgent))
+        // ⚠️ NOT `nodeFailedEvents.isEmpty` — the untaken branch is cascade-skipped and a skip is
+        // ALSO reported as `.workflowNodeFailed`. Assert about the Router itself.
+        XCTAssertFalse(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == router },
+                       "the Router matched a rule, so it must not fail")
+    }
+
+    /// ⚠️ EXISTING WORKFLOWS MUST NOT CHANGE. A stored `fallbackLabel` is still honoured, because
+    /// converting it on load would silently move where unmatched input goes in every workflow saved
+    /// before the redesign.
+    func testRouter_LegacyFallbackStillHonoured() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Other", field: .upstreamOutput, op: .contains, value: "zzz-never")
+        ]
+        config.fallbackLabel = "Other"                 // the pre-2026-08-13 shape
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let urgent = scenario.addBotNode(name: "Urgent Arm")
+        let other = scenario.addBotNode(name: "Other Arm")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: urgent, portLabel: "Urgent")
+        scenario.connect(from: router, to: other, portLabel: "Other")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("nothing matches this")])
+        mockProvider.scriptStream(for: scenario.profileID(for: urgent)!, events: [.content("urgent")])
+        mockProvider.scriptStream(for: scenario.profileID(for: other)!, events: [.content("other")])
+
+        let events = try await execute(scenario)
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+
+        XCTAssertTrue(started.contains(other), "a legacy fallback must keep working")
+        XCTAssertFalse(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == router },
+                       "…and must NOT be turned into a failure by the redesign")
+    }
+
+    /// A brand-new config has no catch-all, and the decoder must not invent one.
+    func testNewConfig_HasNoFallback_AndDecoderDoesNotInventOne() throws {
+        XCTAssertEqual(ConditionNodeConfig().fallbackLabel, "", "new nodes have no catch-all")
+
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "A", field: .upstreamOutput, op: .contains, value: "a"),
+            ConditionRule(label: "B", field: .upstreamOutput, op: .contains, value: "b")
+        ]
+        config.fallbackLabel = ""
+        let round = try JSONDecoder().decode(ConditionNodeConfig.self, from: try JSONEncoder().encode(config))
+        XCTAssertEqual(round.fallbackLabel, "",
+                       "the legacy repair must be guarded on non-empty or it reinstates the retired behaviour")
+
+        // A legacy blob whose fallback names a rule that no longer exists is still repaired to the
+        // last rule. ⚠️ Built by ENCODING a real config and editing one field, not by hand-writing
+        // JSON — a malformed literal decodes to the default rule set and the test silently asserts
+        // nothing (which is exactly what the first draft of this did).
+        var stale = config
+        stale.fallbackLabel = "Gone"
+        var json = try JSONSerialization.jsonObject(with: try JSONEncoder().encode(stale)) as! [String: Any]
+        XCTAssertEqual((json["rules"] as? [Any])?.count, 2, "precondition: the blob really carries both rules")
+        json["fallbackLabel"] = "Gone"
+        let repaired = try JSONDecoder().decode(
+            ConditionNodeConfig.self, from: try JSONSerialization.data(withJSONObject: json))
+        XCTAssertEqual(repaired.fallbackLabel, "B", "a stale fallback repairs to the LAST rule")
+    }
+
+    // MARK: - Condition: multi-match arbitration (opt-in HITL)
+
+    /// Builds Source → Router(Urgent|Billing) → two arms, where the input matches BOTH rules.
+    private func ambiguousRouterScenario(askOnAmbiguity: Bool) -> (WorkflowTestScenario, router: UUID, urgent: UUID, billing: UUID) {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ]
+        config.fallbackLabel = "Billing"
+        config.askOnAmbiguity = askOnAmbiguity
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let urgent = scenario.addBotNode(name: "Urgent Arm")
+        let billing = scenario.addBotNode(name: "Billing Arm")
+
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: urgent, portLabel: "Urgent")
+        scenario.connect(from: router, to: billing, portLabel: "Billing")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("URGENT problem with my invoice")])
+        mockProvider.scriptStream(for: scenario.profileID(for: urgent)!, events: [.content("urgent handled")])
+        mockProvider.scriptStream(for: scenario.profileID(for: billing)!, events: [.content("billing handled")])
+        return (scenario, router, urgent, billing)
+    }
+
+    /// Explicitly switched OFF, an ambiguous input never pauses anything.
+    /// ⚠️ This is the escape hatch for scheduled workflows, where no banner is ever rendered.
+    func testAmbiguity_ArbitrationOff_NeverAsks() async throws {
+        let (scenario, _, urgent, billing) = ambiguousRouterScenario(askOnAmbiguity: false)
+        let events = try await execute(scenario)
+
+        XCTAssertTrue(WorkflowStreamCollector.gateRequests(from: events).isEmpty,
+                      "arbitration is opt-in — nothing may suspend with it off")
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+        XCTAssertTrue(started.contains(urgent))
+        XCTAssertFalse(started.contains(billing))
+    }
+
+    /// ⚠️ ON BY DEFAULT (user decision 2026-08-13) — a fresh Router asks rather than guessing.
+    func testAmbiguity_ArbitrationIsOnByDefault() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()          // untouched — whatever the default is
+        config.rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ]
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let a = scenario.addBotNode(name: "A"), b = scenario.addBotNode(name: "B")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: a, portLabel: "Urgent")
+        scenario.connect(from: router, to: b, portLabel: "Billing")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("URGENT invoice")])
+        mockProvider.scriptStream(for: scenario.profileID(for: a)!, events: [.content("a")])
+        mockProvider.scriptStream(for: scenario.profileID(for: b)!, events: [.content("b")])
+
+        let events = try await executeWithGate(scenario, choosing: "Billing")
+        XCTAssertEqual(WorkflowStreamCollector.gateRequests(from: events).count, 1,
+                       "a default Router must ask when its rules overlap")
+        XCTAssertTrue(WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID).contains(b))
+    }
+
+    /// ⚠️ NO per-node timeout — `deadline` is nil, so the banner shows no countdown and the wait is
+    /// bounded only by the container (Stop, or a scheduled run's deadline).
+    func testAmbiguity_RequestCarriesNoDeadline() async throws {
+        let (scenario, _, _, _) = ambiguousRouterScenario(askOnAmbiguity: true)
+        let events = try await executeWithGate(scenario, choosing: "Urgent")
+        for event in events {
+            if case .requestGate(_, _, _, let deadline, _, _, _) = event {
+                XCTAssertNil(deadline, "the arbitration waits indefinitely — a countdown would lie")
+            }
+        }
+    }
+
+    /// The request carries EXACTLY the matched labels — not every rule, and not the fallback.
+    /// Offering a non-matching branch would let a human route on a rule the input does not satisfy.
+    func testAmbiguity_RequestOffersOnlyTheMatchedRules() async throws {
+        let (scenario, _, _, _) = ambiguousRouterScenario(askOnAmbiguity: true)
+        let events = try await executeWithGate(scenario, choosing: "Urgent")
+        let requests = WorkflowStreamCollector.gateRequests(from: events)
+
+        XCTAssertEqual(requests.count, 1, "one ambiguity, one ask")
+        XCTAssertEqual(requests.first?.options, ["Urgent", "Billing"], "matched labels, in rule order")
+        // ⚠️ The input travels in `inputText`, NOT in the prompt — the highlight spans are measured
+        // against that exact string, so it must be carried verbatim rather than embedded in prose.
+        XCTAssertEqual(requests.first?.inputText, "URGENT problem with my invoice")
+    }
+
+    /// The human overrides the tiebreak: picking the SECOND matched rule routes there, which is the
+    /// entire point — first-match is an authoring artefact, not a decision.
+    func testAmbiguity_HumanPicksSecondRule_RoutesThere() async throws {
+        let (scenario, _, urgent, billing) = ambiguousRouterScenario(askOnAmbiguity: true)
+        let events = try await executeWithGate(scenario, choosing: "Billing")
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+
+        XCTAssertTrue(started.contains(billing), "the chosen branch runs")
+        XCTAssertFalse(started.contains(urgent), "…and the first-match branch does NOT")
+    }
+
+    /// ⚠️ THE UNATTENDED PROPERTY. Unanswered — Stop, closed conversation, or the timeout — falls
+    /// back to FIRST MATCH, never to `fallbackLabel`. That makes a scheduled run behave exactly as
+    /// it would with arbitration switched off, which is what makes the feature safe to enable.
+    func testAmbiguity_Unanswered_FallsBackToFirstMatch() async throws {
+        let (scenario, _, urgent, billing) = ambiguousRouterScenario(askOnAmbiguity: true)
+        let events = try await executeWithGate(scenario, choosing: nil)
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+
+        XCTAssertTrue(started.contains(urgent), "first match, exactly as if arbitration were off")
+        XCTAssertFalse(started.contains(billing), "must NOT route to the catch-all")
+    }
+
+    /// ⚠️ A stale or mis-indexed answer must not activate a port this run never matched. The
+    /// suspension resolves from several surfaces (banner, QuickAccess, and a remote index lookup),
+    /// so the executor validates the answer against the matched set rather than trusting it.
+    func testAmbiguity_AnswerNotAmongMatches_FallsBackToFirstMatch() async throws {
+        let (scenario, _, urgent, billing) = ambiguousRouterScenario(askOnAmbiguity: true)
+        let events = try await executeWithGate(scenario, choosing: "SomeOtherRule")
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+
+        XCTAssertTrue(started.contains(urgent), "an unrecognised answer is treated as unanswered")
+        XCTAssertFalse(started.contains(billing))
+    }
+
+    /// Only AMBIGUITY asks. A single match is not a decision anyone needs to make.
+    func testSingleMatch_ArbitrationOn_DoesNotAsk() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ]
+        config.fallbackLabel = "Billing"
+        config.askOnAmbiguity = true
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let billing = scenario.addBotNode(name: "Billing Arm")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: billing, portLabel: "Billing")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("about my invoice")])
+        mockProvider.scriptStream(for: scenario.profileID(for: billing)!, events: [.content("handled")])
+
+        // Hang-proof: if a regression made this ask, `execute()` would park forever rather than fail.
+        let events = try await executeWithGate(scenario, choosing: nil)
+        XCTAssertTrue(WorkflowStreamCollector.gateRequests(from: events).isEmpty,
+                      "one rule matched — there is nothing to arbitrate")
+        XCTAssertTrue(WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID).contains(billing))
+    }
+
+    /// A stored `askOnAmbiguity` must survive a blob round-trip, and its absence must decode to OFF
+    /// so every layout written before this feature keeps its behaviour.
+    func testAskOnAmbiguity_CodableRoundTripAndLegacyDefault() throws {
+        var config = ConditionNodeConfig()
+        config.askOnAmbiguity = true
+        let data = try JSONEncoder().encode(config)
+        XCTAssertTrue(try JSONDecoder().decode(ConditionNodeConfig.self, from: data).askOnAmbiguity)
+
+        // ⚠️ An ABSENT key decodes to TRUE (changed 2026-08-13). It means "saved before this field
+        // existed", not "the user switched it off" — once they do, `false` is written explicitly.
+        let legacy = Data(#"{"rules":[],"fallbackLabel":"False","passthroughContent":true}"#.utf8)
+        XCTAssertTrue(try JSONDecoder().decode(ConditionNodeConfig.self, from: legacy).askOnAmbiguity,
+                      "an absent key means pre-feature, so it adopts the new default")
+
+        var off = ConditionNodeConfig()
+        off.askOnAmbiguity = false
+        XCTAssertFalse(try JSONDecoder().decode(ConditionNodeConfig.self, from: try JSONEncoder().encode(off)).askOnAmbiguity,
+                       "an EXPLICIT false is a real user choice and must survive")
+    }
+
+    // MARK: - Condition: collect-all-matches (routing unchanged)
+
+    /// ⚠️ THE INVARIANT of the collect-all change: routing is byte-identical. Two rules both match,
+    /// and the FIRST in rule order still wins — exactly what the old `break` produced. Ambiguity is
+    /// now merely *observable*; it changes nothing about where the input goes.
+    func testAmbiguousInput_StillRoutesToFirstMatchingRule() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let router = scenario.addConditionNode(
+            name: "Router",
+            rules: [
+                ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+                ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+            ],
+            fallbackLabel: "Billing"
+        )
+        let urgentArm = scenario.addBotNode(name: "Urgent Arm")
+        let billingArm = scenario.addBotNode(name: "Billing Arm")
+
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: urgentArm, portLabel: "Urgent")
+        scenario.connect(from: router, to: billingArm, portLabel: "Billing")
+
+        // Matches BOTH rules.
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("URGENT help with my invoice")])
+        mockProvider.scriptStream(for: scenario.profileID(for: urgentArm)!, events: [.content("urgent handled")])
+        mockProvider.scriptStream(for: scenario.profileID(for: billingArm)!, events: [.content("billing handled")])
+
+        // ⚠️ `executeWithGate(choosing: nil)`, not `execute()`. Arbitration is ON by default and has
+        // no timeout since 2026-08-13, so a plain `execute()` on an ambiguous Router parks FOREVER
+        // and hangs the suite instead of failing. Answering nil exercises the unattended path, which
+        // is what this test is about: first match still wins.
+        let events = try await executeWithGate(scenario, choosing: nil)
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+
+        XCTAssertTrue(started.contains(urgentArm), "first matching rule wins, as before")
+        XCTAssertFalse(started.contains(billingArm), "exactly ONE port activates — a Router never fans out")
+    }
+
+    /// A second rule that matches must not be reached when an earlier one already did — and equally
+    /// must not suppress it. This is the control for the loop no longer having a `break`.
+    func testSingleMatch_UnambiguousRoutingUnchanged() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let router = scenario.addConditionNode(
+            name: "Router",
+            rules: [
+                ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+                ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+            ],
+            fallbackLabel: "Billing"
+        )
+        let urgentArm = scenario.addBotNode(name: "Urgent Arm")
+        let billingArm = scenario.addBotNode(name: "Billing Arm")
+
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: urgentArm, portLabel: "Urgent")
+        scenario.connect(from: router, to: billingArm, portLabel: "Billing")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("question about my invoice")])
+        mockProvider.scriptStream(for: scenario.profileID(for: urgentArm)!, events: [.content("urgent handled")])
+        mockProvider.scriptStream(for: scenario.profileID(for: billingArm)!, events: [.content("billing handled")])
+
+        let events = try await execute(scenario)
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+
+        XCTAssertTrue(started.contains(billingArm), "only rule 2 matched, so rule 2 routes")
+        XCTAssertFalse(started.contains(urgentArm))
+    }
+
+    /// ⚠️ The classifier trigger is `matchedLabels.isEmpty`, NOT `count != 1`. An AMBIGUOUS input
+    /// already has a route — invoking a model for it would spend time and GPU on inputs that route
+    /// fine today, and (since the classifier can only return a rule label) could not change the
+    /// answer anyway.
+    ///
+    /// Observable because the classifier is enabled with no MLX model: entering that branch throws
+    /// and yields an "AI Classifier failed" thought. Its ABSENCE is the assertion.
+    func testAmbiguousInput_DoesNotInvokeTheClassifier() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ]
+        config.fallbackLabel = "Billing"
+        config.llmFallbackEnabled = true
+        config.llmPrompt = "Classify the message."
+        // ⚠️ A NIL model is blocked by pre-flight validation (`.error`), so the run would never
+        // start. A model name that is not installed passes validation and throws at RUN time —
+        // which is exactly the observable "the branch was entered" signal this test needs.
+        config.llmModelName = "not-an-installed-model-\(UUID().uuidString.prefix(8))"
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let urgentArm = scenario.addBotNode(name: "Urgent Arm")
+        let billingArm = scenario.addBotNode(name: "Billing Arm")
+
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: urgentArm, portLabel: "Urgent")
+        scenario.connect(from: router, to: billingArm, portLabel: "Billing")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("URGENT invoice problem")])
+        mockProvider.scriptStream(for: scenario.profileID(for: urgentArm)!, events: [.content("handled")])
+        mockProvider.scriptStream(for: scenario.profileID(for: billingArm)!, events: [.content("handled")])
+
+        // ⚠️ See above — an ambiguous Router parks indefinitely under `execute()`.
+        let events = try await executeWithGate(scenario, choosing: nil)
+        let thoughts = WorkflowStreamCollector.thoughtText(from: events)
+
+        XCTAssertFalse(thoughts.contains("AI Classifier failed"),
+                       "two rules matched — the classifier must not run. Thoughts: \(thoughts)")
+        XCTAssertTrue(WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID).contains(urgentArm))
+    }
+
+    /// ⚠️ WF61: a Code node has a wireable `error` port, so a recovery branch can be attached
+    /// instead of the whole subtree dying silently. This test covers the two halves that are
+    /// actually reachable: the edge VALIDATES, and on a healthy run the error branch stands down.
+    ///
+    /// ⚠️ WF-TS7 — WHAT THIS TEST DELIBERATELY DOES NOT COVER, and why. The old name was
+    /// `testFailedCodeNode_ErrorPortRunsRecoveryBranch`, but a Code node **cannot fail**:
+    /// `WorkflowTemplate.render` is non-throwing and leaves an unresolvable placeholder verbatim
+    /// in the output, and the `.code` arm of `executeStructuralNode` has no path that assigns
+    /// `.failed`. The old body scripted `{{ input.json.missing.deeper }}` expecting a throw, then
+    /// discarded the run entirely with `_ = events` — so the "runs recovery branch" half was never
+    /// asserted at all, and its one live assertion searched for "doesn't match any output port",
+    /// a string that appears nowhere in the app (the validator says "no longer exists",
+    /// WorkflowValidation.swift:223) — it could not fail. A Code node's error port firing needs a
+    /// production change first; until then this pins what is actually true.
+    func testCodeNodeErrorEdge_ValidatesAndStandsDownWhenTheCodeNodeSucceeds() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        // An unresolvable placeholder does NOT throw — it renders verbatim. See the note above.
+        let code = scenario.addCodeNode(name: "Transform", template: "{{ input.json.missing.deeper }}")
+        let happy = scenario.addBotNode(name: "Happy Path")
+        let recovery = scenario.addBotNode(name: "Recovery")
+
+        scenario.connect(from: source, to: code)
+        scenario.connect(from: code, to: happy)
+        scenario.connect(from: code, to: recovery, portLabel: WorkflowEdge.errorPortLabel)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("data")])
+        mockProvider.scriptStream(for: scenario.profileID(for: happy)!, events: [.content("happy")])
+        mockProvider.scriptStream(for: scenario.profileID(for: recovery)!, events: [.content("recovered")])
+
+        let events = try await execute(scenario)
+        let issues = WorkflowValidator.validate(layout: scenario.layout, profileMap: scenario.profileMap)
+
+        // (1) The canvas accepts the wiring — the `error` edge is not reported as stranded.
+        XCTAssertFalse(issues.contains { $0.nodeID == code && $0.message.contains("no longer exists") },
+                       "an `error` edge from a Code node must validate — got: \(issues.map(\.message))")
+
+        // (2) The run: the Code node completes, the default branch runs, the error branch stands down.
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == code },
+                      "a Code node cannot fail — if this ever flips, the docstring above is stale")
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).isEmpty,
+                      "nothing failed on this run")
+        XCTAssertTrue(started.contains(happy), "the default port carries the success path")
+        XCTAssertFalse(started.contains(recovery), "the error handler must NOT run on a healthy run")
+
+        // The side effect is what actually matters — a recovery branch that posts or notifies.
+        XCTAssertFalse(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: recovery)! },
+                       "the recovery profile was invoked on a run where nothing failed")
+
+        // …and it is REPORTED as stood-down, not silently absent.
+        XCTAssertTrue(WorkflowStreamCollector.nodeSkippedEvents(from: events)
+                        .contains { $0.nodeID == recovery && $0.reason == .errorPortNotTaken },
+                      "got: \(WorkflowStreamCollector.nodeSkippedEvents(from: events).map(\.reason))")
+        XCTAssertFalse(WorkflowStreamCollector.contentText(from: events).contains("recovered"),
+                       "the un-run branch's output must not reach the final answer")
+    }
+
+    // MARK: - Graph-derived joins (the retired "Fan-in Behavior" setting)
+
+    /// ⚠️ THE case the derived join exists for, and the one the old default got wrong.
+    ///
+    /// A diamond over a Condition — C routes to one arm, both arms rejoin at M — is the shape a
+    /// user builds without thinking. Under the retired `.all` default the merge could NEVER run:
+    /// exactly one arm ever fires, so the other's edge is dead on every single run, and nothing
+    /// failed to explain it. The arms are mutually exclusive on C, so the dead one is excused.
+    func testDiamondOverCondition_MergeRunsOnTheTakenArm() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let router = scenario.addConditionNode(name: "Router")
+        let trueArm = scenario.addBotNode(name: "Urgent Handler")
+        let falseArm = scenario.addBotNode(name: "Routine Handler")
+        let merge = scenario.addBotNode(name: "Formatter")
+
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: trueArm, portLabel: "True")
+        scenario.connect(from: router, to: falseArm, portLabel: "False")
+        scenario.connect(from: trueArm, to: merge)
+        scenario.connect(from: falseArm, to: merge)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("has content")])
+        mockProvider.scriptStream(for: scenario.profileID(for: trueArm)!, events: [.content("urgent output")])
+        mockProvider.scriptStream(for: scenario.profileID(for: falseArm)!, events: [.content("routine output")])
+        mockProvider.scriptStream(for: scenario.profileID(for: merge)!, events: [.content("formatted")])
+
+        let events = try await execute(scenario)
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+
+        XCTAssertTrue(started.contains(trueArm), "the matched arm runs")
+        XCTAssertFalse(started.contains(falseArm), "the unmatched arm cascade-skips")
+        XCTAssertTrue(started.contains(merge), "the merge must run — the dead arm is an unchosen alternative")
+
+        // ⚠️ And it sees ONLY the taken arm. The derived join widens the RUN condition; it never
+        // widens the input. A skipped branch contributes nothing.
+        let mergeInput = mockProvider.workflowInvocations
+            .first { $0.profileID == scenario.profileID(for: merge)! }?.context.upstreamInput ?? ""
+        XCTAssertTrue(mergeInput.contains("urgent output"), "got: \(mergeInput)")
+        XCTAssertFalse(mergeInput.contains("routine output"), "the skipped arm must not leak — got: \(mergeInput)")
+    }
+
+    /// ⚠️ THE FAIL-SAFE HALF, and it must never be traded away for the convenience above.
+    /// Three independent branches with nothing exclusive between them are all REQUIRED. One fails
+    /// ⇒ the merge is skipped rather than silently running on partial input.
+    func testParallelBranches_OneFails_MergeIsSkipped() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let r1 = scenario.addBotNode(name: "Researcher 1")
+        let r2 = scenario.addBotNode(name: "Researcher 2")
+        let r3 = scenario.addBotNode(name: "Researcher 3")
+        let merge = scenario.addBotNode(name: "Synthesizer")
+
+        for r in [r1, r2, r3] {
+            scenario.connect(from: source, to: r)
+            scenario.connect(from: r, to: merge)
+        }
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("topic")])
+        mockProvider.scriptStream(for: scenario.profileID(for: r1)!, events: [.content("finding 1")])
+        mockProvider.scriptError(for: scenario.profileID(for: r2)!, error: NSError(domain: "t", code: 1))
+        mockProvider.scriptStream(for: scenario.profileID(for: r3)!, events: [.content("finding 3")])
+        mockProvider.scriptStream(for: scenario.profileID(for: merge)!, events: [.content("synthesis")])
+
+        let events = try await execute(scenario)
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+
+        XCTAssertFalse(started.contains(merge),
+                       "independent branches are all required — running on 2 of 3 is silent partial output")
+        // The healthy siblings still completed; a failure never touches a parallel branch.
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == r3 })
+    }
+
+    /// A merge wired to ONE arm of a Condition plus an independent node. The arm has no live
+    /// exclusive sibling reaching the merge, so it stays REQUIRED — drawing an edge from a single
+    /// port means "run on this outcome", and routing elsewhere must skip.
+    /// ⚠️ This is the case that killed my first two formulations of the rule: "excuse any
+    /// routed-away branch" would wrongly run this node on the False path.
+    func testSingleConditionArmPlusIndependent_SkipsWhenArmNotTaken() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        // isEmpty on non-empty content ⇒ the "True" rule does NOT match ⇒ routes to the fallback.
+        let router = scenario.addConditionNode(
+            name: "Router",
+            rules: [ConditionRule(label: "True", field: .upstreamOutput, op: .isEmpty, value: "")],
+            fallbackLabel: "False"
+        )
+        let independent = scenario.addBotNode(name: "Always Runs")
+        let merge = scenario.addBotNode(name: "Merge")
+
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: source, to: independent)
+        scenario.connect(from: router, to: merge, portLabel: "True")
+        scenario.connect(from: independent, to: merge)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("not empty")])
+        mockProvider.scriptStream(for: scenario.profileID(for: independent)!, events: [.content("side data")])
+        mockProvider.scriptStream(for: scenario.profileID(for: merge)!, events: [.content("merged")])
+
+        let events = try await execute(scenario)
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+
+        XCTAssertTrue(started.contains(independent), "the independent branch ran")
+        XCTAssertFalse(started.contains(merge),
+                       "the condition routed away from the only arm feeding this merge — it must skip")
+    }
+
+    /// The finaliser pattern, free: a node wired to A's `error` port AND to a node downstream of
+    /// A's default port runs whichever way A went. Those two branches are exclusive on A's own
+    /// ports, so each excuses the other.
+    func testErrorPortAndSuccessPath_MergeRunsEitherWay() async throws {
+        for aFails in [false, true] {
+            let scenario = WorkflowTestScenario()
+            let risky = scenario.addBotNode(name: "Risky")
+            let onSuccess = scenario.addBotNode(name: "Happy Path")
+            let finalizer = scenario.addBotNode(name: "Finalizer")
+
+            scenario.connect(from: risky, to: onSuccess)
+            scenario.connect(from: onSuccess, to: finalizer)
+            scenario.connect(from: risky, to: finalizer, portLabel: "error")
+
+            if aFails {
+                mockProvider.scriptError(for: scenario.profileID(for: risky)!, error: NSError(domain: "t", code: 1))
+            } else {
+                mockProvider.scriptStream(for: scenario.profileID(for: risky)!, events: [.content("ok")])
+            }
+            mockProvider.scriptStream(for: scenario.profileID(for: onSuccess)!, events: [.content("happy")])
+            mockProvider.scriptStream(for: scenario.profileID(for: finalizer)!, events: [.content("done")])
+
+            let events = try await execute(scenario)
+            let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+            XCTAssertTrue(started.contains(finalizer),
+                          "finalizer must run with risky \(aFails ? "failing" : "succeeding")")
+        }
+    }
+
+    /// ⚠️ The shape NEITHER retired setting could express: one independent branch plus a mutually
+    /// exclusive pair. `.all` never ran (the unchosen arm is always dead); `.any` would have run on
+    /// the independent branch alone even with both arms dead. Derived: the pair OR-satisfies itself,
+    /// the independent branch stays required.
+    func testIndependentPlusExclusivePair_RunsWithBoth() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let router = scenario.addConditionNode(name: "Router")
+        let armA = scenario.addBotNode(name: "Arm A")
+        let armB = scenario.addBotNode(name: "Arm B")
+        let independent = scenario.addBotNode(name: "Context Fetcher")
+        let merge = scenario.addBotNode(name: "Merge")
+
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: source, to: independent)
+        scenario.connect(from: router, to: armA, portLabel: "True")
+        scenario.connect(from: router, to: armB, portLabel: "False")
+        scenario.connect(from: armA, to: merge)
+        scenario.connect(from: armB, to: merge)
+        scenario.connect(from: independent, to: merge)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("has content")])
+        mockProvider.scriptStream(for: scenario.profileID(for: armA)!, events: [.content("arm A out")])
+        mockProvider.scriptStream(for: scenario.profileID(for: armB)!, events: [.content("arm B out")])
+        mockProvider.scriptStream(for: scenario.profileID(for: independent)!, events: [.content("context out")])
+        mockProvider.scriptStream(for: scenario.profileID(for: merge)!, events: [.content("merged")])
+
+        let events = try await execute(scenario)
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+
+        XCTAssertTrue(started.contains(merge), "exclusive pair OR-satisfies; independent branch is live")
+        let input = mockProvider.workflowInvocations
+            .first { $0.profileID == scenario.profileID(for: merge)! }?.context.upstreamInput ?? ""
+        XCTAssertTrue(input.contains("arm A out"), "got: \(input)")
+        XCTAssertTrue(input.contains("context out"), "the independent branch must contribute — got: \(input)")
+        XCTAssertFalse(input.contains("arm B out"), "the unchosen arm must not leak — got: \(input)")
+    }
+
+    /// ⚠️ The DEEP diamond — the arms are two hops long, so the Condition is no longer the merge's
+    /// direct predecessor. Exclusivity has to be inherited transitively through the chain, and a
+    /// mutation that stops inheriting ancestry passes every other test in this file.
+    ///
+    /// Found by mutation-checking: reverting ancestry inheritance in `computePortReach` failed NO
+    /// test, because every other diamond here puts the decision one hop from the merge.
+    func testDeepDiamondOverCondition_ExclusivityIsInheritedTransitively() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let router = scenario.addConditionNode(name: "Router")
+        let urgentClassify = scenario.addBotNode(name: "Urgent Classify")
+        let urgentDraft = scenario.addBotNode(name: "Urgent Draft")
+        let routineClassify = scenario.addBotNode(name: "Routine Classify")
+        let routineDraft = scenario.addBotNode(name: "Routine Draft")
+        let merge = scenario.addBotNode(name: "Send")
+
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: urgentClassify, portLabel: "True")
+        scenario.connect(from: router, to: routineClassify, portLabel: "False")
+        scenario.connect(from: urgentClassify, to: urgentDraft)
+        scenario.connect(from: routineClassify, to: routineDraft)
+        scenario.connect(from: urgentDraft, to: merge)
+        scenario.connect(from: routineDraft, to: merge)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("has content")])
+        for n in [urgentClassify, urgentDraft, routineClassify, routineDraft, merge] {
+            mockProvider.scriptStream(for: scenario.profileID(for: n)!, events: [.content("out")])
+        }
+
+        let events = try await execute(scenario)
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+
+        XCTAssertTrue(started.contains(urgentDraft), "the taken path runs to its end")
+        XCTAssertFalse(started.contains(routineDraft), "the untaken path cascade-skips all the way")
+        XCTAssertTrue(started.contains(merge),
+                      "the merge must still run — the arms are exclusive via an ancestor TWO hops up")
+    }
+
+    /// The diamond where the TAKEN arm fails. The exclusive group has no LIVE member, so nothing is
+    /// excused and the merge skips. Failure safety needs no separate mechanism — a failed branch
+    /// simply is not live.
+    func testDiamondOverCondition_TakenArmFails_MergeSkips() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let router = scenario.addConditionNode(name: "Router")
+        let trueArm = scenario.addBotNode(name: "Urgent Handler")
+        let falseArm = scenario.addBotNode(name: "Routine Handler")
+        let merge = scenario.addBotNode(name: "Formatter")
+
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: trueArm, portLabel: "True")
+        scenario.connect(from: router, to: falseArm, portLabel: "False")
+        scenario.connect(from: trueArm, to: merge)
+        scenario.connect(from: falseArm, to: merge)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("has content")])
+        mockProvider.scriptError(for: scenario.profileID(for: trueArm)!, error: NSError(domain: "t", code: 1))
+        mockProvider.scriptStream(for: scenario.profileID(for: falseArm)!, events: [.content("routine output")])
+        mockProvider.scriptStream(for: scenario.profileID(for: merge)!, events: [.content("formatted")])
+
+        let events = try await execute(scenario)
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+        XCTAssertFalse(started.contains(merge), "the chosen path failed — there is nothing to merge")
     }
 
     func testCascadedSkip_SkippedNodeDownstreamAlsoSkipped() async throws {
@@ -1641,8 +2946,11 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let events = try await execute(scenario)
 
         let failed = WorkflowStreamCollector.nodeFailedEvents(from: events)
-        // All three should appear as failed/skipped
-        XCTAssertEqual(failed.count, 3, "A fails, B skipped, C skipped (cascading)")
+        let skipped = WorkflowStreamCollector.nodeSkippedEvents(from: events)
+        XCTAssertEqual(failed.count, 1, "only A actually failed")
+        XCTAssertEqual(skipped.count, 2, "B and C did not run — that is not a failure")
+        XCTAssertTrue(skipped.contains { $0.reason == .upstreamSkipped },
+                      "the cascade must be reported as a cascade, got \(skipped.map(\.reason))")
     }
 
     // =========================================================================
@@ -1735,23 +3043,24 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
     // =========================================================================
 
     func testCascadedConditions_TwoConditionNodesInChain() async throws {
-        // Bot → Cond1 → Cond2 → [Yes: BotA, No: BotB]
-        // NOTE: Cond2's upstream is Cond1, whose output is a routing message
-        // (e.g., "Condition (pattern): route → Pass"), NOT the original bot output.
-        // So Cond2 must check for content in the routing message, not the original data.
+        // Source → Router1 → Router2 → [Routed: BotA, NotRouted: BotB]
+        //
+        // ⚠️ REWRITTEN 2026-08-13 when "Pass Through Content" was retired, and the old version is
+        // worth remembering as the argument FOR retiring it: it set `passthroughContent: false` so
+        // Router1 emitted the debug string `Condition (pattern): route → Pass`, then had Router2
+        // match the literal substring "route" inside it. A downstream rule keyed off a diagnostic
+        // line rather than data — which is the only thing the toggle's OFF state ever enabled.
+        // A Router now always passes content through, so Router2 keys off the actual payload.
         let scenario = WorkflowTestScenario()
         let botSrc = scenario.addBotNode(name: "Source")
         let cond1 = scenario.addConditionNode(
             name: "First Filter",
             rules: [ConditionRule(label: "Pass", field: .upstreamOutput, op: .isNotEmpty, value: "")],
-            fallbackLabel: "Fail",
-            // Emit the routing message (not passthrough) so cond2 can match "route" in it.
-            passthroughContent: false
+            fallbackLabel: "Fail"
         )
-        // Cond2 checks for "route" which IS in Cond1's output ("Condition (pattern): route → Pass")
         let cond2 = scenario.addConditionNode(
             name: "Second Filter",
-            rules: [ConditionRule(label: "Routed", field: .upstreamOutput, op: .contains, value: "route")],
+            rules: [ConditionRule(label: "Routed", field: .upstreamOutput, op: .contains, value: "escalate")],
             fallbackLabel: "NotRouted"
         )
         let botRouted = scenario.addBotNode(name: "Routed Handler")
@@ -1762,15 +3071,44 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         scenario.connect(from: cond2, to: botRouted, portLabel: "Routed")
         scenario.connect(from: cond2, to: botNotRouted, portLabel: "NotRouted")
 
-        mockProvider.scriptStream(for: scenario.profileID(for: botSrc)!, events: [.content("data")])
+        mockProvider.scriptStream(for: scenario.profileID(for: botSrc)!, events: [.content("please escalate this")])
         mockProvider.scriptStream(for: scenario.profileID(for: botRouted)!, events: [.content("handled!")])
         mockProvider.scriptStream(for: scenario.profileID(for: botNotRouted)!, events: [.content("meh")])
 
         let events = try await execute(scenario)
-
         let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
-        XCTAssertTrue(started.contains(botRouted), "Should route through both cascaded conditions")
+
+        XCTAssertTrue(started.contains(botRouted), "both routers must chain on the real content")
         XCTAssertFalse(started.contains(botNotRouted))
+    }
+
+    /// ⚠️ The content survives a Router unchanged — that is the whole point of retiring the toggle.
+    /// A stored `passthroughContent = false` from an older layout must NOT suppress it.
+    func testRouter_AlwaysPassesContentThrough_EvenWithRetiredToggleOff() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "Pass", field: .upstreamOutput, op: .isNotEmpty, value: ""),
+            ConditionRule(label: "Empty", field: .upstreamOutput, op: .isEmpty, value: "")
+        ]
+        config.fallbackLabel = "Empty"
+        config.passthroughContent = false          // retired — must be ignored
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let sink = scenario.addBotNode(name: "Sink")
+
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: sink, portLabel: "Pass")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("the real payload")])
+        mockProvider.scriptStream(for: scenario.profileID(for: sink)!, events: [.content("done")])
+
+        _ = try await execute(scenario)
+
+        let sinkInput = mockProvider.workflowInvocations
+            .first { $0.profileID == scenario.profileID(for: sink)! }?.context.upstreamInput ?? ""
+        XCTAssertTrue(sinkInput.contains("the real payload"), "content must flow — got: \(sinkInput)")
+        XCTAssertFalse(sinkInput.contains("route \u{2192}"), "the retired routing-label string must be gone")
     }
 
     func testCodeThenGateThenCondition_ComplexStructuralChain() async throws {
@@ -1831,8 +3169,13 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
     // MARK: - Group 21: Terminal Synthesis Edge Cases
     // =========================================================================
 
-    func testMultipleTerminals_SomeSucceedSomeFail() async throws {
-        // A → B(fails), A → C(succeeds): both are terminals, only C's output in content
+    /// A → B(fails), A → C(succeeds): both are terminals, so the final answer is LABELED and
+    /// carries both — the working half AND why the other half didn't.
+    ///
+    /// This previously asserted `content == "good result"`: the failing terminal contributed
+    /// nothing and, with several terminals, you could not tell which node produced which text.
+    /// Changed deliberately on 2026-08-12.
+    func testMultipleTerminals_LabeledOutputCarriesSuccessAndFailure() async throws {
         let scenario = WorkflowTestScenario()
         let botA = scenario.addBotNode(name: "Source")
         let botB = scenario.addBotNode(name: "Failing Terminal")
@@ -1846,10 +3189,63 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         mockProvider.scriptStream(for: scenario.profileID(for: botC)!, events: [.content("good result")])
 
         let events = try await execute(scenario)
-
-        // Only successful terminal output in final .content
         let content = StreamCollector.contentText(from: events)
-        XCTAssertEqual(content, "good result")
+
+        XCTAssertTrue(content.contains("## Good Terminal"), "each terminal must be attributed — got: \(content)")
+        XCTAssertTrue(content.contains("good result"), "the working half must survive")
+        XCTAssertTrue(content.contains("## Failing Terminal"), "the failed terminal must appear, not vanish")
+        XCTAssertTrue(content.contains("**Failed:**"), "…with its reason, so the gap is explained")
+
+        // A parallel failure must not have cancelled the healthy branch.
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == botC })
+    }
+
+    /// ⚠️ REGRESSION PIN for the 2026-08-12 design decision: a failure in one parallel branch must
+    /// NOT cancel its siblings. Parallel branches are independent by construction — nothing
+    /// connects them — so a sibling's work stays valid and its output still belongs in the answer.
+    /// Aborting them destroyed usable results to save tokens.
+    ///
+    /// The earlier version of this pin could not see the regression: both branches finished
+    /// instantly, so `group.cancelAll()` arrived after the healthy node was already done and the
+    /// assertions passed with cross-branch abort fully reinstated. The slow branch is what makes
+    /// the abort observable — it is still mid-flight when the sibling fails.
+    func testParallelFailure_DoesNotCancelSlowSiblingBranch() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let failFast = scenario.addBotNode(name: "Fails Fast")
+        let slowButFine = scenario.addBotNode(name: "Slow Survivor")
+
+        scenario.connect(from: source, to: failFast)
+        scenario.connect(from: source, to: slowButFine)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("data")])
+        mockProvider.scriptError(for: scenario.profileID(for: failFast)!, error: NSError(domain: "t", code: 1))
+        mockProvider.scriptDelayedStream(for: scenario.profileID(for: slowButFine)!,
+                                         events: [.content("slow but valuable")], milliseconds: 300)
+
+        let events = try await execute(scenario)
+        let content = StreamCollector.contentText(from: events)
+
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == slowButFine },
+                      "the slow sibling must run to completion despite the fast failure")
+        XCTAssertTrue(content.contains("slow but valuable"),
+                      "…and its output must reach the final answer — got: \(content)")
+    }
+
+    /// The control: a SINGLE terminal stays bare. The common one-answer case must not grow a
+    /// heading it never had.
+    func testSingleTerminal_OutputStaysUnlabeled() async throws {
+        let scenario = WorkflowTestScenario()
+        let botA = scenario.addBotNode(name: "Source")
+        let botB = scenario.addBotNode(name: "Only Terminal")
+        scenario.connect(from: botA, to: botB)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: botA)!, events: [.content("data")])
+        mockProvider.scriptStream(for: scenario.profileID(for: botB)!, events: [.content("the answer")])
+
+        let events = try await execute(scenario)
+
+        XCTAssertEqual(StreamCollector.contentText(from: events), "the answer")
     }
 
     func testTerminalNode_EmptyOutput_NotInFinalContent() async throws {
@@ -1898,8 +3294,15 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertEqual(completed.count, 1, "Should execute even with empty user input")
     }
 
-    func testLargeUpstreamContext_Truncated() async throws {
-        // Bot A produces very large output → ContextCompressor truncates for Bot B
+    /// ⚠️ INVERTED 2026-08-13 (user decision): a workflow passes upstream output through in FULL.
+    /// This test previously asserted that a 25,000-char upstream reached the next node cut to
+    /// ~6,000 with a truncation marker — the silent information loss the change removes. Fitting the
+    /// input is now a function of which model the downstream node runs.
+    ///
+    /// ⚠️ The trade is real and deliberate: a node's input is unbounded, so a small local model
+    /// downstream of a verbose upstream will fail at the provider on context length rather than
+    /// receive a shortened prompt.
+    func testLargeUpstreamContext_PassedThroughInFull() async throws {
         let scenario = WorkflowTestScenario()
         let botA = scenario.addBotNode(name: "Verbose Bot")
         let botB = scenario.addBotNode(name: "Receiver Bot")
@@ -1911,14 +3314,15 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         mockProvider.scriptStream(for: scenario.profileID(for: botB)!, events: [.content("done")])
 
         let events = try await execute(scenario)
+        _ = events
 
-        // B should receive truncated context, not the full 25K
         let bPid = scenario.profileID(for: botB)!
         let bInv = mockProvider.invocations.first(where: { $0.profileID == bPid })!
-        XCTAssertLessThan(bInv.userInput.count, 10000,
-                          "Context should be truncated to ~6000 chars, not full 25K")
-        XCTAssertTrue(bInv.userInput.contains("truncated"),
-                      "Should contain truncation marker")
+
+        XCTAssertTrue(bInv.userInput.contains(largeOutput),
+                      "the full 25K upstream output must reach the downstream node")
+        XCTAssertFalse(bInv.userInput.contains("truncated"),
+                       "no truncation marker may be injected")
     }
 
     func testProgressEvents_MonotonicallyIncreasing() async throws {
@@ -2030,7 +3434,8 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
     }
 
     // =========================================================================
-    // MARK: - Group 24: Loop Node Tests
+    // MARK: - Group 24: shared inner-workflow helper
+    // (The Loop node tests that lived here were deleted with the Loop node, 2026-08-15.)
     // =========================================================================
 
     /// Helper: creates an inner workflow with a single bot, saves it, registers profiles.
@@ -2050,196 +3455,14 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
 
         return (inner.workflowProfileID, innerBot)
     }
-
-    func testLoopNode_ExecutesBodyNTimes() async throws {
-        let scenario = WorkflowTestScenario()
-
-        // Create inner workflow: single bot
-        let (innerID, innerBot) = makeInnerBotWorkflow(botName: "Loop Body Bot", scenario: scenario)
-
-        let loop = scenario.addLoopNode(name: "Repeater", bodyWorkflowID: innerID, maxIterations: 3)
-
-        // Script inner bot: returns same output every iteration (cycles last entry)
-        let innerPid = scenario.profileMap.first(where: { $0.value.displayName == "Loop Body Bot" })!.key
-        mockProvider.scriptStream(for: innerPid, events: [.content("iteration output")])
-
-        let events = try await execute(scenario)
-
-        // Should emit 3 loop iteration events
-        let iterations = WorkflowStreamCollector.loopIterationEvents(from: events)
-        XCTAssertEqual(iterations.count, 3, "Should execute 3 iterations")
-        XCTAssertEqual(iterations.map(\.iteration), [1, 2, 3])
-
-        // Loop node itself completes
-        let completed = WorkflowStreamCollector.nodeCompletedEvents(from: events)
-        XCTAssertTrue(completed.contains(where: { $0.nodeID == loop }))
-
-        // Final output should be from last iteration
-        let content = StreamCollector.contentText(from: events)
-        XCTAssertTrue(content.contains("iteration output"))
-    }
-
-    func testLoopNode_ChainsOutputBetweenIterations() async throws {
-        let scenario = WorkflowTestScenario()
-
-        let (innerID, _) = makeInnerBotWorkflow(botName: "Chaining Bot", scenario: scenario)
-        let botA = scenario.addBotNode(name: "Source")
-        let loop = scenario.addLoopNode(name: "Chain Loop", bodyWorkflowID: innerID, maxIterations: 3)
-
-        scenario.connect(from: botA, to: loop)
-
-        mockProvider.scriptStream(for: scenario.profileID(for: botA)!, events: [.content("seed")])
-
-        // Inner bot: each call receives previous iteration's output as input
-        let innerPid = scenario.profileMap.first(where: { $0.value.displayName == "Chaining Bot" })!.key
-        mockProvider.scriptStream(for: innerPid, events: [.content("iter1")])
-        mockProvider.scriptStream(for: innerPid, events: [.content("iter2")])
-        mockProvider.scriptStream(for: innerPid, events: [.content("iter3")])
-
-        let events = try await execute(scenario)
-
-        // Verify the inner bot was called 3 times
-        let innerCalls = mockProvider.invocations.filter { $0.profileID == innerPid }
-        XCTAssertEqual(innerCalls.count, 3)
-
-        // First iteration input should contain "seed" (upstream from botA)
-        XCTAssertTrue(innerCalls[0].userInput.contains("seed"),
-                      "First iteration should receive upstream input")
-
-        // Second iteration input should contain "iter1" (previous iteration output)
-        XCTAssertTrue(innerCalls[1].userInput.contains("iter1"),
-                      "Second iteration should receive first iteration's output")
-
-        // Third iteration input should contain "iter2"
-        XCTAssertTrue(innerCalls[2].userInput.contains("iter2"),
-                      "Third iteration should receive second iteration's output")
-    }
-
-    func testLoopNode_ExitConditionBreaksEarly() async throws {
-        let scenario = WorkflowTestScenario()
-
-        let (innerID, _) = makeInnerBotWorkflow(botName: "Converging Bot", scenario: scenario)
-        let loop = scenario.addLoopNode(
-            name: "Early Exit Loop",
-            bodyWorkflowID: innerID,
-            maxIterations: 10,
-            exitCondition: ConditionRule(label: "exit", field: .upstreamOutput, op: .contains, value: "DONE")
-        )
-
-        let innerPid = scenario.profileMap.first(where: { $0.value.displayName == "Converging Bot" })!.key
-        // Iterations 1-2: no DONE, iteration 3: has DONE
-        mockProvider.scriptStream(for: innerPid, events: [.content("processing...")])
-        mockProvider.scriptStream(for: innerPid, events: [.content("still processing...")])
-        mockProvider.scriptStream(for: innerPid, events: [.content("DONE - converged")])
-
-        let events = try await execute(scenario)
-
-        // Should exit after 3 iterations (not 10)
-        let iterations = WorkflowStreamCollector.loopIterationEvents(from: events)
-        XCTAssertEqual(iterations.count, 3, "Should exit early after 3 iterations when DONE appears")
-
-        // Loop should complete (not fail)
-        let completed = WorkflowStreamCollector.nodeCompletedEvents(from: events)
-        XCTAssertTrue(completed.contains(where: { $0.nodeID == loop }))
-
-        // Completion summary should mention early exit
-        let loopCompleted = completed.first(where: { $0.nodeID == loop })!
-        XCTAssertTrue(loopCompleted.summary.contains("early exit") || loopCompleted.summary.contains("3 iter"),
-                      "Summary should indicate iteration count or early exit")
-    }
-
-    func testLoopNode_NoBody_Fails() async throws {
-        let scenario = WorkflowTestScenario()
-        let loop = scenario.addLoopNodeWithoutBody(name: "Broken Loop")
-
-        // Pre-flight validation rejects a loop with no body workflow configured.
-        do {
-            _ = try await execute(scenario)
-            XCTFail("Expected validationFailed for a loop with no body")
-        } catch let error as WorkflowError {
-            guard case .validationFailed(let issues, _) = error else {
-                XCTFail("Expected validationFailed, got \(error)")
-                return
-            }
-            XCTAssertTrue(issues.contains(where: { $0.nodeID == loop }),
-                          "Validation should flag the body-less loop node")
-        }
-    }
-
-    func testLoopNode_WritesCounterVariables() async throws {
-        let scenario = WorkflowTestScenario()
-
-        let (innerID, _) = makeInnerBotWorkflow(botName: "Counter Bot", scenario: scenario)
-        let loop = scenario.addLoopNode(name: "Counting Loop", bodyWorkflowID: innerID, maxIterations: 2)
-        let code = scenario.addCodeNode(
-            name: "Read Counter",
-            template: "Ran {{ var.__loop_\(loop.uuidString)_counter }} times"
-        )
-        scenario.connect(from: loop, to: code)
-
-        let innerPid = scenario.profileMap.first(where: { $0.value.displayName == "Counter Bot" })!.key
-        mockProvider.scriptStream(for: innerPid, events: [.content("tick")])
-
-        let events = try await execute(scenario)
-
-        // Code node should have read the loop counter variable
-        let codeCompleted = WorkflowStreamCollector.nodeCompletedEvents(from: events)
-            .first(where: { $0.nodeID == code })
-        XCTAssertNotNil(codeCompleted, "Code node should complete")
-        XCTAssertTrue(codeCompleted!.summary.contains("Ran 2 times"),
-                      "Code node should read loop counter variable. Got: \(codeCompleted!.summary)")
-    }
-
-    func testLoopNode_BodyFails_LoopFails() async throws {
-        let scenario = WorkflowTestScenario()
-
-        let (innerID, _) = makeInnerBotWorkflow(botName: "Failing Body Bot", scenario: scenario)
-        let loop = scenario.addLoopNode(name: "Fragile Loop", bodyWorkflowID: innerID, maxIterations: 5)
-
-        let innerPid = scenario.profileMap.first(where: { $0.value.displayName == "Failing Body Bot" })!.key
-        // First iteration succeeds, second fails
-        mockProvider.scriptStream(for: innerPid, events: [.content("ok")])
-        mockProvider.scriptError(for: innerPid, error: NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "body exploded"]))
-
-        let events = try await execute(scenario)
-
-        // Loop should fail after body fails
-        let failed = WorkflowStreamCollector.nodeFailedEvents(from: events)
-        XCTAssertTrue(failed.contains(where: { $0.nodeID == loop }), "Loop should fail when body fails")
-
-        // Should only have 2 iterations (first ok, second fails)
-        let iterations = WorkflowStreamCollector.loopIterationEvents(from: events)
-        XCTAssertEqual(iterations.count, 2, "Should stop after body fails on iteration 2")
-    }
-
-    func testLoopNode_UpstreamContextPassedToFirstIteration() async throws {
-        let scenario = WorkflowTestScenario()
-
-        let botA = scenario.addBotNode(name: "Provider")
-        let (innerID, _) = makeInnerBotWorkflow(botName: "Receiver Bot", scenario: scenario)
-        let loop = scenario.addLoopNode(name: "Context Loop", bodyWorkflowID: innerID, maxIterations: 1)
-
-        scenario.connect(from: botA, to: loop)
-
-        mockProvider.scriptStream(for: scenario.profileID(for: botA)!, events: [.content("upstream data")])
-
-        let innerPid = scenario.profileMap.first(where: { $0.value.displayName == "Receiver Bot" })!.key
-        mockProvider.scriptStream(for: innerPid, events: [.content("processed")])
-
-        let events = try await execute(scenario)
-
-        // Inner bot's first call should receive upstream data as input
-        let innerCalls = mockProvider.invocations.filter { $0.profileID == innerPid }
-        XCTAssertEqual(innerCalls.count, 1)
-        XCTAssertTrue(innerCalls[0].userInput.contains("upstream data"),
-                      "Loop body should receive upstream context on first iteration")
-    }
-
-    // =========================================================================
     // MARK: - Group 25: Parallel Execution
     // =========================================================================
 
-    func testParallel_TwoBotsExecuteConcurrently() async throws {
+    /// ⚠️ WF-TS12: renamed from `testParallel_TwoBotsExecuteConcurrently`. It never asserted
+    /// concurrency — `.events` scripts never suspend, so "B and C both completed" holds just as
+    /// well under a sequential executor. The name is why the real gap went unnoticed for so long;
+    /// `testParallel_SiblingSpansOverlap_NotSequential` below is the test that can tell them apart.
+    func testParallel_BothSiblingsReceiveUpstreamAndComplete() async throws {
         // A → B, A → C; B and C at same level (parallel)
         let scenario = WorkflowTestScenario()
         let botA = scenario.addBotNode(name: "Source")
@@ -2272,6 +3495,159 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let content = StreamCollector.contentText(from: events)
         XCTAssertTrue(content.contains("B result"), "Final content should include B")
         XCTAssertTrue(content.contains("C result"), "Final content should include C")
+    }
+
+    /// ⚠️ WF-TS12: the ONLY test in this group that can tell parallel level dispatch from
+    /// sequential. Every other Group 25 test passes against a sequential executor too, because
+    /// `.events` scripts never suspend. Here each sibling sleeps 400 ms and the assertion is that
+    /// their execution spans INTERSECT — something sequential dispatch cannot produce, since C's
+    /// provider would not be called until B's stream had finished.
+    ///
+    /// Threshold-free by construction: both spans are measured under the same load, so a slow or
+    /// loaded machine shifts them together rather than turning the test red. The spans are stamped
+    /// inside the producer (`MockWorkflowStreamProvider.InvocationSpan`) precisely so consumer-side
+    /// buffering can't manufacture a false overlap.
+    func testParallel_SiblingSpansOverlap_NotSequential() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let slowB = scenario.addBotNode(name: "Slow-B")
+        let slowC = scenario.addBotNode(name: "Slow-C")
+        scenario.connect(from: source, to: slowB)
+        scenario.connect(from: source, to: slowC)
+
+        let bPid = scenario.profileID(for: slowB)!
+        let cPid = scenario.profileID(for: slowC)!
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("go")])
+        mockProvider.scriptDelayedStream(for: bPid, events: [.content("B done")], milliseconds: 400)
+        mockProvider.scriptDelayedStream(for: cPid, events: [.content("C done")], milliseconds: 400)
+
+        let events = try await execute(scenario)
+
+        // Both really ran — otherwise a missing span would read as "no overlap" for the wrong reason.
+        let completed = WorkflowStreamCollector.nodeCompletedEvents(from: events).map(\.nodeID)
+        XCTAssertTrue(completed.contains(slowB), "B must complete")
+        XCTAssertTrue(completed.contains(slowC), "C must complete")
+
+        let spans = mockProvider.spans
+        let b = try XCTUnwrap(spans.first(where: { $0.profileID == bPid }), "no span recorded for B")
+        let c = try XCTUnwrap(spans.first(where: { $0.profileID == cPid }), "no span recorded for C")
+
+        XCTAssertTrue(b.start < c.end && c.start < b.end,
+                      "same-level siblings ran back-to-back, not in parallel — B \(b.start)…\(b.end), C \(c.start)…\(c.end)")
+    }
+
+    // MARK: - WF-CC2: MLX-aware lane dispatch
+    //
+    // ⚠️ `MLXService` keeps exactly ONE model container resident. `loadModel` calls
+    // `performUnload()` before loading a DIFFERENT directory (MLXService.swift:246) but
+    // EARLY-RETURNS for the one already resident (:215-219). So two same-level nodes on different
+    // MLX models evict each other on every generation call — i.e. every ReAct iteration, since
+    // `container(expecting:)` is consulted per generation — each eviction re-reading multi-GB of
+    // weights, and `container(expecting:)` throws `modelIdentityMismatch` after two attempts.
+    //
+    // ⚠️ These tests are HERMETIC. `apiProvider` on the scenario's profiles is inert for
+    // execution — `MockWorkflowStreamProvider` keys on `profile.id` and never reads `details` — so
+    // `.mlx` here reaches the dispatch decision and nothing else. No MLXService, no model, no disk.
+
+    /// The headline: two same-level siblings on DIFFERENT MLX models must NOT overlap.
+    ///
+    /// ⚠️ This test was written and confirmed RED against HEAD before the lane split existed. If it
+    /// ever passes without the split, the premise is wrong and the whole change needs re-deriving.
+    func testParallel_TwoDifferentMLXModels_Serialize() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let deep = scenario.addBotNode(name: "Deep", apiProvider: .mlx, modelName: "qwen3-8b")
+        let fast = scenario.addBotNode(name: "Fast", apiProvider: .mlx, modelName: "llama3-3b")
+        scenario.connect(from: source, to: deep)
+        scenario.connect(from: source, to: fast)
+
+        let dPid = scenario.profileID(for: deep)!
+        let fPid = scenario.profileID(for: fast)!
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("go")])
+        mockProvider.scriptDelayedStream(for: dPid, events: [.content("deep done")], milliseconds: 250)
+        mockProvider.scriptDelayedStream(for: fPid, events: [.content("fast done")], milliseconds: 250)
+
+        let events = try await execute(scenario)
+
+        // Serializing must not cost anyone their work — both still run, both still land.
+        let completed = WorkflowStreamCollector.nodeCompletedEvents(from: events).map(\.nodeID)
+        XCTAssertTrue(completed.contains(deep), "Deep must complete")
+        XCTAssertTrue(completed.contains(fast), "Fast must complete")
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).isEmpty, "a lane split must fail nothing")
+        let content = WorkflowStreamCollector.contentText(from: events)
+        XCTAssertTrue(content.contains("deep done") && content.contains("fast done"),
+                      "both terminals' output must still reach the final answer")
+
+        let spans = mockProvider.spans
+        XCTAssertEqual(spans.count, 2, "both providers must have been invoked exactly once")
+        let d = try XCTUnwrap(spans.first(where: { $0.profileID == dPid }), "no span for Deep")
+        let f = try XCTUnwrap(spans.first(where: { $0.profileID == fPid }), "no span for Fast")
+
+        XCTAssertFalse(d.start < f.end && f.start < d.end,
+                       "two DIFFERENT MLX models ran CONCURRENTLY against a single global model container — they will evict each other's weights on every generation call. Deep \(d.start)…\(d.end), Fast \(f.start)…\(f.end)")
+    }
+
+    /// ⚠️ THE OVER-SERIALIZATION GUARD, and the reason the split is per-model rather than
+    /// per-level. A "any MLX node ⇒ run this level sequentially" implementation would pass the
+    /// test above and every other test in this file — and quietly destroy cloud parallelism. Only
+    /// this test fails under that mutation.
+    func testParallel_CloudSiblingStillOverlaps_MLXLaneIsNotALevelLock() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let deep = scenario.addBotNode(name: "Deep", apiProvider: .mlx, modelName: "qwen3-8b")
+        let fast = scenario.addBotNode(name: "Fast", apiProvider: .mlx, modelName: "llama3-3b")
+        let cloud = scenario.addBotNode(name: "Cloud", apiProvider: .anthropic, modelName: "claude")
+        scenario.connect(from: source, to: deep)
+        scenario.connect(from: source, to: fast)
+        scenario.connect(from: source, to: cloud)
+
+        let dPid = scenario.profileID(for: deep)!
+        let fPid = scenario.profileID(for: fast)!
+        let cPid = scenario.profileID(for: cloud)!
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("go")])
+        mockProvider.scriptDelayedStream(for: dPid, events: [.content("deep")], milliseconds: 150)
+        mockProvider.scriptDelayedStream(for: fPid, events: [.content("fast")], milliseconds: 150)
+        // Long enough to still be running while the MLX lanes hand over.
+        mockProvider.scriptDelayedStream(for: cPid, events: [.content("cloud")], milliseconds: 600)
+
+        let events = try await execute(scenario)
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).isEmpty)
+
+        let spans = mockProvider.spans
+        let d = try XCTUnwrap(spans.first(where: { $0.profileID == dPid }))
+        let f = try XCTUnwrap(spans.first(where: { $0.profileID == fPid }))
+        let c = try XCTUnwrap(spans.first(where: { $0.profileID == cPid }))
+
+        XCTAssertFalse(d.start < f.end && f.start < d.end, "the two MLX models must still be serialized")
+        XCTAssertTrue((c.start < d.end && d.start < c.end) || (c.start < f.end && f.start < c.end),
+                      "the cloud node must still overlap real work — the MLX split is a per-model lane, NOT a level-wide lock. Cloud \(c.start)…\(c.end), Deep \(d.start)…\(d.end), Fast \(f.start)…\(f.end)")
+    }
+
+    /// ⚠️ Two siblings on the SAME MLX model must STILL overlap. `loadModel` early-returns for the
+    /// resident directory and coalesces concurrent loads of it, so they share one container and
+    /// evict nothing — serializing them would cost parallelism for zero benefit. This is the
+    /// integration-level twin of `WorkflowMLXDispatchLaneTests.testOneMLXModel_SingleLane`.
+    func testParallel_SameMLXModel_StillOverlaps() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let a = scenario.addBotNode(name: "A", apiProvider: .mlx, modelName: "qwen3-8b")
+        let b = scenario.addBotNode(name: "B", apiProvider: .mlx, modelName: "qwen3-8b")
+        scenario.connect(from: source, to: a)
+        scenario.connect(from: source, to: b)
+
+        let aPid = scenario.profileID(for: a)!
+        let bPid = scenario.profileID(for: b)!
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("go")])
+        mockProvider.scriptDelayedStream(for: aPid, events: [.content("a")], milliseconds: 250)
+        mockProvider.scriptDelayedStream(for: bPid, events: [.content("b")], milliseconds: 250)
+
+        _ = try await execute(scenario)
+
+        let spans = mockProvider.spans
+        let sa = try XCTUnwrap(spans.first(where: { $0.profileID == aPid }))
+        let sb = try XCTUnwrap(spans.first(where: { $0.profileID == bPid }))
+        XCTAssertTrue(sa.start < sb.end && sb.start < sa.end,
+                      "same-model MLX siblings share ONE container and must stay parallel — A \(sa.start)…\(sa.end), B \(sb.start)…\(sb.end)")
     }
 
     func testParallel_ThreeBotsWithFanIn() async throws {
@@ -2313,9 +3689,9 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertEqual(content, "aggregated")
     }
 
-    func testParallel_OneFailsStopWorkflow_NextLevelBlocked() async throws {
-        // A → (B, C); B → D
-        // B fails with stopWorkflow. C still completes (in-flight). D never starts.
+    /// A failure never cancels a parallel branch (design decision 2026-08-12). C completes; D is
+    /// blocked only because its own upstream B died, not by any policy.
+    func testParallel_OneFails_SiblingCompletes_DependentSkips() async throws {
         let scenario = WorkflowTestScenario()
         let botA = scenario.addBotNode(name: "Source")
         let botB = scenario.addBotNode(name: "Failing-B")
@@ -2326,8 +3702,6 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         scenario.connect(from: botA, to: botC)
         scenario.connect(from: botB, to: botD)
 
-        scenario.setNodeConfig(WorkflowNodeConfig(onFailure: .stopWorkflow), for: botB)
-
         mockProvider.scriptStream(for: scenario.profileID(for: botA)!, events: [.content("data")])
         mockProvider.scriptError(for: scenario.profileID(for: botB)!, error: NSError(domain: "t", code: 1))
         mockProvider.scriptStream(for: scenario.profileID(for: botC)!, events: [.content("C ok")])
@@ -2335,18 +3709,13 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
 
         let events = try await execute(scenario)
 
-        // C completes (was already in-flight when B failed)
-        let completed = WorkflowStreamCollector.nodeCompletedEvents(from: events).map(\.nodeID)
-        XCTAssertTrue(completed.contains(botC), "In-flight parallel node C should still complete")
-
-        // B fails
-        let failed = WorkflowStreamCollector.nodeFailedEvents(from: events).map(\.nodeID)
-        XCTAssertTrue(failed.contains(botB), "B should fail")
-
-        // D never starts — stopWorkflow halts next level
-        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
-        XCTAssertFalse(started.contains(botD), "D should NOT start after stopWorkflow")
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == botC },
+                      "the parallel branch is independent and must keep its result")
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == botB })
+        XCTAssertFalse(WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID).contains(botD),
+                       "D is downstream of B with no error edge")
     }
+
 
     func testParallel_OneFailsDefault_SharedDownstreamSkipped() async throws {
         // A → (B, C) → D; B fails with default skipDependents
@@ -2374,8 +3743,9 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertTrue(completed.contains(botC), "Healthy-C should complete")
 
         let failed = WorkflowStreamCollector.nodeFailedEvents(from: events)
+        let skipped = WorkflowStreamCollector.nodeSkippedEvents(from: events)
         XCTAssertTrue(failed.contains(where: { $0.nodeID == botB }), "B should fail")
-        XCTAssertTrue(failed.contains(where: { $0.nodeID == botD }), "D should be skipped (upstream B failed)")
+        XCTAssertTrue(skipped.contains(where: { $0.nodeID == botD }), "D should be SKIPPED (upstream B failed)")
     }
 
     func testParallel_StructuralBeforeProfile() async throws {
@@ -2563,30 +3933,31 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             if case .error(let err) = e { return err.message }
             return nil
         }
-        XCTAssertTrue(errors.contains(where: { $0.contains("all terminal nodes failed") }),
-                       "Should report all terminals failed")
+        XCTAssertTrue(errors.contains(where: { $0.contains("The workflow failed.") }),
+                       "Should report the run as failed")
+        for name in ["Fail-B", "Fail-C", "Fail-D"] {
+            XCTAssertTrue(errors.contains(where: { $0.contains(name) }),
+                          "every failing node must be named, missing \(name)")
+        }
 
         // Progress should still reach 4/4 (A completed + B,C,D failed = 4 processed)
         let progress = WorkflowStreamCollector.progressEvents(from: events)
         XCTAssertEqual(progress.last?.completed, 4)
     }
 
-    func testParallel_MixedPolicies_StopWorkflowWins() async throws {
-        // A → (B: continueAll, C: stopWorkflow) → D
-        // Both fail. stopWorkflow should prevent D from executing.
+    /// Two parallel failures, no policies: the shared dependent skips (both branches dead), and
+    /// both failures are reported. Nothing "wins" — the graph decides.
+    func testParallel_BothBranchesFail_DependentSkips() async throws {
         let scenario = WorkflowTestScenario()
         let botA = scenario.addBotNode(name: "Source")
-        let botB = scenario.addBotNode(name: "ContinueAll-B")
-        let botC = scenario.addBotNode(name: "StopWorkflow-C")
+        let botB = scenario.addBotNode(name: "Fails-B")
+        let botC = scenario.addBotNode(name: "Fails-C")
         let botD = scenario.addBotNode(name: "Next-Level-D")
 
         scenario.connect(from: botA, to: botB)
         scenario.connect(from: botA, to: botC)
         scenario.connect(from: botB, to: botD)
         scenario.connect(from: botC, to: botD)
-
-        scenario.setNodeConfig(WorkflowNodeConfig(onFailure: .continueAll), for: botB)
-        scenario.setNodeConfig(WorkflowNodeConfig(onFailure: .stopWorkflow), for: botC)
 
         mockProvider.scriptStream(for: scenario.profileID(for: botA)!, events: [.content("data")])
         mockProvider.scriptError(for: scenario.profileID(for: botB)!, error: NSError(domain: "t", code: 1))
@@ -2595,15 +3966,12 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
 
         let events = try await execute(scenario)
 
-        // D should NOT execute — stopWorkflow from C halts the workflow
-        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
-        XCTAssertFalse(started.contains(botD), "D should NOT start — stopWorkflow from C takes precedence")
-
-        // Both B and C should be reported as failed
+        XCTAssertFalse(WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID).contains(botD))
         let failed = WorkflowStreamCollector.nodeFailedEvents(from: events).map(\.nodeID)
         XCTAssertTrue(failed.contains(botB))
-        XCTAssertTrue(failed.contains(botC))
+        XCTAssertTrue(failed.contains(botC), "both failures are reported — neither cancels the other")
     }
+
 
     func testParallel_SingleProfileNode_UsesDirectPath() async throws {
         // A → B: Level 1 has exactly 1 profile node → uses if-branch (no TaskGroup)
@@ -2630,5 +3998,1369 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
 
         let content = StreamCollector.contentText(from: events)
         XCTAssertEqual(content, "B output")
+    }
+
+    // =========================================================================
+    // MARK: - Group 26: Sub-Workflow Nodes (WF2) and body profile resolution (WF1)
+    // =========================================================================
+
+    /// A node backed by a workflow profile runs that workflow's canvas and hands its output on.
+    ///
+    /// Before the fix this node type could not run at all: the dispatch loop sent it down the
+    /// agent path, whose `case .workflow, .imageGen` arm yields an error and finishes, and because
+    /// no `.executionFinished` followed, the default `.completed` stuck — the node went GREEN with
+    /// empty output and the downstream node ran on nothing.
+    func testSubWorkflowNode_RunsChildWorkflow_AndPassesOutputDownstream() async throws {
+        let scenario = WorkflowTestScenario()
+
+        let inner = InnerWorkflowBuilder()
+        let innerBot = inner.addBotNode(name: "Nested Bot")
+        inner.save()
+        innerBuilders.append(inner)
+        for (id, profile) in inner.profileMap { scenario.profileMap[id] = profile }
+
+        let subWorkflow = scenario.addSubWorkflowNode(name: "Nested Step", workflowProfileID: inner.workflowProfileID)
+        let consumer = scenario.addBotNode(name: "Consumer")
+        scenario.connect(from: subWorkflow, to: consumer)
+
+        let innerPid = inner.profileID(for: innerBot)!
+        mockProvider.scriptStream(for: innerPid, events: [.content("NESTED RESULT")])
+        let consumerPid = scenario.profileID(for: consumer)!
+        mockProvider.scriptStream(for: consumerPid, events: [.content("consumer output")])
+
+        let events = try await execute(scenario)
+
+        let completed = WorkflowStreamCollector.nodeCompletedEvents(from: events)
+        let subResult = completed.first(where: { $0.nodeID == subWorkflow })
+        XCTAssertNotNil(subResult, "The sub-workflow node must complete, not be skipped")
+        XCTAssertEqual(subResult?.summary, "NESTED RESULT",
+                       "The node's output must be the child workflow's output, not empty")
+
+        XCTAssertTrue(completed.contains(where: { $0.nodeID == consumer }),
+                      "The downstream node must run")
+        let consumerInvocation = mockProvider.invocations.first(where: { $0.profileID == consumerPid })
+        XCTAssertNotNil(consumerInvocation)
+        XCTAssertTrue(consumerInvocation?.userInput.contains("NESTED RESULT") == true,
+                      "The child's output must reach the downstream node's input — got: \(consumerInvocation?.userInput ?? "<none>")")
+    }
+
+    /// ⚠️ A GATE INSIDE A SUB-WORKFLOW BODY must reach the outer stream and, once answered, let the
+    /// child continue. The three HITL forwards in the sub-workflow arm (`requestConfirmation` /
+    /// `requestGate` / `requestClarification`, each keeping the INNER node's id) are the only thing
+    /// standing between a suspending inner node and the `default:` suppression arm — and a
+    /// swallowed suspending event is a PERMANENT hang: no banner, nobody to answer, and the compute
+    /// clock excludes parked time so not even the node timeout fires.
+    ///
+    /// ⚠️ This pin previously lived in `LoopHITLForwardingTests` (a source scan over the loop arm)
+    /// and was deleted with the Loop node (2026-08-15). This is its behavioural replacement, on the
+    /// surviving forwarder: it drives the REAL child executor (the inner layout is saved and loaded
+    /// from `WorkflowLayoutStore`), so a regression that drops `.requestGate` into `default:` is
+    /// caught by the assertions below — see the gate-timeout note inside for why a swallowed event
+    /// fails fast here instead of hanging.
+    func testGateInsideSubWorkflowBody_ReachesTheOuterStream_AndTheRunCompletes() async throws {
+        let scenario = WorkflowTestScenario()
+
+        let inner = InnerWorkflowBuilder()
+        let innerBot = inner.addBotNode(name: "Prep Bot")
+        // ⚠️ The 5s timeout is the test's OWN safety net, not part of the behaviour under test: with
+        // an indefinite gate, a forwarder regression would HANG this test forever rather than fail
+        // it (the harness answers the gate only when it SEES the event on the outer stream). With
+        // the timeout, a swallowed event times the gate out in 5s and the assertions below fail
+        // loudly. On the healthy path the harness answers within ~50ms, so the timeout never fires.
+        let innerGate = inner.addGateNode(name: "Inner Approval", options: ["Go", "Stop"], timeout: 5)
+        let innerAfter = inner.addBotNode(name: "After Gate")
+        inner.connect(from: innerBot, to: innerGate)
+        inner.connect(from: innerGate, to: innerAfter, portLabel: "Go")
+        inner.save()
+        innerBuilders.append(inner)
+        for (id, profile) in inner.profileMap { scenario.profileMap[id] = profile }
+
+        let subWorkflow = scenario.addSubWorkflowNode(name: "Nested Step", workflowProfileID: inner.workflowProfileID)
+        let consumer = scenario.addBotNode(name: "Consumer")
+        scenario.connect(from: subWorkflow, to: consumer)
+
+        mockProvider.scriptStream(for: inner.profileID(for: innerBot)!, events: [.content("prepped")])
+        mockProvider.scriptStream(for: inner.profileID(for: innerAfter)!, events: [.content("APPROVED RESULT")])
+        mockProvider.scriptStream(for: scenario.profileID(for: consumer)!, events: [.content("done")])
+
+        // Answer the inner gate with "Go" — through the same suspension service the banner uses.
+        let events = try await executeWithGate(scenario, choosing: "Go")
+
+        // 1. The gate REQUEST escaped the child stream — the forwarder, not the default: arm.
+        let gates = WorkflowStreamCollector.gateRequests(from: events)
+        XCTAssertEqual(gates.count, 1, "the inner gate must surface exactly once on the outer stream")
+
+        // 2. The answer resumed the CHILD: its post-gate node ran and its output flowed out.
+        let completed = WorkflowStreamCollector.nodeCompletedEvents(from: events)
+        XCTAssertEqual(completed.first(where: { $0.nodeID == subWorkflow })?.summary, "APPROVED RESULT",
+                       "the child must continue past the answered gate and publish its result")
+        XCTAssertTrue(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: consumer)! },
+                      "downstream must receive the completed sub-workflow's output")
+    }
+
+    /// A sub-workflow node with no task description must not block the run.
+    ///
+    /// The validator demanded one for every profile node and told the user to "Double-click to
+    /// configure"; the double-click handler excluded exactly this node type and `targetConfigNode`
+    /// has no other writer — so the blocking error was unfixable from the app.
+    func testSubWorkflowNode_WithoutTaskDescription_DoesNotBlockValidation() async throws {
+        let scenario = WorkflowTestScenario()
+
+        let inner = InnerWorkflowBuilder()
+        let innerBot = inner.addBotNode(name: "Nested Bot")
+        inner.save()
+        innerBuilders.append(inner)
+        for (id, profile) in inner.profileMap { scenario.profileMap[id] = profile }
+
+        let subWorkflow = scenario.addSubWorkflowNode(name: "Nested Step", workflowProfileID: inner.workflowProfileID)
+        XCTAssertNil(scenario.layout.nodes.first(where: { $0.id == subWorkflow })?.nodeConfig?.taskDescription,
+                     "Precondition: the node under test carries no task description")
+
+        // Direct validator assertion — this is the gate that threw `validationFailed`.
+        let issues = WorkflowValidator.validate(layout: scenario.layout, profileMap: scenario.profileMap)
+        let errors = issues.filter { $0.severity == .error }
+        XCTAssertTrue(errors.isEmpty,
+                      "A sub-workflow node without a task description must not be a validation error — got: \(errors.map(\.message))")
+
+        // And end-to-end: the run reaches the node instead of throwing before any node executes.
+        mockProvider.scriptStream(for: inner.profileID(for: innerBot)!, events: [.content("ok")])
+        let events = try await execute(scenario)
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains(where: { $0.nodeID == subWorkflow }))
+    }
+
+    /// A child workflow that fails must fail the node — never report an empty success.
+    func testSubWorkflowNode_ChildFailure_FailsNodeAndSkipsDependents() async throws {
+        let scenario = WorkflowTestScenario()
+
+        let inner = InnerWorkflowBuilder()
+        let innerBot = inner.addBotNode(name: "Failing Nested Bot")
+        inner.save()
+        innerBuilders.append(inner)
+        for (id, profile) in inner.profileMap { scenario.profileMap[id] = profile }
+
+        let subWorkflow = scenario.addSubWorkflowNode(name: "Nested Step", workflowProfileID: inner.workflowProfileID)
+        let consumer = scenario.addBotNode(name: "Consumer")
+        scenario.connect(from: subWorkflow, to: consumer)
+
+        mockProvider.scriptError(for: inner.profileID(for: innerBot)!, error: NSError(domain: "test", code: 1))
+        mockProvider.scriptStream(for: scenario.profileID(for: consumer)!, events: [.content("should not run")])
+
+        let events = try await execute(scenario)
+
+        let failed = WorkflowStreamCollector.nodeFailedEvents(from: events)
+        XCTAssertTrue(failed.contains(where: { $0.nodeID == subWorkflow }),
+                      "A failing child workflow must fail the node, not complete it green")
+        XCTAssertFalse(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains(where: { $0.nodeID == subWorkflow }),
+                       "The node must not also report completion")
+        XCTAssertFalse(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains(where: { $0.nodeID == consumer }),
+                       "Dependents must skip rather than run on the failed node's empty output")
+    }
+
+    /// WF5 — an inner stream that reports an error and then finishes with no terminal event must
+    /// FAIL the node, not report an empty success.
+    ///
+    /// This is the shape `streamWorkflowNodeResponse` produces for a profile type it cannot run
+    /// (`case .workflow, .imageGen` yields `.error` and finishes). The node used to go green with
+    /// empty output: downstream consumed nothing, joins were satisfied, the error port never
+    /// activated and the run reported success.
+    func testErrorWithoutTerminalEvent_FailsNodeInsteadOfReportingEmptySuccess() async throws {
+        let scenario = WorkflowTestScenario()
+        let producer = scenario.addBotNode(name: "Producer")
+        let consumer = scenario.addBotNode(name: "Consumer")
+        scenario.connect(from: producer, to: consumer)
+
+        // `.error` then end-of-stream — NO `.executionFinished`.
+        mockProvider.scriptStream(
+            for: scenario.profileID(for: producer)!,
+            // Byte-identical to what `streamWorkflowNodeResponse` emits for an unsupported
+            // profile type (AgentConnect.swift:664) — the shape under test.
+            events: [.error("Unsupported profile type for workflow node: imageGen")]
+        )
+        mockProvider.scriptStream(for: scenario.profileID(for: consumer)!, events: [.content("should not run")])
+
+        let events = try await execute(scenario)
+
+        XCTAssertTrue(
+            WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == producer },
+            "A node whose stream errored and produced no terminal outcome must fail"
+        )
+        XCTAssertFalse(
+            WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == producer },
+            "…and must not ALSO report completion"
+        )
+        XCTAssertFalse(
+            WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == consumer },
+            "Dependents must skip rather than run on the failed node's empty output"
+        )
+    }
+
+    /// The guard on the narrowness of the fix: a clean stream that simply ends without an
+    /// `.executionFinished` event is still a SUCCESS. Treating "no terminal event" as failure on
+    /// its own would break every ordinary node — most of this suite's mocks end exactly that way.
+    func testCleanStreamWithoutTerminalEventStillCompletes() async throws {
+        let scenario = WorkflowTestScenario()
+        let bot = scenario.addBotNode(name: "Quiet Bot")
+        mockProvider.scriptStream(for: scenario.profileID(for: bot)!, events: [.content("all good")])
+
+        let events = try await execute(scenario)
+
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == bot })
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).isEmpty)
+    }
+
+    /// WF5 — an ImageGen profile node is rejected at validation, so the user learns when they add
+    /// it rather than after a run that silently produced nothing.
+    func testImageGenProfileNodeIsARejectedAtValidation() async throws {
+        let scenario = WorkflowTestScenario()
+        let profileID = UUID()
+        scenario.profileMap[profileID] = BackendProfileSnapshot(
+            id: profileID,
+            displayName: "Poster Generator",
+            details: .imageGen(ImageGenConfig(llmConfig: ProviderConfig(apiProvider: .openAI, modelName: "gpt-image-1")))
+        )
+        var node = WorkflowNode(
+            id: UUID(),
+            kind: .profile(profileID: profileID, profileType: .imageGen),
+            position: .zero,
+            displayName: "Poster Generator"
+        )
+        node.nodeConfig = WorkflowNodeConfig(taskDescription: "Draw a poster")
+        let layout = WorkflowLayout(nodes: [node], edges: [], annotations: [])
+
+        let errors = WorkflowValidator.validate(layout: layout, profileMap: scenario.profileMap)
+            .filter { $0.severity == .error }
+
+        XCTAssertEqual(errors.count, 1)
+        XCTAssertTrue(errors[0].message.contains("Image generation profiles can't be used as a workflow step"),
+                      "got: \(errors[0].message)")
+    }
+
+    // MARK: - WF8: Action nodes and semantic tool failure
+
+    /// A tool that reports failure by RETURNING an error string must fail the node.
+    ///
+    /// `http_request` answers a dead endpoint with "Error: HTTP request failed …" and returns
+    /// normally. The node used to go green, the tool card said success, and no `error` port
+    /// activated — so the error-handler branch was unreachable for that whole class of tool.
+    func testActionNode_SemanticToolFailure_FailsNodeAndActivatesErrorPort() async throws {
+        let scenario = WorkflowTestScenario()
+        let action = scenario.addActionNode(name: "Post Webhook", toolName: "http_request")
+        let handler = scenario.addBotNode(name: "Error Handler")
+        let happyPath = scenario.addBotNode(name: "Happy Path")
+        scenario.connect(from: action, to: handler, portLabel: "error")
+        scenario.connect(from: action, to: happyPath)
+
+        mockProvider.scriptTool(name: "http_request", output: "Error: HTTP request failed — The Internet connection appears to be offline.")
+        mockProvider.scriptStream(for: scenario.profileID(for: handler)!, events: [.content("escalated")])
+        mockProvider.scriptStream(for: scenario.profileID(for: happyPath)!, events: [.content("should not run")])
+
+        let events = try await execute(scenario)
+
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == action },
+                      "A tool whose output reports a failure must fail the node")
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == handler },
+                      "The error-port branch must run — that is the whole point of the error port")
+        XCTAssertFalse(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == happyPath },
+                       "The default-port branch must NOT run on a failed tool")
+    }
+
+    /// The control: an ordinary successful tool return still completes the node and takes the
+    /// default port. Guards against the semantic check swallowing normal output.
+    func testActionNode_SuccessfulTool_CompletesAndTakesDefaultPort() async throws {
+        let scenario = WorkflowTestScenario()
+        let action = scenario.addActionNode(name: "Post Webhook", toolName: "http_request")
+        let happyPath = scenario.addBotNode(name: "Happy Path")
+        scenario.connect(from: action, to: happyPath)
+
+        mockProvider.scriptTool(name: "http_request", output: "{\"status\":\"ok\"}")
+        mockProvider.scriptStream(for: scenario.profileID(for: happyPath)!, events: [.content("done")])
+
+        let events = try await execute(scenario)
+
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == action })
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == happyPath })
+    }
+
+    /// Tools that legitimately surface error text opt out via `contentMayLookLikeError` — a shell
+    /// tool returning stderr must NOT be misread as a failure. Same opt-out the agent path uses.
+    func testActionNode_ContentMayLookLikeErrorTool_IsNotTreatedAsFailure() async throws {
+        let scenario = WorkflowTestScenario()
+        let action = scenario.addActionNode(name: "Run Build", toolName: "execute_shell")
+        let next = scenario.addBotNode(name: "Reader")
+        scenario.connect(from: action, to: next)
+
+        mockProvider.scriptTool(
+            name: "execute_shell",
+            output: "Error: 3 warnings emitted",   // legitimate stderr content
+            contentMayLookLikeError: true
+        )
+        mockProvider.scriptStream(for: scenario.profileID(for: next)!, events: [.content("read it")])
+
+        let events = try await execute(scenario)
+
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == action },
+                      "A tool that opted out of content sniffing must not be failed on its own output")
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == next })
+    }
+    // MARK: - Group 31: Router no-match behaviour + unattended arbitration (2026-08-16)
+    //
+    // The `always` catch-all idiom was hard-deleted for amplifying ambiguity arbitration (any
+    // input matching a real rule also matched the catch-all, so EVERY ordinary routing decision
+    // asked "which branch?"). Its replacement is `noMatchBehavior`; unattended runs additionally
+    // skip arbitration entirely (`WorkflowRunAttendance`).
+
+    /// `.endWorkflow`: unmatched input ends the BRANCH gracefully — downstream skips as
+    /// not-chosen (never failed), and the Router's passthrough becomes the final output because
+    /// terminality is computed over LIVE edges.
+    func testRouter_NoMatchEndWorkflow_EndsBranchGracefullyWithPassthroughAsFinalOutput() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ]
+        config.noMatchBehavior = .endWorkflow
+        config.fallbackLabel = ""
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let urgent = scenario.addBotNode(name: "Urgent Arm")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: urgent, portLabel: "Urgent")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("nothing that matches")])
+        mockProvider.scriptStream(for: scenario.profileID(for: urgent)!, events: [.content("should not run")])
+
+        let events = try await execute(scenario)
+
+        // Nothing failed, downstream never ran, and it skipped as NOT CHOSEN (quiet, not red).
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).isEmpty,
+                      "a graceful end is not a failure — got: \(WorkflowStreamCollector.nodeFailedEvents(from: events))")
+        XCTAssertFalse(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: urgent)! })
+        XCTAssertTrue(WorkflowStreamCollector.nodeSkippedEvents(from: events)
+                        .contains { $0.nodeID == urgent && $0.reason == .notChosen })
+
+        // The Router became a terminal: its passthrough content is the run's answer.
+        XCTAssertTrue(WorkflowStreamCollector.contentText(from: events).contains("nothing that matches"),
+                      "the passthrough must become the final output — that is the point of 'End workflow here'")
+        XCTAssertEqual(WorkflowStreamCollector.terminalOutcomes(from: events).last?.outcome, .completed,
+                       "the run COMPLETED — ending a branch by choice is not a failure")
+    }
+
+    /// A rename of the default-route rule must not strand the route — the target is stored by ID.
+    func testRouter_NoMatchRoute_SurvivesRuleRename() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        var fallbackRule = ConditionRule(label: "General", field: .upstreamOutput, op: .contains, value: "generalzz")
+        config.noMatchBehavior = .route(ruleID: fallbackRule.id)
+        // Rename AFTER the route was configured — the id is what the engine resolves.
+        fallbackRule.label = "Fallback"
+        config.rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            fallbackRule
+        ]
+        config.fallbackLabel = ""
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let arm = scenario.addBotNode(name: "Fallback Arm")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: arm, portLabel: "Fallback")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("plain input")])
+        mockProvider.scriptStream(for: scenario.profileID(for: arm)!, events: [.content("fallback ran")])
+
+        let events = try await execute(scenario)
+        XCTAssertTrue(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: arm)! },
+                      "the route resolves by rule ID, so the rename must not strand it")
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).isEmpty)
+    }
+
+    /// ⚠️ THE AMPLIFIER'S SYSTEMIC HALF: an UNATTENDED run never arbitrates — first match wins
+    /// immediately. A scheduled run parked here until the 600s deadline killed the WHOLE run, and
+    /// a ChatOps run (no deadline) parked forever.
+    func testRouter_Ambiguity_UnattendedRunSkipsArbitrationAndTakesFirstMatch() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ]
+        config.askOnAmbiguity = true                     // explicitly ON — and still must not ask
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let urgent = scenario.addBotNode(name: "Urgent Arm")
+        let billing = scenario.addBotNode(name: "Billing Arm")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: urgent, portLabel: "Urgent")
+        scenario.connect(from: router, to: billing, portLabel: "Billing")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("URGENT invoice problem")])
+        mockProvider.scriptStream(for: scenario.profileID(for: urgent)!, events: [.content("handled")])
+        mockProvider.scriptStream(for: scenario.profileID(for: billing)!, events: [.content("handled")])
+
+        // The scheduler/ChatOps binding, reproduced: everything inside inherits unattended.
+        let events = try await WorkflowRunAttendance.$isAttended.withValue(false) {
+            try await execute(scenario)
+        }
+
+        XCTAssertTrue(WorkflowStreamCollector.gateRequests(from: events).isEmpty,
+                      "an unattended run must NEVER park on arbitration — nobody can answer")
+        XCTAssertTrue(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: urgent)! },
+                      "first match (rule order) must win, same as an unanswered arbitration")
+        XCTAssertFalse(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: billing)! })
+    }
+
+    /// The behaviour change of the hard delete, pinned: a legacy blob's "always" rule decodes to
+    /// `.other("always")` and NEVER matches — unmatched input follows `noMatchBehavior` (default:
+    /// fail onto the error port) instead of the old catch-all.
+    func testLegacyAlwaysRule_DecodesAsNeverMatching_AndNoMatchBehaviourApplies() async throws {
+        // ⚠️ Built by encoding a REAL rule and editing one field — a hand-written JSON literal
+        // misses required keys (ConditionRule's stable `id`) and asserts nothing (recorded trap).
+        let donor = ConditionRule(label: "Rest", field: .upstreamOutput, op: .isNotEmpty, value: "")
+        let json = String(data: try JSONEncoder().encode(donor), encoding: .utf8)!
+            .replacingOccurrences(of: "\"isNotEmpty\"", with: "\"always\"")
+        XCTAssertTrue(json.contains("\"always\""), "precondition: the blob really carries the retired op")
+        let rule = try JSONDecoder().decode(ConditionRule.self, from: Data(json.utf8))
+        XCTAssertEqual(rule.op, ConditionOp.other("always"),
+                       "a stored 'always' must decode to the inert other() form, not crash and not match")
+
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = ConditionNodeConfig()
+        config.rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            rule
+        ]
+        config.fallbackLabel = ""
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let rest = scenario.addBotNode(name: "Rest Arm")
+        let recovery = scenario.addBotNode(name: "Recovery")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: rest, portLabel: "Rest")
+        scenario.connect(from: router, to: recovery, portLabel: WorkflowEdge.errorPortLabel)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("plain input")])
+        mockProvider.scriptStream(for: scenario.profileID(for: rest)!, events: [.content("old catch-all")])
+        mockProvider.scriptStream(for: scenario.profileID(for: recovery)!, events: [.content("recovered")])
+
+        let events = try await execute(scenario)
+        XCTAssertFalse(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: rest)! },
+                       "the retired always rule must be DEAD — routing through it would resurrect the amplifier")
+        XCTAssertTrue(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: recovery)! },
+                      "unmatched input follows noMatchBehavior (.failNode default) — the error branch runs")
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == router })
+    }
+
+    // MARK: - WF-TS4: the AI Classifier's FAILURE path
+    //
+    // ⚠️ The classifier's happy path is unreachable in tests without an MLX model, so its failure
+    // path — the one users actually hit on a machine with no model, a deleted model, or a bad
+    // config — had NO coverage at all. These three pin what happens to the RUN when the classifier
+    // throws, under each of the three `noMatchBehavior` choices.
+    //
+    // ⚠️ HERMETIC CLASSIFIER FAILURE (the load-bearing fact — do not "fix" this config):
+    // `evaluateConditionWithLLM`'s FIRST guard is `!config.llmPrompt.isEmpty`, and an empty prompt
+    // is only a validator WARNING while an empty `llmModelName` is an ERROR that blocks the run.
+    // So this config passes pre-flight, ENTERS the classifier, and throws before any
+    // MLXModelService/MLXService contact. No disk scan, no model load, fully deterministic.
+
+    private func makeThrowingClassifierConfig(rules: [ConditionRule]) -> ConditionNodeConfig {
+        var config = ConditionNodeConfig()
+        config.rules = rules
+        config.fallbackLabel = ""
+        config.llmFallbackEnabled = true
+        config.llmPrompt = ""                    // <- the throw
+        config.llmModelName = "never-loaded"     // non-empty so pre-flight passes
+        return config
+    }
+
+    /// A classifier failure must FAIL the node (default `.failNode`) with a reason that NAMES the
+    /// classifier, and must light the `error` port so a wired recovery branch runs.
+    func testClassifierFailure_FailsTheNodeOntoErrorPortWithAClassifierSpecificReason() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let config = makeThrowingClassifierConfig(rules: [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ])
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let urgent = scenario.addBotNode(name: "Urgent Arm")
+        let recovery = scenario.addBotNode(name: "Recovery")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: urgent, portLabel: "Urgent")
+        scenario.connect(from: router, to: recovery, portLabel: WorkflowEdge.errorPortLabel)
+
+        // Matches NEITHER rule, so the classifier is actually entered.
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("plain input")])
+        mockProvider.scriptStream(for: scenario.profileID(for: urgent)!, events: [.content("must not run")])
+        mockProvider.scriptStream(for: scenario.profileID(for: recovery)!, events: [.content("recovered")])
+
+        let events = try await execute(scenario)
+
+        let thoughts = WorkflowStreamCollector.thoughtText(from: events)
+        XCTAssertTrue(thoughts.contains("AI Classifier failed"),
+                      "the classifier's failure must reach the event stream. Thoughts: \(thoughts)")
+        // ⚠️ VEHICLE PRECONDITION. This test depends on the FIRST guard in
+        // `evaluateConditionWithLLM` throwing before any MLX contact. Without this assertion, a
+        // change that reorders the guards — or adds a "treat an empty prompt as classifier-off"
+        // pre-check — silently turns all three of these into "the classifier never ran" tests
+        // that still pass while proving nothing about a classifier FAULT.
+        XCTAssertTrue(thoughts.contains("no routing prompt configured"),
+                      "the FIRST guard must be what threw — this test is about a classifier that ran and faulted, not one that was skipped. Thoughts: \(thoughts)")
+
+        let failed = WorkflowStreamCollector.nodeFailedEvents(from: events)
+        XCTAssertTrue(failed.contains { $0.nodeID == router },
+                      "a throwing classifier with .failNode must fail the node. Got: \(failed.map(\.error))")
+
+        // ⚠️ WF-CC10's assertion proper. The old test asserted only that the node failed — which
+        // was already true — and left the REASON unasserted (it appeared only inside an XCTAssert
+        // failure message, which never runs on a pass). The reason is the whole finding.
+        let reason = try XCTUnwrap(failed.first { $0.nodeID == router }).error
+        XCTAssertTrue(reason.contains("could not be consulted"),
+                      "the reason must say the classifier never produced a verdict: \(reason)")
+        XCTAssertTrue(reason.contains("no routing prompt configured"),
+                      "the underlying fault must survive into the reason — a support bundle has to name the cause, not just the symptom: \(reason)")
+        XCTAssertFalse(reason.contains("did not return a label"),
+                       "the classifier never ran. Wording it as an inconclusive ANSWER reports an infrastructure fault as a content fault and sends the user to fix their rules for a problem in their model directory: \(reason)")
+        XCTAssertTrue(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: recovery)! },
+                      "a classifier failure must fail the node onto `error`, so a wired recovery branch runs")
+        XCTAssertFalse(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: urgent)! },
+                       "no rule matched and the classifier threw — no option branch may run")
+    }
+
+    /// ⚠️ WF-CC10 — THIS TEST INVERTED on 2026-08-16 (user decision). It previously asserted that a
+    /// crashed classifier still honoured `When Nothing Matches` and routed to the default branch.
+    /// That was the defect: an MLX slot race silently became a routing decision and the run
+    /// reported SUCCESS with an arbitrary branch taken.
+    ///
+    /// `noMatchBehavior` answers "no rule described this input" — a verdict about CONTENT. A
+    /// classifier that threw produced no verdict at all, so the setting is not applied. Only a
+    /// classifier FAULT bypasses it; an explicit "none of these" and an unreadable reply are
+    /// verdicts the model did produce and still follow the setting (see `WorkflowNoMatchDispositionTests`).
+    func testClassifierCrash_OverridesTheConfiguredDefaultRoute_AndFailsOntoError() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        // Build the default rule first so its stable `id` is available for `.route(ruleID:)`.
+        let generalRule = ConditionRule(label: "General", field: .upstreamOutput, op: .contains, value: "zzz")
+        var config = makeThrowingClassifierConfig(rules: [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            generalRule
+        ])
+        config.noMatchBehavior = .route(ruleID: generalRule.id)
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let generalArm = scenario.addBotNode(name: "General Arm")
+        let recovery = scenario.addBotNode(name: "Recovery")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: generalArm, portLabel: "General")
+        scenario.connect(from: router, to: recovery, portLabel: WorkflowEdge.errorPortLabel)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("plain input")])
+        mockProvider.scriptStream(for: scenario.profileID(for: generalArm)!, events: [.content("handled by default")])
+        mockProvider.scriptStream(for: scenario.profileID(for: recovery)!, events: [.content("recovered")])
+
+        let events = try await execute(scenario)
+
+        XCTAssertFalse(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: generalArm)! },
+                       "a crash is not a no-match — the author's default route answers a question that was never asked, so it must NOT be taken")
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == router },
+                      "the Router must fail: nothing classified this input")
+        XCTAssertTrue(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: recovery)! },
+                      "the `error` port is the documented recovery channel for a classifier fault — wire it to the branch you would have defaulted to")
+        // ⚠️ The thought reaches the EVENT STREAM, but a `.condition` node renders no timeline
+        // (`kindSupportsTimeline` is false for it), so this is NOT a user-visible guarantee — do
+        // not restore the old comment claiming it is.
+        XCTAssertTrue(WorkflowStreamCollector.thoughtText(from: events).contains("AI Classifier failed"),
+                      "the failure must still reach the event stream and the logs")
+    }
+
+    /// ⚠️ WF-CC10 — THIS TEST INVERTED on 2026-08-16 (user decision). It previously asserted a
+    /// crashed classifier ended the branch gracefully under `.endWorkflow`, reporting the run as
+    /// COMPLETED. A classifier fault is now a node failure regardless of the setting.
+    ///
+    /// ⚠️ The one half that is KEPT VERBATIM is the load-bearing one: `try await execute(scenario)`
+    /// must still NOT throw. That pins that the classifier's `do/catch` stays a CATCH — if the
+    /// throw ever propagated out of `executeWorkflow`, one misconfigured Router would abort the
+    /// entire run instead of failing one node.
+    ///
+    /// ⚠️ User-visible cost of this change, stated rather than hidden: the Router no longer
+    /// passes its upstream content through on this path (`.fail` sets `output = ""`), so it is no
+    /// longer a terminal contributing to the final answer. That is why the old
+    /// `contentText contains "plain input"` assertion is gone rather than merely relocated.
+    func testClassifierCrash_IsNotAGracefulEnd_EvenWhenTheAuthorChoseEndWorkflow() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        var config = makeThrowingClassifierConfig(rules: [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ])
+        config.noMatchBehavior = .endWorkflow
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let urgentArm = scenario.addBotNode(name: "Urgent Arm")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: urgentArm, portLabel: "Urgent")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("plain input")])
+        mockProvider.scriptStream(for: scenario.profileID(for: urgentArm)!, events: [.content("must not run")])
+
+        let events = try await execute(scenario)
+
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == router },
+                      "a classifier FAULT fails the node — `.endWorkflow` describes what to do with input the classifier judged, and nothing judged this input")
+        XCTAssertTrue(WorkflowStreamCollector.nodeSkippedEvents(from: events)
+                        .contains { $0.nodeID == urgentArm && $0.reason == .upstreamFailed },
+                      "downstream is skipped because its upstream FAILED, not because a branch was 'not chosen' — the distinction is what tells the user a fault occurred. Got: \(WorkflowStreamCollector.nodeSkippedEvents(from: events).map(\.reason))")
+        XCTAssertEqual(WorkflowStreamCollector.terminalOutcomes(from: events).last?.outcome, .failed,
+                       "the run must report FAILED — reporting success on a run where nothing classified the input is the defect WF-CC10 fixes")
+    }
+
+    // MARK: - Group 30: WF-OB4 — an unreadable canvas must not run as "has no nodes"
+
+    /// ⚠️ THE LIE THIS PINS: `WorkflowLayoutStore.load(for:)` deliberately returns `.empty` for a
+    /// missing row AND an undecodable blob, so the executor's `!layout.nodes.isEmpty` guard told
+    /// the user "The workflow has no nodes. Add profiles to the canvas before running." about a
+    /// canvas that HAS nodes (the denormalized counts prove it) and REFUSES every save while
+    /// unreadable — impossible advice, contradicting the canvas overlay on screen at the same
+    /// moment. Exposure widened when the Loop node was retired with no decode shim: every old
+    /// loop-bearing layout now takes this exact path.
+    ///
+    /// ⚠️ Test mechanics: the corrupt row is planted through a SEPARATE `ModelContext`, never the
+    /// store API. Two reasons: `save(_:for:)` refuses to write over an unreadable row (so it cannot
+    /// create one), and `WorkflowLayoutSD`'s decode state is a per-instance `@Transient` cache —
+    /// corrupting an instance the mainContext has already materialized would leave its cached
+    /// "decodes fine" verdict in place. A separate context writes the bytes to DISK; the executor's
+    /// mainContext then materializes a FRESH instance whose first prime reads the garbage.
+    func testUnreadableLayout_RunIsRefusedWithCountsNotReportedAsEmpty() async throws {
+        let container = try XCTUnwrap(WorkflowLayoutStore.shared.modelContainer,
+                                      "test host must have configured the layout store")
+        let pid = UUID()
+
+        // A real 2-node layout gives the row honest denormalized counts…
+        let donor = WorkflowTestScenario()
+        donor.addBotNode(name: "A")
+        donor.addBotNode(name: "B")
+        let row = WorkflowLayoutSD(workflowProfileID: pid, layout: donor.layout)
+        // …and then the blob is corrupted AFTER init, so counts say 2 nodes while decode fails.
+        row.layoutData = Data("not a workflow layout".utf8)
+        let plantingContext = ModelContext(container)
+        plantingContext.insert(row)
+        try plantingContext.save()
+        defer { WorkflowLayoutStore.shared.delete(for: pid) }
+
+        let executor = WorkflowExecutor(workflowProfileID: pid)
+        let stream = executor.executeWorkflow(
+            userInput: "run it", chatHistory: [], conversationID: UUID(),
+            ragContext: nil, traceContext: traceContext, onTraceUpdate: { _ in },
+            layout: nil,                       // ← the PRODUCTION path: load from the store
+            profileMap: nil, streamProvider: mockProvider
+        )
+
+        do {
+            _ = try await WorkflowStreamCollector.collectWithGateChoice(from: stream, choosing: nil)
+            XCTFail("an unreadable layout must refuse the run")
+        } catch let error as WorkflowError {
+            guard case .layoutUnreadable(let nodes, let edges) = error else {
+                return XCTFail("expected .layoutUnreadable, got \(error) — '\(error.localizedDescription)'")
+            }
+            XCTAssertEqual(nodes, 2, "the counts are the user's evidence and must survive into the error")
+            XCTAssertEqual(edges, 0)
+            XCTAssertFalse(error.localizedDescription.contains("has no nodes"),
+                           "the old lie must be gone")
+            XCTAssertTrue(error.localizedDescription.contains("could not be read"),
+                          "the error must name the real problem — got: \(error.localizedDescription)")
+        }
+    }
+
+    /// The control: a genuinely EMPTY (missing-row) workflow keeps the emptyWorkflow error —
+    /// the unreadable check must not swallow the honest empty case.
+    func testMissingLayout_StillReportsEmptyWorkflow() async throws {
+        let executor = WorkflowExecutor(workflowProfileID: UUID())   // no row exists for this id
+        let stream = executor.executeWorkflow(
+            userInput: "run it", chatHistory: [], conversationID: UUID(),
+            ragContext: nil, traceContext: traceContext, onTraceUpdate: { _ in },
+            layout: nil, profileMap: nil, streamProvider: mockProvider
+        )
+        do {
+            _ = try await WorkflowStreamCollector.collectWithGateChoice(from: stream, choosing: nil)
+            XCTFail("an empty workflow must refuse the run")
+        } catch let error as WorkflowError {
+            guard case .emptyWorkflow = error else {
+                return XCTFail("expected .emptyWorkflow, got \(error)")
+            }
+        }
+    }
+
+    // MARK: - Group 27: WF-EX2 — a skip only carries the `error` signal when a failure started it
+
+    /// ⚠️ THIS is the test that pins the EXECUTOR. The unit tests in `WorkflowSkipReasonTests`
+    /// exercise `WorkflowState.upstreamSignalledError` directly and REPRODUCE the driver's rule in a
+    /// helper, so they cannot see the executor forgetting to apply it — mutating the `if` in
+    /// `WorkflowExecutor` leaves them green. This one drives the real dispatch loop and fails.
+    ///
+    /// Shape: `Fetcher --error--> Handler --error--> Notify`, and Fetcher SUCCEEDS.
+    /// Handler correctly stands down; before the fix it then activated its own `error` port and told
+    /// Notify that Handler had failed — so an alerting branch fired on a run where nothing failed,
+    /// while the run still reported success.
+    func testSuccessfulRun_StoodDownErrorHandler_DoesNotFireItsOwnErrorBranch() async throws {
+        let scenario = WorkflowTestScenario()
+        let fetcher = scenario.addBotNode(name: "Fetcher")
+        let handler = scenario.addBotNode(name: "Handler")
+        let notify = scenario.addBotNode(name: "Notify")
+
+        scenario.connect(from: fetcher, to: handler, portLabel: WorkflowEdge.errorPortLabel)
+        scenario.connect(from: handler, to: notify, portLabel: WorkflowEdge.errorPortLabel)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: fetcher)!, events: [.content("all good")])
+        mockProvider.scriptStream(for: scenario.profileID(for: handler)!, events: [.content("handled")])
+        mockProvider.scriptStream(for: scenario.profileID(for: notify)!, events: [.content("PAGED THE ONCALL")])
+
+        let events = try await execute(scenario)
+
+        // The side effect is what actually matters: Notify must never be invoked.
+        let notifyProfileID = scenario.profileID(for: notify)!
+        XCTAssertFalse(mockProvider.invocations.contains { $0.profileID == notifyProfileID },
+                       "Notify ran on a workflow where NOTHING failed — an alerting branch firing on a healthy run")
+        let handlerProfileID = scenario.profileID(for: handler)!
+        XCTAssertFalse(mockProvider.invocations.contains { $0.profileID == handlerProfileID },
+                       "precondition: the handler itself must stand down when its upstream succeeded")
+
+        // …and it must not reach the user's answer either.
+        XCTAssertFalse(WorkflowStreamCollector.contentText(from: events).contains("PAGED THE ONCALL"),
+                       "the un-run branch's output must not appear in the final answer")
+
+        let skipped = WorkflowStreamCollector.nodeSkippedEvents(from: events)
+        XCTAssertTrue(skipped.contains { $0.nodeID == handler && $0.reason == .errorPortNotTaken })
+        XCTAssertTrue(skipped.contains { $0.nodeID == notify },
+                      "Notify must be reported as not-run, not silently absent")
+    }
+
+    // MARK: - Group 29: WF-TS2 — cancellation that can actually fail
+    //
+    // ⚠️ WHY THE ORIGINAL FIVE `testCancel_*` TESTS VERIFY NOTHING. Every one asserts only on
+    // `mockProvider.invocations`, and their negative assertions ("B did not run") are satisfied for a
+    // reason that has nothing to do with cancellation: the blocked node lands in `.canceled`, and
+    // `WorkflowState.edgeIsLive` treats a `.canceled` upstream as dead, so in a single CHAIN the
+    // downstream node is skipped whether or not the executor honours Stop at all. Deleting BOTH
+    // `try Task.checkCancellation()` calls leaves all five green.
+    //
+    // ⚠️ THE CANCELLED VERDICT IS NOT ASSERTABLE THROUGH THIS SEAM, and that is not a test defect.
+    // The only route into the executor's cancellation arm is `continuation.onTermination { task.cancel() }`,
+    // which fires because the CONSUMER tore the stream down — so by the time the catch arm runs the
+    // stream is already terminal and its `.executionFinished(.cancelled)` yield is dropped. That is
+    // true in production too; `ActiveStreamManager` stamps `cancelled` itself. Do not write a test
+    // that waits for that event: it can never arrive. What IS observable is below.
+
+    /// Two DISCONNECTED chains: chain 1's node blocks forever, chain 2's first node COMPLETES so its
+    /// second node has a live, completed upstream and is perfectly runnable. After Stop it must not
+    /// run. Unlike the original five tests, this assertion is NOT satisfied by the
+    /// dead-`.canceled`-upstream rule, because this node's upstream succeeded.
+    ///
+    /// ⚠️ WHAT THIS DOES **NOT** PIN, VERIFIED BY MUTATION — do not re-derive this.
+    /// Replacing BOTH `try Task.checkCancellation()` calls (WorkflowExecutor.swift:364 and :659)
+    /// with no-ops leaves this test — and all 167 — GREEN. Two reasons, and they are structural:
+    ///   • level 1 holds the blocking node, and `withTaskGroup` awaits every child, so level 2 is
+    ///     not reached while it blocks, with or without the checks; and
+    ///   • once the outer Task is cancelled, every `await` inside subsequent node execution throws
+    ///     `CancellationError` on its own, so the provider is never invoked either way.
+    /// The explicit checks are therefore about PROMPTNESS and TELEMETRY (span closed `.error`,
+    /// `.userCancelled` classified), not about whether downstream work runs. Pinning them needs an
+    /// injectable trace sink, which does not exist — filed as its own item rather than faked here.
+    ///
+    /// What this test DOES pin, and the originals did not: that cancellation propagates into node
+    /// execution at all. If nodes were ever run detached from the run's task — the natural way this
+    /// breaks — `healthyTail` would be invoked and this fails.
+    func testCancel_NoFurtherNodeIsInvoked_EvenWhenItsUpstreamSucceeded() async throws {
+        let scenario = WorkflowTestScenario()
+        let blocker = scenario.addBotNode(name: "Blocker")          // chain 1, level 1 — blocks forever
+        let healthyHead = scenario.addBotNode(name: "Healthy Head") // chain 2, level 1 — completes
+        let healthyTail = scenario.addBotNode(name: "Healthy Tail") // chain 2, level 2 — runnable
+        scenario.connect(from: healthyHead, to: healthyTail)
+
+        mockProvider.scriptSlowStream(for: scenario.profileID(for: blocker)!, initialEvents: [])
+        mockProvider.scriptStream(for: scenario.profileID(for: healthyHead)!, events: [.content("done")])
+        mockProvider.scriptStream(for: scenario.profileID(for: healthyTail)!, events: [.content("should never run")])
+
+        let blockerProfileID = scenario.profileID(for: blocker)!
+        let reachedBlocker = expectation(description: "provider called for the blocking node")
+        reachedBlocker.assertForOverFulfill = false
+        mockProvider.onInvoke = { pid in if pid == blockerProfileID { reachedBlocker.fulfill() } }
+
+        let stream = makeStream(scenario)
+        let task = Task { try await StreamCollector.collect(from: stream) }
+
+        // Deterministic barrier — the provider has been called and is now blocked forever.
+        await fulfillment(of: [reachedBlocker], timeout: 10)
+        task.cancel()
+        _ = try? await task.value
+
+        let tailProfileID = scenario.profileID(for: healthyTail)!
+        XCTAssertFalse(mockProvider.invocations.contains { $0.profileID == tailProfileID },
+                       "no node may be invoked after Stop — this one's upstream COMPLETED, so the dead-upstream rule is not what stops it")
+    }
+
+    /// Stop must reach the node that is actually running, not just stop scheduling new ones.
+    func testCancel_TearsDownTheInFlightNodeStream() async throws {
+        let scenario = WorkflowTestScenario()
+        let blocker = scenario.addBotNode(name: "Blocker")
+        let blockerProfileID = scenario.profileID(for: blocker)!
+        mockProvider.scriptSlowStream(for: blockerProfileID, initialEvents: [])
+
+        let reached = expectation(description: "provider called")
+        reached.assertForOverFulfill = false
+        mockProvider.onInvoke = { pid in if pid == blockerProfileID { reached.fulfill() } }
+
+        let stream = makeStream(scenario)
+        let task = Task { try await StreamCollector.collect(from: stream) }
+        await fulfillment(of: [reached], timeout: 10)
+        task.cancel()
+        _ = try? await task.value
+
+        // Teardown propagates through the executor's node task to the provider's stream.
+        // Poll briefly: the cancellation is asynchronous, but bounded and fast.
+        var tornDown = false
+        for _ in 0..<100 where !tornDown {
+            if mockProvider.tornDownProfileIDs.contains(blockerProfileID) { tornDown = true; break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(tornDown,
+                      "the in-flight node's provider stream was never torn down — Stop did not reach the running node")
+    }
+
+    /// The gate test's original assertion was `gates.count <= 1`, which is vacuously true for 0.
+    /// With a barrier on the gate request itself, the count is deterministic.
+    func testCancel_DuringGate_GateWasActuallyRequested() async throws {
+        let scenario = WorkflowTestScenario()
+        let gate = scenario.addGateNode(name: "Approve?", options: ["Yes", "No"])
+        scenario.connect(from: gate, to: scenario.addBotNode(name: "After"))
+
+        let stream = makeStream(scenario)
+        let collected = Task { try await StreamCollector.collect(from: stream) }
+
+        // Poll for the gate request rather than sleeping a fixed interval.
+        var sawGate = false
+        for _ in 0..<200 where !sawGate {
+            if await ExecutionSuspensionService.shared.hasPendingSuspensions() { sawGate = true; break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(sawGate, "the gate must actually suspend — the old `gates.count <= 1` passed even when it never did")
+
+        collected.cancel()
+        _ = try? await collected.value
+
+        // ⚠️ Catches a LEAKED suspension. It does NOT pin the executor's `cancel(for:)` line —
+        // `suspendForGate`'s own cancellation handler also resumes with nil — and the test says so
+        // rather than claiming coverage it does not have.
+        var drained = false
+        for _ in 0..<100 where !drained {
+            if !(await ExecutionSuspensionService.shared.hasPendingSuspensions()) { drained = true; break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(drained, "a cancelled gate must not leave its suspension parked forever")
+    }
+
+    // MARK: - Group 28: WF-TS1 — the inner-outcome demotion ladder
+    //
+    // ⚠️ WHY THIS GROUP EXISTS. Production node streams emit `.executionFinished` on essentially
+    // every path (ChatExecutor, ReActAgentExecutor, Planning/SelfReflection capabilities), and
+    // `WorkflowExecutor` reads it at :1234-1257 to decide whether a node that produced text actually
+    // SUCCEEDED. Until now no test ever scripted one, so every one of the ~160 integration tests
+    // drove the `streamResult.3 == nil` default — the EXCEPTIONAL shape — and the entire ladder was
+    // unreachable. Deleting :1234-1257 outright failed NO test.
+    //
+    // ⚠️ NOTE FOR THE NEXT READER: the mock needed no new capability for this.
+    // `.executionFinished` is an ordinary `AgentStreamEvent` and `scriptStream(for:events:)` yields
+    // whatever it is handed. Do NOT "improve" `scriptStream` to append a terminal event by default:
+    // it breaks `testErrorWithoutTerminalEvent_FailsNodeInsteadOfReportingEmptySuccess`, silently
+    // neuters `testCleanStreamWithoutTerminalEventStillCompletes`, and removes the no-terminal-event
+    // shape — which `AgentConnect` really does produce — from every other test in this file.
+
+    /// A node whose stream finishes CLEANLY but reports `.failed` must FAIL, not report empty success.
+    ///
+    /// ⚠️ NO `.error` event is scripted, deliberately. With one, the neighbouring guard at :1222
+    /// ("an error arrived and no terminal event did") could produce the failure instead, and the test
+    /// would pass with the whole ladder deleted. Omitting it makes :1245-1251 the ONLY possible cause.
+    func testInnerOutcomeFailed_FailsTheNode_EvenWhenTheStreamLooksClean() async throws {
+        let scenario = WorkflowTestScenario()
+        let agent = scenario.addBotNode(name: "Researcher")
+        let downstream = scenario.addBotNode(name: "Summarizer")
+        scenario.connect(from: agent, to: downstream)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: agent)!, events: [
+            .content("Here is a confident-looking answer."),
+            .executionFinished(outcome: .failed, reason: "Inner agent hit its iteration ceiling")
+        ])
+        mockProvider.scriptStream(for: scenario.profileID(for: downstream)!, events: [.content("summary")])
+
+        let events = try await execute(scenario)
+
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == agent },
+                      "the node reported .failed — it must not go green with laundered prose")
+        XCTAssertFalse(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == agent })
+        XCTAssertFalse(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: downstream)! },
+                       "downstream must not consume the output of a node that failed")
+    }
+
+    /// Degraded success stays SUCCESS — the run continues and the output flows — but the node is
+    /// flagged so the UI can show it amber.
+    ///
+    /// ⚠️ Asserts BOTH halves. Asserting only "it completed" would pass with `nodeHasWarnings = true`
+    /// deleted, which is exactly the trap this repo has hit before.
+    func testInnerOutcomeCompletedWithWarnings_CompletesButFlagsTheNode() async throws {
+        let scenario = WorkflowTestScenario()
+        let agent = scenario.addBotNode(name: "Researcher")
+        let downstream = scenario.addBotNode(name: "Summarizer")
+        scenario.connect(from: agent, to: downstream)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: agent)!, events: [
+            .content("best-effort answer"),
+            .executionFinished(outcome: .completedWithWarnings, reason: "loop guard tripped")
+        ])
+        mockProvider.scriptStream(for: scenario.profileID(for: downstream)!, events: [.content("summary")])
+
+        let events = try await execute(scenario)
+
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == agent },
+                      "degraded success is still success — the run must continue")
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedWithWarnings(from: events).contains(agent),
+                      "…and the warning must reach the UI, or the amber state is unreachable")
+        XCTAssertTrue(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: downstream)! },
+                      "the best-effort output is real and must flow downstream")
+    }
+
+    /// `.cancelled` demotes to `.canceled`, which is NOT a failure — distinct from every existing
+    /// cancellation test, all of which reach that state by THROWING instead.
+    func testInnerOutcomeCancelled_MarksTheNodeCancelledNotFailed() async throws {
+        let scenario = WorkflowTestScenario()
+        let agent = scenario.addBotNode(name: "Researcher")
+        scenario.connect(from: agent, to: scenario.addBotNode(name: "Summarizer"))
+
+        mockProvider.scriptStream(for: scenario.profileID(for: agent)!, events: [
+            .content("partial"),
+            .executionFinished(outcome: .cancelled, reason: "User stopped the run")
+        ])
+
+        let events = try await execute(scenario)
+
+        XCTAssertFalse(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == agent },
+                       "a cancelled node has not FAILED — conflating them is what made `.cancelled` unreachable before")
+        XCTAssertFalse(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == agent })
+    }
+
+    /// The untested half of the :1222 guard: an explicit terminal event is the AUTHORITY, so a
+    /// stream that errors mid-run and then reports `.completed` has RECOVERED.
+    /// `testErrorWithoutTerminalEvent_…` covers only the no-terminal-event half.
+    func testErrorFollowedByCompletedTerminalEvent_CountsAsRecovered() async throws {
+        let scenario = WorkflowTestScenario()
+        let agent = scenario.addBotNode(name: "Researcher")
+        scenario.connect(from: agent, to: scenario.addBotNode(name: "Summarizer"))
+
+        mockProvider.scriptStream(for: scenario.profileID(for: agent)!, events: [
+            .error(StructuredError(message: "transient hiccup")),
+            .content("recovered answer"),
+            .executionFinished(outcome: .completed, reason: nil)
+        ])
+
+        let events = try await execute(scenario)
+
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == agent },
+                      "an explicit .completed outranks an earlier .error — the node recovered")
+        XCTAssertFalse(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == agent })
+    }
+
+    /// ⚠️ Pins a STRING COUPLING ACROSS TWO FILES plus its consequence. `AgentFailureReason.classify`
+    /// (AgentModel.swift:872-882) recognises the circuit-breaker sentence from
+    /// `CognitiveCircuitBreaker.swift` and returns `.repetitiveActionLoop`, whose `isRetryable` is
+    /// FALSE — retrying a deterministic stale-loop abort would just loop again at full token cost.
+    /// If that literal is ever reworded, classification silently falls back to `.modelError`
+    /// (retryable) and the node is re-run `maxNodeRetries` times. This test is what makes that loud.
+    func testCircuitBreakerAbortIsClassifiedUnretryable_AndIsNotRetried() async throws {
+        let scenario = WorkflowTestScenario()
+        let agent = scenario.addBotNode(name: "Researcher")
+        scenario.setNodeConfig(WorkflowNodeConfig(maxNodeRetries: 2), for: agent)
+        scenario.connect(from: agent, to: scenario.addBotNode(name: "Summarizer"))
+
+        mockProvider.scriptStream(for: scenario.profileID(for: agent)!, events: [
+            .content("looping"),
+            .executionFinished(
+                outcome: .failed,
+                reason: "Tool 'read_file' has been called 3 times with the same parameters and results across multiple iterations. Breaking stale loop."
+            )
+        ])
+
+        let events = try await execute(scenario)
+
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == agent })
+        let attempts = mockProvider.invocations.filter { $0.profileID == scenario.profileID(for: agent)! }.count
+        XCTAssertEqual(attempts, 1,
+                       "a stale-loop abort is deterministic — retrying it burns \(2) more full agent turns for an identical failure")
+    }
+
+    /// The other half: P0-6 must survive. When something genuinely FAILS, the recovery chain still
+    /// fires THROUGH a skipped intermediate node — the dead-end this fix must not reintroduce.
+    func testFailedRun_ErrorSignalStillReachesARecoveryBranchThroughASkippedNode() async throws {
+        let scenario = WorkflowTestScenario()
+        let fetcher = scenario.addBotNode(name: "Fetcher")
+        let summarizer = scenario.addBotNode(name: "Summarizer")
+        let recovery = scenario.addBotNode(name: "Recovery")
+
+        scenario.connect(from: fetcher, to: summarizer)                                     // default port
+        scenario.connect(from: summarizer, to: recovery, portLabel: WorkflowEdge.errorPortLabel)
+
+        mockProvider.scriptError(for: scenario.profileID(for: fetcher)!,
+                                 error: NSError(domain: "test", code: 1))
+        mockProvider.scriptStream(for: scenario.profileID(for: summarizer)!, events: [.content("summary")])
+        mockProvider.scriptStream(for: scenario.profileID(for: recovery)!, events: [.content("RECOVERED")])
+
+        _ = try await execute(scenario)
+
+        let recoveryProfileID = scenario.profileID(for: recovery)!
+        XCTAssertTrue(mockProvider.invocations.contains { $0.profileID == recoveryProfileID },
+                      "the recovery branch must still run when a real failure started the cascade")
+    }
+
+    // MARK: - Group 33: WF-TS10 — the runtime nesting-depth backstop
+    //
+    // ⚠️ `WorkflowDepth.maxDepth` had NO runtime coverage: every existing nesting test builds a
+    // STATIC chain, which pre-flight validation refuses first, so the executor's own guard was
+    // never reached. It is reached here by BINDING the TaskLocal — exactly what production does at
+    // WorkflowExecutor.swift:150 — which is also the only way to model the case the backstop
+    // exists for: validating A can be invalidated by editing B while A's canvas is closed.
+    //
+    // Every assertion is written against `WorkflowDepth.maxDepth`, never the literal 3, so
+    // changing the cap again (it went 5 → 3 on 2026-08-13) does not break the suite.
+
+    func testRunStartedBeyondMaxDepth_IsRefusedBeforeAnyNodeRuns() async throws {
+        let scenario = WorkflowTestScenario()
+        let bot = scenario.addBotNode(name: "Should Never Run")
+        mockProvider.scriptStream(for: scenario.profileID(for: bot)!, events: [.content("ran")])
+
+        do {
+            // Entering at `maxDepth` means this run is level maxDepth + 1 — one past the limit.
+            _ = try await execute(scenario, startingDepth: WorkflowDepth.maxDepth)
+            XCTFail("A run entered at depth \(WorkflowDepth.maxDepth + 1) must be refused")
+        } catch let error as WorkflowError {
+            guard case .nodeExecutionFailed(_, let profileName, let underlying) = error else {
+                XCTFail("Expected nodeExecutionFailed, got \(error)"); return
+            }
+            XCTAssertEqual(profileName, "Workflow")
+            XCTAssertTrue(underlying.contains("Maximum workflow nesting depth (\(WorkflowDepth.maxDepth)) exceeded"),
+                          "got: \(underlying)")
+        }
+
+        XCTAssertTrue(mockProvider.invocations.isEmpty,
+                      "the guard must refuse BEFORE dispatching any node — no tokens may be spent past the limit")
+    }
+
+    /// ⚠️ The backstop's actual reason for existing: the STATIC chain here is only 2 levels, so
+    /// pre-flight validation passes — this run is over the limit only because it STARTED inside
+    /// another workflow. Also the only pin on the depth TaskLocal propagating into a child executor.
+    func testSubWorkflowChildInheritsDepth_AndIsRefusedAtTheLimit() async throws {
+        let scenario = WorkflowTestScenario()
+        let inner = InnerWorkflowBuilder()
+        let innerBot = inner.addBotNode(name: "Nested Bot")
+        inner.save()
+        innerBuilders.append(inner)
+        for (id, profile) in inner.profileMap { scenario.profileMap[id] = profile }
+
+        let sub = scenario.addSubWorkflowNode(name: "Nested Step", workflowProfileID: inner.workflowProfileID)
+        let sibling = scenario.addBotNode(name: "Sibling")   // unconnected: proves the OUTER level was allowed
+
+        mockProvider.scriptStream(for: inner.profileID(for: innerBot)!, events: [.content("MUST NOT RUN")])
+        mockProvider.scriptStream(for: scenario.profileID(for: sibling)!, events: [.content("sibling ok")])
+
+        // The outer workflow runs AT the limit; its child is therefore one past it.
+        let events = try await execute(scenario, startingDepth: WorkflowDepth.maxDepth - 1)
+
+        let failed = WorkflowStreamCollector.nodeFailedEvents(from: events)
+        XCTAssertTrue(failed.contains { $0.nodeID == sub },
+                      "the child at depth \(WorkflowDepth.maxDepth + 1) must fail its node")
+        XCTAssertTrue(failed.first(where: { $0.nodeID == sub })?.error.contains("nesting depth") == true,
+                      "the failure must name the depth limit — got: \(failed.first(where: { $0.nodeID == sub })?.error ?? "<none>")")
+        XCTAssertFalse(mockProvider.invocations.contains { $0.profileID == inner.profileID(for: innerBot)! },
+                       "no node inside the refused child may run")
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == sibling },
+                      "the OUTER workflow, exactly at the limit, must still run")
+    }
+
+    /// The boundary in the allowed direction — `maxDepth` levels is the LIMIT, not one past it.
+    func testRunAtExactlyMaxDepth_IsAllowed() async throws {
+        let scenario = WorkflowTestScenario()
+        let bot = scenario.addBotNode(name: "At The Limit")
+        mockProvider.scriptStream(for: scenario.profileID(for: bot)!, events: [.content("ok")])
+
+        let events = try await execute(scenario, startingDepth: WorkflowDepth.maxDepth - 1)
+
+        XCTAssertEqual(StreamCollector.contentText(from: events), "ok",
+                       "\(WorkflowDepth.maxDepth) levels is the LIMIT, not one past it — the guard is `<=`")
+    }
+
+    // MARK: - Group 32: WF-TS9 — the gate auto-decision timeout
+
+    /// ⚠️ WF-TS9: a configured gate timeout must actually auto-decide — the gate FAILS and routes
+    /// onto its `error` port, which is what GateNodeInspectorView promises the user and what
+    /// `outputPortLabels(for:)` draws. Nothing pinned it: `testUnansweredGate_BranchStops` reaches
+    /// `chosenOption == nil` through the HARNESS (`choosing: nil`), never through the timer, so a
+    /// regression that ignored `config.timeout` entirely would not have failed a single test.
+    ///
+    /// ⚠️ MUST use `makeStream` + `StreamCollector.collect`, NOT `execute` — `execute` answers
+    /// every gate immediately, resolving it before the timer could ever run.
+    func testGateWithTimeout_Unanswered_FailsOntoErrorPortAndSkipsOptionBranch() async throws {
+        let scenario = WorkflowTestScenario()
+        let source  = scenario.addBotNode(name: "Source")
+        let gate    = scenario.addGateNode(name: "Timed Gate", options: ["Approve", "Reject"], timeout: 0.5)
+        let approve = scenario.addBotNode(name: "Approve Arm")
+        let handler = scenario.addBotNode(name: "Timeout Handler")
+        scenario.connect(from: source, to: gate)
+        scenario.connect(from: gate, to: approve, portLabel: "Approve")
+        scenario.connect(from: gate, to: handler, portLabel: WorkflowEdge.errorPortLabel)
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!,  events: [.content("data")])
+        mockProvider.scriptStream(for: scenario.profileID(for: approve)!, events: [.content("must not run")])
+        mockProvider.scriptStream(for: scenario.profileID(for: handler)!, events: [.content("handled the no-answer")])
+
+        // ⚠️ Nobody answers this gate. A regression that ignores `config.timeout` parks FOREVER,
+        // so the watchdog converts a hang into a loud assertion failure instead of a dead suite.
+        let stream = makeStream(scenario)
+        let runner = Task { try await StreamCollector.collect(from: stream) }
+        let watchdog = Task { try? await Task.sleep(for: .seconds(5)); runner.cancel() }
+        let started = Date()
+        let events = try await runner.value
+        watchdog.cancel()
+        let elapsed = Date().timeIntervalSince(started)
+
+        // 1. It really PARKED and really auto-decided — not an instant nil, not a hang.
+        XCTAssertGreaterThan(elapsed, 0.4, "the gate must actually wait for its deadline")
+        XCTAssertLessThan(elapsed, 4.0, "the gate must auto-decide, not park until the watchdog")
+        // 2. The banner got a live deadline to count down.
+        let gates = WorkflowStreamCollector.gateRequests(from: events)
+        XCTAssertEqual(gates.count, 1)
+        XCTAssertNotNil(gates.first?.deadline, "a configured timeout must reach the banner as a deadline")
+        // 3. The node FAILED with the unanswered reason.
+        let failed = WorkflowStreamCollector.nodeFailedEvents(from: events)
+        let gateFailure = try XCTUnwrap(failed.first(where: { $0.nodeID == gate }),
+                                        "an unanswered timed gate must fail — got failures: \(failed.map(\.profileName))")
+        XCTAssertTrue(gateFailure.error.contains("was not answered"), "got: \(gateFailure.error)")
+        // 4. The error port is LIVE (the WF61 contract the inspector advertises) …
+        let startedIDs = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+        XCTAssertTrue(startedIDs.contains(handler),
+                      "the timed-out gate must activate `error` so a recovery branch runs")
+        // 5. … and no option branch was taken.
+        XCTAssertFalse(startedIDs.contains(approve), "no option was chosen, so no option branch runs")
+    }
+
+    /// ⚠️ WF-TS9 twin: a configured timeout must not poison the healthy path — the human's choice
+    /// wins the race and routes to its port. Before this, only `testGateInsideSubWorkflowBody_…`
+    /// touched a timed gate at all, and there the timeout is a hang-guard, not the assertion.
+    func testGateWithTimeout_AnsweredBeforeDeadline_RoutesToChosenPort() async throws {
+        let scenario = WorkflowTestScenario()
+        let source  = scenario.addBotNode(name: "Source")
+        let gate    = scenario.addGateNode(name: "Timed Gate", options: ["Approve", "Reject"], timeout: 5)
+        let approve = scenario.addBotNode(name: "Approve Arm")
+        let handler = scenario.addBotNode(name: "Timeout Handler")
+        scenario.connect(from: source, to: gate)
+        scenario.connect(from: gate, to: approve, portLabel: "Approve")
+        scenario.connect(from: gate, to: handler, portLabel: WorkflowEdge.errorPortLabel)
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!,  events: [.content("data")])
+        mockProvider.scriptStream(for: scenario.profileID(for: approve)!, events: [.content("approved work")])
+        mockProvider.scriptStream(for: scenario.profileID(for: handler)!, events: [.content("must not run")])
+
+        let events = try await executeWithGate(scenario, choosing: "Approve")
+
+        let startedIDs = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+        XCTAssertTrue(startedIDs.contains(approve), "the answered choice must route to its port even with a timeout set")
+        XCTAssertFalse(startedIDs.contains(handler), "an answered gate must not activate `error`")
+        XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == gate },
+                      "the gate must COMPLETE, not fail")
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).allSatisfy { $0.nodeID != gate })
+        XCTAssertNotNil(try XCTUnwrap(WorkflowStreamCollector.gateRequests(from: events).first).deadline,
+                        "the deadline must reach the banner on the answered path too")
+    }
+
+    // MARK: - Group 34: the UNIFIED Router decision policy (2026-08-17 redesign)
+    //
+    // ⚠️ One setting, both triggers. A node carrying a `decisionPolicy` resolves EMPTY and
+    // AMBIGUOUS through the same dropdown; a node without one keeps the legacy trio byte-identically
+    // (which is what the 173 tests above continue to prove — every one of them is a nil-policy node).
+
+    private func policyRouterConfig(_ policy: RouterDecisionPolicy,
+                                    rules: [ConditionRule]) -> ConditionNodeConfig {
+        var config = ConditionNodeConfig()
+        config.rules = rules
+        config.fallbackLabel = ""
+        config.decisionPolicy = policy
+        return config
+    }
+
+    /// ⚠️ THE BEHAVIOUR CHANGE THE USER APPROVED. Two rules match; the policy says fail. Under the
+    /// legacy pair this silently took the first match — rule order used as a tiebreak nobody chose.
+    func testPolicyFailNode_AmbiguityFailsInsteadOfSilentlyTakingTheFirstMatch() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ]
+        let router = scenario.addConditionNode(name: "Router",
+                                               config: policyRouterConfig(.failNode, rules: rules))
+        let urgent = scenario.addBotNode(name: "Urgent Arm")
+        let recovery = scenario.addBotNode(name: "Recovery")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: urgent, portLabel: "Urgent")
+        scenario.connect(from: router, to: recovery, portLabel: WorkflowEdge.errorPortLabel)
+
+        // Matches BOTH rules.
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("urgent invoice problem")])
+        mockProvider.scriptStream(for: scenario.profileID(for: urgent)!, events: [.content("must not run")])
+        mockProvider.scriptStream(for: scenario.profileID(for: recovery)!, events: [.content("recovered")])
+
+        let events = try await execute(scenario)
+
+        let failed = WorkflowStreamCollector.nodeFailedEvents(from: events)
+        XCTAssertTrue(failed.contains { $0.nodeID == router },
+                      "two rules matched and the policy says fail — the first-match tiebreak is gone")
+        let reason = try XCTUnwrap(failed.first { $0.nodeID == router }).error
+        XCTAssertTrue(reason.contains("2 rules matched"), "the reason must name the ambiguity: \(reason)")
+        XCTAssertTrue(reason.contains("Urgent") && reason.contains("Billing"),
+                      "and name the competing branches: \(reason)")
+        XCTAssertFalse(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: urgent)! },
+                       "no branch may be silently chosen")
+        XCTAssertTrue(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: recovery)! },
+                      "the error port is the documented recovery channel")
+    }
+
+    /// ⚠️ The author's explicit default beats the implicit rule-order tiebreak — including when
+    /// rules DID match. That is the point of choosing it from a dropdown.
+    func testPolicyRoute_OverridesEvenTheRulesThatMatched() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let general = ConditionRule(label: "General", field: .upstreamOutput, op: .contains, value: "zzz")
+        let rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice"),
+            general
+        ]
+        let router = scenario.addConditionNode(
+            name: "Router", config: policyRouterConfig(.route(ruleID: general.id), rules: rules))
+        let urgent = scenario.addBotNode(name: "Urgent Arm")
+        let generalArm = scenario.addBotNode(name: "General Arm")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: urgent, portLabel: "Urgent")
+        scenario.connect(from: router, to: generalArm, portLabel: "General")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("urgent invoice problem")])
+        mockProvider.scriptStream(for: scenario.profileID(for: urgent)!, events: [.content("must not run")])
+        mockProvider.scriptStream(for: scenario.profileID(for: generalArm)!, events: [.content("handled")])
+
+        let events = try await execute(scenario)
+
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).isEmpty)
+        XCTAssertTrue(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: generalArm)! },
+                      "the chosen default wins")
+        XCTAssertFalse(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: urgent)! },
+                       "a branch that matched must NOT also run — one port, one branch")
+    }
+
+    /// Exactly one match still routes without consulting the policy at all (spec point 1).
+    func testPolicyIsNotConsultedWhenExactlyOneRuleMatches() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ]
+        // A policy that would FAIL if it were consulted — proving it is not.
+        let router = scenario.addConditionNode(name: "Router",
+                                               config: policyRouterConfig(.failNode, rules: rules))
+        let urgent = scenario.addBotNode(name: "Urgent Arm")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: urgent, portLabel: "Urgent")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("urgent please")])
+        mockProvider.scriptStream(for: scenario.profileID(for: urgent)!, events: [.content("handled")])
+
+        let events = try await execute(scenario)
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).isEmpty,
+                      "one clean match must never reach the can't-decide setting")
+        XCTAssertTrue(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: urgent)! })
+    }
+
+    /// EMPTY under `.endBranch`: the branch ends quietly and the Router's content is the answer.
+    func testPolicyEndBranch_OnEmptyEndsQuietly() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ]
+        let router = scenario.addConditionNode(name: "Router",
+                                               config: policyRouterConfig(.endBranch, rules: rules))
+        let urgent = scenario.addBotNode(name: "Urgent Arm")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: urgent, portLabel: "Urgent")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("nothing matches this")])
+        mockProvider.scriptStream(for: scenario.profileID(for: urgent)!, events: [.content("must not run")])
+
+        let events = try await execute(scenario)
+
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).isEmpty,
+                      "`.endBranch` ends the branch — it does not fail it")
+        XCTAssertTrue(WorkflowStreamCollector.nodeSkippedEvents(from: events)
+                        .contains { $0.nodeID == urgent && $0.reason == .notChosen })
+        XCTAssertTrue(WorkflowStreamCollector.contentText(from: events).contains("nothing matches this"),
+                      "the Router becomes a terminal and its passthrough is the final answer")
+    }
+
+    /// ⚠️ Ask on an UNATTENDED run never parks — it applies the configured fallback immediately.
+    /// `execute` resolves gates with nil, but this must not even reach a gate.
+    func testPolicyAsk_UnattendedRunTakesTheFallbackWithoutParking() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
+        ]
+        let router = scenario.addConditionNode(
+            name: "Router", config: policyRouterConfig(.ask(fallback: .failNode), rules: rules))
+        let recovery = scenario.addBotNode(name: "Recovery")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: recovery, portLabel: WorkflowEdge.errorPortLabel)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("urgent invoice")])
+        mockProvider.scriptStream(for: scenario.profileID(for: recovery)!, events: [.content("recovered")])
+
+        let events = try await WorkflowRunAttendance.$isAttended.withValue(false) {
+            try await execute(scenario)
+        }
+
+        XCTAssertTrue(WorkflowStreamCollector.gateRequests(from: events).isEmpty,
+                      "an unattended run must NOT park on a banner nobody can see")
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == router },
+                      "the configured fallback (fail) applies instead")
+    }
+
+    /// The attended twin: the gate IS offered, and the options are the branches that matched.
+    func testPolicyAsk_AttendedRunOffersTheMatchedBranches() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let rules = [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice"),
+            ConditionRule(label: "General", field: .upstreamOutput, op: .contains, value: "zzz")
+        ]
+        let router = scenario.addConditionNode(
+            name: "Router", config: policyRouterConfig(.ask(fallback: .failNode), rules: rules))
+        let urgent = scenario.addBotNode(name: "Urgent Arm")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: urgent, portLabel: "Urgent")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("urgent invoice")])
+        mockProvider.scriptStream(for: scenario.profileID(for: urgent)!, events: [.content("handled")])
+
+        let events = try await executeWithGate(scenario, choosing: "Urgent")
+
+        let gates = WorkflowStreamCollector.gateRequests(from: events)
+        XCTAssertEqual(gates.count, 1, "an attended ambiguous run must ask")
+        XCTAssertEqual(gates.first?.options, ["Urgent", "Billing"],
+                       "only the branches that matched are offered — General did not match")
+        XCTAssertTrue(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: urgent)! },
+                      "the human's choice routes")
     }
 }

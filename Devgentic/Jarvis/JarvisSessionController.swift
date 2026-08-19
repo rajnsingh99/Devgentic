@@ -575,14 +575,28 @@ final class JarvisSessionController {
         // must not clobber a newer one's state. Captured var is filled right after
         // the call returns (streaming starts in an internal Task, so no race).
         var thisStreamID: UUID?
+        // Workflow bookkeeping. ⚠️ Currently ALWAYS nil here: the profile picker filters to
+        // `.bot`/`.agent` (:178, :257), so a workflow cannot be selected by voice. Kept for a
+        // uniform call shape across every `startMessageStream` site — see the QuickAccess twin.
+        let workflowTicket = WorkflowRunBootstrap.begin(
+            config: config,
+            conversationID: convID,
+            userInput: command,
+            registry: mainVM,
+            origin: .jarvis
+        )
         let agentMessage = mainVM.activeStreamManager.startMessageStream(
             withConfig: config,
             conversationID: convID,
             userQuery: command,
             history: transcript,
             files: [],
+            workflowExecutionState: workflowTicket?.state,
             onComplete: { [weak self] in
                 DispatchQueue.main.async {
+                    // finalize BEFORE the identity guard — see the QuickAccess twin: a superseded
+                    // stream must still freeze its own record.
+                    workflowTicket?.finalize()
                     guard let self, self.streamingMessageID == thisStreamID else { return }
                     self.streamingMessageID = nil
                     self.handleRunFinished()

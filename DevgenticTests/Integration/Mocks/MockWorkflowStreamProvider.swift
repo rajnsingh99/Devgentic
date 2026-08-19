@@ -17,6 +17,14 @@ enum ScriptedResponse {
     case error(Error)
     /// Yields initial events then blocks indefinitely (for cancellation testing).
     case slow([AgentStreamEvent])
+    /// Sleeps, THEN yields and finishes normally — a node that is slow but succeeds.
+    ///
+    /// ⚠️ Distinct from `.slow`, and the difference is the whole point: `.slow` never completes, so
+    /// it can only prove that cancellation happened. This one proves the opposite — that a sibling
+    /// branch was NOT cancelled and its result still reached the answer. The sleep is cancellation-
+    /// sensitive (`Task.sleep` throws), so if anything aborts the group this node dies instead of
+    /// finishing, and the assertion on its output fails.
+    case delayed([AgentStreamEvent], milliseconds: Int)
 }
 
 final class MockWorkflowStreamProvider: WorkflowStreamProvider, @unchecked Sendable {
@@ -37,6 +45,57 @@ final class MockWorkflowStreamProvider: WorkflowStreamProvider, @unchecked Senda
 
     /// Every call to `streamWorkflowNodeResponse` is recorded here for assertions.
     private(set) var workflowInvocations: [(profileID: UUID, context: WorkflowExecutionContext)] = []
+
+    // MARK: - Cancellation test seams (WF-TS2)
+
+    /// Fired once per `streamAgentResponse`, AFTER the lock is released.
+    ///
+    /// ⚠️ A DETERMINISTIC BARRIER, replacing `Task.sleep`. The cancellation tests used to cancel
+    /// after a fixed 100 ms and hope the executor had got far enough; on a loaded machine that is a
+    /// coin flip in the other direction (the "A was invoked" assertions are the ones that flake).
+    /// Awaiting this instead means the test cancels at EXACTLY the state it needs: the provider has
+    /// been called and, for `.slow`, is now blocked forever.
+    ///
+    /// ⚠️ MUST be invoked outside `lock`. This provider is called concurrently from the executor's
+    /// parallel `withTaskGroup` node tasks, and running arbitrary test code under the lock risks a
+    /// hang — which in this repo presents as "test runner hung before establishing connection" and
+    /// then poisons every later run.
+    ///
+    /// ⚠️ Do NOT use `.workflowNodeStarted` as the barrier instead: the executor yields it BEFORE
+    /// calling the provider, so cancelling on it reintroduces the very race the sleep had. And node
+    /// `.content` is accumulated into the node's output rather than forwarded, so a scripted
+    /// `.content` can never serve as one either — it looks like a barrier and never fires.
+    var onInvoke: (@Sendable (UUID) -> Void)?
+
+    /// Profile IDs whose `.slow` stream was torn down by the consumer — i.e. the node task really
+    /// was cancelled. Without this, "Stop reached the running node" is unobservable: the old
+    /// `.slow` arm had an empty `onTermination` stub, so teardown left no trace at all.
+    private var _tornDownProfileIDs: [UUID] = []
+    var tornDownProfileIDs: [UUID] {
+        lock.lock(); defer { lock.unlock() }
+        return _tornDownProfileIDs
+    }
+
+    // MARK: - Concurrency observation (WF-TS12)
+
+    /// Wall-clock span of one `.delayed` script, measured INSIDE the producer.
+    /// ⚠️ Producer-side on purpose: stamping the arrival of `.workflowNodeCompleted` on the
+    /// consumer instead lets stream buffering stretch an interval forward, which can manufacture a
+    /// FALSE overlap under a sequential executor — i.e. a test that cannot fail on the very
+    /// mutation it targets.
+    struct InvocationSpan: Sendable {
+        let profileID: UUID
+        let start: ContinuousClock.Instant
+        let end: ContinuousClock.Instant
+    }
+    private var _spans: [InvocationSpan] = []
+    var spans: [InvocationSpan] {
+        lock.lock(); defer { lock.unlock() }
+        return _spans
+    }
+    private func recordSpan(_ span: InvocationSpan) {
+        lock.lock(); _spans.append(span); lock.unlock()
+    }
 
     // MARK: - Configuration (call from setUp, before tests — single-threaded)
 
@@ -62,6 +121,66 @@ final class MockWorkflowStreamProvider: WorkflowStreamProvider, @unchecked Senda
         lock.lock()
         defer { lock.unlock() }
         scriptedQueues[profileID, default: []].append(.slow(initialEvents))
+    }
+
+    /// Script a stream that sleeps, then succeeds. See `ScriptedResponse.delayed`.
+    func scriptDelayedStream(for profileID: UUID, events: [AgentStreamEvent], milliseconds: Int = 250) {
+        lock.lock()
+        defer { lock.unlock() }
+        scriptedQueues[profileID, default: []].append(.delayed(events, milliseconds: milliseconds))
+    }
+
+    // MARK: - Action-node tool scripting
+
+    /// Tools an Action node can resolve, keyed by tool NAME.
+    ///
+    /// The default `resolveWorkflowTool` returns nil, so before this every Action-node path —
+    /// argument binding, confirmation, timeout, retry, the error port — was unreachable from a
+    /// test, and the node kind with the highest privilege in the subsystem (it calls
+    /// `AgentTool.run` directly, bypassing `ToolExecutionMediator`) had zero coverage.
+    private var scriptedTools: [String: AgentTool] = [:]
+
+    /// Registers a tool an Action node will resolve, returning `output` when run.
+    ///
+    /// `contentMayLookLikeError` mirrors the real opt-out for tools whose legitimate output
+    /// surfaces error text (shell stderr, build-log readers).
+    func scriptTool(
+        name: String,
+        output: String,
+        artifacts: [MediaArtifact] = [],
+        requiresConfirmation: Bool = false,
+        contentMayLookLikeError: Bool = false
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        scriptedTools[name] = AgentTool(
+            name: name,
+            description: "Scripted test tool",
+            parameters: ToolParameters(type: "object", properties: [:], required: []),
+            requiresConfirmation: requiresConfirmation,
+            contentMayLookLikeError: contentMayLookLikeError,
+            run: { _ in (output, artifacts) }
+        )
+    }
+
+    /// Registers a tool that THROWS when run — the transient-failure shape the retry loop handles.
+    func scriptThrowingTool(name: String, error: Error, requiresConfirmation: Bool = false) {
+        lock.lock()
+        defer { lock.unlock() }
+        scriptedTools[name] = AgentTool(
+            name: name,
+            description: "Scripted throwing test tool",
+            parameters: ToolParameters(type: "object", properties: [:], required: []),
+            requiresConfirmation: requiresConfirmation,
+            contentMayLookLikeError: false,
+            run: { _ in throw error }
+        )
+    }
+
+    func resolveWorkflowTool(_ tool: Tool, conversationID: UUID) async -> AgentTool? {
+        lock.lock()
+        defer { lock.unlock() }
+        return scriptedTools[tool.name]
     }
 
     // MARK: - WorkflowStreamProvider
@@ -98,6 +217,9 @@ final class MockWorkflowStreamProvider: WorkflowStreamProvider, @unchecked Senda
         }
         lock.unlock()
 
+        // ⚠️ AFTER `lock.unlock()`, never under it — see `onInvoke`.
+        onInvoke?(profileID)
+
         switch response {
         case .error(let error):
             return AsyncThrowingStream { $0.finish(throwing: error) }
@@ -113,7 +235,41 @@ final class MockWorkflowStreamProvider: WorkflowStreamProvider, @unchecked Senda
                 for event in initialEvents {
                     continuation.yield(event)
                 }
-                continuation.onTermination = { @Sendable _ in }
+                // ⚠️ Records the teardown instead of discarding it (WF-TS2). This closure firing IS
+                // the proof that Stop propagated all the way to the in-flight node's provider
+                // stream; with the previous empty stub, "the running node was cancelled" had no
+                // observable consequence anywhere in the suite.
+                continuation.onTermination = { @Sendable [weak self] _ in
+                    guard let self else { return }
+                    self.lock.lock()
+                    self._tornDownProfileIDs.append(profileID)
+                    self.lock.unlock()
+                }
+            }
+        case .delayed(let events, let milliseconds):
+            return AsyncThrowingStream { continuation in
+                // Unstructured on purpose: an unstructured Task does NOT inherit the caller's
+                // cancellation, so the ONLY way this sleep is interrupted is the consumer tearing
+                // the stream down — i.e. the node task actually being cancelled. That keeps the
+                // signal clean: output missing ⇒ something really did abort this branch.
+                let start = ContinuousClock.now
+                let task = Task { [weak self] in
+                    do {
+                        try await Task.sleep(for: .milliseconds(milliseconds))
+                        // WF-TS12: the span is closed here, before any yield, so it measures the
+                        // producer's own occupancy and never the consumer's drain rate.
+                        self?.recordSpan(InvocationSpan(profileID: profileID,
+                                                        start: start,
+                                                        end: ContinuousClock.now))
+                        for event in events {
+                            continuation.yield(event)
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { @Sendable _ in task.cancel() }
             }
         }
     }

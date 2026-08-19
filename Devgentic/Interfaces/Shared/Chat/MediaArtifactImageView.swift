@@ -10,6 +10,9 @@
 
 import SwiftUI
 import AppKit
+import os
+
+private let logger = DGLogger(category: "MediaArtifactImage")
 
 struct MediaArtifactImageView: View {
     let artifact: MediaArtifact
@@ -139,6 +142,18 @@ struct MediaArtifactImageView: View {
     // MARK: - Image Loading
 
     private func loadImage() async {
+        // Clear the DERIVED state first. `.task(id: artifact.id)` re-runs this when the view is
+        // reused for a different artifact — which happens on every variant flip, since the
+        // switch branch in `AgentBubbleContentView.contentView` is keyed only by the message
+        // while `contentToDisplay` follows `currentAgentContent`. Without this reset the old
+        // bitmap survived: `body` gives `loadedImage` precedence over `loadError`, so a new
+        // artifact that fails to resolve kept showing the PREVIOUS picture with no error card
+        // and no Retry — and `Save to Downloads` / `Copy Image` exported the previous
+        // artifact's bytes, because `loadedData` was equally stale.
+        // (`errorPlaceholder`'s Retry already does exactly this; the artifact-change path did not.)
+        loadedImage = nil
+        loadedData = nil
+        loadError = nil
         do {
             let data = try await artifact.reference.resolve()
             // Decoding a full-size bitmap is expensive and was happening on whatever
@@ -153,19 +168,41 @@ struct MediaArtifactImageView: View {
                 self.loadError = nil
             } else {
                 self.loadError = String(localized: "Could not decode image data")
+                logger.error("[MEDIA] Artifact \(self.artifact.id.uuidString.prefix(8)) (\(Self.referenceKind(self.artifact.reference)), \(self.artifact.mimeType), \(data.count) bytes) resolved but did NOT decode. CONSEQUENCE: the picture is missing from the transcript and the error card is shown in its place.")
             }
         } catch {
             guard !Task.isCancelled else { return }
             self.loadError = error.localizedDescription
+            // A `.diskPath` reference that no longer resolves is exactly the durability
+            // failure the logging standard exists for: without this line, "my generated
+            // images disappeared" leaves no trace beyond an error card the user scrolls past.
+            logger.error("[MEDIA] Artifact \(self.artifact.id.uuidString.prefix(8)) (\(Self.referenceKind(self.artifact.reference)), \(self.artifact.mimeType)) FAILED to resolve: \(error.localizedDescription). CONSEQUENCE: the picture is missing from the transcript and the error card is shown in its place (retry offered).")
+        }
+    }
+
+    /// Reference kind for logs — the URL itself is deliberately not logged (user paths).
+    private static func referenceKind(_ reference: MediaReference) -> String {
+        switch reference {
+        case .diskPath:      return "diskPath"
+        case .remoteURL:     return "remoteURL"
+        case .ephemeralData: return "ephemeralData"
         }
     }
 
     // MARK: - Subviews
 
+    /// Sized off the shared constants, not a bespoke 256×256 square.
+    ///
+    /// `ChatUIConstants.imagePlaceholderMinHeight` exists so "the bubble doesn't jump when the
+    /// picture arrives", but the app's primary image renderer ignored it and reserved a fixed
+    /// square instead — so the bubble jumped anyway, and tuning the constant had no effect
+    /// where it mattered most. `maxWidth` matches the loaded image's own frame (:34), so the
+    /// placeholder and the picture occupy the same width.
     private var loadingPlaceholder: some View {
         RoundedRectangle(cornerRadius: 12)
             .fill(theme.secondaryBackground)
-            .frame(width: 256, height: 256)
+            .frame(maxWidth: ChatUIConstants.imageMaxWidth,
+                   minHeight: ChatUIConstants.imagePlaceholderMinHeight)
             .overlay(
                 VStack(spacing: 8) {
                     ProgressView()
@@ -194,7 +231,8 @@ struct MediaArtifactImageView: View {
                 Task { await loadImage() }
             }
         }
-        .frame(maxWidth: ChatUIConstants.imageMaxWidth, alignment: .leading)
+        .frame(maxWidth: ChatUIConstants.imageMaxWidth,
+               minHeight: ChatUIConstants.imagePlaceholderMinHeight, alignment: .leading)
     }
 
     private var metadataOverlay: some View {
@@ -326,12 +364,20 @@ struct MediaArtifactImageView: View {
         guard let data = loadedData else { return }
         let panel = ImageExport.savePanel(baseName: baseName, data: data, declaredMimeType: artifact.mimeType)
         panel.begin { response in
-            guard response == .OK, let url = panel.url else { return }
+            // A plain cancel is not a failure and stays quiet; `.OK` with no URL is, and
+            // used to exit through the same silent return.
+            guard response == .OK else { return }
+            guard let url = panel.url else {
+                logger.error("[MEDIA] Save-As for artifact \(self.artifact.id.uuidString.prefix(8)) was CONFIRMED but the panel returned no URL. CONSEQUENCE: nothing was written and the user saw no error.")
+                saveError = String(localized: "Couldn't determine where to save the image.")
+                return
+            }
             do {
                 try data.write(to: url)
                 savedURL = url
             } catch {
                 saveError = error.localizedDescription
+                logger.error("[MEDIA] Save-As for artifact \(self.artifact.id.uuidString.prefix(8)) FAILED writing \(data.count) bytes: \(error.localizedDescription). CONSEQUENCE: nothing was written; the alert tells the user.")
             }
         }
     }

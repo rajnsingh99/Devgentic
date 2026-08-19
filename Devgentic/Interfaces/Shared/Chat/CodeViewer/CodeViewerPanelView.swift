@@ -743,9 +743,20 @@ struct CodeViewerPanelView: View {
 
     // MARK: - Actions
 
+    /// The text the user is actually looking at.
+    ///
+    /// `CodeViewerTab.snippet` is IMMUTABLE for the life of the tab, so once the editor has
+    /// written through to `editedCode` its `.code` is stale. Every copy action used it, so
+    /// after any edit the clipboard silently held the pre-edit version. Mirrors what
+    /// `saveCodeToFile` already does.
+    private var codeOnScreen: String? {
+        guard let snippet = currentSnippet else { return nil }
+        return chatHistoryViewModel.activeCodeViewerTab?.effectiveCode ?? snippet.code
+    }
+
     private func copyCodeToClipboard() {
-        guard let snippet = currentSnippet else { return }
-        copyToClipboard(snippet.code)
+        guard let code = codeOnScreen else { return }
+        copyToClipboard(code)
     }
 
     private func copyToClipboard(_ string: String) {
@@ -765,13 +776,13 @@ struct CodeViewerPanelView: View {
     private func markdownFence() -> String {
         guard let snippet = currentSnippet else { return "" }
         let info = [snippet.language, activeTabFileName].compactMap { $0 }.joined(separator: " ")
-        return "```\(info)\n\(snippet.code)\n```"
+        return "```\(info)\n\(codeOnScreen ?? snippet.code)\n```"
     }
 
     /// The snippet prefixed with a language-appropriate comment line naming the file.
     private func codeWithFilenameComment() -> String {
         guard let snippet = currentSnippet, let fileName = activeTabFileName else {
-            return currentSnippet?.code ?? ""
+            return codeOnScreen ?? ""
         }
         let comment: String
         switch snippet.language?.lowercased() {
@@ -784,7 +795,7 @@ struct CodeViewerPanelView: View {
         default:
             comment = "// \(fileName)"
         }
-        return "\(comment)\n\(snippet.code)"
+        return "\(comment)\n\(codeOnScreen ?? snippet.code)"
     }
 
 
@@ -834,15 +845,33 @@ struct CodeViewerPanelView: View {
         }
 
         savePanel.begin { (result) in
-            if result == .OK, let url = savePanel.url {
+            if result == .OK, let rawURL = savePanel.url {
+                // Third save engine, same symlink rule as the other two: writing to a symlink
+                // path replaces the link with a regular file and leaves the target stale.
+                let url = ChatHistoryViewModel.writeTarget(forPath: rawURL.path)
                 do {
-                    try buffer.write(to: url, atomically: true, encoding: .utf8)
+                    // Save As is the THIRD save engine and was the only one still writing the
+                    // raw buffer. Every tab's content came through `CodeSnippet.normalizedCode`,
+                    // which trims BOTH edges, so writing it verbatim over an existing file
+                    // silently deleted that file's leading blank line/indentation and its POSIX
+                    // trailing newline — the exact loss `contentToApply` exists to prevent (see
+                    // its doc comment). The baseline MUST be the destination's on-disk bytes;
+                    // for a genuinely new file there is no edge whitespace to restore and the
+                    // helper degrades to a no-op.
+                    let onDisk = try? String(contentsOf: url, encoding: .utf8)
+                    let content = ChatHistoryViewModel.contentToApply(
+                        snippetCode: buffer,
+                        preservingEdgeWhitespaceOf: onDisk ?? buffer
+                    )
+                    try content.write(to: url, atomically: true, encoding: .utf8)
                     // Save As satisfies an UNLINKED tab's dirty state (it has no source
                     // file — this WAS its save). For a linked tab it's just an exported
                     // copy; the source file still hasn't seen the draft, so it stays dirty.
                     if !isLinked, let tabID {
+                        // `wroteToDisk` is the drift baseline and must be the BYTES, which
+                        // differ from the editor buffer whenever edge whitespace was restored.
                         chatHistoryViewModel.markCodeViewerTabSavedAs(
-                            tabID: tabID, savedBuffer: buffer, savedTo: url
+                            tabID: tabID, savedBuffer: buffer, savedTo: url, wroteToDisk: content
                         )
                     }
                 } catch {

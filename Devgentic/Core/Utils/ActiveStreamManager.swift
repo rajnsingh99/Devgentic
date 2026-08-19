@@ -227,6 +227,29 @@ final class ActiveStreamManager {
         onComplete: @escaping () -> Void
     ) -> ChatMessage {
         
+        // ⚠️ GUARD-RAIL: a workflow profile started without workflow bookkeeping.
+        //
+        // Six of the seven callers of this method used to do exactly that. The run still
+        // EXECUTES, which is why it went unnoticed — but with no `WorkflowExecutionState` there is
+        // no run record (no stub, no freeze, no per-node timelines — that detail lives only in
+        // the state and is never captured), HITL attributes to `.chat` instead of `.workflow`
+        // (`enqueueHITL` keys on `workflowState != nil`), and the capability-card router stays on
+        // even though parallel nodes interleave segments it cannot separate.
+        //
+        // `WorkflowRunBootstrap.begin(...)` is the fix; this line exists because a helper can be
+        // forgotten by the NEXT new call site and a loud log cannot.
+        if config.profile.profileType == .workflow && workflowExecutionState == nil {
+            logger.error("""
+                [WF_RUN] ⚠️ Workflow '\(config.profile.displayName)' (\(config.profile.id)) started \
+                with NO WorkflowExecutionState — conv \(conversationID). CONSEQUENCE: this run \
+                leaves no run record (nothing in run history, the run picker or the badge; per-node \
+                timelines are never captured), any HITL it raises is attributed to the CHAT \
+                interface instead of the workflow view, and capability-card routing stays enabled. \
+                The run itself will execute normally. FIX: call WorkflowRunBootstrap.begin(...) at \
+                this call site and pass its `state` + call `finalize()` in onComplete.
+                """)
+        }
+
         let agentMessage: ChatMessage
         let isRegeneration = existingMessage != nil
 
@@ -447,13 +470,13 @@ final class ActiveStreamManager {
                         )
 
                     // [E1] Workflow Gate request → unified InteractionCenter as a `.gate` interaction.
-                    case .requestGate(let prompt, let options, let operationID, let deadline, let sourceNodeID):
+                    case .requestGate(let prompt, let options, let operationID, let deadline, let sourceNodeID, let inputText, let highlights):
                         agentMessage.agentState = .interaction(.gate)
                         agentMessage.lifecycleState = .parkedHITL(operationID: operationID)
                         await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
                         self.enqueueHITL(
                             operationID: operationID,
-                            kind: .gate(PendingGate(id: operationID, prompt: prompt, options: options, deadline: deadline)),
+                            kind: .gate(PendingGate(id: operationID, prompt: prompt, options: options, deadline: deadline, inputText: inputText, highlights: highlights)),
                             conversationID: conversationID,
                             profileType: config.profile.profileType,
                             workflowState: workflowExecutionState,
@@ -614,15 +637,15 @@ final class ActiveStreamManager {
                         logger.info("[WF_EVENT] NodeFailed: '\(profileName)' [\(nodeID)] error=\(error)")
                         workflowExecutionState?.handleNodeFailed(nodeID: nodeID, profileName: profileName, error: error, suggestion: suggestion)
 
+                    case .workflowNodeSkipped(let nodeID, let profileName, let reason):
+                        workflowExecutionState?.handleNodeSkipped(nodeID: nodeID, profileName: profileName, reason: reason)
+
+                    case .workflowNodeCancelled(let nodeID, let profileName):
+                        workflowExecutionState?.handleNodeCancelled(nodeID: nodeID, profileName: profileName)
+
                     case .workflowProgress(let completed, let total):
                         logger.info("[WF_EVENT] Progress: \(completed)/\(total)")
                         workflowExecutionState?.handleProgress(completed: completed, total: total)
-
-                    case .workflowLoopIteration(let nodeID, let profileName, let iteration, let maxIterations):
-                        let iterationId = UUID()
-                        agentMessage.appendTimelineEvent(.thought(id: iterationId, text: "🔄 \(profileName): iteration \(iteration)/\(maxIterations)"))
-                        logger.info("[WF_EVENT] LoopIteration: '\(profileName)' [\(nodeID)] \(iteration)/\(maxIterations)")
-                        workflowExecutionState?.handleLoopIteration(nodeID: nodeID, profileName: profileName, iteration: iteration, maxIterations: maxIterations)
 
                     // MARK: Capability Events (Planning, Self-Reflection, Delegation)
 
@@ -852,7 +875,7 @@ final class ActiveStreamManager {
 
             } catch is CancellationError {
                 logger.info("[STREAM_CANCELLED] traceID: \(agentMessage.traceID ?? "?"), messageID: \(agentMessage.id.uuidString.prefix(8))")
-                workflowExecutionState?.handleError("Cancelled")
+                workflowExecutionState?.handleError("Cancelled", cancelled: true)
                 if agentMessage.terminalOutcome == nil {
                     agentMessage.terminalOutcome = .cancelled
                     agentMessage.terminalReason = agentMessage.terminalReason ?? "Cancelled by user"

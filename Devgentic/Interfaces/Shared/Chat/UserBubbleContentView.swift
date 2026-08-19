@@ -70,8 +70,8 @@ struct UserBubbleContentView: View {
                 if let textContent = message.content.textContent, !textContent.isEmpty {
                     UserMessageView(
                         text: textContent,
-                        searchQuery: searchViewModel.isSearchActive ? searchViewModel.searchQuery : "",
-                        activeHighlightIndex: searchViewModel.activeMatchLocalIndex(for: message.id)
+                        searchQuery: searchViewModel.isSearchActive ? searchViewModel.effectiveQuery : "",
+                        activeHighlightIndex: searchViewModel.activeMatchIndex(in: message.id, blockID: nil)
                     )
                     .userBubbleStyle()
                     .textSelection(.enabled)

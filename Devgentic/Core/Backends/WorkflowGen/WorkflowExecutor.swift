@@ -18,7 +18,37 @@ private let logger = DGLogger(category: "WorkflowExecutor")
 /// TaskLocal depth counter for sub-workflow recursion protection.
 enum WorkflowDepth {
     @TaskLocal static var current: Int = 0
-    static let maxDepth: Int = 5
+
+    /// How many workflows may be nested inside one another, INCLUDING the outermost.
+    ///
+    /// ⚠️ The counter is incremented BEFORE its guard, so the outermost workflow is already level 1.
+    /// A limit of 3 means this workflow plus two nested levels; the 4th is refused.
+    ///
+    /// ⚠️ Lowered 5 → 3 on 2026-08-13 (user decision). Each level multiplies cost and latency — five
+    /// nodes per workflow at five levels is ~3,000 node executions from one click — and nesting that
+    /// deep is nearly always a mistake rather than a design.
+    ///
+    /// ⚠️ This is now a BACKSTOP, not the primary guard. `WorkflowValidator` reports cycles and
+    /// over-deep chains at design time and again at pre-flight, so a user should never reach this.
+    /// It is kept because validating A can be invalidated by editing B while A's canvas is closed,
+    /// and it costs one integer.
+    static let maxDepth: Int = 3
+}
+
+/// TaskLocal marking whether a HUMAN is watching this run.
+///
+/// `true` (the default) for chat/QuickAccess/Jarvis/regenerate sends; bound `false` by the
+/// SCHEDULER and the CHATOPS bridges around `startMessageStream`, and inherited by every child
+/// task from there — through BOS, AgentConnect, the executor's stream task, and into nested
+/// sub-workflow executors — exactly like `WorkflowDepth`.
+///
+/// ⚠️ Why it exists (2026-08-16, user decision): Router ambiguity arbitration parks INDEFINITELY,
+/// and an unattended run renders no banner — a scheduled run parked until the scheduler's run
+/// deadline cancelled the WHOLE run, and a ChatOps run (which has no deadline at all) parked
+/// forever. An unattended run now never arbitrates: it takes the FIRST MATCH immediately, which is
+/// byte-identical to what an unanswered arbitration resolves to anyway.
+enum WorkflowRunAttendance {
+    @TaskLocal static var isAttended: Bool = true
 }
 
 actor WorkflowExecutor: Executor {
@@ -49,8 +79,8 @@ actor WorkflowExecutor: Executor {
         case .nodeTimeout:              return .wfNodeFailed
         case .nodeExecutionFailed:      return .wfNodeFailed
         case .allUpstreamsFailed:       return .wfNodeSkipped
-        case .loopBodyNotConfigured:    return .wfValidationFailed
         case .validationFailed:         return .wfValidationFailed
+        case .layoutUnreadable:         return .wfValidationFailed
         }
     }
 
@@ -162,6 +192,22 @@ actor WorkflowExecutor: Executor {
                         // ModelContext lives on main). The executor is an actor, so we
                         // hop briefly to load the layout — same pattern used for
                         // `BackendProfileStore.fetchProfile(byId:)` later in this method.
+                        //
+                        // ⚠️ Unreadability is asked BEFORE the load, same as the canvas does
+                        // (WF-OB4). `load(for:)` deliberately returns `.empty` for a missing row
+                        // AND an undecodable blob — by the time we hold the layout the two are
+                        // indistinguishable, and the `.empty` guard below would tell the user
+                        // "The workflow has no nodes. Add profiles…" about a canvas that HAS
+                        // nodes and refuses every save. The denormalized counts live outside the
+                        // blob, so they are trustworthy evidence even when the blob is not.
+                        let (unreadable, counts) = await MainActor.run {
+                            (WorkflowLayoutStore.shared.isLayoutUnreadable(for: profileID),
+                             WorkflowLayoutStore.shared.storedCounts(for: profileID))
+                        }
+                        if unreadable {
+                            logger.error("[PERSISTENCE] Run REFUSED for profile \(profileID) conv \(conversationID): the stored canvas blob could not be decoded (last successful save held \(counts.nodes) node(s), \(counts.edges) edge(s)). CONSEQUENCE: the run is blocked BEFORE dispatch with an honest error naming the counts, instead of 'The workflow has no nodes' — the blob is left byte-intact and the canvas overlay owns the repair path.")
+                            throw WorkflowError.layoutUnreadable(nodeCount: counts.nodes, edgeCount: counts.edges)
+                        }
                         layout = await MainActor.run { WorkflowLayoutStore.shared.load(for: profileID) }
                     }
 
@@ -193,6 +239,21 @@ actor WorkflowExecutor: Executor {
                         )
                     }
 
+                    // The map is what pre-flight validation and dispatch both resolve profile
+                    // nodes against, so a shortfall here presents to the user as "Profile not
+                    // found — it may have been deleted" on a profile that exists. Name the
+                    // source and the shortfall explicitly: without this, a body executor handed
+                    // the wrong map was indistinguishable in the log from genuinely deleted
+                    // profiles, and the suggested remediation (recreate the profile) is
+                    // destructive.
+                    let requiredProfileIDs = Set(layout.nodes.compactMap(\.profileID))
+                    let missingProfileIDs = requiredProfileIDs.subtracting(profileMap.keys)
+                    if missingProfileIDs.isEmpty {
+                        logger.info("[WF_PROFILES] profile \(profileID) conv \(conversationID): profile map \(injectedProfileMap == nil ? "resolved from store" : "INJECTED by caller") — \(profileMap.count) entr(ies), all \(requiredProfileIDs.count) referenced profile(s) present.")
+                    } else {
+                        logger.error("[WF_PROFILES] profile \(profileID) conv \(conversationID): profile map \(injectedProfileMap == nil ? "resolved from store" : "INJECTED by caller") is MISSING \(missingProfileIDs.count) of \(requiredProfileIDs.count) referenced profile(s): \(missingProfileIDs.map(\.uuidString).sorted().joined(separator: ", ")). CONSEQUENCE: pre-flight validation will report each of those nodes as 'Profile not found — it may have been deleted' and the whole run is blocked before any node executes.")
+                    }
+
                     // =============================================================
                     // 2b. EXTRACT WORKFLOW-LEVEL CONFIG
                     // =============================================================
@@ -205,29 +266,108 @@ actor WorkflowExecutor: Executor {
                               case .workflow(let config) = workflowProfile.details {
                         workflowConfig = config
                     } else {
-                        // Fetch workflow's own profile (it's not in the node profile map)
-                        let wfProfile = await MainActor.run { try? BackendProfileStore.shared.fetchProfile(byId: profileID) }
-                        if case .workflow(let config) = wfProfile?.details {
+                        // Fetch workflow's own profile (it's not in the node profile map).
+                        //
+                        // ⚠️ The fallback below is SILENT no more. This was `try?` into
+                        // `WorkflowConfig(agentProfileIDs: [])`, so a failed fetch — an unreadable
+                        // profile blob, or a container not yet configured — produced a run that
+                        // looked completely normal (the layout still loads from its own store) but
+                        // executed against hard-coded defaults: a 120 s node timeout although the
+                        // user turned timeouts OFF, a different context budget, a different failure
+                        // policy and retry count. The only trace was "Node X exceeded the 120s
+                        // timeout", which names a symptom that the user's own settings say cannot
+                        // happen — an unfalsifiable field report.
+                        //
+                        // Reachable for any sub-workflow child, which builds
+                        // its own executor for a profile it must fetch itself.
+                        let fetched: BackendProfileModel?
+                        do {
+                            fetched = try await MainActor.run { try BackendProfileStore.shared.fetchProfile(byId: profileID) }
+                        } catch {
+                            fetched = nil
+                            logger.error("[WF_CONFIG] profile \(profileID) conv \(conversationID): fetching the workflow's own profile FAILED (\(error.localizedDescription)). CONSEQUENCE: the run continues on hard-coded defaults — node timeout \(WorkflowConfig(agentProfileIDs: []).effectiveNodeTimeout.map { "\(Int($0))s" } ?? "off"), max nesting \(WorkflowDepth.maxDepth), retries \(WorkflowConfig(agentProfileIDs: []).resolvedMaxRetries) — and the user's saved execution settings are NOT in effect for this run.")
+                        }
+
+                        if case .workflow(let config) = fetched?.details {
                             workflowConfig = config
                         } else {
-                            workflowConfig = WorkflowConfig(agentProfileIDs: [])
+                            let defaults = WorkflowConfig(agentProfileIDs: [])
+                            if fetched != nil {
+                                // Found, but it is not a workflow profile — a different failure
+                                // from "could not read it", and worth separating.
+                                logger.error("[WF_CONFIG] profile \(profileID) conv \(conversationID): resolved profile is '\(fetched?.profileType.rawValue ?? "unknown")', not a workflow, so it carries no workflow config. CONSEQUENCE: the run uses hard-coded defaults; the user's saved execution settings are NOT in effect.")
+                            } else {
+                                logger.error("[WF_CONFIG] profile \(profileID) conv \(conversationID): no workflow profile resolved. CONSEQUENCE: the run uses hard-coded defaults — node timeout \(defaults.effectiveNodeTimeout.map { "\(Int($0))s" } ?? "off"), max nesting \(WorkflowDepth.maxDepth), retries \(defaults.resolvedMaxRetries).")
+                            }
+                            workflowConfig = defaults
                         }
                     }
 
-                    // Configurable nesting depth check (may be lower than hard ceiling)
-                    guard WorkflowDepth.current <= workflowConfig.resolvedMaxNestingDepth else {
-                        throw WorkflowError.nodeExecutionFailed(
-                            nodeID: profileID,
-                            profileName: "Workflow",
-                            underlyingError: "Maximum workflow nesting depth (\(workflowConfig.resolvedMaxNestingDepth)) exceeded"
-                        )
-                    }
+                    logger.info("[WF_CONFIG] profile \(profileID) conv \(conversationID): node timeout \(workflowConfig.effectiveNodeTimeout.map { "\(Int($0))s" } ?? "OFF"), max nesting \(WorkflowDepth.maxDepth), max retries \(workflowConfig.resolvedMaxRetries).")
 
                     // =============================================================
                     // 2c. PRE-FLIGHT CONFIGURATION VALIDATION
                     // =============================================================
 
-                    let validationIssues = WorkflowValidator.validate(layout: layout, profileMap: profileMap)
+                    // Retired per-node failure policies, reported once per run.
+                    //
+                    // The stored value is decoded (it must be — an unknown rawValue would take the
+                    // whole layout unreadable, WF24) and then IGNORED. A user who set "Stop
+                    // Workflow" is getting materially different behaviour now, so say so rather
+                    // than change it silently.
+                    let nodesWithRetiredPolicy = layout.nodes.compactMap { node -> (String, NodeFailurePolicy)? in
+                        guard let policy = node.nodeConfig?.onFailure, policy != .skipDependents else { return nil }
+                        return (node.displayName, policy)
+                    }
+                    if !nodesWithRetiredPolicy.isEmpty {
+                        let described = nodesWithRetiredPolicy.map { "\($0.0) → \($0.1.rawValue)" }.joined(separator: ", ")
+                        logger.notice("[WF_ROUTE] \(nodesWithRetiredPolicy.count) node(s) carry a RETIRED per-node failure policy, which is ignored: \(described). CONSEQUENCE: failure routing now comes from the canvas — an unwired `error` port stops that branch, a wired one runs the handler. `stopWorkflow` in particular no longer cancels parallel branches; they run to completion and their results still reach the final answer.")
+                    }
+
+                    // Same shape as the failure-policy line above: a stored `joinMode` from a
+                    // pre-2026-08-13 layout is honoured by neither branch of the derived join, and
+                    // a value silently ignored is exactly the kind of thing a field report blames.
+                    // ⚠️ `.all` is NOT reported — it was the default, so its presence says nothing
+                    // about intent, and logging every node on every run would bury the real signal.
+                    let nodesWithStoredJoinMode = layout.nodes.filter { $0.nodeConfig?.joinMode == .any }
+                    if !nodesWithStoredJoinMode.isEmpty {
+                        let named = nodesWithStoredJoinMode.map(\.displayName).joined(separator: ", ")
+                        logger.notice("[WF_ROUTE] \(nodesWithStoredJoinMode.count) node(s) carry a RETIRED 'Any one' fan-in setting, which is ignored: \(named). CONSEQUENCE: the join is now DERIVED from the graph — every incoming branch is required except a dead one whose live sibling is a mutually-exclusive alternative (different ports of a common Condition/Gate). For a merge under a Condition the behaviour is unchanged; for genuinely independent branches the node now SKIPS on a dead branch instead of running on partial input.")
+                    }
+
+                    // The node-timeout settings were retired with the whole Workflow Settings sheet
+                    // (2026-08-13). Stored values are still honoured so existing workflows keep
+                    // behaving identically — say so, since there is no longer any UI that reveals it.
+                    if workflowConfig.nodeTimeoutEnabled == false {
+                        logger.notice("[WF_CONFIG] This workflow carries a RETIRED 'node timeout OFF' setting, still honoured: its nodes run UNBOUNDED. CONSEQUENCE: a hung node is never stopped automatically. The Workflow Settings sheet was removed 2026-08-13 and there is no UI to change this — set a per-node hard timeout, or an `executionTimeout` on the bound profile, to bound the nodes that matter.")
+                    } else if let stored = workflowConfig.defaultNodeTimeout {
+                        logger.notice("[WF_CONFIG] This workflow carries a RETIRED workflow-level node timeout of \(Int(stored))s, still honoured. CONSEQUENCE: none — behaviour is unchanged. The control was removed 2026-08-13; per-node `hardTimeout` and the bound profile's `executionTimeout` both override it.")
+                    }
+
+                    // Same shape as the retired-policy lines above. A workflow-level retry default
+                    // is still honoured so an existing workflow keeps its resilience, but the
+                    // control is gone and the node-level equivalent is named here.
+                    if workflowConfig.resolvedMaxRetries > 0 {
+                        let affected = layout.nodes.filter { $0.nodeConfig?.maxNodeRetries == nil }
+                            .filter { node in
+                                if case .profile = node.kind { return true }
+                                if case .action = node.kind { return true }
+                                return false
+                            }
+                        logger.notice("[WF_CONFIG] This workflow carries a RETIRED workflow-level 'Default Max Retries' of \(workflowConfig.resolvedMaxRetries), still honoured by \(affected.count) node(s) that set no retry count of their own: \(affected.map(\.displayName).joined(separator: ", ")). CONSEQUENCE: none today — behaviour is unchanged. The control was removed 2026-08-13 because retry SAFETY differs by node kind; set Retries on those individual nodes to express it on the canvas. ⚠️ Only Profile and Action nodes retry at all — a Code, Router or Gate node never did.")
+                    }
+
+                    // ⚠️ Resolved on the MainActor because `WorkflowLayoutStore` is isolated there
+                    // — the same hop the layout load above already makes. The validator stays pure.
+                    let nestedLayouts = await MainActor.run {
+                        WorkflowLayoutStore.shared.resolveNestedLayouts(from: layout)
+                    }
+                    let validationIssues = WorkflowValidator.validate(
+                        layout: layout,
+                        profileMap: profileMap,
+                        subWorkflowLayouts: nestedLayouts,
+                        rootProfileID: profileID
+                    )
                     let validationErrors = validationIssues.filter { $0.severity == .error }
                     if !validationErrors.isEmpty {
                         let summary = validationErrors
@@ -249,13 +389,11 @@ actor WorkflowExecutor: Executor {
                     var state = WorkflowState()
                     let agentConnect: any WorkflowStreamProvider = injectedStreamProvider ?? AgentConnect()
                     var completedCount = 0
-                    var workflowStopped = false
 
                     continuation.yield(.thought("Starting workflow with \(totalNodes) node(s) across \(levels.count) level(s)..."))
 
                     for (levelIndex, level) in levels.enumerated() {
                         try Task.checkCancellation()
-                        if workflowStopped { break }
 
                         let levelNodeNames = level.compactMap { id in layout.nodes.first(where: { $0.id == id })?.displayName ?? id.uuidString }
                         logger.info("--- Level \(levelIndex + 1)/\(levels.count): [\(levelNodeNames.joined(separator: ", "))] ---")
@@ -272,14 +410,27 @@ actor WorkflowExecutor: Executor {
                             }
 
                             // --- Check upstream dependencies (respects NodeFailurePolicy) ---
-                            if !state.shouldExecuteNode(nodeID, edges: layout.edges, nodes: layout.nodes) {
-                                let skipReason = "Upstream dependency failed"
-                                logger.notice("Skipping node '\(node.displayName)': \(skipReason)")
+                            if case .skip(let skipCause) = state.runDecision(for: nodeID, edges: layout.edges, nodes: layout.nodes) {
+                                let skipReason = skipCause.displayText
+                                // Name the upstream(s) that caused it and what is now unreachable.
+                                // Nothing is cancelled when a branch dies (parallel branches are
+                                // independent by construction and keep their results), so a run
+                                // CAN spend tokens on work that a dead join will discard — this
+                                // line is what makes that visible in the log rather than silent.
+                                let deadUpstreams = layout.edges
+                                    .filter { $0.targetNodeID == nodeID }
+                                    .compactMap { edge in layout.nodes.first(where: { $0.id == edge.sourceNodeID })?.displayName }
+                                    .joined(separator: ", ")
+                                // Decided BEFORE the result is recorded — `recordResult` does not touch
+                                // `activeOutputPorts`, but reading the upstreams first keeps this
+                                // independent of that and of this node's own (about to be written) entry.
+                                let propagatesError = state.upstreamSignalledError(for: nodeID, edges: layout.edges)
+                                logger.notice("[WF_ROUTE] Skipping '\(node.displayName)': \(skipReason) (upstream: \(deadUpstreams)). \(propagatesError ? "An upstream FAILED, so this node activates its `error` port and a branch wired there still runs." : "Nothing upstream failed, so NO port is activated and the whole subtree below this node stays dead.") CONSEQUENCE: this branch stops here — wire the failing node's `error` port if it should be handled instead. Parallel branches are unaffected and keep running.")
                                 let skipResult = NodeResultEnvelope(
                                     taskID: UUID(), nodeID: nodeID,
                                     sourceProfileID: node.profileID ?? UUID(), profileName: node.displayName,
                                     profileType: node.profileType ?? .bot,
-                                    status: .skipped(reason: skipReason),
+                                    status: .skipped(reason: skipCause),
                                     output: "", artifacts: [],
                                     metadata: .simple(start: Date(), end: Date(), output: "")
                                 )
@@ -294,14 +445,34 @@ actor WorkflowExecutor: Executor {
                                     context: ["node_name": node.displayName, "node_id": nodeID.uuidString]
                                 )
                                 await TraceRecorder.shared.emitAgentError(span: traceContext, error: classified, iteration: nil)
-                                // P0-6: skipped nodes activate the `"error"` port for
-                                // downstream routing. Without this, branches wired
-                                // exclusively to the `error` port hang waiting for an
-                                // activation that never comes — a silent dead-end.
-                                // Skip propagates as an upstream-failure signal so error
-                                // recovery branches actually fire.
-                                state.setActiveOutputPorts(["error"], for: nodeID)
-                                continuation.yield(.workflowNodeFailed(nodeID: nodeID, profileName: node.displayName, error: skipReason))
+                                // P0-6: a skipped node activates the `"error"` port so a recovery
+                                // chain does not dead-end — branches wired exclusively to `error`
+                                // would otherwise hang waiting for an activation that never comes.
+                                //
+                                // ⚠️ CONDITIONAL since WF-EX2, and the condition is the whole point.
+                                // This used to fire on EVERY skip, including the two causes where
+                                // nothing went wrong (`.notChosen`, `.errorPortNotTaken`), so an
+                                // error handler hanging off a merely-routed-past node RAN on a
+                                // perfectly healthy run — and the run still reported success. If that
+                                // handler posts a webhook or sends a message, the workflow reported a
+                                // failure that never happened.
+                                //
+                                // `upstreamSignalledError` keys off the upstreams' active ports, NOT
+                                // this node's skip reason: `error` only ever gets there from a node
+                                // that actually failed, or from a skip that inherited it here, so the
+                                // signal carries its own provenance and stays correct however many
+                                // hops the dead branch runs. See that method for why the skip reason
+                                // is the wrong test.
+                                if propagatesError {
+                                    state.setActiveOutputPorts([WorkflowEdge.errorPortLabel], for: nodeID)
+                                }
+                                // ⚠️ `workflowNodeSkipped`, NOT `workflowNodeFailed`. This node did
+                                // not fail — in the `.notChosen` and `.errorPortNotTaken` cases
+                                // nothing in the run failed at all. Reporting it as a failure was
+                                // what forced every consumer to string-match its way back to the
+                                // truth, and what made `.skipped` unreachable in both the live and
+                                // the persisted status enums.
+                                continuation.yield(.workflowNodeSkipped(nodeID: nodeID, profileName: node.displayName, reason: skipCause))
                                 completedCount += 1
                                 continuation.yield(.workflowProgress(completed: completedCount, total: totalNodes))
                                 continue
@@ -335,9 +506,24 @@ actor WorkflowExecutor: Executor {
                                     continuation.yield(.workflowProgress(completed: completedCount, total: totalNodes))
                                     continue
                                 }
-                                profileNodes.append((node, nodeProfile))
+                                // A workflow-backed profile node is a NESTED SUB-WORKFLOW, not an
+                                // agent turn. It cannot go down the profile path: that path ends at
+                                // `streamWorkflowNodeResponse`, whose `case .workflow, .imageGen`
+                                // arm yields an error and finishes — and because the executor's
+                                // `.error` arm never sets `nodeStatus`, and no `.executionFinished`
+                                // arrives, the default `.completed` used to stick. The node went
+                                // GREEN with empty output, downstream consumed nothing, joins were
+                                // satisfied, the error port never fired and the run reported
+                                // success. It is dispatched structurally instead, where a child
+                                // executor runs its canvas (see `executeStructuralNode`).
+                                if profileType == .workflow {
+                                    logger.info("[WF_EXEC] node '\(node.displayName)' [node \(nodeID.uuidString.prefix(8))] is a nested sub-workflow (profile \(profileID)) — dispatching to the child executor, not the agent stream path.")
+                                    structuralNodes.append(node)
+                                } else {
+                                    profileNodes.append((node, nodeProfile))
+                                }
 
-                            case .condition, .loop, .code, .gate, .trigger, .action:
+                            case .condition, .code, .gate, .trigger, .action:
                                 structuralNodes.append(node)
                             }
                         }
@@ -356,7 +542,7 @@ actor WorkflowExecutor: Executor {
                         if structuralNodes.count == 1 {
                             let node = structuralNodes[0]
                             let upstreamResults = state.upstreamResultEnvelopes(for: node.id, edges: layout.edges)
-                            let structResult = await Self.executeStructuralNode(
+                            let structResult = await Self.executeStructuralNodeBounded(
                                 node: node,
                                 upstreamResults: upstreamResults,
                                 state: state,
@@ -367,7 +553,7 @@ actor WorkflowExecutor: Executor {
                                 traceContext: traceContext,
                                 onTraceUpdate: onTraceUpdate,
                                 streamProvider: agentConnect,
-                                profileMap: profileMap,
+                                injectedProfileMap: injectedProfileMap,
                                 workflowConfig: workflowConfig
                             )
                             state.recordResult(from: structResult.envelope)
@@ -375,16 +561,13 @@ actor WorkflowExecutor: Executor {
                                 state.setActiveOutputPorts(ports, for: node.id)
                             }
                             if case .failed = structResult.envelope.status, structResult.activePorts == nil {
-                                state.setActiveOutputPorts(["error"], for: node.id)
+                                state.setActiveOutputPorts([WorkflowEdge.errorPortLabel], for: node.id)
                             }
                             for (key, value) in structResult.variableUpdates {
                                 state.setVariable(key, value: value)
                             }
                             completedCount += 1
                             continuation.yield(.workflowProgress(completed: completedCount, total: totalNodes))
-                            if case .failed = structResult.envelope.status, node.nodeConfig?.onFailure == .stopWorkflow {
-                                workflowStopped = true
-                            }
                         } else if !structuralNodes.isEmpty {
                             // Parallel — snapshot state before launch (same pattern as
                             // parallel profile nodes); upstream results are read from the
@@ -395,7 +578,7 @@ actor WorkflowExecutor: Executor {
                                     let displayIndex = completedCount + nodeOffset + 1
                                     let upstreamResults = snapshotState.upstreamResultEnvelopes(for: node.id, edges: layout.edges)
                                     group.addTask {
-                                        await Self.executeStructuralNode(
+                                        await Self.executeStructuralNodeBounded(
                                             node: node,
                                             upstreamResults: upstreamResults,
                                             state: snapshotState,
@@ -406,7 +589,7 @@ actor WorkflowExecutor: Executor {
                                             traceContext: traceContext,
                                             onTraceUpdate: onTraceUpdate,
                                             streamProvider: agentConnect,
-                                            profileMap: profileMap,
+                                            injectedProfileMap: injectedProfileMap,
                                             workflowConfig: workflowConfig
                                         )
                                     }
@@ -421,7 +604,7 @@ actor WorkflowExecutor: Executor {
                                         state.setActiveOutputPorts(ports, for: sid)
                                     }
                                     if case .failed = structResult.envelope.status, structResult.activePorts == nil {
-                                        state.setActiveOutputPorts(["error"], for: sid)
+                                        state.setActiveOutputPorts([WorkflowEdge.errorPortLabel], for: sid)
                                     }
                                     for (key, value) in structResult.variableUpdates {
                                         state.setVariable(key, value: value)
@@ -429,17 +612,10 @@ actor WorkflowExecutor: Executor {
                                     completedCount += 1
                                     continuation.yield(.workflowProgress(completed: completedCount, total: totalNodes))
 
-                                    if case .failed = structResult.envelope.status,
-                                       layout.nodes.first(where: { $0.id == sid })?.nodeConfig?.onFailure == .stopWorkflow {
-                                        workflowStopped = true
-                                        group.cancelAll()
-                                        logger.notice("Sibling cancellation: structural node failed with stopWorkflow; cancelling remaining parallel tasks.")
-                                    }
                                 }
                             }
                         }
 
-                        if workflowStopped { break }
                         guard !profileNodes.isEmpty else { continue }
 
                         // --- Execute profile nodes (with optional retry) ---
@@ -448,7 +624,7 @@ actor WorkflowExecutor: Executor {
                             let result = await Self.executeProfileNodeWithRetry(
                                 node: node, profile: profile,
                                 userInput: userInput,
-                                state: state, edges: layout.edges,
+                                state: state, edges: layout.edges, nodes: layout.nodes,
                                 nodeIndex: completedCount + 1, totalNodes: totalNodes,
                                 conversationID: conversationID,
                                 agentConnect: agentConnect,
@@ -459,58 +635,111 @@ actor WorkflowExecutor: Executor {
                             state.recordResult(from: result)
                             // Activate error port on failure for error routing
                             if case .failed = result.status {
-                                state.setActiveOutputPorts(["error"], for: node.id)
+                                state.setActiveOutputPorts([WorkflowEdge.errorPortLabel], for: node.id)
                             }
                             completedCount += 1
                             continuation.yield(.workflowProgress(completed: completedCount, total: totalNodes))
-
-                            if case .failed = result.status, node.nodeConfig?.onFailure == .stopWorkflow {
-                                workflowStopped = true
-                            }
                         } else {
-                            // Parallel profile nodes — snapshot state before launch
-                            let snapshotState = state
+                            // --- WF-CC2: MLX-aware dispatch ---
+                            // Same-level profile nodes are split into lanes that run one after
+                            // another; every lane is still fully parallel inside itself. Nodes are
+                            // separated ONLY when this level demands two or more DIFFERENT MLX
+                            // models: `MLXService` keeps exactly ONE model container resident, and
+                            // `loadModel` calls `performUnload()` (MLXService.swift:246) before
+                            // loading a different directory while EARLY-RETURNING for the one
+                            // already resident (:215-219). Two siblings on different models
+                            // therefore evict each other on every generation call — i.e. every
+                            // ReAct iteration — and `container(expecting:)` gives up after two
+                            // attempts and throws `modelIdentityMismatch`. Two siblings on the
+                            // SAME model share one container and cost nothing, so they are
+                            // deliberately left parallel. See `profileDispatchLanes`.
+                            let lanes = Self.profileDispatchLanes(profileNodes)
 
-                            await withTaskGroup(of: NodeResultEnvelope.self) { group in
-                                for (nodeOffset, (node, profile)) in profileNodes.enumerated() {
-                                    let displayIndex = completedCount + nodeOffset + 1
-                                    group.addTask {
-                                        await Self.executeProfileNodeWithRetry(
-                                            node: node, profile: profile,
-                                            userInput: userInput,
-                                            state: snapshotState, edges: layout.edges,
-                                            nodeIndex: displayIndex, totalNodes: totalNodes,
-                                            conversationID: conversationID,
-                                            agentConnect: agentConnect,
-                                            traceContext: traceContext, onTraceUpdate: onTraceUpdate,
-                                            continuation: continuation,
-                                            workflowConfig: workflowConfig
-                                        )
-                                    }
+                            if lanes.count > 1 {
+                                let shape = lanes
+                                    .map { "\($0.slot ?? "unconstrained") ← [\($0.members.map(\.node.displayName).joined(separator: ", "))]" }
+                                    .joined(separator: " THEN ")
+                                logger.notice("[WF_EXEC] profile \(profileID) conv \(conversationID) level \(levelIndex + 1)/\(levels.count): \(profileNodes.count) profile node(s) demand \(lanes.count) DIFFERENT local MLX models, so they are dispatched in \(lanes.count) sequential lane(s) — \(shape). CONSEQUENCE: this level's wall clock is now the SUM of the lanes instead of the slowest node. Only ONE MLX model container is resident at a time, so running them together would unload and re-read multi-GB weights on every generation call and can fail a node outright with a model-identity mismatch.")
+                            }
+
+                            for (laneIndex, lane) in lanes.enumerated() {
+                                // ⚠️ NO `try Task.checkCancellation()` between lanes, deliberately.
+                                // Skipping a later lane on cancel would leave its nodes with NO
+                                // `workflowNodeStarted` and no envelope at all, and
+                                // `WorkflowExecutionState.settleInFlightWork` can only repair rows
+                                // that are already `.running` — those nodes would vanish from the
+                                // run instead of being reported cancelled. Letting the lane be
+                                // created inside an already-cancelled parent reproduces today's
+                                // behaviour exactly: each child starts cancelled and emits
+                                // `workflowNodeStarted` then `workflowNodeCancelled`.
+
+                                // ⚠️ Re-snapshotted PER LANE, and provably equivalent to one
+                                // level-wide snapshot: `executeProfileNodeWithRetry` reads `state`
+                                // ONLY via `upstreamResultEnvelopes(for:edges:)`, which filters on
+                                // INCOMING edges, and `computeExecutionLevels` peels only in-degree
+                                // zero nodes, so no same-level edge can exist. Re-snapshotting
+                                // keeps that argument local instead of resting on an invariant
+                                // enforced in another file.
+                                let snapshotState = state
+                                // ⚠️ Captured BEFORE the drain loop below mutates `completedCount`,
+                                // so lane 2's display indices continue lane 1's instead of
+                                // restarting or colliding. Indices stay contiguous 1…N.
+                                let indexBase = completedCount
+
+                                if lanes.count > 1 {
+                                    logger.info("[WF_EXEC] profile \(profileID) conv \(conversationID) level \(levelIndex + 1) lane \(laneIndex + 1)/\(lanes.count) [\(lane.slot ?? "unconstrained")]: starting \(lane.members.count) node(s) — [\(lane.members.map(\.node.displayName).joined(separator: ", "))]. CONSEQUENCE: nodes in later lanes have NOT started and emit no workflowNodeStarted until this lane drains — their cards stay 'Waiting' and progress holds at \(completedCount)/\(totalNodes). This is a queue, not a hang.")
                                 }
-                                for await result in group {
-                                    state.recordResult(from: result)
-                                    if case .failed = result.status {
-                                        state.setActiveOutputPorts(["error"], for: result.nodeID)
-                                        let failedNode = layout.nodes.first(where: { $0.id == result.nodeID })
-                                        if failedNode?.nodeConfig?.onFailure == .stopWorkflow {
-                                            workflowStopped = true
-                                            // P0-9: cancel still-running siblings the moment a
-                                            // `.stopWorkflow` failure lands. Without this, the
-                                            // TaskGroup keeps draining results from siblings
-                                            // that were already launched — wasting compute and
-                                            // emitting confusing trailing events after the user
-                                            // has been told the run was stopped.
-                                            group.cancelAll()
-                                            logger.notice("Sibling cancellation: '\(failedNode?.displayName ?? "?")' failed with stopWorkflow policy; cancelling remaining parallel tasks.")
+
+                                await withTaskGroup(of: NodeResultEnvelope.self) { group in
+                                    for (nodeOffset, (node, profile)) in lane.members.enumerated() {
+                                        let displayIndex = indexBase + nodeOffset + 1
+                                        group.addTask {
+                                            await Self.executeProfileNodeWithRetry(
+                                                node: node, profile: profile,
+                                                userInput: userInput,
+                                                state: snapshotState, edges: layout.edges, nodes: layout.nodes,
+                                                nodeIndex: displayIndex, totalNodes: totalNodes,
+                                                conversationID: conversationID,
+                                                agentConnect: agentConnect,
+                                                traceContext: traceContext, onTraceUpdate: onTraceUpdate,
+                                                continuation: continuation,
+                                                workflowConfig: workflowConfig
+                                            )
                                         }
                                     }
-                                    completedCount += 1
-                                    continuation.yield(.workflowProgress(completed: completedCount, total: totalNodes))
+                                    // ⚠️ BYTE-IDENTICAL to the pre-WF-CC2 drain body: the
+                                    // 2026-08-12 sibling-not-cancelled decision lives here and the
+                                    // lane split does not touch it.
+                                    for await result in group {
+                                        state.recordResult(from: result)
+                                        if case .failed = result.status {
+                                            // ⚠️ Siblings are NOT cancelled. A parallel branch is
+                                            // independent by construction — nothing connects it to
+                                            // this one — so its work stays valid and its output still
+                                            // reaches the final answer. Aborting them destroyed usable
+                                            // results to save tokens (design decision 2026-08-12); a
+                                            // doomed branch is reported by the unreachable-branch log
+                                            // instead.
+                                            state.setActiveOutputPorts([WorkflowEdge.errorPortLabel], for: result.nodeID)
+                                        }
+                                        completedCount += 1
+                                        continuation.yield(.workflowProgress(completed: completedCount, total: totalNodes))
+                                    }
                                 }
                             }
                         }
                     }
+
+                    // ⚠️ Cancellation is checked at the TOP of each level, so a run stopped during
+                    // its FINAL level had no later checkpoint: the loop ended normally and the
+                    // synthesis below ran as though the run had finished (WF-EX3). Nothing reached
+                    // the user — the consumer is already torn down and `ActiveStreamManager` stamps
+                    // `cancelled` itself — but the TELEMETRY lied: the root span closed `.completed`
+                    // and no `.userCancelled` was recorded, so Stop was under-counted in Trends at
+                    // the single most common moment people press it. This lands in the
+                    // `catch is CancellationError` arm below, which already drains suspensions,
+                    // classifies the error, closes the span `.error` and emits `.cancelled`.
+                    try Task.checkCancellation()
 
                     // =============================================================
                     // 4. SYNTHESIZE FINAL OUTPUT (Terminal Nodes)
@@ -524,17 +753,126 @@ actor WorkflowExecutor: Executor {
                         return false
                     }
 
+                    // ⚠️ The run verdict is decided by whether anything FAILED, not by whether a
+                    // terminal succeeded. Those are different questions, and conflating them is what
+                    // reported a healthy branching run as a total failure.
+                    let failedNodes = state.failedNodeSummaries()
+
+                    // Terminals that actually RAN. A `.skipped` terminal is an untaken branch —
+                    // normal condition/gate routing, not a result — so it is excluded entirely.
+                    // Listing it would put "## Fallback Handler — not run" in the answer of every
+                    // branching workflow, which is noise, not information.
+                    let ranTerminals = terminalOutputs.filter {
+                        switch $0.status {
+                        case .completed, .failed: return true
+                        case .canceled, .skipped: return false
+                        }
+                    }
+
                     if !successfulTerminals.isEmpty {
-                        let finalOutput = successfulTerminals.map(\.text).joined(separator: "\n\n")
+                        // Labeled, per-terminal output — successes AND failures together, so a
+                        // partially-successful run shows what worked next to what didn't, each
+                        // attributed to its node. Previously only successful terminals were joined
+                        // with "\n\n", so with several terminals you could not tell which node
+                        // produced which half, and a failed one contributed nothing at all.
+                        //
+                        // Markdown headings rather than a structured payload: the Final Outcome
+                        // card already renders `finalOutput` as markdown, so attribution costs no
+                        // schema change and no view work. A structured `[TerminalOutput]` is the
+                        // eventual shape and is filed separately.
+                        //
+                        // ONE terminal stays bare — the common single-answer case must not grow a
+                        // heading it never had.
+                        let finalOutput: String
+                        if ranTerminals.count <= 1 {
+                            finalOutput = ranTerminals.first?.text ?? ""
+                        } else {
+                            finalOutput = ranTerminals.map { terminal -> String in
+                                let body: String
+                                if case .failed(let reason) = terminal.status {
+                                    body = "**Failed:** \(reason.localizedDescription)"
+                                } else {
+                                    body = terminal.text.isEmpty ? "_(no output)_" : terminal.text
+                                }
+                                return "## \(terminal.profileName)\n\n\(body)"
+                            }.joined(separator: "\n\n")
+                        }
+
                         if !finalOutput.isEmpty {
                             continuation.yield(.content(finalOutput))
+                        } else {
+                            // ⚠️ NO `.content` here, deliberately — do not "fix" this into an
+                            // explanatory sentence. A terminal can succeed with empty TEXT and still
+                            // have done its job: an Action node that wrote a file, or a node whose
+                            // result is an artifact rather than prose. Announcing "finished without
+                            // producing an answer" would be false for exactly those runs, and
+                            // `testTerminalNode_EmptyOutput_NotInFinalContent` pins the silence.
+                            // (Branch 3 below is different: there NO terminal succeeded at all.)
+                            // Logged so a genuinely blank reply is still diagnosable.
+                            logger.notice("[WF_EXEC] Run completed with an EMPTY final answer: \(successfulTerminals.count) successful terminal(s) produced no text. CONSEQUENCE: no `.content` is emitted — correct when the result is an artifact or a side effect, but if the user expected prose, check whether the terminal node's chosen output port is wired.")
                         }
                         let terminalNames = successfulTerminals.map(\.profileName).joined(separator: ", ")
-                        logger.info("Workflow completed. \(successfulTerminals.count)/\(terminalOutputs.count) terminal nodes succeeded: [\(terminalNames)]")
-                        logger.debug("Final output preview (\(finalOutput.count) chars):\n\(String(finalOutput.prefix(500)))")
+                        logger.info("[WF_EXEC] Workflow completed. \(successfulTerminals.count)/\(terminalOutputs.count) terminal node(s) succeeded: [\(terminalNames)]. Final output \(finalOutput.count) chars\(ranTerminals.count > 1 ? ", labeled per terminal" : "").")
+                        logger.debug("Final output preview:\n\(String(finalOutput.prefix(500)))")
+                    } else if !failedNodes.isEmpty {
+                        // Something genuinely failed. Report the ACTUAL reasons rather than the flat
+                        // "all terminal nodes failed", which named neither the node nor the cause —
+                        // the run's own error message was the one place the failure wasn't visible.
+                        // Still an `.error` event, not `.content`: the event type is what the chat
+                        // surfaces as a failure, and changing it would silently alter that contract.
+                        //
+                        // ⚠️ Reported over FAILED NODES, not terminals. The failing node is usually
+                        // mid-graph, so listing terminals described the symptom ("did not run") and
+                        // hid the cause. Terminals are appended for context, not used as the reason.
+                        let terminalDetail = terminalOutputs.map { terminal -> String in
+                            switch terminal.status {
+                            case .failed(let reason):     return "\(terminal.profileName): \(reason.localizedDescription)"
+                            case .canceled:               return "\(terminal.profileName): cancelled"
+                            case .skipped(let cause):     return "\(terminal.profileName): \(cause.displayText)"
+                            case .completed:              return "\(terminal.profileName): completed"
+                            }
+                        }.joined(separator: "\n")
+                        let message = "The workflow failed.\n\n\(failedNodes.joined(separator: "\n"))"
+                            + (terminalDetail.isEmpty ? "" : "\n\nBranch endings:\n\(terminalDetail)")
+                        continuation.yield(.error(StructuredError(message: message)))
+                        logger.error("[WF_EXEC] Run FAILED — \(failedNodes.count) node(s) failed: \(failedNodes.joined(separator: " | ")). Terminals: \(terminalDetail.replacingOccurrences(of: "\n", with: " | ")). CONSEQUENCE: the run is reported failed and the answer names the nodes that actually failed rather than the branches that merely did not run.")
                     } else {
-                        continuation.yield(.error("Workflow completed but all terminal nodes failed."))
-                        logger.warning("Workflow completed but all terminal nodes failed.")
+                        // ⚠️ DEFENSIVE — believed UNREACHABLE, and deliberately kept.
+                        //
+                        // Reaching here needs zero successful terminals AND zero failures. Since
+                        // WF-EX1 made terminality a function of LIVE edges, a completed node either
+                        // feeds a live edge or IS a terminal — so "no successful terminal" implies
+                        // "nothing completed at all", which for a graph whose entry nodes always run
+                        // means everything was skipped or cancelled. The derived fan-in join then
+                        // excuses exactly the dead branches that could otherwise strand a merge, so
+                        // no purely-skipped shape I could construct lands here (attempted:
+                        // unwired-router-port, two-router cross-skip, and a stranded join — each
+                        // leaves a completed terminal or a failure behind). Cancellation used to be
+                        // the one live route and now throws to `catch is CancellationError` first
+                        // (WF-EX3).
+                        //
+                        // ⚠️ A mutation check CONFIRMED the gap rather than the coverage: deleting
+                        // `&& !failedNodes.isEmpty` from the failure branch above fails NO test,
+                        // because no test reaches this branch. Keep it anyway — an unreachable
+                        // branch that reports honestly costs nothing, and the alternative (falling
+                        // into the failure branch with an empty failure list) is the WF-EX1 defect.
+                        //
+                        // Nothing succeeded AND nothing failed — every branch that was taken ended in
+                        // a node that did not run. That is an odd workflow, but it is NOT a failure,
+                        // and calling it one was the second half of the same bug: a run where a Gate
+                        // or Router legitimately routed into a dead end was reported red with the
+                        // sentence "all terminal nodes failed", asserting failures that never
+                        // happened. Reported as a completed run that produced no answer, which is
+                        // exactly what it is.
+                        let detail = terminalOutputs.map { terminal -> String in
+                            if case .skipped(let cause) = terminal.status {
+                                return "\(terminal.profileName): \(cause.displayText)"
+                            }
+                            return "\(terminal.profileName): \(WorkflowState.statusLabel(terminal.status))"
+                        }.joined(separator: "\n")
+                        continuation.yield(.content(String(
+                            localized: "The workflow finished without producing an answer — every branch it took ended in a node that did not run.")))
+                        logger.notice("[WF_EXEC] Run produced NO output and NO failures — \(terminalOutputs.count) terminal node(s), none completed: \(detail.replacingOccurrences(of: "\n", with: " | ")). CONSEQUENCE: reported as COMPLETED with an explanatory answer, not as a failure — nothing in this run failed.")
                     }
 
                     let executionLog = state.executionLog
@@ -545,11 +883,11 @@ actor WorkflowExecutor: Executor {
                     // executors are swallowed by the forwarder (they're node-scoped); the
                     // workflow as a whole reports its own outcome here so the bubble's
                     // TerminalOutcomeChip reflects workflow-level success vs partial-failure.
-                    if successfulTerminals.isEmpty {
+                    if successfulTerminals.isEmpty && !failedNodes.isEmpty {
                         await TraceRecorder.shared.endSpan(spanID: traceContext.spanID, status: .error)
                         continuation.yield(.executionFinished(
                             outcome: .failed,
-                            reason: "All \(terminalOutputs.count) terminal node\(terminalOutputs.count == 1 ? "" : "s") failed"
+                            reason: "\(failedNodes.count) node\(failedNodes.count == 1 ? "" : "s") failed"
                         ))
                     } else {
                         await TraceRecorder.shared.endSpan(spanID: traceContext.spanID, status: .completed)
@@ -619,6 +957,7 @@ actor WorkflowExecutor: Executor {
         profile: BackendProfileModel,
         userInput: String,
         upstreamResults: [NodeResultEnvelope],
+        isEntryNode: Bool,
         nodeIndex: Int,
         totalNodes: Int,
         conversationID: UUID,
@@ -663,17 +1002,18 @@ actor WorkflowExecutor: Executor {
 
         // --- Build Workflow Execution Context ---
         let baseTaskDescription = node.nodeConfig?.taskDescription ?? ""
-        let isFirstNode = upstreamResults.isEmpty
-        // `includeFailures: true` lets an error-handler profile node (wired to a
-        // failed upstream's `error` port) actually receive that upstream's output
-        // + failure reason. This is safe regardless of routing: a failed envelope
-        // only reaches `upstreamResults` when port-filtering matched an active
-        // `error` port (i.e. genuine error routing) — normal success routing never
-        // surfaces failed upstreams here.
-        let upstreamInput = ContextCompressor.compileForWorkflow(
+        let isFirstNode = isEntryNode
+        // `includeFailures: true` lets a downstream profile node actually receive a failed
+        // upstream's output + failure reason. A failed envelope reaches `upstreamResults` by
+        // exactly TWO sanctioned routes, and the annotation is wanted on both:
+        //   1. an active `error` port (a dedicated error-handler branch), and
+        //   2. a DEFAULT edge from an upstream whose policy is Continue All — n8n-style
+        //      continue-on-error, where the failure rides the main output with its data.
+        // Normal success routing never surfaces failed upstreams here.
+        // ⚠️ No budgets — upstream output passes through in full (user decision 2026-08-13).
+        // Fitting it is a function of which model this node runs, which is the author's choice.
+        let upstreamInput = WorkflowInputAssembler.compileForWorkflow(
             results: upstreamResults,
-            budget: workflowConfig.resolvedTotalContextBudget,
-            perNodeBudget: workflowConfig.resolvedContextBudgetPerNode,
             includeFailures: true
         )
 
@@ -713,7 +1053,7 @@ actor WorkflowExecutor: Executor {
         if upstreamArtifacts.isEmpty {
             upstreamArtifactText = ""
         } else {
-            let (extracted, docFailures) = await ContextCompressor.extractDocumentText(
+            let (extracted, docFailures) = await WorkflowInputAssembler.extractDocumentText(
                 from: upstreamArtifacts,
                 fileProcessor: FileProcessorService()
             )
@@ -754,7 +1094,11 @@ actor WorkflowExecutor: Executor {
         // node sets no explicit `hardTimeout`); the node then runs unbounded.
         let nodeTimeout: TimeInterval? = {
             if let hardTimeout = node.nodeConfig?.hardTimeout { return hardTimeout }
-            if case .agent(let config) = profile.details, let t = config.executionTimeout { return t }
+            // ⚠️ register B44 — routed through the shared accessor rather than a sixth private
+            // `if case .agent`. No behaviour change for anything reachable here (a workflow node
+            // binds a STORED profile and `.code` is ephemeral, never persisted), but leaving the
+            // pattern in place is how this defect kept reproducing itself across five call sites.
+            if let t = profile.details.executionTimeout { return t }
             return workflowConfig.effectiveNodeTimeout
         }()
 
@@ -779,16 +1123,21 @@ actor WorkflowExecutor: Executor {
             // becomes a `.completed` workflow node and (a) inflates the success
             // tally and (b) makes node-level retry (`maxNodeRetries`) unreachable.
             let streamResult = try await withThrowingTaskGroup(
-                of: (String, [ToolOutput], [MediaArtifact], ExecutionOutcome?, String?).self
+                of: (String, [ToolOutput], [MediaArtifact], ExecutionOutcome?, String?, String?).self
             ) { group in
                 // Timeout sentinel — only when a timeout is configured. When disabled
                 // (`nodeTimeout == nil`) the group runs the stream task alone, unbounded.
+                //
+                // ⚠️ The clock excludes time parked awaiting a human (2026-08-13). This used to be a
+                // raw `Task.sleep(nodeTimeout)`, which meant an agent that asked for a tool
+                // confirmation killed its own node at 120s if the user was slow to answer — a live
+                // defect, not a hypothetical. `withComputeTimeout` re-checks parked time when it
+                // wakes and extends by the shortfall.
                 if let nodeTimeout {
+                    let convID = conversationID
+                    let name = displayName
                     group.addTask {
-                        try await Task.sleep(for: .seconds(nodeTimeout))
-                        throw AgentExecutionError(reason: .executionTimeout(
-                            elapsed: nodeTimeout, limit: nodeTimeout
-                        ))
+                        try await Self.computeTimeoutSentinel(nodeTimeout, conversationID: convID, nodeName: name)
                     }
                 }
 
@@ -803,6 +1152,14 @@ actor WorkflowExecutor: Executor {
                     // produced a non-empty `content` value.
                     var innerOutcome: ExecutionOutcome? = nil
                     var innerReason: String? = nil
+                    /// The last `.error` the inner stream emitted.
+                    ///
+                    /// Needed because an inner stream may report a fatal error and then simply
+                    /// FINISH, never emitting `.executionFinished` — which is exactly what
+                    /// `streamWorkflowNodeResponse` does for a profile type it cannot run
+                    /// (`case .workflow, .imageGen`). Without this the error was forwarded to the
+                    /// timeline for display and then dropped from the OUTCOME decision.
+                    var innerErrorMessage: String? = nil
 
                     let nodeStream = agentConnect.streamWorkflowNodeResponse(
                         for: profile,
@@ -835,6 +1192,13 @@ actor WorkflowExecutor: Executor {
                             continuation.yield(.reasoning("[\(displayName)] \(msg)", id: id, sourceNodeID: nodeID))
 
                         case .toolCall(let name, let params, _, let stepId):
+                            // ⚠️ Keyed to the OWNING node (`nodeID`), never `innerNode` (WF-UI2).
+                            // The inner id is a node of the CHILD's canvas: no view queries
+                            // `nodeTimelines` for it, and freeze persists timelines only for outer
+                            // result nodes — so every tool card forwarded under an inner id fell
+                            // into a keyed void: no card in the Timeline tab, nothing persisted,
+                            // debug-only logs. The HITL arms below deliberately KEEP the inner id —
+                            // approval scope is keyed on it and the suspension resumes against it.
                             continuation.yield(.toolCall(name: name, params: params, sourceNodeID: nodeID, stepId: stepId))
 
                         case .requestConfirmation(let toolName, let params, let operationID, _):
@@ -843,10 +1207,10 @@ actor WorkflowExecutor: Executor {
                         case .requestClarification(let question, let operationID, _, let options, let multiline):
                             continuation.yield(.requestClarification(question: "[\(displayName)] \(question)", operationID: operationID, sourceNodeID: nodeID, options: options, multiline: multiline))
 
-                        case .requestGate(let prompt, let options, let operationID, let deadline, _):
+                        case .requestGate(let prompt, let options, let operationID, let deadline, _, let inputText, let highlights):
                             // Gates are structural nodes, not profile-node output, so this is defensive —
                             // forward it tagged with this node id if it ever surfaces here.
-                            continuation.yield(.requestGate(prompt: "[\(displayName)] \(prompt)", options: options, operationID: operationID, deadline: deadline, sourceNodeID: nodeID))
+                            continuation.yield(.requestGate(prompt: "[\(displayName)] \(prompt)", options: options, operationID: operationID, deadline: deadline, sourceNodeID: nodeID, inputText: inputText, highlights: highlights))
 
                         case .error(let errMsg):
                             // Prefix the node name but PRESERVE the structured error's
@@ -857,6 +1221,13 @@ actor WorkflowExecutor: Executor {
                                 relatedPath: errMsg.relatedPath,
                                 suggestion: errMsg.suggestion
                             )))
+                            // Remember it for the outcome decision below. Forwarding an error for
+                            // DISPLAY is not the same as recording that the node failed, and this
+                            // arm used to do only the former — so an inner stream that errored and
+                            // finished without `.executionFinished` kept `nodeStatus`'s default
+                            // `.completed`. `.executionFinished(.failed)` still wins over this;
+                            // it is the authority when both are present.
+                            innerErrorMessage = errMsg.message
 
                         case .warning(let cat, let msg, let relatedPath, _):
                             // Always route to the node's own timeline — detail visibility when
@@ -870,7 +1241,9 @@ actor WorkflowExecutor: Executor {
                                 continuation.yield(.warning(category: cat, message: "[\(displayName)] \(msg)", relatedPath: relatedPath, sourceNodeID: nil))
                             }
 
-                        case .workflowNodeStarted, .workflowNodeCompleted, .workflowNodeFailed, .workflowProgress, .workflowLoopIteration:
+                        case .workflowNodeStarted, .workflowNodeCompleted, .workflowNodeFailed,
+                             .workflowNodeSkipped, .workflowNodeCancelled,
+                             .workflowProgress:
                             break // Ignore nested workflow events
 
                         case .mediaProgress:
@@ -900,7 +1273,7 @@ actor WorkflowExecutor: Executor {
                             innerReason = reason
                         }
                     }
-                    return (output, tools, media, innerOutcome, innerReason)
+                    return (output, tools, media, innerOutcome, innerReason, innerErrorMessage)
                 }
 
                 let result = try await group.next()!
@@ -910,6 +1283,26 @@ actor WorkflowExecutor: Executor {
             nodeOutput = streamResult.0
             nodeArtifacts = streamResult.1
             nodeMediaArtifacts = streamResult.2
+
+            // An inner stream that reported an ERROR and then finished with no terminal event
+            // must not be reported as a success.
+            //
+            // ⚠️ This is the shape `streamWorkflowNodeResponse` produces for a profile type it
+            // cannot run — `case .workflow, .imageGen` yields `.error` and finishes — so an
+            // ImageGen node used to go GREEN with empty output: downstream consumed nothing,
+            // joins were satisfied, the error port never activated, node retry could never fire,
+            // and the whole run reported success. The `.error` arm above forwarded the message
+            // for DISPLAY only; nothing carried it into this decision.
+            //
+            // Deliberately narrow: it fires only when NO `.executionFinished` arrived at all.
+            // A stream that errors mid-run and then reports `.completed` has recovered, and an
+            // explicit terminal event stays the authority — the branch below still owns that
+            // case. Treating "no terminal event" as failure ON ITS OWN would be wrong: a clean
+            // stream legitimately ends without one, which is why the default is `.completed`.
+            if case .completed = nodeStatus, streamResult.3 == nil, let errorMessage = streamResult.5 {
+                logger.error("[WF_EXEC] node '\(displayName)' [node \(nodeID.uuidString.prefix(8))] emitted an error and finished with NO terminal outcome: \(errorMessage). CONSEQUENCE: the node is failed rather than reported as an empty success, so its error port activates, dependents skip per its failure policy, and node retry can fire — instead of downstream nodes running on nothing while the run claims success.")
+                nodeStatus = .failed(.modelError(provider: "workflow", error: errorMessage))
+            }
 
             // Demote `.completed` → `.failed` when the inner agent/bot signalled
             // a non-success terminal outcome. The default nodeStatus (`.completed`)
@@ -1025,24 +1418,111 @@ actor WorkflowExecutor: Executor {
 
         case .canceled:
             await TraceRecorder.shared.endSpan(spanID: nodeSpan.spanID, status: .error)
-            continuation.yield(.workflowNodeFailed(nodeID: nodeID, profileName: displayName, error: "Cancelled"))
+            continuation.yield(.workflowNodeCancelled(nodeID: nodeID, profileName: displayName))
 
         case .skipped(let reason):
             // Skipped here is the "post-execution skip" path (rare in practice;
             // upstream skips are caught earlier with a synthetic envelope). Still
             // emit the category so the workflow phase shows the signal.
+            //
+            // ⚠️ This arm used to yield `workflowNodeFailed(error: "Skipped: …")`, whose wording did
+            // NOT match the prefix every consumer string-matched on — so the first node kind to
+            // return `.skipped` from `executeNode` would have been counted as a genuine failure
+            // everywhere. The typed event removes the trap rather than fixing the literal.
             let classified = ClassifiedAgentError.synthetic(
                 category: .wfNodeSkipped,
                 origin: "WorkflowExecutor.executeNode.skipped",
-                message: reason,
+                message: reason.displayText,
                 context: ["node_name": displayName, "node_id": nodeID.uuidString]
             )
             await TraceRecorder.shared.emitAgentError(span: nodeSpan, error: classified, iteration: nil)
             await TraceRecorder.shared.endSpan(spanID: nodeSpan.spanID, status: .completed)
-            continuation.yield(.workflowNodeFailed(nodeID: nodeID, profileName: displayName, error: "Skipped: \(reason)"))
+            continuation.yield(.workflowNodeSkipped(nodeID: nodeID, profileName: displayName, reason: reason))
         }
 
         return result
+    }
+
+    // MARK: - WF-CC2: MLX-aware profile-node dispatch
+
+    /// The single global runtime slot a model name binds to, or `nil` for "binds none".
+    ///
+    /// ⚠️ `WorkflowValidator` calls this too, so the design-time warning and the runtime
+    /// partition CANNOT disagree about which nodes contend. Change one, you change both.
+    nonisolated static func mlxSlotKey(modelName: String) -> String? {
+        let model = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return model.isEmpty ? nil : "mlx:\(model)"
+    }
+
+    /// The MLX slot this profile's LLM binds to, or `nil` when it binds none.
+    ///
+    /// ⚠️ `.mlx` ONLY — never `ApiProvider.isLocal`, which also covers `.ollama`. Ollama speaks
+    /// HTTP to a separate server that keeps several models resident and queues server-side; it has
+    /// no in-process slot to contend for.
+    ///
+    /// ⚠️ Keyed on the MODEL, not merely on the provider. `MLXService.loadModel(from:)`
+    /// EARLY-RETURNS without unloading when the requested directory is already resident
+    /// (MLXService.swift:215-219) and coalesces concurrent loads of the same directory (:210-212),
+    /// so N nodes on ONE model share a single container and evict nothing. `performUnload()`
+    /// (:246) runs only on a genuine model SWITCH. Serializing same-model siblings would cost
+    /// parallelism for no benefit whatsoever.
+    ///
+    /// ⚠️ The NAME is a safe key even though `MLXService` compares DIRECTORIES: the name is
+    /// resolved by `MLXModelService.installedModel(named:)`, which is deterministic, so equal
+    /// names always mean one path. Two different names CAN collapse onto one path, which makes
+    /// this key over-partition in that case — costing parallelism, never correctness. Do NOT "fix"
+    /// that by resolving paths here: `MLXModelService` is `@MainActor`, and a main-actor hop per
+    /// node inside this `nonisolated` dispatch loop buys a rare speedup at the price of a new
+    /// failure mode.
+    ///
+    /// `resolvedLLMConfig` (BackendProfile.swift:30) is already nil for `.workflow` (dispatched
+    /// structurally) and `.imageGen`, which is exactly right — neither can reach `MLXService`.
+    nonisolated static func mlxSlotKey(for profile: BackendProfileModel) -> String? {
+        guard let config = profile.resolvedLLMConfig, config.apiProvider == .mlx else { return nil }
+        return mlxSlotKey(modelName: config.modelName)
+    }
+
+    /// Splits one level's profile nodes into lanes dispatched one AFTER another. Every lane is
+    /// still fully parallel inside itself.
+    ///
+    /// ⚠️ Returns ONE lane containing everything unless the level demands TWO OR MORE DISTINCT MLX
+    /// models. A level with no MLX node, or with one MLX node beside any number of cloud/Ollama
+    /// nodes, is byte-for-byte today's behaviour — nothing can evict anything.
+    ///
+    /// ⚠️ When it does split, the unconstrained (cloud / Ollama / unconfigured) nodes ride along
+    /// with the FIRST MLX lane rather than forming a lane of their own: they never touch the MLX
+    /// slot, so they are exactly as safe beside MLX-A as they are alone, and this way they still
+    /// overlap real work instead of extending the level by their own duration.
+    ///
+    /// ⚠️ Reordering is safe BY CONSTRUCTION, not by convention. `computeExecutionLevels` peels
+    /// only nodes whose in-degree has reached zero, so two nodes on one level can never be joined
+    /// by an edge; and `executeProfileNodeWithRetry` reads `state` exactly once, via
+    /// `upstreamResultEnvelopes(for:edges:)`, which filters on INCOMING edges only. A node in lane
+    /// 2 therefore sees byte-identical upstream input to what it would have seen in lane 1.
+    nonisolated static func profileDispatchLanes(
+        _ nodes: [(node: WorkflowNode, profile: BackendProfileModel)]
+    ) -> [(slot: String?, members: [(node: WorkflowNode, profile: BackendProfileModel)])] {
+        typealias Entry = (node: WorkflowNode, profile: BackendProfileModel)
+        var unconstrained: [Entry] = []
+        var bySlot: [String: [Entry]] = [:]
+        var slotOrder: [String] = []
+
+        for entry in nodes {
+            guard let slot = mlxSlotKey(for: entry.profile) else {
+                unconstrained.append(entry)
+                continue
+            }
+            if bySlot[slot] == nil { slotOrder.append(slot) }
+            bySlot[slot, default: []].append(entry)
+        }
+
+        guard slotOrder.count > 1 else {
+            return nodes.isEmpty ? [] : [(slotOrder.first, nodes)]
+        }
+
+        return slotOrder.enumerated().map { index, slot in
+            (slot, index == 0 ? unconstrained + bySlot[slot]! : bySlot[slot]!)
+        }
     }
 
     // MARK: - Profile Node Retry Wrapper
@@ -1065,6 +1545,7 @@ actor WorkflowExecutor: Executor {
         userInput: String,
         state: WorkflowState,
         edges: [WorkflowEdge],
+        nodes: [WorkflowNode],
         nodeIndex: Int,
         totalNodes: Int,
         conversationID: UUID,
@@ -1075,9 +1556,18 @@ actor WorkflowExecutor: Executor {
         workflowConfig: WorkflowConfig
     ) async -> NodeResultEnvelope {
 
+        // ⚠️ `resolvedMaxRetries` is a LEGACY fallback — the workflow-level stepper was retired
+        // 2026-08-13. It stays honoured so an existing workflow keeps its resilience; new workflows
+        // leave it nil, so a node with no `maxNodeRetries` of its own does not retry.
         let maxRetries = node.nodeConfig?.maxNodeRetries ?? workflowConfig.resolvedMaxRetries
         let retryDelay = node.nodeConfig?.retryDelay ?? 0
         let upstreamResults = state.upstreamResultEnvelopes(for: node.id, edges: edges)
+        // "First node" is a GRAPH property, not a data property. It was derived from
+        // `upstreamResults.isEmpty`, which broke the moment routing and data disagreed: a
+        // continueAll downstream whose only upstream failed got zero envelopes and was handed the
+        // user's chat query as if it were an entry node (WF13). The two gates agree again now,
+        // but deriving from the graph makes the misclassification unrepresentable either way.
+        let isEntryNode = !edges.contains { $0.targetNodeID == node.id }
 
         var lastResult: NodeResultEnvelope?
 
@@ -1094,6 +1584,7 @@ actor WorkflowExecutor: Executor {
                 node: node, profile: profile,
                 userInput: userInput,
                 upstreamResults: upstreamResults,
+                isEntryNode: isEntryNode,
                 nodeIndex: nodeIndex, totalNodes: totalNodes,
                 conversationID: conversationID,
                 agentConnect: agentConnect,
@@ -1110,6 +1601,154 @@ actor WorkflowExecutor: Executor {
         }
 
         return lastResult!
+    }
+
+
+    /// Character spans of every place `rule` matched `text`, for the arbitration highlight.
+    ///
+    /// ⚠️ Runs ONLY when an arbitration is about to be shown, as a separate read-only pass AFTER the
+    /// routing decision — so it can never influence which branch is taken, however wrong it is.
+    ///
+    /// ⚠️ Uses `range(of:options:.caseInsensitive)`, which is exactly what
+    /// `localizedCaseInsensitiveContains` delegates to. That is the point: the highlight is produced
+    /// by the same comparison that routed, so it can never show a match the router did not make (or
+    /// miss one it did). ⚠️ Do NOT reuse `SearchHighlighter.matchOffsets` here — it lowercases both
+    /// sides and uses plain `range(of:)`, which diverges from locale-aware folding on Turkish
+    /// dotless-i and ß/ss.
+    ///
+    /// ⚠️ Start AND end both come from the returned `Range`. Never compute `end = start +
+    /// needle.count`: case-insensitive folding can match a span whose length differs from the
+    /// needle's (ß matches "ss", precomposed matches decomposed).
+    ///
+    /// Only `contains` has a locatable span. `equals` would give the degenerate whole field;
+    /// `notContains` / `notEquals` / `isEmpty` / `always` match by absence or unconditionally, and
+    /// highlighting a near-miss for `notContains` would paint precisely the text that would have
+    /// made the rule NOT match.
+    private static func matchSpans(for rule: ConditionRule, in text: String) -> [RuleMatchSpan] {
+        guard rule.op == .contains, !text.isEmpty else { return [] }
+
+        let needles = rule.value
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
+        var spans: [RuleMatchSpan] = []
+        for needle in needles {
+            var searchStart = text.startIndex
+            while searchStart < text.endIndex,
+                  let found = text.range(of: needle, options: .caseInsensitive, range: searchStart..<text.endIndex, locale: .current) {
+                spans.append(RuleMatchSpan(
+                    label: rule.label,
+                    start: text.distance(from: text.startIndex, to: found.lowerBound),
+                    end: text.distance(from: text.startIndex, to: found.upperBound)
+                ))
+                // A zero-width match would loop forever; step past it.
+                searchStart = found.upperBound > found.lowerBound ? found.upperBound : text.index(after: found.lowerBound)
+            }
+        }
+
+        // One rule's comma-separated needles can overlap ("urgent, urgently"). Merge, so the
+        // banner's forward-cursor painter never receives overlapping or out-of-order spans.
+        let sorted = spans.sorted { $0.start == $1.start ? $0.end < $1.end : $0.start < $1.start }
+        var merged: [RuleMatchSpan] = []
+        for span in sorted {
+            if let last = merged.last, span.start <= last.end {
+                merged[merged.count - 1] = RuleMatchSpan(label: last.label, start: last.start, end: max(last.end, span.end))
+            } else {
+                merged.append(span)
+            }
+        }
+        return merged
+    }
+
+    /// Sleeps until **compute** time exceeds `limit`, then throws `.executionTimeout`. Never returns
+    /// normally — it is a sentinel to race real work against.
+    ///
+    /// ⚠️ THE POINT: the clock excludes time spent parked awaiting a human. A node that sat for ten
+    /// minutes because nobody clicked a confirmation button has not misbehaved. Before 2026-08-13
+    /// the profile path raced a plain `Task.sleep`, so a slow tool confirmation killed the node at
+    /// 120s — a live defect — and extending that raw race to every node kind would have killed the
+    /// Router's deliberately-indefinite ambiguity arbitration on its first use.
+    ///
+    /// Self-correcting rather than a precomputed deadline: sleep to the nominal deadline, ask how
+    /// much of that was parked, and if compute has not reached the limit, extend by the shortfall
+    /// and sleep again. That handles parks beginning AFTER the sentinel is already asleep, which a
+    /// deadline computed up front cannot.
+    ///
+    /// ⚠️ Park time is accounted per CONVERSATION, so parallel siblings share the credit and a node
+    /// can over-run its limit when a sibling parked. Deliberate: over-crediting wastes some time,
+    /// under-crediting kills work that was only ever waiting.
+    static func computeTimeoutSentinel(
+        _ limit: TimeInterval,
+        conversationID: UUID,
+        nodeName: String
+    ) async throws -> Never {
+        let start = Date()
+        let parkedAtStart = await ExecutionSuspensionService.shared.cumulativeParkedTime(for: conversationID)
+        var remaining = limit
+
+        while true {
+            try await Task.sleep(for: .seconds(remaining))
+            let parked = await ExecutionSuspensionService.shared
+                .cumulativeParkedTime(for: conversationID) - parkedAtStart
+            let wall = Date().timeIntervalSince(start)
+            let compute = wall - parked
+
+            if compute >= limit {
+                logger.error("[WF_TIMEOUT] Node '\(nodeName)' exceeded its \(Int(limit))s compute budget (\(Int(compute))s compute, \(Int(parked))s parked awaiting a human, \(Int(wall))s wall-clock). CONSEQUENCE: the node fails and activates its `error` port; a branch wired there runs, otherwise this branch stops here.")
+                throw AgentExecutionError(reason: .executionTimeout(elapsed: compute, limit: limit))
+            }
+
+            remaining = limit - compute
+            logger.info("[WF_TIMEOUT] Node '\(nodeName)' timeout extended by \(Int(remaining))s — \(Int(parked))s of the elapsed \(Int(wall))s was spent awaiting a human, which does not count against the compute budget.")
+        }
+    }
+
+    /// How many times a structural node will attempt its work.
+    ///
+    /// ⚠️ Only Action nodes retry. A Code, Router or Gate node never did, so giving them a
+    /// multiplied budget would weaken a real bound in exchange for nothing.
+    static func plannedAttempts(for node: WorkflowNode, workflowConfig: WorkflowConfig) -> Int {
+        guard case .action = node.kind else { return 1 }
+        return max((node.nodeConfig?.maxNodeRetries ?? workflowConfig.resolvedMaxRetries) + 1, 1)
+    }
+
+    /// The node's OUTER backstop — the per-attempt limit multiplied across every planned attempt,
+    /// plus the delays between them.
+    ///
+    /// ⚠️ THE INVARIANT: this must always be ≥ the per-attempt limit × attempts, or retries become
+    /// unreachable. It was previously the per-attempt limit itself, so attempt 1 consumed the whole
+    /// budget and the sentinel fired the moment attempt 2 began — a node configured "60s, 3 retries"
+    /// got exactly one attempt, and any tool that failed slower than `limit / attempts` had its
+    /// configured retries silently disabled. Slow failure is precisely what retries are for.
+    ///
+    /// `nil` (timeout off) stays `nil` — unbounded is unbounded however many attempts there are.
+    static func outerTimeoutBudget(for node: WorkflowNode, workflowConfig: WorkflowConfig) -> TimeInterval? {
+        guard let perAttempt = node.nodeConfig?.hardTimeout ?? workflowConfig.effectiveNodeTimeout else { return nil }
+        let attempts = plannedAttempts(for: node, workflowConfig: workflowConfig)
+        let retryDelay = node.nodeConfig?.retryDelay ?? 0
+        return Double(attempts) * perAttempt + Double(attempts - 1) * retryDelay
+    }
+
+    /// Runs `work`, failing it if compute time exceeds `limit`. `nil` limit ⇒ unbounded.
+    /// See `computeTimeoutSentinel` for why the clock is not wall-clock.
+    static func withComputeTimeout<T: Sendable>(
+        _ limit: TimeInterval?,
+        conversationID: UUID,
+        nodeName: String,
+        work: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        guard let limit else { return try await work() }
+
+        return try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await work() }
+            group.addTask {
+                try await computeTimeoutSentinel(limit, conversationID: conversationID, nodeName: nodeName)
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
     }
 
     // MARK: - Artifact Forwarding
@@ -1173,7 +1812,159 @@ actor WorkflowExecutor: Executor {
 
     /// Executes a non-profile (structural) workflow node.
     /// Async because gate nodes suspend for HITL approval.
-    /// `streamProvider` and `profileMap` are threaded for loop body sub-executor injection.
+    /// `streamProvider` and `profileMap` are threaded for the sub-workflow child executor and Action-node tool resolution.
+    /// `executeStructuralNode` bounded by the node's compute timeout.
+    ///
+    /// ⚠️ Structural nodes had NO timeout at all before 2026-08-13 (WF22) — the race existed only on
+    /// the profile-stream and Action-tool paths, so a Router's MLX classifier, a Code template, a
+    /// sub-workflow could run unbounded while the settings sheet claimed a "maximum
+    /// wall-clock time per node".
+    ///
+    /// ⚠️ On timeout the node FAILS with `activePorts == nil`, so the driver activates `error` —
+    /// wireable on every failable kind since WF61. A timed-out node is therefore recoverable rather
+    /// than a dead branch.
+    ///
+    /// ⚠️ Safe to apply to Gate and to Router arbitration ONLY because the clock excludes parked
+    /// time (see `withComputeTimeout`). A raw wall-clock race here would kill an unanswered gate and
+    /// the deliberately-indefinite ambiguity arbitration.
+    private nonisolated static func executeStructuralNodeBounded(
+        node: WorkflowNode,
+        upstreamResults: [NodeResultEnvelope],
+        state: WorkflowState,
+        conversationID: UUID,
+        continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation,
+        nodeIndex: Int,
+        totalNodes: Int,
+        traceContext: TraceContext = TraceContext(subAgentName: "structural", provider: .anthropic),
+        onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void = { _ in },
+        streamProvider: (any WorkflowStreamProvider)? = nil,
+        injectedProfileMap: [UUID: BackendProfileModel]? = nil,
+        workflowConfig: WorkflowConfig = WorkflowConfig(agentProfileIDs: [])
+    ) async -> StructuralNodeResult {
+        // The timeout is PER ATTEMPT, so the outer backstop must be sized to the whole retry budget.
+        //
+        // ⚠️ THIS IS WHAT DEFEATED RETRIES ENTIRELY (WF-EX2). The outer bound and the per-attempt
+        // bound inside the Action path were computed from the IDENTICAL expression, so attempt 1
+        // consumed the whole budget and the outer sentinel fired the instant attempt 2 began:
+        // a node configured "60s, 3 retries" got exactly one attempt. Any Action node whose tool
+        // failed slower than `timeout / (retries + 1)` had its configured retries silently
+        // disabled — and slow failure is precisely the case retries exist for.
+        //
+        // ⚠️ The outer clock is NOT redundant now that the inner one is per-attempt: it is the ONLY
+        // bound on the other five structural kinds. A Router's LLM classifier, a Code template, a
+        // A sub-workflow has no inner timeout of its own (that was WF22), so
+        // removing it would put them back to running unbounded.
+        //
+        // Same multiplicative shape the profile path already documents and accepts: bounded, never
+        // infinite, and `maxNodeRetries` defaults to 0 so nothing changes unless a user opts in.
+        let perAttemptLimit = node.nodeConfig?.hardTimeout ?? workflowConfig.effectiveNodeTimeout
+        let retryDelay = node.nodeConfig?.retryDelay ?? 0
+        let attempts = Self.plannedAttempts(for: node, workflowConfig: workflowConfig)
+        let limit = Self.outerTimeoutBudget(for: node, workflowConfig: workflowConfig)
+
+        if attempts > 1, let perAttemptLimit, let limit {
+            logger.info("[WF_TIMEOUT] Action node '\(node.displayName)' is bounded at \(Int(perAttemptLimit))s PER ATTEMPT across \(attempts) attempt(s) (+\(Int(retryDelay))s between), so the node's outer backstop is \(Int(limit))s. CONSEQUENCE: a retry now gets its own full budget instead of whatever the first attempt left.")
+        }
+
+        let startTime = Date()
+
+        do {
+            let result = try await withComputeTimeout(limit, conversationID: conversationID, nodeName: node.displayName) {
+                await executeStructuralNode(
+                    node: node, upstreamResults: upstreamResults, state: state,
+                    conversationID: conversationID, continuation: continuation,
+                    nodeIndex: nodeIndex, totalNodes: totalNodes,
+                    traceContext: traceContext, onTraceUpdate: onTraceUpdate,
+                    streamProvider: streamProvider, injectedProfileMap: injectedProfileMap,
+                    workflowConfig: workflowConfig
+                )
+            }
+            emitStructuralTerminalEvent(
+                node: node, envelope: result.envelope,
+                variableUpdates: result.variableUpdates, continuation: continuation
+            )
+            return result
+        } catch is CancellationError {
+            // ⚠️ CANCELLATION IS NOT A FAILURE, and this arm is why it used to look like one.
+            //
+            // This was a bare `catch`. On Stop the timeout sentinel's `Task.sleep` throws
+            // `CancellationError` and usually wins the race, so the generic arm below mapped the
+            // user's own Stop to `.modelError(provider: "workflow", error: "The operation couldn't
+            // be completed. (Swift.CancellationError error 1.)")` — raw Swift internals shown as a
+            // workflow error — OVERWROTE the honest `.canceled` the work side had already
+            // reported, and activated the node's `error` branch. It fired on the DEFAULT path
+            // (`effectiveNodeTimeout` is `nodeTimeoutEnabled ?? true`), i.e. every Stop with a
+            // structural node in flight, and it silently undid the cancelled-status work done
+            // elsewhere in the model.
+            //
+            // ⚠️ `activePorts` stays nil AND the status is `.canceled`, not `.failed`, so the
+            // driver does NOT activate `error`: `edgeIsLive` treats `.canceled` as dead in both
+            // directions, which is correct — a cancelled node routes nowhere.
+            let envelope = NodeResultEnvelope(
+                taskID: UUID(), nodeID: node.id,
+                sourceProfileID: node.profileID ?? UUID(),
+                profileName: node.displayName,
+                profileType: node.profileType ?? .bot,
+                status: .canceled,
+                output: "",
+                artifacts: [],
+                metadata: .simple(start: startTime, end: Date(), output: "")
+            )
+            logger.notice("[WF_EXEC] Structural node '\(node.displayName)' [node \(node.id.uuidString.prefix(8))] CANCELLED after \(Int(Date().timeIntervalSince(startTime)))s. CONSEQUENCE: recorded as cancelled (not failed); its `error` port is NOT activated, so no recovery branch runs — the run is being torn down.")
+            continuation.yield(.workflowNodeCancelled(nodeID: node.id, profileName: node.displayName))
+            return StructuralNodeResult(envelope: envelope, activePorts: nil, variableUpdates: [:])
+        } catch {
+            let reason = (error as? AgentExecutionError)?.reason
+                ?? .modelError(provider: "workflow", error: error.localizedDescription)
+            let envelope = NodeResultEnvelope(
+                taskID: UUID(), nodeID: node.id,
+                sourceProfileID: node.profileID ?? UUID(),
+                profileName: node.displayName,
+                profileType: node.profileType ?? .bot,
+                status: .failed(reason),
+                output: "",
+                artifacts: [],
+                metadata: .simple(start: startTime, end: Date(), output: "")
+            )
+            // ⚠️ The node's real result — if the work finished before the group could unwind it —
+            // is UNRECOVERABLE here: `group.next()` rethrew the sentinel's error and the work
+            // child's value went with it. Say so, because a discarded answer with no log is
+            // indistinguishable in a support bundle from a node that produced nothing.
+            logger.error("[WF_EXEC] Structural node '\(node.displayName)' [node \(node.id.uuidString.prefix(8))] failed after \(Int(Date().timeIntervalSince(startTime)))s: \(reason.localizedDescription). CONSEQUENCE: the node reports empty output and activates its `error` port. If this was a compute-timeout, any result the node produced while unwinding was DISCARDED — the timeout race keeps the losing side's value out of reach — so downstream sees \"\" rather than a late answer.")
+            continuation.yield(.workflowNodeFailed(
+                nodeID: node.id, profileName: node.displayName,
+                error: reason.localizedDescription))
+            // ⚠️ `activePorts: nil` so the driver activates `error`. Setting it here would suppress
+            // the one recovery route a timed-out node has.
+            return StructuralNodeResult(envelope: envelope, activePorts: nil, variableUpdates: [:])
+        }
+    }
+
+    /// Emits the ONE terminal event for a structural node (WF-EX4).
+    ///
+    /// ⚠️ The single emitter. `executeStructuralNode` deliberately emits none of its own — see the
+    /// comment where its switch used to be.
+    private nonisolated static func emitStructuralTerminalEvent(
+        node: WorkflowNode,
+        envelope: NodeResultEnvelope,
+        variableUpdates: [String: String],
+        continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation
+    ) {
+        switch envelope.status {
+        case .completed:
+            // Full output (see executeNode) — the display renders & persists it in
+            // full; previews clip downstream.
+            let summary = envelope.output
+            continuation.yield(.workflowNodeCompleted(nodeID: node.id, profileName: node.displayName, summary: summary))
+        case .failed(let reason):
+            continuation.yield(.workflowNodeFailed(nodeID: node.id, profileName: node.displayName, error: reason.localizedDescription, suggestion: reason.remediation))
+        case .canceled:
+            continuation.yield(.workflowNodeCancelled(nodeID: node.id, profileName: node.displayName))
+        case .skipped(let reason):
+            continuation.yield(.workflowNodeSkipped(nodeID: node.id, profileName: node.displayName, reason: reason))
+        }
+    }
+
     private nonisolated static func executeStructuralNode(
         node: WorkflowNode,
         upstreamResults: [NodeResultEnvelope],
@@ -1182,15 +1973,26 @@ actor WorkflowExecutor: Executor {
         continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation,
         nodeIndex: Int,
         totalNodes: Int,
-        // Trace context + callback are threaded through so loop bodies can
-        // produce child spans of the parent loop rather than fresh root traces,
-        // and so body iterations' onTraceUpdate events reach the same consumer
-        // as the parent workflow's. Defaults preserve the prior single-shot
-        // behaviour for non-loop structural nodes (condition, gate, code).
+        // Trace context + callback are threaded through so a sub-workflow child
+        // can produce child spans of the parent node rather than fresh root
+        // traces, and so its onTraceUpdate events reach the same consumer as the
+        // parent workflow's. Defaults preserve the single-shot behaviour of the
+        // other structural kinds (condition, gate, code).
         traceContext: TraceContext = TraceContext(subAgentName: "structural", provider: .anthropic),
         onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void = { _ in },
         streamProvider: (any WorkflowStreamProvider)? = nil,
-        profileMap: [UUID: BackendProfileModel]? = nil,
+        // ⚠️ The map the CALLER was injected with (nil in production), NOT the parent's own
+        // resolved `profileMap`. Its only use is to be forwarded to a nested sub-workflow's executor.
+        //
+        // Forwarding the parent's resolved map is what broke nested execution outright: the parent
+        // builds it from `Set(layout.nodes.map(\.profileID))` — its OWN nodes — so a body
+        // profile the parent does not also use is absent by construction. The body executor's
+        // `if let injected` short-circuit then skips its own fetch, pre-flight validation
+        // reports every body profile node as "Profile not found — it may have been deleted",
+        // and the run throws `validationFailed` for profiles that exist and are visible in
+        // the sidebar. Passing the INJECTION through instead means production (nil) lets the
+        // body resolve its own profiles, while tests keep the map they deliberately supply.
+        injectedProfileMap: [UUID: BackendProfileModel]? = nil,
         // Workflow defaults used by Action nodes for timeout/retry resolution.
         workflowConfig: WorkflowConfig = WorkflowConfig(agentProfileIDs: [])
     ) async -> StructuralNodeResult {
@@ -1212,7 +2014,7 @@ actor WorkflowExecutor: Executor {
         // Artifacts the node itself produces (only Action nodes, via their tool).
         var producedArtifacts: [MediaArtifact] = []
 
-        // Per-structural-node span so condition/loop/code/gate/action nodes appear in the
+        // Per-structural-node span so condition/code/gate/action nodes appear in the
         // trace tree (mirrors the profile-node span) and Action-node tool results below
         // attach to a real parent row (Gap #11). Status reflects the node's outcome.
         let structSpan = traceContext.newSpan()
@@ -1227,7 +2029,6 @@ actor WorkflowExecutor: Executor {
         let kindLabel: String = switch node.kind {
         case .profile: "profile"
         case .condition: "condition"
-        case .loop: "loop"
         case .code: "code"
         case .gate: "gate"
         case .trigger: "trigger"
@@ -1236,20 +2037,190 @@ actor WorkflowExecutor: Executor {
         logger.info("Structural node '\(displayName)' (\(kindLabel)): \(upstreamResults.count) upstream results [\(upstreamNames)], total \(upstreamTotalChars) chars")
 
         switch node.kind {
-        case .profile:
-            break // Should never reach here
+        case .profile(let profileID, let profileType):
+            // NESTED SUB-WORKFLOW. Only workflow-backed profile nodes are dispatched here; every
+            // other profile type goes down the agent path in `executeNode`.
+            guard profileType == .workflow else {
+                // Previously `break // Should never reach here`, which meant a routing mistake
+                // presented as a GREEN node with empty output — downstream consumed nothing,
+                // joins were satisfied, the error port stayed inactive and the run reported
+                // success. A broken invariant must not default to silent success, and there are
+                // no `assert`s in this subsystem to catch it in debug either.
+                logger.error("[WF_EXEC] node '\(displayName)' [node \(nodeID.uuidString.prefix(8))] reached executeStructuralNode as a \(profileType.rawValue) profile, which only the agent path can run. CONSEQUENCE: the node is failed rather than reported as an empty success; its error port activates and dependents skip.")
+                status = .failed(.modelError(
+                    provider: "workflow",
+                    error: "Internal routing error: '\(displayName)' is a \(profileType.rawValue) profile and cannot run as a structural node."
+                ))
+                break
+            }
+
+            let upstreamText = upstreamResults.map(\.output).joined(separator: "\n")
+            logger.info("[WF_EXEC] sub-workflow '\(displayName)' [node \(nodeID.uuidString.prefix(8))] starting: child profile \(profileID), \(upstreamText.count) chars of upstream input, depth \(WorkflowDepth.current).")
+
+            // The child runs its OWN canvas. `layout: nil` makes it load that workflow's layout,
+            // and `profileMap` is the INJECTION (nil in production) so the child resolves the
+            // profiles ITS nodes reference — the parent's resolved map only ever holds the
+            // parent's. The recursion guard needs nothing here: `executeWorkflow` increments the
+            // `WorkflowDepth` TaskLocal itself and refuses past `maxDepth`, and TaskLocals
+            // propagate into the child's task.
+            let childExecutor = WorkflowExecutor(workflowProfileID: profileID)
+            let childTrace = traceContext.newSpan()
+            let childStream = childExecutor.executeWorkflow(
+                userInput: upstreamText,
+                chatHistory: [],
+                conversationID: conversationID,
+                ragContext: nil,
+                traceContext: childTrace,
+                onTraceUpdate: onTraceUpdate,
+                layout: nil,
+                profileMap: injectedProfileMap,
+                streamProvider: streamProvider
+            )
+
+            var childOutput = ""
+            var childOutcome: ExecutionOutcome? = nil
+            var childFailureReason: String? = nil
+            var suppressedOrchestrationEvents = 0
+
+            do {
+                for try await event in childStream {
+                    switch event {
+                    case .content(let text):
+                        childOutput += text
+
+                    case .thought(let msg, let id, _):
+                        continuation.yield(.thought("[\(displayName)] \(msg)", id: id, sourceNodeID: nodeID))
+
+                    case .reasoning(let msg, let id, _):
+                        continuation.yield(.reasoning("[\(displayName)] \(msg)", id: id, sourceNodeID: nodeID))
+
+                    // Tool and artifact evidence is FORWARDED, not suppressed. A sub-workflow that
+                    // writes a file or generates an image must show its tool cards in the timeline,
+                    // land in the persisted run record, and hand its media downstream — otherwise a
+                    // consumer node answers about an artifact it never received.
+                    case .toolCall(let name, let params, _, let stepId):
+                        continuation.yield(.toolCall(name: name, params: params, sourceNodeID: nodeID, stepId: stepId))
+
+                    case .toolSucceeded(let toolOutput, let durationMs, _):
+                        continuation.yield(.toolSucceeded(toolOutput, durationMs: durationMs, sourceNodeID: nodeID))
+
+                    case .toolFailed(let toolOutput, let category, let suggestion, _):
+                        continuation.yield(.toolFailed(toolOutput, category: category, suggestion: suggestion, sourceNodeID: nodeID))
+
+                    case .artifactProduced(let artifact):
+                        producedArtifacts.append(artifact)
+                        continuation.yield(.artifactProduced(artifact))
+
+                    case .warning(let category, let message, let relatedPath, _):
+                        continuation.yield(.warning(category: category, message: "[\(displayName)] \(message)", relatedPath: relatedPath, sourceNodeID: nodeID))
+
+                    case .error(let errMsg):
+                        // Surface in the node's timeline, but let `.executionFinished` decide the
+                        // outcome — an `.error` fires only when every terminal failed, so keying
+                        // off it would miss a partial failure.
+                        continuation.yield(.thought("[\(displayName)] Error: \(errMsg.message)", sourceNodeID: nodeID))
+                        childFailureReason = errMsg.message
+
+                    case .executionFinished(let outcome, let reason):
+                        childOutcome = outcome
+                        if let reason { childFailureReason = reason }
+
+                    // ⚠️ HITL requests MUST be forwarded — each carries an `operationID` the child
+                    // is already suspended on. Swallowing one means no banner, nobody to answer,
+                    // and a workflow hung forever with no error and no timeout. `sourceNodeID`
+                    // keeps the INNER node's id: it is what the approval scope is keyed on, so
+                    // collapsing it here would pool approvals across every node in the child.
+                    case .requestConfirmation(let toolName, let params, let operationID, let innerNode):
+                        logger.notice("[WF_HITL] sub-workflow '\(displayName)' forwarding confirmation for '\(toolName)' [op \(operationID) node \(innerNode?.uuidString ?? nodeID.uuidString)] — run is now WAITING on the user")
+                        continuation.yield(.requestConfirmation(
+                            toolName: toolName, params: params,
+                            operationID: operationID, sourceNodeID: innerNode ?? nodeID))
+
+                    case .requestGate(let prompt, let options, let operationID, let deadline, let innerNode, let inputText, let highlights):
+                        logger.notice("[WF_HITL] sub-workflow '\(displayName)' forwarding GATE [op \(operationID)] — run is now WAITING on the user")
+                        continuation.yield(.requestGate(
+                            prompt: prompt, options: options, operationID: operationID,
+                            deadline: deadline, sourceNodeID: innerNode ?? nodeID,
+                            inputText: inputText, highlights: highlights))
+
+                    case .requestClarification(let question, let operationID, let innerNode, let options, let multiline):
+                        logger.notice("[WF_HITL] sub-workflow '\(displayName)' forwarding clarification [op \(operationID)] — run is now WAITING on the user")
+                        continuation.yield(.requestClarification(
+                            question: "[\(displayName)] \(question)",
+                            operationID: operationID, sourceNodeID: innerNode ?? nodeID,
+                            options: options, multiline: multiline))
+
+                    default:
+                        // The child's OWN orchestration events (its per-node started/completed,
+                        // its progress counter, its token usage). Re-emitting them would make the
+                        // parent's timeline show the child's nodes as siblings of its own and
+                        // double-count progress against the parent's total. Counted, not silent —
+                        // see the log line below.
+                        suppressedOrchestrationEvents += 1
+                    }
+                }
+            } catch is CancellationError {
+                logger.notice("[WF_EXEC] sub-workflow '\(displayName)' [node \(nodeID.uuidString.prefix(8))] cancelled after \(childOutput.count) chars. CONSEQUENCE: node recorded as cancelled; no error port activates and the parent settles this node as stopped, not failed.")
+                output = childOutput
+                status = .canceled
+                break
+            } catch {
+                logger.error("[WF_EXEC] sub-workflow '\(displayName)' [node \(nodeID.uuidString.prefix(8))] threw: \(error.localizedDescription). CONSEQUENCE: node failed, error port activates, dependents skip per the node's failure policy.")
+                output = childOutput
+                status = .failed(.modelError(provider: "workflow", error: "Sub-workflow '\(displayName)' failed: \(error.localizedDescription)"))
+                break
+            }
+
+            output = childOutput
+
+            switch childOutcome {
+            case .failed:
+                let reasonText = childFailureReason ?? "Sub-workflow reported failure"
+                logger.error("[WF_EXEC] sub-workflow '\(displayName)' [node \(nodeID.uuidString.prefix(8))] outcome=.failed (\(reasonText)). CONSEQUENCE: node failed with \(childOutput.count) chars of partial output preserved; error port activates.")
+                status = .failed(.modelError(provider: "workflow", error: "Sub-workflow '\(displayName)' failed: \(reasonText)"))
+            case .cancelled:
+                logger.notice("[WF_EXEC] sub-workflow '\(displayName)' [node \(nodeID.uuidString.prefix(8))] outcome=.cancelled.")
+                status = .canceled
+            case .completedWithWarnings:
+                logger.notice("[WF_EXEC] sub-workflow '\(displayName)' [node \(nodeID.uuidString.prefix(8))] completed with warnings (\(childFailureReason ?? "degraded run")) — continuing with its output.")
+            case .completed:
+                break
+            case nil:
+                // No terminal event at all. Treated as a FAILURE, never as success: an empty
+                // green node is the one outcome that corrupts everything downstream silently.
+                logger.error("[WF_EXEC] sub-workflow '\(displayName)' [node \(nodeID.uuidString.prefix(8))] ended without an executionFinished event (\(childOutput.count) chars produced). CONSEQUENCE: node failed rather than reported as an empty success, so the error port activates instead of downstream nodes running on nothing.")
+                status = .failed(.modelError(
+                    provider: "workflow",
+                    error: "Sub-workflow '\(displayName)' ended without reporting an outcome."
+                ))
+            }
+
+            logger.info("[WF_EXEC] sub-workflow '\(displayName)' [node \(nodeID.uuidString.prefix(8))] finished: \(childOutput.count) chars, \(producedArtifacts.count) artifact(s) forwarded, \(suppressedOrchestrationEvents) child orchestration event(s) not re-emitted (deliberate — they belong to the child's own progress tally).")
 
         case .condition(let config):
             let upstreamText = upstreamResults.map(\.output).joined(separator: "\n")
-            logger.debug("Condition '\(displayName)' input preview: \(String(upstreamText.prefix(300)))")
+            logger.debug("Router '\(displayName)' input preview: \(String(upstreamText.prefix(300)))")
 
-            // Step 1: Pattern matching — always runs first
-            var matchedLabel: String?
+            // Step 1: Pattern matching — always runs first.
+            //
+            // ⚠️ ALL matching rules are collected; the loop no longer stops at the first hit.
+            // Routing is UNCHANGED — `matchedLabels.first` is exactly the rule the old `break`
+            // would have stopped on, because rule order is unchanged and each rule's verdict is
+            // computed from `fieldValue` and `values` alone, with no cross-rule state. What the
+            // extra work buys is knowing that an input was AMBIGUOUS, which is invisible today:
+            // a rule ordered second can match every input and nothing ever says so.
+            var matchedLabels: [String] = []
             for rule in config.rules {
                 let fieldValue: String
                 switch rule.field {
                 case .upstreamOutput: fieldValue = upstreamText
                 case .variable:       fieldValue = state.variables[rule.variableName ?? ""] ?? ""
+                case .other(let raw):
+                    // A field this build cannot evaluate (newer-version blob, WF-PE3). The rule is
+                    // INERT — never a match — and says so; guessing a field would route traffic on
+                    // semantics this build does not have. The validator flags the node.
+                    logger.error("[WF_ROUTE] Router rule '\(rule.label)' uses field '\(raw)', which this build does not recognise (saved by a newer version). CONSEQUENCE: the rule never matches on this build; routing falls to the remaining rules or the no-match failure path.")
+                    continue
                 }
 
                 // Split comma-separated values (trimmed). Single value = array of 1.
@@ -1272,23 +2243,122 @@ actor WorkflowExecutor: Executor {
                 case .notEquals:
                     // ALL values must differ → true
                     matches = !values.contains { fieldValue == $0 }
+                case .other(let raw):
+                    // Same contract as an unknown field: inert, loud, never a guess (WF-PE3).
+                    logger.error("[WF_ROUTE] Router rule '\(rule.label)' uses operator '\(raw)', which this build does not recognise (saved by a newer version). CONSEQUENCE: the rule never matches on this build.")
+                    matches = false
                 case .isEmpty:     matches = fieldValue.isEmpty
                 case .isNotEmpty:  matches = !fieldValue.isEmpty
+                // ⚠️ `case .always` was HARD-DELETED 2026-08-16 — a stored "always" now decodes to
+                // `.other("always")` and lands in the never-matches arm above. The catch-all's job
+                // moved to `config.noMatchBehavior`; unmatched input follows that setting.
                 }
 
-                logger.debug("Condition '\(displayName)' rule: field=\(String(describing: rule.field)) op=\(String(describing: rule.op)) value='\(rule.value)' → \(matches ? "MATCH" : "no match") (label: '\(rule.label)')")
+                logger.debug("Router '\(displayName)' rule: field=\(String(describing: rule.field)) op=\(String(describing: rule.op)) value='\(rule.value)' → \(matches ? "MATCH" : "no match") (label: '\(rule.label)')")
                 if matches {
-                    matchedLabel = rule.label
-                    logger.info("Condition '\(displayName)': pattern rule matched → '\(rule.label)' (field=\(String(describing: rule.field)), op=\(String(describing: rule.op)), value='\(rule.value)')")
-                    break
+                    matchedLabels.append(rule.label)
+                    logger.info("Router '\(displayName)': pattern rule matched → '\(rule.label)' (field=\(String(describing: rule.field)), op=\(String(describing: rule.op)), value='\(rule.value)')")
+                }
+            }
+
+            // ⚠️ Deduped BY LABEL before anything counts them. Two rules may legitimately share a
+            // label — they share one output port — and counting them separately would manufacture
+            // an ambiguity against a single branch.
+            var seenLabels = Set<String>()
+            let distinctMatched = matchedLabels.filter { seenLabels.insert($0).inserted }
+
+            // Step 1b: ambiguity — more than one rule described the same input.
+            //
+            // ⚠️ LEGACY PATH ONLY (2026-08-17). A node carrying a `decisionPolicy` resolves BOTH
+            // ambiguity and no-match through the unified consultation further down; this inline
+            // block is what governs a node saved before the redesign, and it must stay
+            // byte-identical for those. `nil` policy is not "unset", it is "the legacy trio governs".
+            var arbitratedLabel: String?
+            if config.decisionPolicy == nil, distinctMatched.count > 1 {
+                logger.notice("[WF_ROUTE] Router '\(displayName)': \(matchedLabels.count) rules matched the same input — [\(matchedLabels.joined(separator: ", "))]. CONSEQUENCE: routing to '\(matchedLabels[0])' because it is FIRST in rule order\(config.askOnAmbiguity ? " unless a human picks otherwise" : ""); the other \(matchedLabels.count - 1) matching branch(es) will not run. If that tiebreak is not what you meant, reorder the rules or make them mutually exclusive.")
+
+                if config.askOnAmbiguity, !WorkflowRunAttendance.isAttended {
+                    // ⚠️ Unattended (scheduled / ChatOps): never park. Nobody can see the banner,
+                    // and the container either cancels the whole run at its deadline (scheduler) or
+                    // has no bound at all (ChatOps). First match is exactly what an unanswered
+                    // arbitration resolves to, so behaviour is identical minus the doomed wait.
+                    logger.notice("[WF_ROUTE] Router '\(displayName)': arbitration SKIPPED — this run is unattended (scheduled or bridge-initiated), so nobody could answer. CONSEQUENCE: routing to '\(matchedLabels[0])' (first match), the same branch an unanswered arbitration resolves to; the run keeps moving instead of parking until the container kills it.")
+                } else if config.askOnAmbiguity {
+                    // ⚠️ Reuses the GATE interaction verbatim — same event, same suspension, same
+                    // banner, same remote mirroring. Rule arbitration IS a gate: the user picks one
+                    // of N labels and that choice routes to the matching port. Critically, every
+                    // option here is a MATCHED RULE LABEL, and rule labels are already declared
+                    // output ports (`ConditionNodeConfig.outputPortLabels`), so `activePorts =
+                    // [chosen]` routes with no engine change. A free-form dynamic option set would
+                    // NOT work — the display travels in the payload but the routing target is bound
+                    // to config-derived edges.
+                    let operationID = UUID()
+
+                    // ⚠️ Spans are computed against the TRUNCATED preview, not the full text, so
+                    // an offset can never point past the string the banner actually renders.
+                    let preview = upstreamText.count > 500
+                        ? String(upstreamText.prefix(500)) + "…"
+                        : upstreamText
+                    let highlights = config.rules
+                        .filter { matchedLabels.contains($0.label) }
+                        .flatMap { Self.matchSpans(for: $0, in: preview) }
+
+                    // ⚠️ `deadline: nil` — the arbitration waits INDEFINITELY (user decision
+                    // 2026-08-13; the previous 120s auto-resolve took the decision away from someone
+                    // who had simply stepped away). nil also suppresses the banner's countdown, so
+                    // the UI matches the behaviour instead of showing a timer that never fires.
+                    //
+                    // ⚠️ The container owns the deadline now, exactly as it does for a Gate with no
+                    // configured timeout: Stop for an attended run, the 600s deadline for a
+                    // scheduled one. Structural nodes get no per-node timeout race (WF22), so there
+                    // is no other bound — and for a scheduled run the container deadline cancels the
+                    // WHOLE run, not just this node.
+                    continuation.yield(.requestGate(
+                        prompt: "\(matchedLabels.count) rules match this input — which branch should it take?",
+                        options: matchedLabels,
+                        operationID: operationID,
+                        deadline: nil,
+                        sourceNodeID: nodeID,
+                        inputText: preview,
+                        highlights: highlights
+                    ))
+
+                    logger.notice("[WF_ROUTE] Router '\(displayName)' PARKED INDEFINITELY for ambiguity arbitration (operationID: \(operationID), options: [\(matchedLabels.joined(separator: " | "))]). CONSEQUENCE: this run makes no further progress on this branch until a human answers. There is no per-node timeout — only the container bounds it (Stop, or a scheduled run's 600s deadline, which cancels the ENTIRE run). ⚠️ A scheduled run renders NO banner for this: switch 'Ask Me Which Branch' off on Routers used in unattended workflows.")
+
+                    let chosen = await ExecutionSuspensionService.shared.suspendForGate(
+                        for: operationID, conversationID: conversationID
+                    )
+
+                    // ⚠️ Only a label that actually matched may be honoured. The suspension resolves
+                    // from several surfaces (banner, QuickAccess, Slack/Discord/Telegram index
+                    // lookup); a stale or mis-indexed answer must not activate a port that this run
+                    // never matched, which would route on a rule the input does not satisfy.
+                    if let chosen, matchedLabels.contains(chosen) {
+                        arbitratedLabel = chosen
+                        logger.notice("[WF_ROUTE] Router '\(displayName)': human chose '\(chosen)' from [\(matchedLabels.joined(separator: ", "))].")
+                    } else {
+                        // ⚠️ FIRST MATCH, never `fallbackLabel`. There is no per-node timeout any
+                        // more, so "unanswered" now means Stop, a closed conversation, or the
+                        // container deadline force-resolving the suspension — all of which must
+                        // leave the run behaving exactly as it would with arbitration switched off.
+                        // Routing to the catch-all instead would silently change where every
+                        // unattended ambiguous input goes.
+                        let reason = chosen == nil ? "unanswered (Stop, conversation closed, or container deadline)" : "answered with '\(chosen!)', which is not among the matched rules"
+                        logger.notice("[WF_ROUTE] Router '\(displayName)': arbitration \(reason) — falling back to the first match '\(matchedLabels[0])'. CONSEQUENCE: routing is identical to this node having arbitration switched off; no branch is lost.")
+                    }
                 }
             }
 
             // Step 2: LLM fallback — only fires when no pattern rule matched
-            if matchedLabel == nil && config.llmFallbackEnabled {
-                logger.info("Condition '\(displayName)': no pattern match, delegating to AI Classifier")
+            // Step 2: AI Classifier — kept in its own variable so the routing METHOD is a fact
+            // rather than something re-derived from the label afterwards (see step 3).
+            var classifierOutcome: ClassifierOutcome?     // nil = never consulted
+            // ⚠️ `isEmpty`, NOT `count != 1`. The classifier is a NO-MATCH fallback; triggering it
+            // on an ambiguous input would start calling a model for inputs that route fine today.
+            if matchedLabels.isEmpty && config.llmFallbackEnabled {
+                logger.info("Router '\(displayName)': no pattern match, delegating to AI Classifier")
                 do {
-                    matchedLabel = try await Self.evaluateConditionWithLLM(
+                    classifierOutcome = try await Self.evaluateConditionWithLLM(
                         config: config,
                         upstreamText: upstreamText,
                         displayName: displayName,
@@ -1296,227 +2366,317 @@ actor WorkflowExecutor: Executor {
                         continuation: continuation,
                         traceContext: traceContext
                     )
+                } catch is CancellationError {
+                    // ⚠️ WF-CC13, fixed alongside WF-CC10 because it cannot wait. This was a BARE
+                    // catch, so a Stop landing in the classifier's `model.generate` was recorded
+                    // as a classifier FAILURE, counted as one in TrendsView, and then routed
+                    // through `noMatchBehavior` — under `.endWorkflow` the node reported
+                    // `.completed` and its passthrough became the run's final answer. Every other
+                    // structural failure path in this file already has this arm; this one did not.
+                    // It MUST ship with WF-CC10: without it, failing on a classifier fault would
+                    // make every Stop taken during classification fire the recovery branch.
+                    classifierOutcome = .cancelled
                 } catch {
-                    logger.error("Condition LLM fallback failed for '\(displayName)': \(error.localizedDescription)")
-                    continuation.yield(.thought("[\(displayName)] AI Classifier failed: \(error.localizedDescription)", sourceNodeID: nodeID))
-                    // P1-18: classify the failure into the workflow phase so it
-                    // surfaces in TrendsView instead of being a silent thought event.
-                    let classified = ClassifiedAgentError.synthetic(
-                        category: .wfClassifierFailed,
-                        origin: "WorkflowExecutor.evaluateConditionWithLLM",
-                        message: error.localizedDescription,
-                        context: [
-                            "node_name": displayName,
-                            "node_id": nodeID.uuidString,
-                            "model": config.llmModelName ?? ""
-                        ]
-                    )
-                    await TraceRecorder.shared.emitAgentError(span: traceContext, error: classified, iteration: nil)
+                    // ⚠️ `Task.isCancelled` as well as the typed catch: the MLX provider may wrap a
+                    // cancellation rather than rethrow it, and misclassifying a Stop as a fault
+                    // fires the error branch on every Stop taken during classification.
+                    if Task.isCancelled {
+                        classifierOutcome = .cancelled
+                    } else {
+                        classifierOutcome = .failed(reason: error.localizedDescription)
+                        logger.error("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: AI Classifier FAILED — \(error.localizedDescription) (model: \(config.llmModelName ?? "none")). CONSEQUENCE: no routing verdict exists for this input, so the node fails onto its `error` port and 'When Nothing Matches' is deliberately NOT applied — that setting answers 'no rule described this input', and nothing here read the input at all. To recover automatically, wire this Router's `error` port to the branch you would have defaulted to.")
+                        // ⚠️ Prefix "AI Classifier failed:" is VERBATIM — several tests key on it,
+                        // including one that asserts its ABSENCE. Do not reword.
+                        continuation.yield(.thought("[\(displayName)] AI Classifier failed: \(error.localizedDescription)", sourceNodeID: nodeID))
+                        // P1-18: classify the failure into the workflow phase so it
+                        // surfaces in TrendsView instead of being a silent thought event.
+                        // ⚠️ NOT emitted for `.cancelled` — a Stop is a user action, not a
+                        // classifier fault, and counting it as one poisons the reliability stats.
+                        let classified = ClassifiedAgentError.synthetic(
+                            category: .wfClassifierFailed,
+                            origin: "WorkflowExecutor.evaluateConditionWithLLM",
+                            message: error.localizedDescription,
+                            context: [
+                                "node_name": displayName,
+                                "node_id": nodeID.uuidString,
+                                "model": config.llmModelName ?? ""
+                            ]
+                        )
+                        await TraceRecorder.shared.emitAgentError(span: traceContext, error: classified, iteration: nil)
+                    }
                 }
             }
 
-            // Step 3: Static fallback — last resort
-            let activatedPort = matchedLabel ?? config.fallbackLabel
-            activePorts = [activatedPort]
-            let method = matchedLabel != nil ? (config.llmFallbackEnabled && !config.rules.contains(where: { $0.label == matchedLabel }) ? "classifier" : "pattern") : "fallback"
-            // When passthroughContent is true, downstream nodes receive the original content.
-            // When false, they receive only the routing label — useful for branching without forwarding payload.
-            output = config.passthroughContent ? upstreamText : "Condition (\(method)): route \u{2192} \(activatedPort)"
-            logger.info("Condition node '\(displayName)' activated port: '\(activatedPort)' via \(method), passthrough=\(config.passthroughContent), output \(output.count) chars")
-
-        case .loop(let config):
-            // --- Loop Node: iterate a sub-workflow body ---
-            guard let bodyProfileID = config.bodyWorkflowID else {
-                output = "Loop node has no body workflow configured"
-                status = .failed(.modelError(provider: "workflow", error: "Loop '\(displayName)' has no body workflow assigned. Double-click to configure."))
-                logger.error("Loop node '\(displayName)' has no bodyWorkflowID configured")
+            // A cancelled classifier settles the node HERE, before any routing is considered.
+            // ⚠️ `.canceled`, not `.failed`, and `activePorts` stays nil — `edgeIsLive` treats a
+            // cancelled node as dead in both directions, so it routes NOWHERE. Marking it failed
+            // would activate `error` on every Stop.
+            if case .cancelled = classifierOutcome {
+                output = ""
+                status = .canceled
+                logger.notice("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: AI Classifier CANCELLED (Stop, or the container deadline). CONSEQUENCE: recorded as cancelled, not failed; the `error` port is NOT activated and no recovery branch runs — the run is being torn down, not misrouted. No classifier-failure telemetry is emitted.")
                 break
             }
 
-            let maxIter = max(1, min(config.maxIterations, 50))
-            let upstreamText = upstreamResults.map(\.output).joined(separator: "\n")
-            var iterationInput = upstreamText
-            var iterationOutput = ""
-            var loopCounter = 0
-            var exitedEarly = false
+            // ═══════════════════════════════════════════════════════════════════════════════
+            // Step 2b: THE UNIFIED DECISION (2026-08-17 redesign) — policy nodes only.
+            //
+            // One setting answers both "several rules matched" and "nothing matched", and the AI
+            // Classifier inherits it: one token routes, zero is EMPTY, two or more is AMBIGUOUS
+            // (which is what retires WF-OB2's per-launch-random pick).
+            //
+            // ⚠️ Everything below this block — `resolveRouterPort`, the `method` chain, the
+            // `noMatchBehavior` switch — is the LEGACY path and runs only when `decisionPolicy` is
+            // nil. Both are kept because the legacy 2×3 matrix does not collapse onto the new axis
+            // losslessly; a stored workflow keeps its exact behaviour until its author re-saves it.
+            // ═══════════════════════════════════════════════════════════════════════════════
+            if let policy = config.decisionPolicy {
+                // Exactly one branch named → route, policy never consulted (spec point 1).
+                var decided: String? = distinctMatched.count == 1 ? distinctMatched[0] : nil
+                var situation: RouterUndecided?
+                var boundaryFailReason: String?
 
-            logger.info("Loop node '\(displayName)' starting: max \(maxIter) iterations, body: \(bodyProfileID)")
-            logger.debug("Loop '\(displayName)' initial input preview:\n\(String(upstreamText.prefix(300)))")
+                if decided == nil {
+                    if distinctMatched.count > 1 {
+                        situation = .ambiguous(candidates: distinctMatched, origin: .pattern)
+                    } else if let outcome = classifierOutcome {
+                        // ⚠️ `classify` sorts crash/Stop OUT before any situation value exists, so
+                        // no policy branch can route them (WF-CC10 / WF-CC13, now type-enforced).
+                        switch Self.classify(outcome: outcome) {
+                        case .decided(let label):        decided = label
+                        case .situation(let s):          situation = s
+                        case .boundaryFail(let reason):  boundaryFailReason = reason
+                        case .boundaryCancel:
+                            // Unreachable: the `.cancelled` settle above already broke out.
+                            boundaryFailReason = nil
+                        }
+                    } else {
+                        situation = .empty(.noRuleMatched)
+                    }
+                }
 
-            for iteration in 1...maxIter {
-                if Task.isCancelled {
-                    logger.info("Loop '\(displayName)' detected cancellation before iteration \(iteration)")
-                    output = iterationOutput.isEmpty ? upstreamText : iterationOutput
-                    status = .canceled
+                if let reason = boundaryFailReason {
+                    // ⚠️ The policy is deliberately NOT applied: it answers "no rule described this
+                    // input", and a classifier that threw never read the input at all.
+                    output = ""
+                    status = .failed(.modelError(provider: "workflow", error: "Router '\(displayName)': \(reason)"))
+                    logger.error("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))] FAILED — \(reason). CONSEQUENCE: the node activates its `error` port; 'When Routing Can't Decide' is deliberately NOT applied to a classifier FAULT. To recover automatically, wire this Router's `error` port.")
                     break
                 }
 
-                continuation.yield(.workflowLoopIteration(
-                    nodeID: nodeID, profileName: displayName,
-                    iteration: iteration, maxIterations: maxIter
-                ))
+                if let label = decided {
+                    activePorts = [label]
+                    output = upstreamText
+                    let via = distinctMatched.count == 1 ? "pattern" : "classifier"
+                    logger.info("[WF_ROUTE] Router '\(displayName)' activated port: '\(label)' via \(via) (policy not consulted — exactly one branch named), output \(output.count) chars")
+                    break
+                }
 
-                // Execute body workflow (thread injected dependencies for testability).
-                //
-                // P0-4: child span of the parent loop's traceContext (not a fresh root),
-                // and forward the parent's `onTraceUpdate` so body-iteration trace events
-                // are no longer orphaned in the trace tree.
-                let bodyExecutor = WorkflowExecutor(workflowProfileID: bodyProfileID)
-                let bodyTrace = traceContext.newSpan()
-                let bodyStream = bodyExecutor.executeWorkflow(
-                    userInput: iterationInput,
-                    chatHistory: [],
-                    conversationID: conversationID,
-                    ragContext: nil,
-                    traceContext: bodyTrace,
-                    onTraceUpdate: onTraceUpdate,
-                    layout: nil,
-                    profileMap: profileMap,
-                    streamProvider: streamProvider
-                )
+                guard let undecided = situation else { break }   // unreachable by construction
 
-                // Consume body stream, accumulate text output.
-                //
-                // P0-5: body-failure detection now reads the body's
-                // `.executionFinished(outcome:)` event — the single source of truth.
-                // Previously we keyed off the `.error` event, which only fires when
-                // *all* terminals failed; a partial-failure body reported `.completed`
-                // and the loop kept iterating against unreliable upstream data.
-                var bodyOutput = ""
-                var bodyOutcome: ExecutionOutcome? = nil
-                var bodyFailureReason: String? = nil
-                do {
-                    for try await event in bodyStream {
-                        switch event {
-                        case .content(let text):
-                            bodyOutput += text
-                        case .thought(let msg, let id, _):
-                            continuation.yield(.thought("[\(displayName) iter \(iteration)] \(msg)", id: id, sourceNodeID: nodeID))
-                        case .error(let errMsg):
-                            // Surface in the node timeline but don't decide outcome here —
-                            // wait for the body's `.executionFinished` to make the call.
-                            continuation.yield(.thought("[\(displayName) iter \(iteration)] Error: \(errMsg.message)", sourceNodeID: nodeID))
-                            bodyFailureReason = errMsg.message
-                        case .executionFinished(let outcome, let reason):
-                            bodyOutcome = outcome
-                            if let reason { bodyFailureReason = reason }
+                // Resolve, honouring an Ask by parking; whatever the human answers (or does not)
+                // funnels back through the SAME table via the fallback.
+                var disposition = Self.resolveUndecided(policy: policy, situation: undecided, rules: config.rules)
 
-                        // ⚠️ HITL requests MUST be forwarded, not suppressed. Each carries an
-                        // `operationID` that the inner execution is already suspended on, waiting
-                        // for `ExecutionSuspensionService` to resume it. Swallowing the event
-                        // means no banner is ever shown, so nobody can answer, so the suspension
-                        // never resolves — the whole workflow hangs, with no error and no
-                        // timeout. Before 2026-07-31 `default: break` caught all three, so a Gate
-                        // node inside a loop body hung the run silently. Action nodes began
-                        // requesting confirmation the same day, which made the reachable surface
-                        // much larger.
-                        //
-                        // `sourceNodeID` keeps the INNER node's id when it has one: it is the
-                        // node actually asking, it is what the approval scope is keyed on, and
-                        // collapsing it to the loop's id would pool approvals across every node
-                        // in the body. Falls back to the loop node so the banner is always
-                        // attributable to something on the canvas.
-                        case .requestConfirmation(let toolName, let params, let operationID, let innerNode):
-                            // Logged because a FORWARDED request and a SWALLOWED one look
-                            // identical from outside — both leave the run sitting still. This
-                            // line is what distinguishes "waiting for the user" from "hung".
-                            logger.notice("[WF_HITL] loop '\(displayName)' iter \(iteration) forwarding confirmation for '\(toolName)' [op \(operationID) node \(innerNode?.uuidString ?? nodeID.uuidString)] — run is now WAITING on the user")
-                            continuation.yield(.requestConfirmation(
-                                toolName: toolName, params: params,
-                                operationID: operationID, sourceNodeID: innerNode ?? nodeID))
+                if case .ask(let options, let prompt, let fallback) = disposition {
+                    if !WorkflowRunAttendance.isAttended {
+                        // ⚠️ Unattended (scheduled / chat bridge): never park. Nobody can see the
+                        // banner, and the container either cancels the whole run at its deadline or
+                        // has no bound at all.
+                        logger.notice("[WF_ROUTE] Router '\(displayName)': Ask SKIPPED — this run is unattended (scheduled or bridge-initiated), so nobody could answer. CONSEQUENCE: falling back to the configured 'If nobody can answer' action instead of parking until the container kills the run.")
+                        disposition = Self.resolveUndecided(
+                            policy: Self.policy(for: fallback), situation: undecided, rules: config.rules)
+                    } else {
+                        let operationID = UUID()
+                        let preview = upstreamText.count > 500
+                            ? String(upstreamText.prefix(500)) + "…"
+                            : upstreamText
+                        // Highlights only make sense when specific rules matched; an EMPTY situation
+                        // has nothing to point at, and the banner renders fine with none.
+                        let highlights: [RuleMatchSpan]
+                        if case .ambiguous(let candidates, .pattern) = undecided {
+                            highlights = config.rules
+                                .filter { candidates.contains($0.label) }
+                                .flatMap { Self.matchSpans(for: $0, in: preview) }
+                        } else {
+                            highlights = []
+                        }
 
-                        case .requestGate(let prompt, let options, let operationID, let deadline, let innerNode):
-                            logger.notice("[WF_HITL] loop '\(displayName)' iter \(iteration) forwarding GATE [op \(operationID)] — run is now WAITING on the user")
-                            continuation.yield(.requestGate(
-                                prompt: prompt, options: options, operationID: operationID,
-                                deadline: deadline, sourceNodeID: innerNode ?? nodeID))
+                        continuation.yield(.requestGate(
+                            prompt: prompt,
+                            options: options,
+                            operationID: operationID,
+                            deadline: nil,
+                            sourceNodeID: nodeID,
+                            inputText: preview,
+                            highlights: highlights
+                        ))
+                        logger.notice("[WF_ROUTE] Router '\(displayName)' PARKED INDEFINITELY for a routing decision (operationID: \(operationID), options: [\(options.joined(separator: " | "))]). CONSEQUENCE: this branch makes no further progress until a human answers. There is no per-node timeout — only the container bounds it (Stop, or a scheduled run's 600s deadline, which cancels the ENTIRE run).")
 
-                        case .requestClarification(let question, let operationID, let innerNode, let options, let multiline):
-                            logger.notice("[WF_HITL] loop '\(displayName)' iter \(iteration) forwarding clarification [op \(operationID)] — run is now WAITING on the user")
-                            continuation.yield(.requestClarification(
-                                question: "[\(displayName) iter \(iteration)] \(question)",
-                                operationID: operationID, sourceNodeID: innerNode ?? nodeID,
-                                options: options, multiline: multiline))
+                        let chosen = await ExecutionSuspensionService.shared.suspendForGate(
+                            for: operationID, conversationID: conversationID
+                        )
 
-                        default:
-                            break // Suppress inner workflow orchestration events
+                        // ⚠️ Only an OFFERED option may be honoured. The suspension resolves from
+                        // several surfaces (banner, QuickAccess, chat bridges); a stale or
+                        // mis-indexed answer must not activate a port this situation never offered.
+                        if let chosen, options.contains(chosen) {
+                            logger.notice("[WF_ROUTE] Router '\(displayName)': human chose '\(chosen)' from [\(options.joined(separator: ", "))].")
+                            disposition = .route(port: chosen)
+                        } else {
+                            let why = chosen == nil
+                                ? "unanswered (Stop, conversation closed, or container deadline)"
+                                : "answered with '\(chosen!)', which was not offered"
+                            logger.notice("[WF_ROUTE] Router '\(displayName)': routing decision \(why) — applying the configured 'If nobody can answer' action. CONSEQUENCE: identical to an unattended run, so an unanswered Ask and an unattendable one never diverge.")
+                            disposition = Self.resolveUndecided(
+                                policy: Self.policy(for: fallback), situation: undecided, rules: config.rules)
                         }
                     }
-                    // Outcome-based failure detection. `.failed` is authoritative;
-                    // `.cancelled` propagates as a cancel-shaped failure (consistent
-                    // with the prior catch behavior). `.completed` is success.
-                    if bodyOutcome == .failed {
-                        let reasonText = bodyFailureReason ?? "Loop body reported failure"
-                        logger.error("Loop '\(displayName)' iteration \(iteration) body outcome=.failed (\(reasonText))")
-                        output = iterationOutput.isEmpty ? upstreamText : iterationOutput
-                        status = .failed(.modelError(provider: "workflow", error: "Loop body failed at iteration \(iteration): \(reasonText)"))
-                        break
-                    }
-                    if bodyOutcome == .cancelled {
-                        logger.notice("Loop '\(displayName)' iteration \(iteration) body outcome=.cancelled")
-                        output = iterationOutput.isEmpty ? upstreamText : iterationOutput
-                        status = .canceled
-                        break
-                    }
-                } catch is CancellationError {
-                    logger.info("Loop '\(displayName)' cancelled at iteration \(iteration)")
-                    output = iterationOutput.isEmpty ? upstreamText : iterationOutput
-                    status = .failed(.modelError(provider: "workflow", error: "Loop cancelled at iteration \(iteration)"))
-                    break
-                } catch {
-                    logger.error("Loop '\(displayName)' iteration \(iteration) body failed: \(error.localizedDescription)")
-                    output = "Loop failed at iteration \(iteration): \(error.localizedDescription)"
-                    status = .failed(.modelError(provider: "workflow", error: "Loop body failed at iteration \(iteration): \(error.localizedDescription)"))
-                    break
                 }
+                switch disposition {
+                case .route(let port):
+                    activePorts = [port]
+                    output = upstreamText
+                    logger.notice("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: no single branch was named — routing to '\(port)' per 'When Routing Can't Decide'. CONSEQUENCE: the run continues down that branch exactly as if that rule had matched; any branches that DID match do not run.")
 
-                loopCounter = iteration
-                iterationOutput = bodyOutput
-                iterationInput = bodyOutput // Chain: next iteration gets this iteration's output
+                case .endBranch:
+                    output = upstreamText
+                    status = .completed
+                    activePorts = []
+                    logger.notice("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: no single branch was named — ENDING this branch per 'When Routing Can't Decide'. CONSEQUENCE: everything downstream skips as 'not chosen', nothing is reported as failed, and this Router's passthrough content becomes (part of) the final answer. Parallel branches are unaffected.")
 
-                logger.info("Loop '\(displayName)' iteration \(iteration)/\(maxIter) completed: \(bodyOutput.count) chars")
-                logger.debug("Loop '\(displayName)' iteration \(iteration) output preview:\n\(String(bodyOutput.prefix(300)))")
+                case .fail(let reason):
+                    // ⚠️ `activePorts` left NIL so the driver's structural-failure path activates
+                    // `error`. Setting it here would suppress that.
+                    output = ""
+                    status = .failed(.modelError(provider: "workflow", error: "Router '\(displayName)': \(reason)"))
+                    logger.error("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))] FAILED — \(reason) (\(config.rules.count) rule(s) evaluated against \(upstreamText.count) chars). CONSEQUENCE: this node activates its `error` port; a branch wired there runs, otherwise this branch stops and the reason appears in the run's final output.")
 
-                // Evaluate exit condition (if configured)
-                if let exitRule = config.exitCondition {
-                    let fieldValue: String
-                    switch exitRule.field {
-                    case .upstreamOutput: fieldValue = bodyOutput
-                    case .variable:       fieldValue = state.variables[exitRule.variableName ?? ""] ?? ""
-                    }
+                case .ask:
+                    // Unreachable: every Ask above resolves to route/fail/endBranch before here.
+                    output = ""
+                    status = .failed(.modelError(provider: "workflow", error: "Router '\(displayName)': routing decision could not be resolved"))
+                    logger.error("[WF_ROUTE] Router '\(displayName)': an Ask disposition survived resolution — this is a bug in the unified decision path, not a configuration error.")
+                }
+                break
+            }
 
-                    let shouldExit: Bool
-                    switch exitRule.op {
-                    case .contains:    shouldExit = fieldValue.localizedCaseInsensitiveContains(exitRule.value)
-                    case .notContains: shouldExit = !fieldValue.localizedCaseInsensitiveContains(exitRule.value)
-                    case .equals:      shouldExit = fieldValue == exitRule.value
-                    case .notEquals:   shouldExit = fieldValue != exitRule.value
-                    case .isEmpty:     shouldExit = fieldValue.isEmpty
-                    case .isNotEmpty:  shouldExit = !fieldValue.isEmpty
-                    }
+            // ⚠️ LEGACY-ONLY WF-OB2 REPAIR. A nil-policy node has no setting to consult about an
+            // ambiguous classifier reply, so it collapses to the FIRST-STATED candidate. That is
+            // still a behaviour change for untouched blobs — and it is strictly the bugfix: what it
+            // replaces was whichever label an unordered Dictionary happened to yield, which could
+            // differ between app launches for the same input. First-stated is deterministic and is
+            // the model's own answer (the rest of a "not X, it's Y" reply is hedging).
+            if config.decisionPolicy == nil, case .ambiguous(let candidates)? = classifierOutcome,
+               let firstStated = candidates.first {
+                logger.notice("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: the AI Classifier named \(candidates.count) categories — [\(candidates.joined(separator: ", "))] — and this Router predates the unified routing setting, so it takes the FIRST-STATED one, '\(firstStated)'. CONSEQUENCE: deterministic, unlike the previous behaviour which picked by hash order and could differ between launches. Open this node and save it to choose what should happen instead.")
+                classifierOutcome = .label(firstStated)
+            }
 
-                    if shouldExit {
-                        logger.info("Loop '\(displayName)' exit condition met after iteration \(iteration)")
-                        exitedEarly = true
-                        break
-                    }
+            // Step 3: resolve the port.
+            //
+            // ⚠️ `matchedLabels.first` reproduces the pre-2026-08-13 first-match-wins exactly.
+            // `fallbackLabel` is a LEGACY compatibility path — the Static Fallback picker is gone and
+            // a default branch is now an ordinary last rule with the `always` operator. Configs
+            // saved before that still carry a fallback and are still honoured, because silently
+            // converting them on load would change where unmatched input goes in every existing
+            // workflow.
+            // ⚠️ Extracted to `resolveRouterPort` so this decision is unit-testable (WF-EX1). The
+            // classifier itself needs a real MLX model and cannot be reached from a test, but the
+            // rule that turns its answer into a port is pure — and that rule is where the defect was.
+            let resolution = Self.resolveRouterPort(
+                arbitrated: arbitratedLabel,
+                matched: matchedLabels,
+                classifier: classifierOutcome?.label,
+                legacyFallback: config.fallbackLabel
+            )
+            if case .none(let discardedEmptyLabel) = resolution, discardedEmptyLabel {
+                logger.error("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))] resolved an EMPTY port label and DISCARDED it. CONSEQUENCE: the node fails onto its `error` port instead of activating a port no edge can legitimately carry — activating \"\" would have made every UNLABELLED edge out of this node fire, sending the run down the default branch as though a rule had matched. Give every rule a non-empty label.")
+            }
+            let resolvedPort = resolution.port
+
+            // ⚠️ The routing METHOD is TRACKED, not inferred. The old expression asked whether the
+            // matched label was ABSENT from `config.rules` — but the classifier only ever returns a
+            // rule label, so that test was always false and every classifier decision was reported
+            // as "pattern" (WF65). Inference was the bug.
+            // ⚠️ `var`, not `let`: the no-match arm below corrects it to "no-match-default".
+            // Without that, a `.route(...)` no-match logged "activated port 'General' via
+            // legacy-fallback" for a route no legacy fallback was involved in — this chain falls
+            // to its `else` when all three signals are nil (WF-CC10).
+            var method: String
+            if arbitratedLabel != nil {
+                method = "arbitrated"
+            } else if !matchedLabels.isEmpty {
+                method = "pattern"
+            } else if classifierOutcome?.label != nil {
+                method = "classifier"
+            } else {
+                method = "legacy-fallback"
+            }
+
+            // NO RULE MATCHED — a real outcome, not something to swallow. What happens next is the
+            // author's explicit choice (`noMatchBehavior`, 2026-08-16), replacing the deleted
+            // `always` catch-all idiom. Never a run-level stop (that would be `stopWorkflow`
+            // renamed, retired 2026-08-12): parallel branches keep their results in every case.
+            var noMatchPort: String?
+            var noMatchSettled = false
+            if resolvedPort == nil {
+                // ⚠️ Placed AFTER `resolveRouterPort`, deliberately: a non-empty legacy
+                // `fallbackLabel` resolves a port at step 3 and never reaches here, so this change
+                // leaves pre-2026-08-13 configs routing exactly where they route today. Declining
+                // the legacy catch-all on a classifier fault too would be a separate, currently
+                // unpinned behaviour change.
+                switch Self.resolveNoMatch(
+                    behavior: config.noMatchBehavior,
+                    outcome: classifierOutcome,
+                    rules: config.rules
+                ) {
+                case .fail(let reason):
+                    // ⚠️ `activePorts` is left NIL so the driver's structural-failure path activates
+                    // `error`. Setting it here would suppress that.
+                    output = ""
+                    status = .failed(.modelError(provider: "workflow", error: "Router '\(displayName)': \(reason)"))
+                    noMatchSettled = true
+                    logger.error("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))] FAILED — \(reason) (\(config.rules.count) rule(s) evaluated against \(upstreamText.count) chars). CONSEQUENCE: this node activates its `error` port; a branch wired there runs, otherwise this branch stops and the reason appears in the run's final output. To send unmatched input somewhere instead, set the Router's 'When Nothing Matches' option — ⚠️ except after a classifier FAULT, which that setting deliberately does not cover.")
+
+                case .route(let port):
+                    noMatchPort = port
+                    method = "no-match-default"
+                    logger.notice("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: no port resolved — routing to DEFAULT '\(port)' per 'When Nothing Matches'. CONSEQUENCE: the run continues down that branch exactly as if the rule had matched. The classifier produced a verdict, or was never consulted; a classifier FAULT would have failed the node instead.")
+
+                case .endBranch:
+                    // Graceful end of THIS BRANCH: complete with an explicitly EMPTY port set, so
+                    // every outgoing edge is dead, downstream skips as `.notChosen` (quiet, not
+                    // red), and — terminality being computed over LIVE edges — this Router becomes
+                    // a terminal whose passthrough content is the run's final output.
+                    // ⚠️ Parallel siblings are untouched (invariant W28).
+                    output = upstreamText
+                    status = .completed
+                    activePorts = []
+                    noMatchSettled = true
+                    logger.notice("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: no port resolved — ENDING this branch per 'When Nothing Matches'. CONSEQUENCE: every node downstream of this Router skips as 'not chosen', nothing is reported as failed, and the Router's passthrough content becomes (part of) the run's final answer. Parallel branches are unaffected. A classifier FAULT would have failed the node instead.")
                 }
             }
+            if noMatchSettled { break }
 
-            // Set final output if we didn't break due to failure
-            if case .completed = status {
-                output = iterationOutput.isEmpty ? upstreamText : iterationOutput
-                let exitLabel = exitedEarly ? " (exit condition met)" : ""
-                logger.info("Loop '\(displayName)' completed after \(loopCounter) iteration(s)\(exitLabel). Output: \(output.count) chars")
+            guard let activatedPort = resolvedPort ?? noMatchPort else {
+                // Unreachable: every no-match arm either settled above or set `noMatchPort`.
+                break
             }
 
-            variableUpdates["__loop_\(nodeID.uuidString)_counter"] = "\(loopCounter)"
-            variableUpdates["__loop_\(nodeID.uuidString)_exited_early"] = exitedEarly ? "true" : "false"
-            // Expose the final iteration output as a variable so downstream nodes can reference it
-            variableUpdates["__loop_\(nodeID.uuidString)_output"] = output
-            if loopCounter > 0 {
-                logger.notice("Loop '\(displayName)': variables written by Code nodes inside the loop body are scoped to the sub-workflow and do not propagate to the parent. Use the loop's text output for downstream context instead.")
+            activePorts = [activatedPort]
+            if !config.fallbackLabel.isEmpty, method == "legacy-fallback" {
+                logger.notice("[WF_ROUTE] Router '\(displayName)' used its LEGACY catch-all '\(config.fallbackLabel)'. The Static Fallback picker was retired 2026-08-13 and stored values are still honoured so existing workflows keep behaving identically. CONSEQUENCE: none today — but to express this on the canvas instead, set the Router's 'When Nothing Matches' option to route to '\(config.fallbackLabel)'.")
             }
+            // ⚠️ A Router ALWAYS passes the upstream content through. The "Pass Through Content"
+            // toggle was retired 2026-08-13: switched off it emitted a debug string in place of the
+            // payload, which nothing downstream could consume, and it suppressed text only —
+            // artifacts flowed either way.
+            output = upstreamText
+            if !config.passthroughContent {
+                logger.notice("[WF_ROUTE] Router '\(displayName)' carries a RETIRED 'Pass Through Content = off' setting, which is ignored. CONSEQUENCE: downstream nodes now receive the full upstream content instead of the routing-label string they used to get. If a downstream rule or prompt was written against text like \"route \u{2192} \(activatedPort)\", it will no longer match — key off the content itself.")
+            }
+            logger.info("[WF_ROUTE] Router '\(displayName)' activated port: '\(activatedPort)' via \(method), output \(output.count) chars")
 
         case .code(let config):
             // Template transform via WorkflowTemplate (single-pass, injection-safe).
@@ -1686,13 +2846,20 @@ actor WorkflowExecutor: Executor {
             // raises HITL for the agent path — so until 2026-07-31 a tool the user had
             // configured to ASK ran silently here, and the `requiresConfirmation: false` in
             // `resolveWorkflowTool` was not even the reason: nothing on this path ever read the
-            // flag. The node's own tool configuration is the authority, exactly as in chat.
+            // flag.
+            //
+            // ⚠️ Gate on the RESOLVED tool, not on `toolRef` (the node's stored snapshot).
+            // `toolRef.requiresConfirmation` is frozen at the moment the tool was picked, and
+            // that seed was hardcoded `false` before 2026-07-31 — so every Action node saved
+            // before then ran destructive tools unattended forever, and no later change to the
+            // tool's policy could reach it. `resolveWorkflowTool` re-derives the value from the
+            // live definition (failing closed when it cannot), which makes THIS the authority.
             //
             // Resolved arguments (not the argument NAMES the timeline shows) are what the user
             // is asked to approve — approving "args: [command]" without seeing the command is
             // not consent. This matches the agent path, which has always surfaced real arguments
             // in the banner; the trace event above stays names-only because it is exportable.
-            if toolRef.requiresConfirmation {
+            if agentTool.requiresConfirmation {
                 // Scoped to THIS node: a grant given in another node of the same run is not an
                 // answer here, because nodes configure their tools independently.
                 let alreadyAllowed = await SessionToolApprovals.shared.isAllowed(
@@ -1735,10 +2902,16 @@ actor WorkflowExecutor: Executor {
                 }
             }
 
-            // (#1) Per-node timeout — a hung tool can't block the workflow forever.
+            // (#1) Per-ATTEMPT timeout — a hung tool can't block the workflow forever.
             // (#2) Retry — transient failures (network/MCP/timeout) retry up to
             // `maxNodeRetries`. Defaults: hardTimeout → workflow default (120s),
             // retries → workflow default (0). Both honor per-node overrides.
+            //
+            // ⚠️ These two were documented as independent and were NOT (WF-EX2): the caller's outer
+            // backstop was computed from this SAME expression, so the first attempt consumed the
+            // entire node budget and every retry was silently unreachable. The outer bound is now
+            // sized to `attempts × limit` in `executeStructuralNodeBounded` — read that before
+            // changing either number, because they only work as a pair.
             let nodeTimeout: TimeInterval? = node.nodeConfig?.hardTimeout ?? workflowConfig.effectiveNodeTimeout
             let maxRetries = node.nodeConfig?.maxNodeRetries ?? workflowConfig.resolvedMaxRetries
             let retryDelay = node.nodeConfig?.retryDelay ?? 0
@@ -1746,11 +2919,50 @@ actor WorkflowExecutor: Executor {
 
             var attempt = 0
             while true {
+                // ⚠️ Per ATTEMPT, not since the node began. `toolStart` is set once before the loop,
+                // so with retries every duration after the first was cumulative — attempt 3 of a
+                // 60s-timeout tool was reported as a 180s call in the timeline and in per-tool
+                // latency stats.
+                let attemptStart = Date()
                 do {
                     let (toolOutput, toolArtifacts) = try await Self.runToolWithTimeout(agentTool, args: argsData, timeout: nodeTimeout)
                     output = toolOutput
                     producedArtifacts = toolArtifacts
-                    let durationMs = Int(Date().timeIntervalSince(toolStart) * 1000)
+                    let durationMs = Int(Date().timeIntervalSince(attemptStart) * 1000)
+
+                    // A tool that reports failure by RETURNING an error string is a failure.
+                    //
+                    // ⚠️ Not throwing is not the same as succeeding. `http_request` answers a dead
+                    // endpoint with "Error: HTTP request failed …" and returns normally; so do many
+                    // MCP tools. This branch used to mark every non-throwing return a success, so
+                    // the node went green, the tool card said success, no `error` port activated —
+                    // and the node's error-handler branch was unreachable for that whole class of
+                    // tool, which is most of the integration tools people wire Action nodes to.
+                    //
+                    // Same predicate and same opt-out as the agent path, deliberately reused rather
+                    // than re-implemented: tools whose legitimate output surfaces error text (shell
+                    // stderr, build-log readers) set `contentMayLookLikeError` and are exempt —
+                    // their real failures still throw.
+                    let semanticFailure = agentTool.contentMayLookLikeError
+                        ? false
+                        : ToolExecutionMediator.isSemanticFailure(toolOutput)
+
+                    if semanticFailure {
+                        // Deliberately NOT retried, unlike a thrown error. The tool returned
+                        // normally, so it may already have performed its side effect and merely
+                        // reported badly — re-running a POST that answered "Error: HTTP 500" can
+                        // double-submit. The thrown path retries because the call is known not to
+                        // have completed. Revisit only with a per-tool idempotency signal.
+                        status = .failed(.modelError(provider: "tool", error: "Tool '\(toolRef.name)' reported a failure: \(toolOutput)"))
+                        await TraceRecorder.shared.emitToolResult(span: structSpan, name: toolRef.name, success: false, output: toolOutput, durationMs: durationMs)
+                        continuation.yield(.toolFailed(
+                            ToolOutput(toolName: toolRef.name, params: toolParams, output: toolOutput, isSuccess: false),
+                            category: .executionThrew, sourceNodeID: nodeID
+                        ))
+                        logger.error("[WF_EXEC] Action node '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: tool '\(toolRef.name)' returned normally but its output reports a failure: \(toolOutput.prefix(200)). CONSEQUENCE: the node is failed and its error port activates, so an error-handler branch runs — previously this reported success and downstream nodes consumed the error text as data.")
+                        break
+                    }
+
                     // Route through reliability stats — Action-node tools were invisible
                     // to per-tool stats (they bypass ToolExecutionMediator) (Gap #11).
                     await TraceRecorder.shared.emitToolResult(span: structSpan, name: toolRef.name, success: true, output: toolOutput, durationMs: durationMs)
@@ -1770,10 +2982,34 @@ actor WorkflowExecutor: Executor {
                     logger.notice("Action node '\(displayName)': cancelled")
                     break
                 } catch {
+                    // ⚠️ REPORT EVERY FAILED ATTEMPT, not just the last one.
+                    //
+                    // This branch used to log and yield a `.thought`, then `continue` — so an
+                    // attempt that failed and was retried reached neither the trace nor per-tool
+                    // reliability stats. A tool that failed twice and succeeded on the third try was
+                    // recorded as one clean success, which is exactly backwards for a stat whose
+                    // whole job is to show which tools are flaky.
+                    let attemptDurationMs = Int(Date().timeIntervalSince(attemptStart) * 1000)
+                    let attemptCategory: ToolFailureCategory
+                    if let agentErr = error as? AgentExecutionError, case .executionTimeout = agentErr.reason {
+                        attemptCategory = .timeout
+                    } else {
+                        attemptCategory = .executionThrew
+                    }
+
                     // Retry transient failures (timeout, network, MCP) up to the cap.
                     if attempt < maxRetries {
                         attempt += 1
-                        logger.notice("Action node '\(displayName)': tool '\(toolRef.name)' failed (\(error.localizedDescription)); retry \(attempt)/\(maxRetries)")
+                        await TraceRecorder.shared.emitToolResult(span: structSpan, name: toolRef.name, success: false, output: error.localizedDescription, durationMs: attemptDurationMs)
+                        continuation.yield(.toolFailed(
+                            ToolOutput(
+                                toolName: toolRef.name, params: toolParams,
+                                output: "Attempt \(attempt) of \(maxRetries + 1) failed: \(error.localizedDescription)",
+                                isSuccess: false
+                            ),
+                            category: attemptCategory, sourceNodeID: nodeID
+                        ))
+                        logger.notice("[WF_EXEC] Action node '\(displayName)': tool '\(toolRef.name)' failed on attempt \(attempt)/\(maxRetries + 1) after \(attemptDurationMs)ms (\(error.localizedDescription)); retrying\(retryDelay > 0 ? " after \(Int(retryDelay))s" : ""). CONSEQUENCE: this attempt IS counted in the tool's reliability stats and shown in the node's timeline — a retried failure is not a silent one.")
                         continuation.yield(.thought("[\(displayName)] Tool failed — retrying (\(attempt)/\(maxRetries))...", sourceNodeID: nodeID))
                         if retryDelay > 0 { try? await Task.sleep(for: .seconds(retryDelay)) }
                         continue
@@ -1787,7 +3023,7 @@ actor WorkflowExecutor: Executor {
                     } else {
                         failureCategory = .executionThrew
                     }
-                    let durationMs = Int(Date().timeIntervalSince(toolStart) * 1000)
+                    let durationMs = attemptDurationMs
                     await TraceRecorder.shared.emitToolResult(span: structSpan, name: toolRef.name, success: false, output: error.localizedDescription, durationMs: durationMs)
                     continuation.yield(.toolFailed(
                         ToolOutput(toolName: toolRef.name, params: toolParams, output: output, isSuccess: false),
@@ -1801,36 +3037,40 @@ actor WorkflowExecutor: Executor {
 
         let endTime = Date()
 
-        // Emit completion/failure
-        switch status {
-        case .completed:
-            // Full output (see executeNode) — the display renders & persists it in
-            // full; previews clip downstream.
-            var summary = output
-            // Enrich summary for loop nodes with iteration count
-            if case .loop = node.kind,
-               let counterStr = variableUpdates["__loop_\(nodeID.uuidString)_counter"] {
-                let earlyExit = variableUpdates["__loop_\(nodeID.uuidString)_exited_early"] == "true" ? " (early exit)" : ""
-                summary = "[\(counterStr) iter\(earlyExit)] " + summary
-            }
-            continuation.yield(.workflowNodeCompleted(nodeID: nodeID, profileName: displayName, summary: summary))
-        case .failed(let reason):
-            continuation.yield(.workflowNodeFailed(nodeID: nodeID, profileName: displayName, error: reason.localizedDescription, suggestion: reason.remediation))
-        case .canceled:
-            continuation.yield(.workflowNodeFailed(nodeID: nodeID, profileName: displayName, error: "Cancelled"))
-        case .skipped(let reason):
-            continuation.yield(.workflowNodeFailed(nodeID: nodeID, profileName: displayName, error: "Skipped: \(reason)"))
+        // ⚠️ NO terminal event is emitted here. `executeStructuralNodeBounded` — the ONLY caller —
+        // emits exactly one, from the envelope this function returns (WF-EX4).
+        //
+        // This function used to yield its own `workflowNodeCompleted`/`Failed`/etc., and the
+        // wrapper yielded ANOTHER on the timeout path, so one node produced TWO contradictory
+        // terminal events: a green "✅ node: <full answer>" immediately followed by a red
+        // "❌ Execution timeout". Structured concurrency makes that ordering deterministic (the
+        // wrapper's task group must await this child before rethrowing), so the node settled on
+        // the right verdict — but the activity log recorded a success and a failure for the same
+        // node, seconds apart, with nothing explaining it. One emitter, one event.
+
+        // True structural kinds (condition/code/gate/action/trigger) have no backing
+        // profile, so the envelope carries a placeholder. A sub-workflow node DOES have one,
+        // and reporting it as a random `.bot` would mislabel it everywhere the run record is
+        // read — the timeline icon, the node card and the history row all key off these.
+        let envelopeProfileID: UUID
+        let envelopeProfileType: ProfileType
+        if case .profile(let pid, let ptype) = node.kind {
+            envelopeProfileID = pid
+            envelopeProfileType = ptype
+        } else {
+            envelopeProfileID = UUID()
+            envelopeProfileType = .bot
         }
 
         let envelope = NodeResultEnvelope(
             taskID: UUID(),
             nodeID: nodeID,
-            sourceProfileID: UUID(),
+            sourceProfileID: envelopeProfileID,
             profileName: displayName,
-            profileType: .bot,
+            profileType: envelopeProfileType,
             status: status,
             output: output,
-            // Structural nodes (Code/Gate/Loop/Condition) are pipeline plumbing —
+            // Structural nodes (Code/Gate/Condition) are pipeline plumbing —
             // they forward upstream artifacts so media survives the hop (a Gate or
             // Code node between an image producer and a vision consumer no longer
             // drops the image). Action nodes additionally contribute any artifacts
@@ -1845,12 +3085,337 @@ actor WorkflowExecutor: Executor {
                 tokenEstimate: output.count / 4
             ),
             // Auto-detect structured output (mirrors the profile-node path): a Code
-            // node emitting JSON, or a Loop/Gate passing JSON through, exposes it as
+            // node emitting JSON, or a Gate passing JSON through, exposes it as
             // `structuredOutput` for downstream `{{ input.json.path }}` access.
             structuredOutput: JSONValue.parseStructured(output)
         )
 
         return StructuralNodeResult(envelope: envelope, activePorts: activePorts, variableUpdates: variableUpdates)
+    }
+
+    // MARK: - Classifier Outcome (WF-CC10)
+
+    /// What the AI Classifier produced for THIS node — a FACT, not an absence.
+    ///
+    /// ⚠️ `classifierLabel: String?` collapsed FOUR different sentences into `nil`: the classifier
+    /// was never consulted, it answered "none of these", it answered unreadably, and it never
+    /// answered at all (it threw). `noMatchBehavior` answers "no rule described this input" — a
+    /// verdict about CONTENT. A classifier that threw produced no verdict, so applying that
+    /// setting turns an infrastructure fault into a routing decision, and under `.route` the run
+    /// then reports SUCCESS with an arbitrary branch taken.
+    ///
+    /// ⚠️ "Did it run at all?" is modelled as OPTIONALITY, not a case. That removes the
+    /// `config.llmFallbackEnabled && classifierLabel == nil` inference, which was wrong whenever a
+    /// rule matched with a BLANK label: the classifier is skipped (its trigger is
+    /// `matchedLabels.isEmpty`) yet the reason claimed it had weighed the input and returned nothing.
+    enum ClassifierOutcome: Equatable, Sendable {
+        /// It named a rule label. NOT guaranteed non-empty — `resolveRouterPort` still owns
+        /// empty-label rejection (WF-EX1) and this type must not grow a second opinion about it.
+        case label(String)
+        /// It answered, and the answer was the no-match sentinel. A verdict about the RULES;
+        /// remedy: add or widen one. FOLLOWS `noMatchBehavior` — this is the case that setting
+        /// was written for.
+        case noMatch
+        /// It answered, and the reply carried no recognisable token. A verdict about the MODEL;
+        /// remedy: pick a stronger one. ⚠️ Deliberately ALSO follows `noMatchBehavior`: the model
+        /// ran and could not decide, and "if it can't decide, When Nothing Matches applies" is
+        /// what the Router inspector promises.
+        case unreadable(preview: String)
+        /// It never answered — threw before or during the model call. NOT a verdict about
+        /// anything. The ONLY case that bypasses `noMatchBehavior`.
+        case failed(reason: String)
+        /// Torn down by Stop or the container deadline. ⚠️ Kept APART from `.failed` because this
+        /// file's own rule is "cancellation is not a failure": a cancelled node records
+        /// `.canceled` and must NOT activate `error`, or every Stop taken during classification
+        /// would run the recovery branch.
+        case cancelled
+
+        /// The reply named TWO OR MORE distinct labels, in first-appearance order (WF-OB2).
+        /// ⚠️ A verdict the model DID produce, so it feeds the Router's decision policy exactly
+        /// like several pattern rules matching — it is ambiguity, not a fault.
+        case ambiguous(candidates: [String])
+
+        /// Adapter for `resolveRouterPort`, whose contract is "signals that are PRESENT".
+        var label: String? {
+            if case .label(let l) = self { return l }
+            return nil
+        }
+    }
+
+    // MARK: - Unified Router decision (2026-08-17 redesign)
+
+    /// Where an undecided Router's situation came from — pattern rules, or the AI Classifier.
+    /// Carried so a log or a failure reason can say WHICH, since the remedies differ.
+    enum RouterUndecidedOrigin: Equatable, Sendable { case pattern, classifier }
+
+    /// Why a Router could not decide.
+    ///
+    /// ⚠️ THIS TYPE STRUCTURALLY CANNOT EXPRESS A FAULT OR A STOP, and that is the point. A
+    /// classifier CRASH bypasses the decision policy and fails the node (WF-CC10); a Stop settles
+    /// `.canceled` and routes nowhere (WF-CC13). Both are separated out by `classify(outcome:)`
+    /// BEFORE a value of this type exists, so no policy branch can accidentally route them.
+    enum RouterUndecided: Equatable, Sendable {
+        /// Nothing named a branch.
+        case empty(EmptyEvidence)
+        /// Several branches were named — pattern rules or classifier tokens. Candidates are
+        /// deduped and ordered (rule order for patterns, reply order for the classifier).
+        case ambiguous(candidates: [String], origin: RouterUndecidedOrigin)
+
+        /// Why nothing was named. The distinction is the user's remedy: widen a rule, versus pick
+        /// a stronger model.
+        enum EmptyEvidence: Equatable, Sendable {
+            /// No rule matched and the classifier was never consulted (off, or a rule matched).
+            case noRuleMatched
+            /// The model explicitly answered "none of these fit" — a verdict about the RULES.
+            case classifierNoMatch
+            /// The reply carried nothing recognisable — a verdict about the MODEL.
+            case classifierUnreadable(preview: String)
+        }
+    }
+
+    /// A classifier outcome sorted into the two things it can be: a boundary the policy must never
+    /// see, or a routable situation.
+    enum RouterBoundaryOrSituation: Equatable {
+        case decided(String)
+        case situation(RouterUndecided)
+        case boundaryFail(reason: String)
+        case boundaryCancel
+    }
+
+    /// ⚠️ THE crashed-vs-inconclusive differential lives here — moved out of `resolveNoMatch`'s
+    /// first guard so it stays unit-provable while becoming type-enforced downstream.
+    ///
+    /// ⚠️ Exhaustive with NO `default`: a new `ClassifierOutcome` case must break this build rather
+    /// than silently inherit a routing verdict.
+    static func classify(outcome: ClassifierOutcome) -> RouterBoundaryOrSituation {
+        switch outcome {
+        case .failed(let reason):
+            // WF-CC10, wording preserved verbatim — tests pin it.
+            return .boundaryFail(reason: "the AI Classifier could not be consulted (\(reason)), so nothing classified this input and no branch was chosen")
+        case .cancelled:
+            return .boundaryCancel
+        case .label(let l):
+            return .decided(l)
+        case .ambiguous(let candidates):
+            return .situation(.ambiguous(candidates: candidates, origin: .classifier))
+        case .noMatch:
+            return .situation(.empty(.classifierNoMatch))
+        case .unreadable(let preview):
+            return .situation(.empty(.classifierUnreadable(preview: preview)))
+        }
+    }
+
+    /// What the executor should do about an undecided Router.
+    enum UndecidedDisposition: Equatable {
+        case fail(reason: String)
+        case route(port: String)
+        case endBranch
+        /// Park and ask. The executor owns the actual suspension; this carries what to offer and
+        /// what to do when nobody answers.
+        case ask(options: [String], prompt: String, fallback: RouterDecisionPolicy.AskFallback)
+    }
+
+    /// The unified decision: one policy, both triggers (user decision 2026-08-17).
+    ///
+    /// ⚠️ Pure and total, so the whole decision table is unit-testable without an executor — the
+    /// classifier cannot be driven from a test (it reaches `MLXService.shared` directly), so this
+    /// function is the only place the situations can be compared against each other.
+    static func resolveUndecided(
+        policy: RouterDecisionPolicy,
+        situation: RouterUndecided,
+        rules: [ConditionRule]
+    ) -> UndecidedDisposition {
+        // The human-readable evidence, shared by every disposition that reports one.
+        let detail: String
+        switch situation {
+        case .empty(.noRuleMatched):
+            detail = "no rule matched"
+        case .empty(.classifierNoMatch):
+            detail = "no rule matched, and the AI Classifier reported that none of the \(rules.count) categories fit"
+        case .empty(.classifierUnreadable(let preview)):
+            detail = "no rule matched, and the AI Classifier's reply (\"\(preview)\") carried no recognisable label"
+        case .ambiguous(let candidates, let origin):
+            let source = origin == .pattern ? "\(candidates.count) rules matched the same input" : "the AI Classifier named \(candidates.count) categories"
+            detail = "\(source) — [\(candidates.joined(separator: ", "))] — so no single branch was chosen"
+        }
+
+        switch policy {
+        case .failNode:
+            return .fail(reason: detail)
+
+        case .endBranch:
+            return .endBranch
+
+        case .route(let ruleID):
+            // ⚠️ Resolved by the rule's STABLE ID so renames cannot strand it. A deleted target is
+            // a design-time validation ERROR; reaching this at run time means validation was
+            // bypassed, so fail honestly rather than guess.
+            guard let target = rules.first(where: { $0.id == ruleID }) else {
+                return .fail(reason: "\(detail), and the chosen default route points at a rule that no longer exists")
+            }
+            return .route(port: target.label)
+
+        case .ask(let fallback):
+            // ⚠️ The offered options differ by situation, and every one of them is a RULE LABEL —
+            // which is what makes the gate reuse work, since rule labels are already declared
+            // output ports. Ambiguity offers only the branches actually named; EMPTY has no
+            // candidates, so it offers every rule (the question becomes "none of these fit — which
+            // should it take anyway?").
+            let options: [String]
+            let prompt: String
+            switch situation {
+            case .ambiguous(let candidates, let origin):
+                options = candidates
+                prompt = origin == .pattern
+                    ? "\(candidates.count) rules match this input — which branch should it take?"
+                    : "The AI Classifier named \(candidates.count) categories — which branch should it take?"
+            case .empty:
+                // Deduped, order preserved: two rules may share a label (one port), and the
+                // banner must not offer the same branch twice.
+                var seen = Set<String>()
+                options = rules.map(\.label).filter { !$0.isEmpty && seen.insert($0).inserted }
+                prompt = "Nothing matched this input — which branch should it take?"
+            }
+            // A Router with no rules cannot offer a choice; fall straight to the fallback rather
+            // than parking on an empty banner.
+            guard !options.isEmpty else {
+                return Self.resolveUndecided(
+                    policy: Self.policy(for: fallback), situation: situation, rules: rules)
+            }
+            return .ask(options: options, prompt: prompt, fallback: fallback)
+        }
+    }
+
+    /// An `AskFallback` is a policy minus `ask` — this lifts it back so the fallback resolves
+    /// through the SAME table rather than a parallel one that could drift.
+    static func policy(for fallback: RouterDecisionPolicy.AskFallback) -> RouterDecisionPolicy {
+        switch fallback {
+        case .failNode:          return .failNode
+        case .route(let ruleID): return .route(ruleID: ruleID)
+        case .endBranch:         return .endBranch
+        }
+    }
+
+    /// What the Router does when no port resolved.
+    enum NoMatchDisposition: Equatable {
+        case fail(reason: String)
+        case route(port: String)
+        case endBranch
+    }
+
+    /// ⚠️ Extracted PURE so the crashed-vs-inconclusive distinction is PROVABLE. The classifier
+    /// cannot be driven from a test — it reaches `MLXModelService.shared` / `MLXService.shared` as
+    /// concrete singletons with no injection seam — so an INCONCLUSIVE classifier is unreachable
+    /// end-to-end, and this function is the only place the two can be compared. Same concession,
+    /// and the same reason, as `resolveRouterPort`.
+    static func resolveNoMatch(
+        behavior: RouterNoMatchBehavior,
+        outcome: ClassifierOutcome?,
+        rules: [ConditionRule]
+    ) -> NoMatchDisposition {
+        // ⚠️ WF-CC10 LIVES IN THIS BLOCK AND NOWHERE ELSE.
+        // A classifier that never executed did not find the input unmatched — it never read it.
+        // `noMatchBehavior` is the answer to a question that was never asked, so it is not applied.
+        // Same reasoning as the deleted-route arm below: fail honestly rather than guess.
+        // ⚠️ `.cancelled` never reaches here — its caller settles the node as `.canceled` first.
+        if case .failed(let reason) = outcome {
+            return .fail(reason: "the AI Classifier could not be consulted (\(reason)), so nothing classified this input and no branch was chosen")
+        }
+
+        let detail: String
+        switch outcome {
+        // ⚠️ `.failed` is listed only because Swift does not narrow the enum after the `if case`
+        // early-return above — it is unreachable here. Kept in the exhaustive switch rather than
+        // hidden behind a `default:` so that adding a ClassifierOutcome case still breaks the build.
+        case nil, .label, .cancelled, .failed, .ambiguous:
+            // nil = the classifier was off, or a rule matched (possibly with a BLANK label, which
+            // `resolveRouterPort` then discarded). `.label` reaching here means the label was
+            // blank. `.ambiguous` is unreachable on this LEGACY path: the call site collapses it to
+            // its first-stated candidate before this runs, because a nil-policy node has no setting
+            // to consult (that collapse is the WF-OB2 bugfix — deterministic first-stated replacing
+            // a per-launch random pick). None of these may mention a classifier verdict.
+            detail = "no rule matched"
+        case .noMatch:
+            detail = "no rule matched, and the AI Classifier reported that none of the \(rules.count) categories fit"
+        case .unreadable(let preview):
+            detail = "no rule matched, and the AI Classifier's reply (\"\(preview)\") carried no recognisable label"
+        }
+
+        switch behavior {
+        case .failNode:
+            return .fail(reason: detail)
+        case .endWorkflow:
+            return .endBranch
+        case .route(let ruleID):
+            // ⚠️ Resolved by the rule's STABLE ID, so renames cannot strand it. A deleted target is
+            // a design-time validation ERROR; reaching this at run time means validation was
+            // bypassed, so fail honestly rather than guess.
+            guard let target = rules.first(where: { $0.id == ruleID }) else {
+                return .fail(reason: "\(detail), and its 'When Nothing Matches' route points at a rule that no longer exists")
+            }
+            return .route(port: target.label)
+        }
+    }
+
+    // MARK: - Router Port Resolution
+
+    /// Which output port a Router activates, or nothing at all.
+    enum RouterPortResolution: Equatable {
+        case port(String)
+        /// No port resolved — the node must FAIL onto its `error` port.
+        /// `discardedEmptyLabel` is true when a candidate existed but was an empty string, which is
+        /// worth logging separately because it means a rule was saved with a blank label.
+        case none(discardedEmptyLabel: Bool)
+
+        var port: String? {
+            if case .port(let p) = self { return p }
+            return nil
+        }
+    }
+
+    /// Turns the three routing signals into the port to activate.
+    ///
+    /// ⚠️ `internal`, not `private`, SOLELY so it can be unit-tested — the same concession
+    /// `AgentConnect.resolveExecutableTools` makes. The classifier that feeds it reaches for
+    /// `MLXModelService.shared`/`MLXService.shared` directly and cannot be driven from a test, so
+    /// extracting the pure half is what makes WF-EX1 verifiable at all.
+    ///
+    /// ⚠️ AN EMPTY LABEL IS ABSENT, NOT A PORT — the whole point of this function (WF-EX1).
+    /// `evaluateConditionWithLLM` used to return `matched ?? config.fallbackLabel`, and since the
+    /// Static Fallback picker was retired 2026-08-13 `fallbackLabel` is empty on every Router made
+    /// since — so an unreadable model reply produced `""`. A `??` chain treats `""` as PRESENT, so it
+    /// sailed past the `guard let` written to fail the node and activated a port named `""`.
+    /// `WorkflowState.edgeIsLive` resolves an edge's port as `edge.sourcePortLabel ?? ""`, so that
+    /// empty port matched every UNLABELLED edge out of the Router: the run took the default branch as
+    /// though a rule had matched, and still reported success.
+    ///
+    /// Normalising HERE, once, rather than at each producer, means every future signal added to this
+    /// chain inherits the guarantee instead of re-learning it the same way.
+    ///
+    /// Priority is unchanged: HITL arbitration → first pattern match → classifier → legacy catch-all.
+    static func resolveRouterPort(
+        arbitrated: String?,
+        matched: [String],
+        classifier: String?,
+        legacyFallback: String
+    ) -> RouterPortResolution {
+        // ⚠️ The legacy fallback is handled AFTER the loop, deliberately. An empty `legacyFallback`
+        // is the ORDINARY state of every Router created since the Static Fallback picker was retired
+        // — it means "no catch-all configured", not "someone saved a blank label". Feeding it through
+        // the same empty-detection as the real signals would raise `discardedEmptyLabel` on every
+        // no-match run and turn a genuine diagnostic into noise.
+        var sawEmptyCandidate = false
+        for candidate in [arbitrated, matched.first, classifier] {
+            guard let candidate else { continue }
+            if candidate.isEmpty {
+                // Not an answer, but a signal worth reporting — keep looking.
+                sawEmptyCandidate = true
+                continue
+            }
+            return .port(candidate)
+        }
+        if !legacyFallback.isEmpty { return .port(legacyFallback) }
+        return .none(discardedEmptyLabel: sawEmptyCandidate)
     }
 
     // MARK: - AI Classifier Evaluation
@@ -1865,7 +3430,7 @@ actor WorkflowExecutor: Executor {
         nodeID: UUID,
         continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation,
         traceContext: TraceContext
-    ) async throws -> String {
+    ) async throws -> ClassifierOutcome {
 
         let classificationLabels = config.rules.map(\.label)
 
@@ -1916,7 +3481,10 @@ actor WorkflowExecutor: Executor {
             .sorted(by: { $0.key < $1.key })
             .map { "\($0.key) → \($0.value)" }
             .joined(separator: ", ")
-        logger.debug("AI Classifier '\(displayName)' token map: [\(tokenMapDebug)]")
+        // ⚠️ The no-match token is logged alongside the label map because without it a support bundle
+        // cannot decode the reply: a lone unfamiliar 4-char code in the trace is indistinguishable
+        // from a hallucinated one, and the two have opposite remedies.
+        logger.debug("AI Classifier '\(displayName)' token map: [\(tokenMapDebug)]\(tokenMapper.fallbackIsNoMatchSentinel ? ", no-match token → \(tokenMapper.fallbackToken) (routes nowhere)" : ", catch-all → \(tokenMapper.fallbackToken)")")
 
         // XML-structured prompt with opaque tokens — optimized for small MLX models
         let systemPrompt = """
@@ -1950,7 +3518,7 @@ actor WorkflowExecutor: Executor {
         <labels>
         \(tokenMapper.xmlLabelBlock)
         </labels>
-        <instruction>\(config.llmPrompt)</instruction>
+        <instruction>\(config.resolvedRoutingPrompt())</instruction>
         <fallback_id>\(tokenMapper.fallbackToken)</fallback_id>
         <input>\(String(upstreamText.prefix(4000)))</input>
         </classification_task>
@@ -2011,12 +3579,51 @@ actor WorkflowExecutor: Executor {
         // Parse response using token mapper — handles clean, wrapped, and lowercased responses
         let matched = tokenMapper.parseResponse(response)
 
-        let result = matched ?? config.fallbackLabel
-        let responsePreview = response.trimmingCharacters(in: .whitespacesAndNewlines).prefix(50)
-        continuation.yield(.thought("[\(displayName)] AI Classifier: \"\(responsePreview)\" → route: \(result)", sourceNodeID: nodeID))
-        logger.info("Condition AI Classifier '\(displayName)': response=\"\(responsePreview)\", resolved=\(result)")
+        // ⚠️ nil, NEVER "" (WF-EX1). This used to be `matched ?? config.fallbackLabel`, and since the
+        // Static Fallback picker was retired 2026-08-13 `fallbackLabel` is EMPTY on every Router
+        // created since — so a model reply carrying no recognisable token produced the empty string
+        // and handed it back as though it were a routing decision.
+        //
+        // The caller's `??` chain then treated "" as PRESENT, sailed past the `guard let` written to
+        // fail the node on no-match, and activated a port named "". Two ways that hurt, both silent
+        // and both leaving the run reporting SUCCESS:
+        //   • no edge is labelled "", so the branch just stops; or worse
+        //   • `WorkflowState.edgeIsLive` compares `edge.sourcePortLabel ?? ""`, so an UNLABELLED
+        //     edge out of this Router matches "" and FIRES — the run routes down the default branch
+        //     as if a rule had matched, on a reply the classifier could not read at all.
+        //
+        // Returning nil lets the caller's existing no-match arm do its job: fail the node, activate
+        // `error`, and put the reason in the run's final output.
+        // ⚠️ NEVER "" (WF-EX1) and, since WF-CC10, never a bare `nil` either. The three non-label
+        // endings are DIFFERENT SENTENCES and the caller needs all three: `noMatch` and
+        // `unreadable` are verdicts the model produced, so they follow `noMatchBehavior`; a THROW
+        // (which never reaches this line) is not a verdict at all. Collapsing them to `String?`
+        // meant an MLX slot race and a clean "none of these" arrived identically, and under
+        // `.route` an infrastructure fault silently became a routing decision.
+        let result: String? = matched ?? (config.fallbackLabel.isEmpty ? nil : config.fallbackLabel)
+        let responsePreview = String(response.trimmingCharacters(in: .whitespacesAndNewlines).prefix(50))
 
-        return result
+        if let result {
+            continuation.yield(.thought("[\(displayName)] AI Classifier: \"\(responsePreview)\" → route: \(result)", sourceNodeID: nodeID))
+            logger.info("Router AI Classifier '\(displayName)': response=\"\(responsePreview)\", resolved=\(result)")
+            return .label(result)
+        }
+
+        if tokenMapper.isExplicitNoMatch(response) {
+            // ⚠️ Reported separately from an unparseable reply (WF-OB1). The model DID answer, and
+            // its answer was "none of these" — that is a statement about the RULES, not a
+            // misbehaving model, and the remedy is different: add or widen a rule.
+            continuation.yield(.thought("[\(displayName)] AI Classifier: none of the categories matched", sourceNodeID: nodeID))
+            logger.notice("[WF_ROUTE] Router AI Classifier '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: the model explicitly reported that NONE of the \(classificationLabels.count) categor(ies) fit. CONSEQUENCE: no port is resolved, so the node follows its 'When Nothing Matches' setting — this is the classifier working correctly on input the rules do not cover, not a model failure. Add a rule that covers this input.")
+            return .noMatch
+        }
+
+        // ⚠️ The two log lines above and below used to say "the node fails onto its `error` port".
+        // That has been false since `noMatchBehavior` shipped 2026-08-16 — true only under
+        // `.failNode`. A log line must state its TRUE consequence (WF-CC10).
+        logger.error("[WF_ROUTE] Router AI Classifier '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: the model reply \"\(responsePreview)\" contained NONE of the \(classificationLabels.count) label token(s) and not the no-match token either — an unusable answer. CONSEQUENCE: no port is resolved, so the node follows its 'When Nothing Matches' setting; the model RAN, so this is treated as an undecided verdict rather than a classifier fault. If this recurs, the model is too small to follow the token protocol; pick a stronger one for this Router.")
+        continuation.yield(.thought("[\(displayName)] AI Classifier: \"\(responsePreview)\" → no recognisable label", sourceNodeID: nodeID))
+        return .unreadable(preview: responsePreview)
     }
 
 }

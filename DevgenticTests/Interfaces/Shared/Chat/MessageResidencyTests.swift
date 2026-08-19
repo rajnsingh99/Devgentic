@@ -43,6 +43,14 @@ private final class EndlessChatStore: ChatPersistenceProtocol {
         return Array(backing[offset ..< min(offset + limit, backing.count)])
     }
 
+    /// Must be implemented, not left to the protocol's `[]` default — the corpus is fetched
+    /// through THIS method now, and the default would silently make every corpus test assert
+    /// against an empty corpus.
+    func fetchSearchDocuments(for conversationId: UUID, limit: Int) async -> [SearchDocument] {
+        fetchCount += 1
+        return backing.prefix(limit).map(ChatSearchDecomposition.document(for:))
+    }
+
     func addConversation(from conversation: Conversation) {}
     func addMessage(_ message: ChatMessage, toConversation conversationId: UUID) async {}
     func addMessages(_ messages: [ChatMessage], toConversation conversationId: UUID) async {}
@@ -198,8 +206,8 @@ final class MessageResidencyTests: XCTestCase {
         for _ in 0..<80 { await viewModel.loadMoreMessages() }
         XCTAssertTrue(viewModel.hasReachedResidencyCap, "sanity: capped")
 
-        let offWindow = SearchMatch(messageID: UUID(), matchIndex: 0)
-        let resident = SearchMatch(messageID: viewModel.currentChatMessages[0].id, matchIndex: 0)
+        let offWindow = SearchMatch(messageID: UUID(), blockID: nil, indexInBlock: 0)
+        let resident = SearchMatch(messageID: viewModel.currentChatMessages[0].id, blockID: nil, indexInBlock: 0)
 
         XCTAssertEqual(viewModel.unreachableMatchCount(in: [offWindow, resident]), 1)
 

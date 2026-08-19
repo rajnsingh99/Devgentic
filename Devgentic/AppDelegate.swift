@@ -43,6 +43,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     /// check is distinguishable from one that ran and found nothing.
     weak var profileService: BackendProfileService?
 
+    /// Owner of the MAIN Workflow interface's canvas states, injected alongside `profileService`.
+    ///
+    /// ⚠️ A SECOND, INDEPENDENT source of unsaved canvas work, and the reason `profileService`
+    /// alone was not enough. There are two `WorkflowEditGuard` instances by design — the profile
+    /// editor's canvas and the main Workflow interface's canvas can be mounted AT THE SAME TIME
+    /// (`chatArea` stays alive under a non-chat destination, opacity-toggled), so one shared guard
+    /// would let whichever registered last clear the other's hooks and dirty flag. The bug was that
+    /// quit consulted only the first: an afternoon of graph work in the main interface was
+    /// discarded by ⌘Q with no prompt and no log line, while the identical work done inside the
+    /// profile editor was rescued.
+    weak var workflowCanvasOwner: MainApplicationViewModel?
+
     /// [C6] True when the QuickAccess panel is the KEY window — i.e. the user is actively
     /// looking at it. Because the panel is non-activating it can be key while `NSApp.isActive`
     /// is false, so notification suppression must consult this in addition to app-active.
@@ -234,9 +246,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     /// Arms the quit-time guard. Separate from `configureQuickAccess` because it has nothing to do
     /// with the panel — until this runs, `applicationShouldTerminate` cannot see the editor.
-    func configureTerminationGuard(profileService: BackendProfileService) {
+    func configureTerminationGuard(
+        profileService: BackendProfileService,
+        mainAppViewModel: MainApplicationViewModel
+    ) {
         self.profileService = profileService
-        Self.logger.info("[PROFILE] AppDelegate: quit-time unsaved-changes guard armed.")
+        self.workflowCanvasOwner = mainAppViewModel
+        Self.logger.info("[PROFILE] AppDelegate: quit-time unsaved-changes guard armed (profile editor + workflow canvases).")
     }
 
     enum QuitDecision { case proceed, cancel }
@@ -268,20 +284,38 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // is discarded here silently — the exact loss this guard exists to prevent.
         profileService.flushPendingEditorText()
 
-        guard profileService.hasUnsavedEditorChanges else { return .proceed }
+        // The MAIN Workflow interface's canvases are a separate source of dirt from the profile
+        // editor's — different guard, different owner, and BOTH can be dirty at once. Read every
+        // cached canvas, not just the one on screen: switching workflows leaves the previous one's
+        // unsaved graph in the cache, invisible to the on-screen guard.
+        if workflowCanvasOwner == nil {
+            Self.logger.notice(
+                "[WF_CANVAS] Quit is NOT gated on unsaved workflow-canvas edits: the main view model "
+                + "was never injected into AppDelegate. CONSEQUENCE: unsaved graph work in the "
+                + "Workflow interface is being discarded silently."
+            )
+        }
+        let dirtyWorkflowIDs = workflowCanvasOwner?.unsavedWorkflowCanvasProfileIDs ?? []
+
+        guard profileService.hasUnsavedEditorChanges || !dirtyWorkflowIDs.isEmpty else { return .proceed }
 
         let bufferDirty = profileService.editBuffer?.isDirty == true
         let canvasDirty = profileService.canvasEditGuard.hasUnsavedChanges
         Self.logger.notice(
-            "[PROFILE] Quit requested with unsaved editor changes (buffer dirty: \(bufferDirty), "
-            + "canvas dirty: \(canvasDirty)) for '\(profileService.editBuffer?.draft.displayName ?? "no open profile")'. "
+            "[PROFILE] Quit requested with unsaved changes (buffer dirty: \(bufferDirty), "
+            + "editor canvas dirty: \(canvasDirty), workflow canvases dirty: \(dirtyWorkflowIDs.count)) "
+            + "for '\(profileService.editBuffer?.draft.displayName ?? "no open profile")'. "
             + "CONSEQUENCE: prompting before teardown; quit is blocked until the user answers."
         )
 
         let alert = NSAlert()
         alert.messageText = String(localized: "You have unsaved changes")
-        alert.informativeText = String(
-            localized: "Your profile edits haven't been saved yet. Quitting now discards them.")
+        // Name the workflow canvas explicitly when that is what is dirty — "profile edits" sent the
+        // user looking for an editor they never opened, and the wrong mental model at a
+        // Discard-and-Quit prompt is how work gets thrown away on purpose.
+        alert.informativeText = dirtyWorkflowIDs.isEmpty
+            ? String(localized: "Your profile edits haven't been saved yet. Quitting now discards them.")
+            : String(localized: "Your workflow canvas has unsaved changes. Quitting now discards them.")
         alert.alertStyle = .warning
         alert.addButton(withTitle: String(localized: "Save and Quit"))
         alert.addButton(withTitle: String(localized: "Discard and Quit"))
@@ -311,19 +345,78 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     /// has a window to appear in. A failure here cancels the quit and says why.
     @MainActor
     private func saveOpenProfileEdits(on profileService: BackendProfileService) -> QuitDecision {
-        if profileService.canvasEditGuard.hasUnsavedChanges {
-            guard let saveHook = profileService.canvasEditGuard.saveHook else {
+        // Main Workflow interface canvases FIRST — this drains every cached dirty canvas, including
+        // ones for workflows the user has since switched away from, which no on-screen hook covers.
+        var drainedProfileIDs: Set<UUID> = []
+        // ⚠️ Distinct from "the drain covered nothing": a nil owner means the drain never RAN (it is
+        // injected by `configureTerminationGuard`, and quit fails open before that). The fallback
+        // warning below must not fire in that case — it would assert data loss that is not happening.
+        let drainDidRun = workflowCanvasOwner != nil
+        if let workflowCanvasOwner {
+            let drain = workflowCanvasOwner.persistDirtyWorkflowCanvases(profileService: profileService)
+            drainedProfileIDs = Set(drain.persisted)
+            if !drain.failed.isEmpty {
                 Self.logger.error(
-                    "[PROFILE] Quit-time save requested but the workflow canvas registered NO save "
-                    + "hook. CONSEQUENCE: the canvas layout cannot be persisted from here; quit is "
-                    + "cancelled so the user can save it from the canvas itself."
+                    "[WF_CANVAS] Quit-time save FAILED for \(drain.failed.count) workflow canvas(es): "
+                    + "\(drain.failed.map(\.uuidString).joined(separator: ", ")). CONSEQUENCE: quit is "
+                    + "CANCELLED rather than discarding graph work the user asked to keep."
                 )
                 presentQuitSaveFailure(String(
-                    localized: "The workflow canvas couldn't be saved automatically. Save it from the canvas, then quit."))
+                    localized: "A workflow canvas couldn't be saved automatically. Save it from the canvas, then quit."))
                 return .cancel
             }
-            saveHook()
-            Self.logger.info("[PROFILE] Quit-time save: workflow canvas layout persisted.")
+        }
+
+        if profileService.canvasEditGuard.hasUnsavedChanges {
+            // ⚠️ WF-PE1. The drain above and this `saveHook` both write `WorkflowLayoutSD`, and the
+            // store has no compare-and-swap — so if they ever hold DIFFERENT graphs for one profile,
+            // this second write silently destroys the first. Both mount sites now share a single
+            // `WorkflowCanvasState` per profile (`MainApplicationViewModel.workflowCanvasState(for:)`),
+            // which makes the two writes identical; skipping the redundant one keeps that true by
+            // construction instead of by assumption, and turns any future divergence into a log line
+            // here rather than a graph the user loses at quit.
+            //
+            // The dirty flag is the guard's own MIRROR of the canvas state and is not cleared by the
+            // drain's `markSaved()`, so it reads stale-true after a successful drain — expected, and
+            // exactly why the decision keys off the profile identity rather than the flag.
+            if let registeredID = profileService.canvasEditGuard.registeredProfileID,
+               drainedProfileIDs.contains(registeredID) {
+                Self.logger.info(
+                    "[WF_CANVAS] Quit-time save: the on-screen canvas (workflow \(registeredID)) was "
+                    + "already persisted by the cached-canvas drain, so its saveHook is SKIPPED. "
+                    + "CONSEQUENCE: none — both resolve to the same shared WorkflowCanvasState, and "
+                    + "skipping avoids a second write to the same layout row."
+                )
+            } else {
+                guard let saveHook = profileService.canvasEditGuard.saveHook else {
+                    Self.logger.error(
+                        "[PROFILE] Quit-time save requested but the workflow canvas registered NO save "
+                        + "hook. CONSEQUENCE: the canvas layout cannot be persisted from here; quit is "
+                        + "cancelled so the user can save it from the canvas itself."
+                    )
+                    presentQuitSaveFailure(String(
+                        localized: "The workflow canvas couldn't be saved automatically. Save it from the canvas, then quit."))
+                    return .cancel
+                }
+                // Reaching here means the on-screen canvas is NOT one the drain covered — i.e. it is
+                // holding a state the view model does not know about. That is the WF-PE1 shape and
+                // should be impossible now; say so rather than writing silently.
+                //
+                // ⚠️ Only when the drain actually ran. With a nil `workflowCanvasOwner` this hook is
+                // the ONLY thing saving the canvas, which is correct, not a conflict.
+                if drainDidRun, let registeredID = profileService.canvasEditGuard.registeredProfileID {
+                    Self.logger.error(
+                        "[WF_CANVAS] Quit-time save: the on-screen canvas for workflow \(registeredID) "
+                        + "was NOT covered by the cached-canvas drain, so it holds a state the view "
+                        + "model does not own. CONSEQUENCE: its saveHook is running as a fallback and "
+                        + "will overwrite that workflow's layout row with this canvas's graph; if "
+                        + "another surface was editing the same workflow, its edits are being lost. "
+                        + "Mount sites must inject MainApplicationViewModel.workflowCanvasState(for:)."
+                    )
+                }
+                saveHook()
+                Self.logger.info("[PROFILE] Quit-time save: workflow canvas layout persisted.")
+            }
         }
 
         if let buffer = profileService.editBuffer, buffer.isDirty {

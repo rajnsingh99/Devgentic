@@ -34,11 +34,20 @@ protocol ChatPersistenceProtocol: Sendable {
     // (test stubs) aren't forced to implement them.
     func fetchMessage(withId id: UUID) async -> ChatMessage?
     func fetchUserMessagesWithAttachedTextFiles(for conversationId: UUID) async -> [ChatMessage]
+
+    /// The find-in-conversation corpus, projected down to just the text search needs.
+    ///
+    /// Deliberately NOT `fetchMessages`: that runs `toChatMessage()` per row, which decodes the
+    /// timeline and token blobs and materialises EVERY attached image's full `binaryData` — for
+    /// up to 1000 rows, on the main actor, triggered by pressing ⌘F. The corpus never reads any
+    /// of that. Defaulted so lightweight test conformers aren't forced to implement it.
+    func fetchSearchDocuments(for conversationId: UUID, limit: Int) async -> [SearchDocument]
 }
 
 extension ChatPersistenceProtocol {
     func fetchMessage(withId id: UUID) async -> ChatMessage? { nil }
     func fetchUserMessagesWithAttachedTextFiles(for conversationId: UUID) async -> [ChatMessage] { [] }
+    func fetchSearchDocuments(for conversationId: UUID, limit: Int) async -> [SearchDocument] { [] }
 }
 
 // MARK: - SwiftData Chat Persistence Store
@@ -191,6 +200,61 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
             return messages
         } catch {
             logger.error("Failed to fetch messages for \(conversationId.uuidString): \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    /// Corpus projection: reads ONLY `id`, `timestamp`, `senderType` and `contentData`, and
+    /// decodes the content blob alone. Never calls `toChatMessage()`, so the timeline/token
+    /// blobs and — the dominant cost — every attached image's external-storage bytes are never
+    /// touched. Same predicate/sort/limit as `fetchMessages`.
+    ///
+    /// Still main-actor (the store is `@MainActor` and this app has no background
+    /// `ModelContext`), so this shrinks the ⌘F stall rather than eliminating it.
+    func fetchSearchDocuments(for conversationId: UUID, limit: Int) async -> [SearchDocument] {
+        guard let context = mainContext else {
+            logger.warning("[SEARCH] Corpus projection skipped for \(conversationId.uuidString.prefix(8)) — no ModelContext. CONSEQUENCE: search reaches only the resident scroll window; older messages report no results.")
+            return []
+        }
+
+        var descriptor = FetchDescriptor<ChatMessageSD>(
+            predicate: #Predicate { $0.conversationId == conversationId },
+            sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
+        )
+        descriptor.fetchLimit = limit
+
+        do {
+            let entities = try context.fetch(descriptor)
+            var undecodable = 0
+            // One document per row ALWAYS, even with no units — callers index the corpus
+            // positionally and compare its count against the resident window.
+            let documents = entities.map { entity -> SearchDocument in
+                let sender = SenderRole(rawValue: entity.senderType) ?? .user
+                guard let content = try? JSONDecoder().decode(MessageContent.self, from: entity.contentData) else {
+                    undecodable += 1
+                    return SearchDocument(id: entity.id, timestamp: entity.timestamp, units: [])
+                }
+                let blocks: [ContentBlock]?
+                if case .markdownText(let text) = content, !text.isEmpty {
+                    // Pure free function — writes no cache on any ChatMessage, so the corpus
+                    // cannot repopulate the caches `trimMarkdownCachesOutsideWindow` releases.
+                    blocks = parseMarkdown(text)
+                } else {
+                    blocks = nil
+                }
+                return SearchDocument(
+                    id: entity.id,
+                    timestamp: entity.timestamp,
+                    units: ChatSearchDecomposition.units(sender: sender, content: content, blocks: blocks)
+                )
+            }
+            if undecodable > 0 {
+                logger.warning("[SEARCH] \(undecodable) of \(documents.count) message(s) in \(conversationId.uuidString.prefix(8)) had UNDECODABLE contentData. CONSEQUENCE: they are in the corpus but contribute no searchable text, so their content cannot be found.")
+            }
+            logger.debug("[SEARCH] Projected \(documents.count) search document(s) for \(conversationId.uuidString.prefix(8)) — no timeline or image blobs decoded.")
+            return documents
+        } catch {
+            logger.error("[SEARCH] Corpus projection FAILED for \(conversationId.uuidString.prefix(8)): \(error.localizedDescription). CONSEQUENCE: search reaches only the resident scroll window.")
             return []
         }
     }

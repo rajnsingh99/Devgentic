@@ -41,6 +41,10 @@ enum WorkflowLayoutSaveOutcome: Equatable {
     /// Repair via `repairUnreadableLayout(_:for:reason:)`.
     case refusedUnreadable(nodeCount: Int, edgeCount: Int, annotationCount: Int)
 
+    /// The stored blob was written by a NEWER build; re-encoding here would strip its fields
+    /// permanently (WF-PE2). Byte-intact refusal; the canvas is read-only until the app updates.
+    case refusedNewerVersion(blobVersion: Int, appVersion: Int)
+
     /// SwiftData raised on fetch or save.
     case failed(String)
 
@@ -75,6 +79,55 @@ final class WorkflowLayoutStore {
     /// Loads the layout for a given workflow profile. Returns `.empty` on miss
     /// (no row, no container, or decode failure) — the canvas treats an empty
     /// layout as a fresh workflow.
+    /// Loads every workflow layout reachable from `layout` through sub-workflow nodes, keyed by
+    /// workflow profile ID. Feeds `WorkflowValidator`'s nesting and cycle rules.
+    ///
+    /// ⚠️ THE VISITED SET IS FOR TERMINATION, NOT CORRECTNESS. A workflow that contains itself would
+    /// recurse forever *while loading* — before the validator ever gets the chance to report the
+    /// cycle. The set is what makes a cyclic graph loadable at all; reporting the cycle is a
+    /// separate walk over the finished map.
+    ///
+    /// ⚠️ Resolved by the CALLER and handed to the validator, deliberately. The validator is a pure
+    /// synchronous function re-run on every canvas edit (`markDirty` → `revalidate`); making it load
+    /// layouts would put a SwiftData fetch on every keystroke and let stale async results race the
+    /// live ones. Same shape as `availableToolSources`.
+    func resolveNestedLayouts(from layout: WorkflowLayout) -> [UUID: WorkflowLayout] {
+        var resolved: [UUID: WorkflowLayout] = [:]
+        var visited = Set<UUID>()
+        var queue = Self.subWorkflowProfileIDs(in: layout)
+
+        while let profileID = queue.popLast() {
+            guard visited.insert(profileID).inserted else { continue }
+            let sub = load(for: profileID)
+            resolved[profileID] = sub
+            queue.append(contentsOf: Self.subWorkflowProfileIDs(in: sub))
+        }
+        return resolved
+    }
+
+    /// Every workflow this layout references, with the node that references it.
+    ///
+    /// ⚠️ THE ONE DEFINITION of "what other workflows does this graph run". Today the only shape is
+    /// a `.profile(_, .workflow)` node — but keep this the single extractor anyway. When the Loop
+    /// node existed there were TWO shapes, and for a long time only the first was collected, HERE
+    /// and in a private twin inside `validateNesting`: loop bodies were invisible to cycle/depth
+    /// validation (a mutually-recursive composition validated completely clean and died at run time
+    /// with "nesting depth exceeded", after ~2–3 canvas runs' worth of tokens). That register class
+    /// (WF-VA1 ≡ WF-NS5 ≡ WF-SE4) was one defect filed three times because the extractor existed
+    /// twice — any future node kind that references a workflow MUST be added here and only here.
+    /// (The Loop node was retired and deleted 2026-08-15.)
+    nonisolated static func workflowReferences(in layout: WorkflowLayout) -> [(profileID: UUID, nodeName: String)] {
+        layout.nodes.compactMap { node in
+            if case .profile(let id, .workflow) = node.kind { return (id, node.displayName) }
+            return nil
+        }
+    }
+
+    /// Profile IDs of every workflow this layout references (sub-workflow nodes).
+    nonisolated static func subWorkflowProfileIDs(in layout: WorkflowLayout) -> [UUID] {
+        workflowReferences(in: layout).map(\.profileID)
+    }
+
     func load(for profileID: UUID) -> WorkflowLayout {
         guard let context = mainContext else {
             logger.error("load(for:) called before container was configured — returning .empty.")
@@ -119,6 +172,21 @@ final class WorkflowLayoutStore {
             if let existing = try context.fetch(descriptor).first {
                 // Ask BEFORE writing. The setter refuses silently (by design — it must not throw
                 // from a property), so the refusal is only observable by checking first.
+                if existing.hasNewerVersionLayout {
+                    let blobVersion = existing.newerBlobVersion ?? -1
+                    logger.error(
+                        "[PERSISTENCE] Canvas save REFUSED — profile \(profileID): the stored layout "
+                        + "was written by a NEWER build (blob v\(blobVersion), this build writes "
+                        + "v\(WorkflowLayoutSD.layoutBlobVersion)); re-encoding would permanently strip "
+                        + "every newer-version field. CONSEQUENCE: layoutData is left byte-intact and "
+                        + "saves are refused on this build; viewing and running still work. The user "
+                        + "needs the app update that wrote this layout."
+                    )
+                    return .refusedNewerVersion(
+                        blobVersion: blobVersion,
+                        appVersion: WorkflowLayoutSD.layoutBlobVersion
+                    )
+                }
                 if existing.hasUnreadableLayout {
                     logger.error(
                         "[PERSISTENCE] Canvas save REFUSED — profile \(profileID): the stored layout "

@@ -597,7 +597,13 @@ private struct ModeTabButton: View {
             // Unsaved-changes dot on the Workflow tab so the dirty state is visible even
             // when the user is looking elsewhere (sidebar, other modes).
             .overlay(alignment: .topTrailing) {
-                if mode == .workflow && viewModel.workflowEditGuard.hasUnsavedChanges {
+                // ⚠️ Reads the view model's MIRROR, not `workflowEditGuard.hasUnsavedChanges`. The
+                // guard reflects only the canvas currently ON SCREEN and is cleared by
+                // `unregister()` when it goes away — so the dot vanished the moment the user
+                // navigated off, which is exactly when it was needed. The mirror is keyed by profile
+                // and outlives every view teardown, so it also lights for a workflow the user edited
+                // and then switched away from.
+                if mode == .workflow && !viewModel.dirtyWorkflowCanvasIDs.isEmpty {
                     Circle()
                         .fill(Color.orange)
                         .frame(width: 6, height: 6)

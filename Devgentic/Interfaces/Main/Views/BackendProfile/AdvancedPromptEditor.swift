@@ -9,6 +9,10 @@ import SwiftUI
 import AppKit
 import Combine
 
+/// ⚠️ register B7 — this file had no logger while owning an `NSWindow`'s lifetime, so an
+/// orphaned window (and the typed prompt it took with it) left no trace at all.
+private let logger = DGLogger(category: "AdvancedPromptEditor")
+
 // MARK: - Window Manager
 
 /// Manages a single floating NSWindow for the advanced prompt editor. One
@@ -34,13 +38,28 @@ final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
     /// Spawns or brings the editor window to the front.
     func showEditor(
         text: Binding<String>,
-        agentName: String,
+        agentName: Binding<String>,
         configuredTools: Binding<[Tool]>,
         themeManager: ThemeManager
     ) {
         let theme = themeManager.currentTheme
 
-        if let existingWindow = window, existingWindow.isVisible {
+        // ⚠️ register B7 — the reuse test was `window != nil && window.isVisible`, and `isVisible`
+        // is FALSE for a miniaturized window. Minimizing the editor and clicking Expand again
+        // therefore fell through to the create path and ABANDONED the old window while it was
+        // still this object's delegate. Closing that orphan then ran `windowWillClose`, which
+        // cleared the LIVE window's reference and all four callbacks — so the live editor's Save
+        // prompt went dead and `closeWindowCommittingChanges()` called a nil `commitChanges`,
+        // silently discarding whatever had been typed. Reuse whenever we still hold a window;
+        // `windowWillClose` nils it on every real close, so a retained window is always usable.
+        if let existingWindow = window {
+            // ⚠️ Commit BEFORE rebuilding the content view. The editor keeps its text in
+            // `@State localText` and only writes back on an explicit commit, so replacing the
+            // hosting view re-initialises that state from the binding and would drop anything
+            // typed since the last commit — the same loss register A27 fixed on the navigation
+            // path, which re-presenting would otherwise reintroduce.
+            commitChanges?()
+
             existingWindow.contentView = NSHostingView(
                 rootView: AdvancedPromptEditorHost(
                     themeManager: themeManager,
@@ -50,9 +69,11 @@ final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
                     configuredTools: configuredTools
                 )
             )
-            existingWindow.title = "System Instructions: \(agentName)"
+            existingWindow.title = Self.title(for: agentName.wrappedValue)
             existingWindow.backgroundColor = NSColor(theme.primaryBackground)
+            if existingWindow.isMiniaturized { existingWindow.deminiaturize(nil) }
             existingWindow.makeKeyAndOrderFront(nil)
+            logger.info("[PROFILE] Re-presented the floating instructions editor for '\(agentName.wrappedValue)'.")
             return
         }
 
@@ -72,7 +93,7 @@ final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
         )
 
         newWindow.center()
-        newWindow.title = "System Instructions: \(agentName)"
+        newWindow.title = Self.title(for: agentName.wrappedValue)
         newWindow.isReleasedWhenClosed = false
         newWindow.contentView = NSHostingView(rootView: editorView)
         newWindow.level = .floating
@@ -112,12 +133,16 @@ final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
         closeWindow()
     }
 
+    static func title(for agentName: String) -> String { "System Instructions: \(agentName)" }
+
     /// Updates the floating window's title without rebuilding the content
     /// view (so the editor keeps focus). No-op when the window isn't open —
     /// callers can fire this on every name keystroke without checks.
     func updateTitle(agentName: String) {
-        guard let window, window.isVisible else { return }
-        window.title = "System Instructions: \(agentName)"
+        // ⚠️ register B7 — was gated on `isVisible`, which is false while miniaturized, so a
+        // rename went unrecorded and the window resurfaced with a stale title.
+        guard let window else { return }
+        window.title = Self.title(for: agentName)
     }
 
     // MARK: - NSWindowDelegate
@@ -151,6 +176,24 @@ final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
 
     nonisolated func windowWillClose(_ notification: Notification) {
         MainActor.assumeIsolated {
+            // ⚠️ register B7 — IDENTITY CHECK. This used to clear state unconditionally, so a
+            // close notification from ANY window this object had ever been the delegate of wiped
+            // the live window's reference and all four callbacks. With the reuse fix above an
+            // orphan should no longer exist, but the guard is what makes that safe rather than
+            // merely likely: nilling `commitChanges` for a live editor silently destroys the
+            // user's typed prompt, which is far too costly to leave resting on an invariant.
+            guard let closing = notification.object as? NSWindow, closing === window else {
+                logger.error(
+                    "[PROFILE] A prompt-editor window closed that is NOT the one currently tracked. "
+                    + "CONSEQUENCE: its close is ignored and the live editor keeps its callbacks; "
+                    + "if this ever appears, an orphaned window survived the reuse path and the "
+                    + "leak this guard exists to contain is back."
+                )
+                return
+            }
+
+            logger.info("[PROFILE] Floating instructions editor closed; releasing its window and hosting view.")
+            closing.delegate = nil
             window = nil
             // Reset callbacks
             checkChanges = nil
@@ -171,7 +214,7 @@ private struct AdvancedPromptEditorHost: View {
     @Bindable var themeManager: ThemeManager
     var manager: AdvancedPromptWindowManager
     @Binding var text: String
-    var agentName: String
+    @Binding var agentName: String
     @Binding var configuredTools: [Tool]
 
     var body: some View {
@@ -183,6 +226,13 @@ private struct AdvancedPromptEditorHost: View {
         )
         .environment(\.appTheme, themeManager.currentTheme)
         .preferredColorScheme(themeManager.currentTheme.colorScheme)
+        // ⚠️ register B18 — A75 fixed exactly this for the BOT editor and left the agent one.
+        // `updateTitle(agentName:)` was never wrong; it was never CALLED, so renaming an agent
+        // left the detached window advertising the old name. Driving it from the host's own
+        // re-render removes the call site that can be forgotten. A plain `String` could not have
+        // worked: the editor lives in an `NSHostingView` whose root view is built once, so an
+        // `.onChange` on a captured `String` can never fire.
+        .onChange(of: agentName) { _, newName in manager.updateTitle(agentName: newName) }
     }
 }
 

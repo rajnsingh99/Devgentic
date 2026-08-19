@@ -25,8 +25,30 @@ struct ClassificationTokenMapper: Sendable {
     /// Maps original label → opaque token.
     let labelToToken: [String: String]
 
-    /// The fallback token (opaque form of the fallback label).
+    /// The token the prompt advertises for "none of these fit".
+    ///
+    /// Two meanings, distinguished by `fallbackIsNoMatchSentinel`:
+    ///   • a configured catch-all's token — answering it ROUTES to that branch (legacy behaviour); or
+    ///   • a dedicated sentinel that maps to NO label — answering it means "no category matched",
+    ///     which resolves to no port and fails the node onto its `error` port.
     let fallbackToken: String
+
+    /// True when `fallbackToken` is the no-match sentinel rather than a real branch's token.
+    ///
+    /// ⚠️ THE WHOLE POINT OF WF-OB1. This used to be `l2t[fallbackLabel] ?? l2t.values.first`, so
+    /// when no catch-all was configured the "if unsure" token was **an arbitrary entry of an
+    /// unordered Dictionary** — a REAL branch that nobody chose. Since the Static Fallback picker was
+    /// retired 2026-08-13 that is the state of every Router created since, so the default behaviour
+    /// was: every ambiguous input is funnelled down one arbitrarily-picked branch, which then
+    /// produces a confident-looking answer. Swift seeds Dictionary hashing per process, so *which*
+    /// branch could differ between app launches — the same workflow, the same input, a different
+    /// route, with nothing in the UI or the log saying the choice was arbitrary.
+    ///
+    /// ⚠️ The escape hatch is KEPT rather than removed. Dropping the "if unsure" line entirely would
+    /// leave a genuinely-unsure model with no way to say so, and it would simply guess a real token —
+    /// trading a visibly-arbitrary route for an invisible one. A sentinel that maps to nothing lets
+    /// the model decline, and lets the Router fail honestly.
+    let fallbackIsNoMatchSentinel: Bool
 
     // MARK: - Initialization
 
@@ -49,7 +71,36 @@ struct ClassificationTokenMapper: Sendable {
 
         tokenToLabel = t2l
         labelToToken = l2t
-        fallbackToken = l2t[fallbackLabel] ?? l2t.values.first ?? "XXXX"
+
+        // ⚠️ A catch-all is used ONLY when one was actually configured and still names a real rule.
+        // Everything else — an empty `fallbackLabel` (the default since 2026-08-13), or one naming a
+        // rule that has since been renamed or deleted — gets the sentinel, NOT a substitute branch.
+        // Guessing here is what WF-OB1 was.
+        //
+        // ⚠️ The sentinel is generated with `excluding: usedTokens`, so it can never collide with a
+        // real label's token. The previous `?? "XXXX"` literal could, in principle, be generated for
+        // a real label — 1 in 32⁴, but a silent two-branches-one-token collision if it ever landed.
+        if !fallbackLabel.isEmpty, let configured = l2t[fallbackLabel] {
+            fallbackToken = configured
+            fallbackIsNoMatchSentinel = false
+        } else {
+            fallbackToken = Self.generateUniqueToken(excluding: usedTokens)
+            fallbackIsNoMatchSentinel = true
+        }
+    }
+
+    /// True when `response` carries the no-match sentinel and no real label token.
+    ///
+    /// Used for REPORTING only — `parseResponse` already returns nil for the sentinel, because the
+    /// sentinel is deliberately absent from `tokenToLabel`. This exists so the log and the node's
+    /// failure reason can say "the classifier reported that nothing matched" rather than the much
+    /// weaker "the reply contained no recognisable token", which is also what an unparseable answer
+    /// produces. Those are different situations for the user: one means the rules do not cover the
+    /// input, the other means the model misbehaved.
+    func isExplicitNoMatch(_ response: String) -> Bool {
+        guard fallbackIsNoMatchSentinel else { return false }
+        guard parseResponse(response) == nil else { return false }
+        return response.uppercased().contains(fallbackToken)
     }
 
     // MARK: - Prompt Building
@@ -84,22 +135,64 @@ struct ClassificationTokenMapper: Sendable {
     /// - Wrapped response: "I think XK7M fits best" → "Essay"
     /// - Lowercased response: "xk7m" → "Essay" (case-insensitive scan)
     func parseResponse(_ response: String) -> String? {
+        // ⚠️ Retained as a thin adapter over `parse(_:)` so the ambiguity information cannot be
+        // discarded by accident. Returns a label ONLY for an unambiguous single hit — a reply
+        // naming two labels is `.ambiguous`, and collapsing that to one of them here is exactly
+        // the WF-OB2 defect this rewrite removed.
+        if case .label(let l) = parse(response) { return l }
+        return nil
+    }
+
+    /// The total classification of a model reply.
+    ///
+    /// ⚠️ Replaces the old "scan until the first token matches" loop, which iterated an unordered
+    /// `Dictionary` — so a reply naming TWO labels resolved to whichever key Swift happened to
+    /// yield first, and, because Swift seeds hashing per process, the SAME input could take a
+    /// different branch after an app restart with the run reporting success either way (WF-OB2).
+    /// The failure was biased toward wrong: models phrase conclusions as "not X, it's Y", so the
+    /// rejected label often appeared first in the text.
+    enum ParseResult: Equatable, Sendable {
+        /// Exactly one distinct label was named.
+        case label(String)
+        /// Two or more distinct labels were named, in FIRST-APPEARANCE order in the reply.
+        /// ⚠️ Reply order, not rule order: the model was instructed to emit ONE token, so what it
+        /// emitted first is its answer and the rest is hedging. Deterministic either way — the
+        /// point is that it comes from character positions, never Dictionary iteration.
+        case ambiguous(candidates: [String])
+        /// The model answered with the no-match sentinel and no real token: a verdict about the
+        /// RULES ("none of these fit"). Remedy: add or widen a rule.
+        case explicitNoMatch
+        /// Nothing recognisable in the reply: a verdict about the MODEL. Remedy: a stronger model.
+        case unreadable
+    }
+
+    /// Classifies a model reply. Total — every reply lands in exactly one case.
+    func parse(_ response: String) -> ParseResult {
         let uppercased = response.uppercased()
 
-        // Exact token match first (most common for well-behaved models)
-        let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        if let label = tokenToLabel[trimmed] {
-            return label
-        }
-
-        // Scan for any token in the response (handles wrapped/verbose output)
+        // Record each real token's FIRST occurrence, then order by position. Deduped BY LABEL,
+        // keeping the earliest: two rules may legitimately share a label (they share one output
+        // port), and without this such a pair would manufacture a phantom self-ambiguity.
+        var earliestByLabel: [String: String.Index] = [:]
         for (token, label) in tokenToLabel {
-            if uppercased.contains(token) {
-                return label
-            }
+            guard let r = uppercased.range(of: token) else { continue }
+            if let existing = earliestByLabel[label], existing <= r.lowerBound { continue }
+            earliestByLabel[label] = r.lowerBound
         }
 
-        return nil
+        let ordered = earliestByLabel
+            .sorted { $0.value < $1.value }
+            .map(\.key)
+
+        if ordered.count == 1 { return .label(ordered[0]) }
+        if ordered.count > 1 { return .ambiguous(candidates: ordered) }
+
+        // ⚠️ The sentinel is consulted ONLY when no real token was found. A reply carrying a real
+        // token AND the sentinel routes on the real token — today's semantics, preserved exactly.
+        if fallbackIsNoMatchSentinel, uppercased.contains(fallbackToken) {
+            return .explicitNoMatch
+        }
+        return .unreadable
     }
 
     // MARK: - Token Generation

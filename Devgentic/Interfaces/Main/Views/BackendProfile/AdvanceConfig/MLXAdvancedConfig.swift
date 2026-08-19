@@ -7,6 +7,10 @@
 
 import SwiftUI
 
+/// ⚠️ register A39 — this file had no logger while silently rewriting persisted user settings,
+/// so the rewrite was invisible in a support log as well as on screen.
+private let logger = DGLogger(category: "MLXAdvancedConfig")
+
 /// Data model representing advanced MLX inference parameters
 struct MLXAdvancedConfig: Codable, Equatable {
     var temperature: Double
@@ -135,6 +139,34 @@ struct MLXAdvancedConfig: Codable, Equatable {
 /// fine adjustment). Values typed outside the model-derived range are silently
 /// clamped on commit, with the active range surfaced as a caption underneath
 /// the field so the user can see where the cap came from.
+// MARK: - Parameter bounds (register A39)
+
+extension MLXAdvancedConfig {
+
+    /// Absolute floors. A value below these is not a tuning choice, it is a typo in the text field
+    /// — the provider rejects or misbehaves on them — so these ARE clamped.
+    static let maxTokensFloor = 256
+    static let repetitionContextFloor = 10
+
+    /// Upper bound for `maxTokens` — half the context window so the prompt itself has room.
+    /// Floor at 512 to keep the field usable even with a pathologically tiny configured window.
+    ///
+    /// ⚠️ Extracted from `MLXSettingsView` so the derivation is assertable. It was a `private var`
+    /// on the view, which meant the bounds that silently rewrote user settings could not be
+    /// tested at all — the same reason `ModelSelectionPolicy` was lifted out of the pickers.
+    static func maxTokensCap(forContextWindow contextWindow: Int) -> Int {
+        max(512, contextWindow / 2)
+    }
+
+    /// Upper bound for `repetitionContextSize`. Beyond ~2K the sampler's scan cost outweighs the
+    /// loop-suppression benefit, so we cap there even when the model could technically attend to
+    /// more. Tied to a quarter of the context window so small-context models don't get a
+    /// disproportionate cap.
+    static func repetitionContextCap(forContextWindow contextWindow: Int) -> Int {
+        max(64, min(contextWindow / 4, 2048))
+    }
+}
+
 struct MLXSettingsView: View {
     @Binding var config: MLXAdvancedConfig
 
@@ -165,19 +197,12 @@ struct MLXSettingsView: View {
         return 8192
     }
 
-    /// Upper bound for `maxTokens` — half the context window so the prompt
-    /// itself has room. Floor at 512 to keep the field usable even with a
-    /// pathologically tiny configured window.
     private var maxTokensCap: Int {
-        max(512, contextWindow / 2)
+        MLXAdvancedConfig.maxTokensCap(forContextWindow: contextWindow)
     }
 
-    /// Upper bound for `repetitionContextSize`. Beyond ~2K the sampler's scan
-    /// cost outweighs the loop-suppression benefit, so we cap there even when
-    /// the model could technically attend to more. Tied to a quarter of the
-    /// context window so small-context models don't get a disproportionate cap.
     private var repCtxCap: Int {
-        max(64, min(contextWindow / 4, 2048))
+        MLXAdvancedConfig.repetitionContextCap(forContextWindow: contextWindow)
     }
 
     /// Suffix shown next to a range hint — surfaces the model context window
@@ -190,6 +215,52 @@ struct MLXSettingsView: View {
             return " · model context: \(ctx) tokens (catalog)"
         }
         return ""
+    }
+
+    // MARK: - Bound enforcement (register A39)
+
+    /// Clamps a value up to the absolute floor, and **deliberately does not clamp the ceiling**.
+    ///
+    /// ⚠️ The upper bound used to be clamped here too, which silently destroyed tuning. The trigger
+    /// was not what the register assumed — `.onChange` watches the VALUE, not the cap, so
+    /// re-pointing the profile at a smaller-context model clamps nothing at that moment. It fired
+    /// on the NEXT editor open, when `ProviderAdvancedConfigManager.load` assigns the stored value
+    /// and the now-smaller cap rewrites it. And it did not stop at the panel: the write reaches
+    /// `AdvancedConfigSyncModifier`, so the profile went dirty on mere open and the next Save
+    /// persisted the reduced number. A user who tuned 8192 for a large-context model got 2048 back
+    /// with no notice, no log, and no way to know it had happened.
+    ///
+    /// The Ollama panel already made the opposite call for `num_ctx` and says why: values over the
+    /// model's window are surfaced as a warning "so the user can choose to keep their setting
+    /// (e.g. switching models for comparison)". This now matches it. Nothing downstream depends on
+    /// the clamp — `AgentConnect` hands the decoded blob straight to `MLXLLMProvider`, so an
+    /// over-cap value was never being corrected at runtime anyway; it was only being corrected in
+    /// the one place the user could still have fixed it themselves.
+    private func clampFloorOnly(_ value: inout Int, newValue: Int, floor: Int, field: String) {
+        guard newValue < floor else { return }
+        value = floor
+        logger.notice(
+            "[PROFILE] MLX advanced config '\(field)' was \(newValue), below the absolute floor "
+            + "\(floor), and has been raised to it. CONSEQUENCE: values under the floor are "
+            + "rejected by the sampler, so this is a typo repair — an over-cap value, by contrast, "
+            + "is kept and surfaced as a warning rather than rewritten."
+        )
+    }
+
+    /// Inline warning for a stored value above the model-derived cap. Mirrors the Ollama panel's
+    /// `num_ctx` row so the two read the same way.
+    @ViewBuilder
+    private func overCapWarning(current: Int, cap: Int, what: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .accessibilityHidden(true)
+            Text("Current value \(current) exceeds this model's \(what) cap of \(cap). Your setting is kept — lower it if this model cannot handle it.")
+                .font(.caption2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .foregroundColor(theme.warningColor)
+        .accessibilityElement(children: .combine)
     }
 
     var body: some View {
@@ -274,6 +345,14 @@ struct MLXSettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Text("Range: 10–\(repCtxCap)\(modelContextSuffix)")
                         .font(.caption2).foregroundColor(theme.secondaryText.opacity(0.7))
+
+                    if config.repetitionContextSize > repCtxCap {
+                        overCapWarning(
+                            current: config.repetitionContextSize,
+                            cap: repCtxCap,
+                            what: "repetition context"
+                        )
+                    }
                 }
                 Spacer(minLength: 16)
                 HStack(spacing: 6) {
@@ -289,13 +368,10 @@ struct MLXSettingsView: View {
                 }
             }
             .onChange(of: config.repetitionContextSize) { _, newVal in
-                // Clamp values typed outside the bound via TextField. SwiftUI
-                // commits on focus loss/Return, so this fires after the user
-                // finishes typing, not on each keystroke.
-                let clamped = max(10, min(newVal, repCtxCap))
-                if clamped != newVal {
-                    config.repetitionContextSize = clamped
-                }
+                clampFloorOnly(&config.repetitionContextSize,
+                               newValue: newVal,
+                               floor: MLXAdvancedConfig.repetitionContextFloor,
+                               field: "repetitionContextSize")
             }
 
             Divider()
@@ -310,6 +386,14 @@ struct MLXSettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Text("Range: 256–\(maxTokensCap)\(modelContextSuffix)")
                         .font(.caption2).foregroundColor(theme.secondaryText.opacity(0.7))
+
+                    if config.maxTokens > maxTokensCap {
+                        overCapWarning(
+                            current: config.maxTokens,
+                            cap: maxTokensCap,
+                            what: "max tokens"
+                        )
+                    }
                 }
                 Spacer(minLength: 16)
                 HStack(spacing: 6) {
@@ -325,10 +409,10 @@ struct MLXSettingsView: View {
                 }
             }
             .onChange(of: config.maxTokens) { _, newVal in
-                let clamped = max(256, min(newVal, maxTokensCap))
-                if clamped != newVal {
-                    config.maxTokens = clamped
-                }
+                clampFloorOnly(&config.maxTokens,
+                               newValue: newVal,
+                               floor: MLXAdvancedConfig.maxTokensFloor,
+                               field: "maxTokens")
             }
 
             HStack {

@@ -15,6 +15,32 @@ import os
 
 private let logger = DGLogger(category: "WorkflowRunRecord")
 
+/// LEGACY ONLY — how records written before 2026-08-15 encoded "this node never ran".
+///
+/// ⚠️ DO NOT ADD CALLERS. This is a decoder for old data, not a way to classify a node.
+///
+/// Until 2026-08-15 the event channel had no way to say "skipped": `WorkflowExecutor` built
+/// `status: .skipped(reason:)` internally and then yielded `.workflowNodeFailed(…)`, so every
+/// not-run node was stored as `.failed` carrying the sentence "Upstream dependency failed" — a
+/// sentence that was itself untrue whenever the cause was ordinary routing. Every surface wanting
+/// "how many actually failed" had to subtract them by matching that prose. Nine did; three of them
+/// got it wrong, so the same node read "Not run" on screen and "Failed" to VoiceOver.
+///
+/// New records carry `NodeStatus.skipped(NodeSkipReason)` and need none of this. The prefix survives
+/// only so a run recorded by an older build still reads correctly after an upgrade.
+enum WorkflowNodeOutcome {
+    /// The exact sentence pre-2026-08-15 builds wrote for a cascade skip.
+    static let legacyUpstreamSkipReason = "Upstream dependency failed"
+
+    /// Prefix matched against an OLD record's `detail`.
+    static let legacyUpstreamSkipPrefix = "Upstream dependency"
+
+    /// True when a legacy `.failed` node did not actually run.
+    static func isLegacyUpstreamSkip(detail: String) -> Bool {
+        detail.hasPrefix(legacyUpstreamSkipPrefix)
+    }
+}
+
 /// Persistent record of a single workflow execution run.
 struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
 
@@ -107,6 +133,28 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
         /// Optional → old records decode as nil (= no warnings).
         let hasWarnings: Bool?
 
+        /// The node never ran.
+        ///
+        /// ⚠️ Was `status == .failed && detail.hasPrefix("Upstream dependency")` — English prose as
+        /// load-bearing control flow. Nine surfaces re-derived that test, three got it wrong, and
+        /// rewording the message would have silently broken every failure count in the app. The
+        /// status now carries the fact structurally.
+        ///
+        /// ⚠️ Records written before 2026-08-15 have no `.skipped` status — every skip in them is a
+        /// `.failed` carrying the old sentence — so the legacy prose test is retained ONLY as a
+        /// fallback for those, never for newly written rows.
+        var didNotRun: Bool {
+            if case .skipped = status { return true }
+            return status == .failed && WorkflowNodeOutcome.isLegacyUpstreamSkip(detail: detail)
+        }
+
+        /// Failed on its own account. This is what a "N failed" badge means.
+        ///
+        /// A cancelled node is not a failure either — the user asked for it.
+        var isGenuineFailure: Bool {
+            status == .failed && !WorkflowNodeOutcome.isLegacyUpstreamSkip(detail: detail)
+        }
+
         /// ⚠️ Hand-written `RawRepresentable` so an unrecognised status is PRESERVED, not rejected.
         ///
         /// This field is decoded STRICTLY (below), and it sits inside the per-node envelope — so
@@ -118,7 +166,12 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
         /// Stdlib `RawRepresentable where RawValue == String` conformances give byte-identical
         /// `Codable` and rawValue-based `Equatable`, so no call site changes.
         enum NodeStatus: RawRepresentable, Codable, Sendable, Equatable {
-            case running, completed, failed, skipped
+            case running, completed, failed, cancelled
+            /// The node did not run, and WHY. ⚠️ The reason is persisted as part of the rawValue
+            /// (`skipped:notChosen`) rather than in the free-text detail, because the detail is what
+            /// consumers used to parse English out of. An unknown reason from a newer build decodes
+            /// to `.notChosen` — the neutral one — so a future cause never reads as a failure.
+            case skipped(NodeSkipReason)
             /// A status written by a newer build, carried verbatim.
             case other(String)
 
@@ -127,18 +180,28 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
                 case "running":   self = .running
                 case "completed": self = .completed
                 case "failed":    self = .failed
-                case "skipped":   self = .skipped
-                default:          self = .other(rawValue)
+                case "cancelled": self = .cancelled
+                // Bare "skipped" is what builds before 2026-08-15 wrote. They only ever produced
+                // the cascade case, so it maps to the honest equivalent rather than to `.other`.
+                case "skipped":   self = .skipped(.upstreamSkipped)
+                default:
+                    if rawValue.hasPrefix("skipped:") {
+                        let raw = String(rawValue.dropFirst("skipped:".count))
+                        self = .skipped(NodeSkipReason(rawValue: raw) ?? .notChosen)
+                    } else {
+                        self = .other(rawValue)
+                    }
                 }
             }
 
             var rawValue: String {
                 switch self {
-                case .running:        return "running"
-                case .completed:      return "completed"
-                case .failed:         return "failed"
-                case .skipped:        return "skipped"
-                case .other(let raw): return raw
+                case .running:              return "running"
+                case .completed:            return "completed"
+                case .failed:               return "failed"
+                case .cancelled:            return "cancelled"
+                case .skipped(let reason):  return "skipped:\(reason.rawValue)"
+                case .other(let raw):       return raw
                 }
             }
         }
@@ -211,6 +274,8 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
         timestamp: Date,
         layout: WorkflowLayout? = nil
     ) -> WorkflowRunRecord {
+        var unsettledNodes = 0
+        var closedToolRows = 0
         let nodeSnapshots = state.nodeResults.map { result in
             // Compute per-node input from edge topology (Tier 2)
             var inputText: String? = nil
@@ -225,34 +290,70 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
                 }
             }
 
+            // Defensive settle. `WorkflowExecutionState.settleInFlightWork` (called from
+            // `handleError`) is the primary repair, but freeze is the LAST gate before the
+            // record becomes permanent, and a node persisted `.running` renders in the
+            // historical run with a live accent spine badged "Running…" forever. Anything
+            // still in flight here ended without reporting, which is a failure by definition.
+            let snapshotStatus: WorkflowNodeResultSnapshot.NodeStatus
+            var snapshotDetail = result.detail
+            switch result.status {
+            case .running:
+                unsettledNodes += 1
+                snapshotStatus = .failed
+                let note = "Interrupted before the node finished."
+                snapshotDetail = snapshotDetail.isEmpty ? note : "\(snapshotDetail)\n\(note)"
+            case .completed: snapshotStatus = .completed
+            case .failed:    snapshotStatus = .failed
+            case .skipped(let reason): snapshotStatus = .skipped(reason)
+            case .cancelled: snapshotStatus = .cancelled
+            }
+
             return WorkflowNodeResultSnapshot(
                 id: result.id,
                 nodeID: result.nodeID,
                 profileName: result.profileName,
-                status: {
-                    switch result.status {
-                    case .running:   return .running
-                    case .completed: return .completed
-                    case .failed:    return .failed
-                    case .skipped:   return .skipped
-                    }
-                }(),
-                detail: result.detail,
+                status: snapshotStatus,
+                detail: snapshotDetail,
                 duration: result.duration,
                 input: inputText,
                 inputSourceLabel: sourceLabel,
                 // Persist the trace (capped from the end — on failure the most recent
                 // events are the diagnostic ones). Empty → nil keeps old-record parity.
-                nodeTimeline: state.nodeTimelines[result.nodeID].flatMap { events in
-                    events.isEmpty ? nil : Array(events.suffix(400))
-                },
+                // Dangling tool rows are closed on the way in for the same reason as the node
+                // status above: `AgentTimelineView` spins any row with `isExecuting == true`.
+                nodeTimeline: {
+                    guard var events = state.nodeTimelines[result.nodeID], !events.isEmpty else { return nil }
+                    closedToolRows += DanglingToolRowCloser.close(&events, outcome: .failed)
+                    return Array(events.suffix(400))
+                }(),
                 hasWarnings: result.hasWarnings ? true : nil
             )
         }
 
+        if unsettledNodes > 0 || closedToolRows > 0 {
+            logger.warning("[WORKFLOW] freeze() force-settled \(unsettledNodes) node(s) still marked running and \(closedToolRows) dangling tool row(s) for '\(workflowName)'. The live state should already have settled these — a persisted run must never claim to still be executing.")
+        }
+
+        // Derived from the SNAPSHOTS, not the live results, so a force-settled node counts.
+        //
+        // ⚠️ `isGenuineFailure`, NOT `status == .failed`. A node skipped because a Condition or
+        // Gate routed the other way is recorded `.failed` with detail "Upstream dependency
+        // failed" (see this file's header) — it never ran and nothing went wrong. Rolling that
+        // up as a run failure meant EVERY conditional workflow reported EVERY successful run as
+        // failed, permanently, in persistence: a red "Failed" pill over a correct answer, a
+        // uniformly red history list, and no way to tell a real failure from a taken branch.
+        // The distinction already existed 170 lines above and the history card's "N failed"
+        // badge already used it; only the roll-ups did not.
         let status: RunStatus = {
+            // ⚠️ FIRST, before the error check. A cancel sets `workflowError` too ("Cancelled"),
+            // so testing that first made every user Stop indistinguishable from a crash — the run
+            // was persisted `.failed` and rendered with a red "Failed" pill, reporting the user's
+            // own action back to them as an error. `.cancelled` was unreachable and the amber
+            // "Cancelled" states built for it were dead code.
+            if state.wasCancelled { return .cancelled }
             if let _ = state.workflowError { return .failed }
-            if state.nodeResults.contains(where: { $0.status == .failed }) { return .failed }
+            if nodeSnapshots.contains(where: { $0.isGenuineFailure }) { return .failed }
             return .completed
         }()
 

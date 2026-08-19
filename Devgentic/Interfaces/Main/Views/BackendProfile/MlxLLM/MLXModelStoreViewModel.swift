@@ -22,7 +22,10 @@ class MLXModelStoreViewModel {
             searchDebounceTask = Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(500))
                 guard !Task.isCancelled, let self, self.isRemoteSearchEnabled else { return }
-                self.refreshCategoryData()
+                // ⚠️ register A43 — `.filterChanged`, so the Installed tab re-filters without
+                // re-walking the disk. Remote categories still issue their fetch: for those the
+                // search text is a QUERY the server answers, not a client-side filter.
+                self.refreshCategoryData(reason: .filterChanged)
             }
         }
     }
@@ -316,8 +319,24 @@ class MLXModelStoreViewModel {
     }
     
     // MARK: - Logic
-    
-    private func refreshCategoryData() {
+
+    /// Why `refreshCategoryData` is being called. Register A43.
+    ///
+    /// ⚠️ The Installed tab's forced disk scan is correct for a Refresh click, a tab switch and
+    /// first load — all explicit requests for current data — and wrong for a keystroke in the
+    /// filter field. `force: true` bypasses both the 2 s debounce AND the in-flight coalescing
+    /// (a forcing caller joins the running walk and then deliberately starts a new one), so every
+    /// typing pause guaranteed a fresh recursive `FileManager.enumerator` walk plus a full
+    /// cognitive-profile rebuild — and none of it could change the result, because filtering the
+    /// Installed tab happens entirely client-side in `filterAndSortModels`.
+    private enum RefreshReason {
+        /// Refresh button, tab switch, first load — re-read the disk.
+        case userRequest
+        /// A filter keystroke. The data is already current; only the projection changes.
+        case filterChanged
+    }
+
+    private func refreshCategoryData(reason: RefreshReason = .userRequest) {
         currentPage = 0
 
         if selectedCategory == .recommended {
@@ -335,13 +354,22 @@ class MLXModelStoreViewModel {
                 sortBeforeInstalledTab = sortOption
                 sortOption = .recent
             }
-            logger.info("Refresh: category=installed — scanning local models")
             // Force: this path is reached from the Refresh button and from switching to the
             // Installed tab, both of which are explicit user requests for current data. The
             // debounce exists to absorb the init + onAppear double-fire, not to ignore the
             // user. (The comment here used to say the window was <2s while the constant was
             // 30s — a refresh could silently do nothing for half a minute.)
-            service.forceRefreshInstalledModels()
+            //
+            // ⚠️ register A43 — but NOT for a filter keystroke, which this comment predates and
+            // was never written for. Filtering is client-side, so the scan could not change what
+            // the user sees; it was pure I/O per typing pause, and worse on a custom models
+            // directory pointed at an external or network volume.
+            if reason == .userRequest {
+                logger.info("Refresh: category=installed — scanning local models")
+                service.forceRefreshInstalledModels()
+            } else {
+                logger.info("Refresh: category=installed — filter changed, re-filtering without a disk scan")
+            }
             // The observer only fires when the model list actually CHANGED, so re-filter
             // unconditionally to render the installed cards for this tab immediately.
             applyFilterAndSort()

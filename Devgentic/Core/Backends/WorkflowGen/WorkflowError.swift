@@ -29,11 +29,19 @@ enum WorkflowError: LocalizedError, Sendable {
     /// All upstream dependencies for a node failed, so it cannot execute.
     case allUpstreamsFailed(nodeID: UUID, profileName: String)
 
-    /// A loop node has no body workflow configured.
-    case loopBodyNotConfigured(nodeID: UUID, nodeName: String)
-
     /// Pre-flight validation found configuration errors that must be resolved before execution.
     case validationFailed(errors: [WorkflowValidationIssue], summary: String)
+
+    /// The stored canvas blob could not be decoded, so the run is refused before dispatch (WF-OB4).
+    ///
+    /// ⚠️ Distinct from `emptyWorkflow` on purpose. `WorkflowLayoutStore.load(for:)` deliberately
+    /// returns `.empty` for a missing row AND an unreadable blob, so without this case an
+    /// unreadable canvas ran into the `!layout.nodes.isEmpty` guard and the user was told "The
+    /// workflow has no nodes. Add profiles to the canvas before running." — both halves false: the
+    /// denormalized counts prove nodes exist, and the canvas REFUSES every save while unreadable,
+    /// so the suggested remedy was impossible. The counts ride along because they are the evidence
+    /// (they live outside the blob, written by the last successful save).
+    case layoutUnreadable(nodeCount: Int, edgeCount: Int)
 
     var errorDescription: String? {
         switch self {
@@ -49,10 +57,10 @@ enum WorkflowError: LocalizedError, Sendable {
             return "Node '\(name)' failed: \(error)"
         case .allUpstreamsFailed(_, let name):
             return "All upstream nodes for '\(name)' failed. Cannot execute."
-        case .loopBodyNotConfigured(_, let name):
-            return "Loop node '\(name)' has no body workflow configured. Double-click to set one."
         case .validationFailed(_, let summary):
             return "Workflow has configuration errors that must be resolved:\n\(summary)"
+        case .layoutUnreadable(let nodes, let edges):
+            return "This workflow's saved canvas could not be read by this version of the app. It last held \(nodes) node\(nodes == 1 ? "" : "s") and \(edges) connection\(edges == 1 ? "" : "s") — the data is intact but the run is blocked to protect it. Open the workflow's canvas to review, repair, or discard it."
         }
     }
 }

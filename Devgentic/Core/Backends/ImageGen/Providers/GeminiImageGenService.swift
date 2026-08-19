@@ -19,9 +19,25 @@ struct GeminiImageGenService: ImageGenProvider, Sendable {
     let apiKey: String
     let modelName: String
 
-    init(apiKey: String, modelName: String) {
+    /// ⚠️ register B21 — this type had no endpoint at all: both request builders hardcoded
+    /// `ProviderDefaults.geminiBaseURL`, so an imageGen profile configured against a corporate
+    /// gateway sent its gateway-scoped key straight to Google. `OpenAIImageGenService` and
+    /// `OllamaImageGenService` both took a `baseURL`; this one was the odd one out.
+    let baseURL: String?
+
+    private var apiBaseURL: URL {
+        ProviderDefaults.resolvedBaseURL(configured: baseURL, fallback: ProviderDefaults.geminiBaseURL)
+    }
+
+    init(apiKey: String, modelName: String, baseURL: String? = nil) {
         self.apiKey = apiKey
         self.modelName = modelName
+        self.baseURL = baseURL
+    }
+
+    /// The `models/<name>:generateContent` URL both generators post to.
+    private var generateContentURL: URL {
+        apiBaseURL.appendingPathComponent("models/\(modelName):generateContent")
     }
 
     // MARK: - Text-to-Image
@@ -33,10 +49,7 @@ struct GeminiImageGenService: ImageGenProvider, Sendable {
         conversationID: UUID,
         progressHandler: (@Sendable (Int, Int) -> Void)?
     ) async throws -> MediaArtifact {
-        let urlComponents = URLComponents(url: ProviderDefaults.geminiBaseURL.appendingPathComponent("models/\(modelName):generateContent"), resolvingAgainstBaseURL: false)!
-        let url = urlComponents.url!
-
-        var request = URLRequest(url: url, timeoutInterval: 120)
+        var request = URLRequest(url: generateContentURL, timeoutInterval: 120)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         // ⚠️ Header, never the query string — see the note in `GeminiService.verifyAndFetchModels`.
@@ -96,10 +109,7 @@ struct GeminiImageGenService: ImageGenProvider, Sendable {
         conversationID: UUID,
         progressHandler: (@Sendable (Int, Int) -> Void)?
     ) async throws -> MediaArtifact {
-        let urlComponents = URLComponents(url: ProviderDefaults.geminiBaseURL.appendingPathComponent("models/\(modelName):generateContent"), resolvingAgainstBaseURL: false)!
-        let url = urlComponents.url!
-
-        var request = URLRequest(url: url, timeoutInterval: 120)
+        var request = URLRequest(url: generateContentURL, timeoutInterval: 120)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         // ⚠️ Header, never the query string — see the note in `GeminiService.verifyAndFetchModels`.

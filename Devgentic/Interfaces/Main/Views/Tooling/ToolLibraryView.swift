@@ -250,13 +250,17 @@ struct ToolLibraryView: View {
                             toolRow(row)
                         }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, isSelectionMode && !selectedToolIDs.isEmpty ? 80 : 20)
+                    .padding(.horizontal, ViewLayout.containerPadding)
+                    .padding(.bottom, isSelectionMode && !selectedToolIDs.isEmpty ? 80 : ViewLayout.containerPadding)
+                    .frame(maxWidth: 1000)
+                    .frame(maxWidth: .infinity)
                 }
 
                 // Bulk action bar
                 if isSelectionMode && !selectedToolIDs.isEmpty {
                     bulkActionBar
+                        .frame(maxWidth: 1000)
+                        .frame(maxWidth: .infinity)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
