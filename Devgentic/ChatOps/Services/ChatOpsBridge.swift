@@ -251,7 +251,11 @@ final class ChatOpsBridge {
     private func handleStatus(chatID: Int64) async {
         guard let vm = viewModel else { return }
 
-        let isStreaming = vm.streamingMessageID != nil
+        // Conversation-scoped 2026-08-17 (design doc increment 1): this used to read the
+        // app-global `vm.streamingMessageID`, so /status reported "streaming" whenever ANY
+        // conversation was busy — including a main-window run the remote user has nothing to
+        // do with — and reported idle the moment an unrelated run cleared the slot.
+        let isStreaming = config.activeConversationID.map { vm.activeStreamManager.hasActiveStream(inConversation: $0) } ?? false
         let activeConvTitle: String
         if let activeID = config.activeConversationID,
            let conversationSD = vm.persistenceService.getConversation(withId: activeID) {

@@ -57,6 +57,13 @@ struct WorkflowRunDisplayData {
         /// so `WorkflowOutputView` hides the Timeline tab and shows Output directly.
         let supportsTimeline: Bool
 
+        /// Per-node SKIP eligibility (D2.1): PROFILE kinds only — bot, agent, sub-workflow.
+        /// Structural kinds never render the button (a Router bypass is ill-defined, a Gate's
+        /// skip IS a decision, a Trigger's skip makes the run meaningless), and the record path /
+        /// orphaned-result path leave the default: a node whose kind is unknowable is not
+        /// skippable. The engine enforces the same restriction independently.
+        var isUserSkippable: Bool = false
+
         enum NodeStatus: Sendable {
             case pending, running, completed, failed, skipped, cancelled
             /// A status written by a NEWER build than this one. The node FINISHED (its detail,
@@ -220,6 +227,10 @@ struct WorkflowRunDisplayData {
             }
 
             // Pending placeholder
+            let isProfileKind: Bool = {
+                if case .profile = layoutNode.kind { return true }
+                return false
+            }()
             return NodeDisplayData(
                 id: nodeID,
                 nodeID: nodeID,
@@ -231,7 +242,8 @@ struct WorkflowRunDisplayData {
                 inputSourceLabel: sourceLabel,
                 nodeTimeline: [],
                 isStreaming: false,
-                supportsTimeline: kindSupportsTimeline(layoutNode.kind)
+                supportsTimeline: kindSupportsTimeline(layoutNode.kind),
+                isUserSkippable: isProfileKind
             )
         }
         + orphanedLiveResults(state: state, nodeByID: nodeByID)

@@ -143,11 +143,7 @@ struct NativeToolTemplateGenerator: CognitiveGenerator {
 
         guard !responseText.isEmpty else {
             logLLMOps.error("❌ [\(self.logTag):\(reqId)] Empty response from model.")
-            throw NSError(
-                domain: "NativeToolTemplateGenerator",
-                code: 422,
-                userInfo: [NSLocalizedDescriptionKey: "Empty response from model."]
-            )
+            throw GenerationError.emptyResponse(generator: self.logTag)
         }
 
         let pipeline = CognitiveParsePipeline(

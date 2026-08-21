@@ -26,6 +26,15 @@ final class ActiveStreamManager {
 
     // MARK: - Dependencies
     @ObservationIgnored private var activeTasks: [UUID: Task<Void, Never>] = [:]
+
+    /// When each live run CLAIMED its stream. Written and removed in lockstep with
+    /// `activeStreams` (the only two sites are the insert below and `finalizeMessage`), so it
+    /// cannot outlive the run it describes.
+    ///
+    /// Needed because a run's start time is NOT `ChatMessage.timestamp`: Redo and Resume stream
+    /// into a pre-existing message whose timestamp is hours old. `ForegroundRunResolver` uses this
+    /// to break a tie deterministically when a conversation somehow holds two live runs.
+    @ObservationIgnored private var streamStartedAt: [UUID: Date] = [:]
     @ObservationIgnored nonisolated(unsafe) private var permissionResolvedObserver: Any?
     @ObservationIgnored nonisolated(unsafe) private var clarificationResolvedObserver: Any?
     @ObservationIgnored nonisolated(unsafe) private var planReviewResolvedObserver: Any?
@@ -299,6 +308,7 @@ final class ActiveStreamManager {
         }
 
         activeStreams[agentMessage.id] = agentMessage
+        streamStartedAt[agentMessage.id] = Date()
         for delegate in liveMirrorDelegates {
             delegate.activeStreamManager(self, didStartStream: agentMessage, for: conversationID)
         }
@@ -429,7 +439,7 @@ final class ActiveStreamManager {
                     // [HITL] Permission request → unified InteractionCenter (single source of truth).
                     // Node attribution rides in the banner via the origin; the thinking-island
                     // headline stays generic (the banner carries which node/agent is asking).
-                    case .requestConfirmation(let toolName, let params, let operationID, let sourceNodeID):
+                    case .requestConfirmation(let toolName, let params, let operationID, let sourceNodeID, let sourceNodeName):
                         agentMessage.agentState = .interaction(.permission(toolName: toolName))
                         // [G1 Piece 1] Park marker + the operationID join key, flushed immediately:
                         // a run parked on approval can sit indefinitely, so this is the prime
@@ -449,12 +459,13 @@ final class ActiveStreamManager {
                             profileType: config.profile.profileType,
                             workflowState: workflowExecutionState,
                             sourceNodeID: sourceNodeID,
+                            sourceNodeName: sourceNodeName,
                             profileID: config.profile.id,
                             traceContext: traceContext
                         )
 
                     // [ASK_USER] Clarification request → unified InteractionCenter.
-                    case .requestClarification(let question, let operationID, let sourceNodeID, let options, let multiline):
+                    case .requestClarification(let question, let operationID, let sourceNodeID, let options, let multiline, let sourceNodeName):
                         agentMessage.agentState = .interaction(.clarification)
                         agentMessage.lifecycleState = .parkedHITL(operationID: operationID)
                         await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
@@ -465,12 +476,13 @@ final class ActiveStreamManager {
                             profileType: config.profile.profileType,
                             workflowState: workflowExecutionState,
                             sourceNodeID: sourceNodeID,
+                            sourceNodeName: sourceNodeName,
                             profileID: config.profile.id,
                             traceContext: traceContext
                         )
 
                     // [E1] Workflow Gate request → unified InteractionCenter as a `.gate` interaction.
-                    case .requestGate(let prompt, let options, let operationID, let deadline, let sourceNodeID, let inputText, let highlights):
+                    case .requestGate(let prompt, let options, let operationID, let deadline, let sourceNodeID, let inputText, let highlights, let sourceNodeName):
                         agentMessage.agentState = .interaction(.gate)
                         agentMessage.lifecycleState = .parkedHITL(operationID: operationID)
                         await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
@@ -481,6 +493,7 @@ final class ActiveStreamManager {
                             profileType: config.profile.profileType,
                             workflowState: workflowExecutionState,
                             sourceNodeID: sourceNodeID,
+                            sourceNodeName: sourceNodeName,
                             profileID: config.profile.id,
                             traceContext: traceContext
                         )
@@ -670,7 +683,7 @@ final class ActiveStreamManager {
                             ))
                         }
 
-                    case .requestPlanReview(let subtasks, let operationID, let sourceNodeID):
+                    case .requestPlanReview(let subtasks, let operationID, let sourceNodeID, let sourceNodeName):
                         agentMessage.agentState = .interaction(.planReview)
                         // [ASM-5] Park + immediate boundary flush — every other HITL case
                         // (tool confirmation, clarification, gate) does exactly this. Without
@@ -695,6 +708,7 @@ final class ActiveStreamManager {
                             profileType: config.profile.profileType,
                             workflowState: workflowExecutionState,
                             sourceNodeID: sourceNodeID,
+                            sourceNodeName: sourceNodeName,
                             profileID: config.profile.id,
                             traceContext: traceContext
                         )
@@ -984,6 +998,9 @@ final class ActiveStreamManager {
         profileType: ProfileType,
         workflowState: WorkflowExecutionState?,
         sourceNodeID: UUID?,
+        /// Producer-supplied display name, defaulted so existing call sites are unaffected.
+        /// See the resolution comment below for why the id alone is not enough.
+        sourceNodeName: String? = nil,
         profileID: UUID?,
         traceContext: TraceContext
     ) {
@@ -999,7 +1016,12 @@ final class ActiveStreamManager {
             ? .workflow
             : (profileType == .code ? .code : .chat)
 
-        let nodeName: String? = sourceNodeID.flatMap { id in
+        // Prefer a name the PRODUCER supplied. The `nodeResults` lookup below only works for a
+        // node of the CURRENT canvas; for a request forwarded out of a sub-workflow, `sourceNodeID`
+        // names an inner node this state has never heard of (the child's node events are
+        // suppressed), so it always missed and the banner rendered a bare kind label — with two
+        // nodes parked at once the user could not tell which was asking.
+        let nodeName: String? = sourceNodeName ?? sourceNodeID.flatMap { id in
             workflowState?.nodeResults.first(where: { $0.nodeID == id })?.profileName
         }
 
@@ -1126,6 +1148,32 @@ final class ActiveStreamManager {
     /// auto-updates rows on stream start/end (`activeStreams` is observable).
     func hasActiveStream(inConversation conversationID: UUID) -> Bool {
         activeStreams.values.contains { $0.conversationId == conversationID }
+    }
+
+    /// Every live run, reduced to the fields the foreground decision needs.
+    ///
+    /// This is the authoritative answer to "what is running?" — it replaced
+    /// `MainApplicationViewModel.streamingMessageID` / `.streamingMessage`, two stored `var`s that
+    /// five surfaces overwrote and five completions nil'd with no ownership guard. `activeStreams`
+    /// was always correctly keyed and always observable; the slot was a lossy copy of it.
+    /// See `ForegroundRunResolver` for the full history and `LLM_Execution_Concurrency_Design.md`.
+    ///
+    /// Reading this inside a SwiftUI view body or an `ObservationStream` registers on
+    /// `activeStreams`, so the composer's Send/Stop state updates on every stream start and end
+    /// exactly as the sidebar's pulse already does.
+    func liveRunSnapshot() -> [ForegroundRunResolver.LiveRun] {
+        activeStreams.values.map { message in
+            let parked: Bool
+            if case .parkedHITL = message.lifecycleState { parked = true } else { parked = false }
+            return ForegroundRunResolver.LiveRun(
+                messageID: message.id,
+                conversationID: message.conversationId,
+                // `.distantPast` only if the two maps ever diverge; it degrades the tie-break to
+                // "loses to everything", never the candidacy itself.
+                startedAt: streamStartedAt[message.id] ?? .distantPast,
+                isParked: parked
+            )
+        }
     }
 
     public func cancelStream(for messageId: UUID) {
@@ -1299,6 +1347,7 @@ final class ActiveStreamManager {
         }
         
         activeStreams.removeValue(forKey: message.id)
+        streamStartedAt.removeValue(forKey: message.id)
         for delegate in liveMirrorDelegates {
             delegate.activeStreamManager(self, didEndStream: message)
         }

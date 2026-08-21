@@ -430,6 +430,7 @@ struct WorkflowDedicatedView: View {
                         } : nil,
                         // WF-UI4: the pill disables itself while a send/stream is in flight instead
                         // of rendering enabled and dropping the click downstream.
+                        conversationID: conversationID,
                         rerunBlocked: viewModel.isSendInProgress
                     )
 

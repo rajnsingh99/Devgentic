@@ -173,15 +173,12 @@ final class SchedulerCoordinator {
                         summary = "Response complete."
                     }
 
-                    // Release the shared streaming slot. ⚠️ CORRECTED 2026-08-17: this is NOT
-                    // what hides a HITL banner (see the set site below). ⚠️ UNGUARDED — this nils
-                    // the slot regardless of whether THIS run still owns it, so a run that
-                    // superseded us is orphaned: the composer flips back to Send and that run
-                    // becomes unstoppable from the UI. Logs nothing, so the eviction is invisible
-                    // in the field. Tracked in LLM_Execution_Concurrency_Design.md (increment 1,
-                    // which deletes both this line and the slot).
-                    self?.viewModel?.streamingMessageID = nil
-                    self?.viewModel?.streamingMessage = nil
+                    // ✅ The unguarded shared-slot clear that used to live here was DELETED
+                    // 2026-08-17 (design doc increment 1) along with the slot itself. It nil'd the
+                    // slot regardless of ownership, orphaning whichever run had superseded this
+                    // one. There is nothing to release: the composer derives its state from
+                    // ActiveStreamManager, which this run's finalize already updates.
+                    self?.logger.info("[RUN_LIFECYCLE] scheduled run completed for conversation \(conversationID.uuidString.prefix(8)).")
 
                     continuation.resume(returning: summary)
                 }
@@ -189,25 +186,23 @@ final class SchedulerCoordinator {
             }
             messageBox = agentMessage // Fill the box so the closure can read it
 
-            // ⚠️ CORRECTED 2026-08-17. This write does NOT drive HITL banners — the banner stack
-            // keys on `selectedConversationID` only (InteractionBannerStack.swift:35, :129), and a
-            // scheduled run deliberately never selects its conversation. That was true before the
-            // HITL standardization replaced the banner's mount and deleted the consumer without
-            // the producer.
+            // ✅ The shared-slot claim that used to live here was DELETED 2026-08-17 (design doc
+            // increment 1). It never drove HITL banners — the banner stack keys on
+            // `selectedConversationID` only (InteractionBannerStack.swift:35, :129), and a
+            // scheduled run deliberately never selects its conversation.
             //
-            // What this write ACTUALLY load-bears, undocumented until 2026-08-17:
-            //   1. Stop's target            — MessagingCoordinator.cancelStreamingResponse:549
-            //   2. The composer's Send/Stop state — ChatInputViewModel:279
-            //   3. ChatOps `/status`
-            //   4. The model-unload gate    — ConversationSwitchCoordinator:121, :139
-            // On (4): because [C7] excludes `.parkedHITL` runs from the `activeStreams` scan, this
-            // line is the ONLY thing keeping a multi-GB local model resident for a PARKED scheduled
-            // run — so a parked run pins the model iff it happens to have last written this slot.
-            // Deleting this line silently flips that policy. Owner decision 2026-08-17: a parked
-            // run should NOT pin the model (2-minute idle unload, reload on resume), which is what
-            // [C7] already intends. See LLM_Execution_Concurrency_Design.md §2.3 and §0.5.
-            vm.streamingMessageID = agentMessage.id
-            vm.streamingMessage = agentMessage
+            // What it DID silently load-bear, and where each moved:
+            //   1. Stop's target  → derived per-conversation; an unattended run in an UNSELECTED
+            //      conversation is now correctly out of the composer's reach, and stoppable by
+            //      opening its conversation.
+            //   2. Composer state → same derivation, so a background scheduled run no longer locks
+            //      the main composer for its whole duration.
+            //   3. ChatOps /status → now asks ActiveStreamManager about its OWN conversation.
+            //   4. The model-unload gate → the `[C7]` policy now applies consistently. Previously a
+            //      PARKED run pinned a multi-GB model iff it happened to have last written this
+            //      slot, i.e. by race. Owner decision 2026-08-17: a parked run does NOT pin the
+            //      model (2-minute idle unload, reload on resume) — which is what [C7] already
+            //      intended. See LLM_Execution_Concurrency_Design.md §2.3 and §0.5.
 
             // [HITL/P5] The deadline: if the unattended run is still going after 10 minutes
             // (e.g. parked on a HITL nobody is there to answer, now that the per-HITL watchdog is

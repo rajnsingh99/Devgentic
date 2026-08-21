@@ -218,11 +218,18 @@ struct AgentMessageActionsView: View {
                 }
 
                 if !chatActionsSuppressed {
-                    let isRedoDisabled = (message.agentResponse?.generationAttempts ?? 0) >= 5
+                    // Single source for "may this run?" — shared with the runtime refusal in
+                    // MessagingCoordinator. This used to hardcode `>= 5` while the coordinator read
+                    // `ChatMessage.maxGenerationAttempts`, and neither expressed "a run is already
+                    // live in this conversation", so Redo stayed clickable on older messages while
+                    // another run streamed — the one-click path to an orphaned, uncancellable run.
+                    let redoRefusal = mainAppViewModel.regenerationRefusal(for: message)
+                    let isRedoDisabled = redoRefusal != nil
                     ChatActionButton(action: { mainAppViewModel.regenerateResponse(for: message) }, disabled: isRedoDisabled) {
                         Label("Redo", systemImage: "arrow.clockwise")
                     }
                     .foregroundColor(isRedoDisabled ? theme.tertiaryText : theme.secondaryText)
+                    .help(redoRefusal?.userFacingReason ?? "Generate a new response")
                     .accessibilityLabel("Regenerate response")
                 }
 

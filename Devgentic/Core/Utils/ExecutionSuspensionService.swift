@@ -50,6 +50,14 @@ actor ExecutionSuspensionService {
     private var gateContinuations: [UUID: CheckedContinuation<String?, Never>] = [:]
     // Reverse lookup: operationID -> conversationID (for cancel-by-conversation)
     private var operationToConversation: [UUID: UUID] = [:]
+    /// Reverse lookup: operationID -> workflow NODE, for `cancelNode`. Absent for every park with
+    /// no node dimension — chat and code runs, and both MCP brokers, which build their HITLOrigin
+    /// with `nodeID: nil`. Those are drained only by the conversation-wide `cancel(for:)`.
+    ///
+    /// ⚠️ Written and removed in LOCKSTEP with `operationToConversation`. This actor is a
+    /// process-wide singleton with no reset, so a removal missed at any one of the five sites leaks
+    /// for the life of the process.
+    private var operationToNode: [UUID: UUID] = [:]
 
     // MARK: - Park accounting (for compute-only node timeouts)
 
@@ -139,7 +147,7 @@ actor ExecutionSuspensionService {
     ///   - operationID: Unique identifier for this HITL operation.
     ///   - conversationID: The conversation this operation belongs to (for cancel-by-conversation).
     /// - Returns: `true` if the user approved the action, `false` if denied or timed out.
-    func suspend(for operationID: UUID, conversationID: UUID) async -> Bool {
+    func suspend(for operationID: UUID, conversationID: UUID, nodeID: UUID? = nil) async -> Bool {
         // Safety: If we somehow suspend twice with the same operationID, auto-deny previous.
         if let existing = activeContinuations[operationID] {
             logger.warning("[Suspension] Overwriting existing suspension for operation \(operationID). Auto-denying previous.")
@@ -148,6 +156,7 @@ actor ExecutionSuspensionService {
         }
 
         operationToConversation[operationID] = conversationID
+        if let nodeID { operationToNode[operationID] = nodeID }
         beginPark(conversationID)
 
         logger.info("[Suspension] Suspending operation \(operationID) for conversation: \(conversationID). Indefinite — container owns the deadline.")
@@ -173,6 +182,7 @@ actor ExecutionSuspensionService {
     ///   - approved: Whether the user clicked "Allow" (true) or "Deny" (false).
     func resume(for operationID: UUID, approved: Bool, editedArguments: [String: JSONValue]? = nil) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
+        operationToNode.removeValue(forKey: operationID)
         if let conversationID { endPark(conversationID) }
 
         // [HITL/A3] Stash user edits to apply on approval; drop them on denial.
@@ -207,7 +217,7 @@ actor ExecutionSuspensionService {
     ///   - operationID: Unique identifier for this HITL operation.
     ///   - conversationID: The conversation this operation belongs to.
     /// - Returns: The user's text response, or `nil` if timed out / cancelled.
-    func suspendForClarification(for operationID: UUID, conversationID: UUID) async -> String? {
+    func suspendForClarification(for operationID: UUID, conversationID: UUID, nodeID: UUID? = nil) async -> String? {
         // Safety: prevent double-suspension leaks
         if let existing = clarificationContinuations[operationID] {
             logger.warning("[Clarification] Overwriting existing clarification for operation \(operationID). Auto-cancelling previous.")
@@ -216,6 +226,7 @@ actor ExecutionSuspensionService {
         }
 
         operationToConversation[operationID] = conversationID
+        if let nodeID { operationToNode[operationID] = nodeID }
         beginPark(conversationID)
 
         logger.info("[Clarification] Suspending operation \(operationID) for conversation: \(conversationID). Indefinite — container owns the deadline.")
@@ -235,6 +246,7 @@ actor ExecutionSuspensionService {
     /// Resumes a clarification suspension with the user's text input.
     func resumeClarification(for operationID: UUID, userInput: String?) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
+        operationToNode.removeValue(forKey: operationID)
         if let conversationID { endPark(conversationID) }
 
         guard let continuation = clarificationContinuations.removeValue(forKey: operationID) else {
@@ -256,7 +268,7 @@ actor ExecutionSuspensionService {
     ///   - operationID: Unique identifier for this HITL operation.
     ///   - conversationID: The conversation this operation belongs to.
     /// - Returns: The user-edited subtask array, or `nil` if the user rejected the plan.
-    func suspendForPlanReview(for operationID: UUID, conversationID: UUID) async -> [SubTask]? {
+    func suspendForPlanReview(for operationID: UUID, conversationID: UUID, nodeID: UUID? = nil) async -> [SubTask]? {
         // Safety: prevent double-suspension leaks
         if let existing = planReviewContinuations[operationID] {
             logger.warning("[PlanReview] Overwriting existing plan review for operation \(operationID). Auto-cancelling previous.")
@@ -265,6 +277,7 @@ actor ExecutionSuspensionService {
         }
 
         operationToConversation[operationID] = conversationID
+        if let nodeID { operationToNode[operationID] = nodeID }
         beginPark(conversationID)
 
         logger.info("[PlanReview] Suspending operation \(operationID) for conversation: \(conversationID). No timeout — awaiting user action.")
@@ -286,6 +299,7 @@ actor ExecutionSuspensionService {
     /// Resumes a plan review suspension with the user-edited plan or nil for rejection.
     func resumePlanReview(for operationID: UUID, editedPlan: [SubTask]?) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
+        operationToNode.removeValue(forKey: operationID)
         if let conversationID { endPark(conversationID) }
 
         guard let continuation = planReviewContinuations.removeValue(forKey: operationID) else {
@@ -303,7 +317,7 @@ actor ExecutionSuspensionService {
 
     /// Pauses a workflow Gate node until the user picks an option (routes to that option's port) or the
     /// gate is cancelled / times out. Returns the chosen option string, or `nil` if cancelled/timed out.
-    func suspendForGate(for operationID: UUID, conversationID: UUID) async -> String? {
+    func suspendForGate(for operationID: UUID, conversationID: UUID, nodeID: UUID? = nil) async -> String? {
         if let existing = gateContinuations[operationID] {
             logger.warning("[Gate] Overwriting existing gate suspension for operation \(operationID). Auto-cancelling previous.")
             existing.resume(returning: nil)
@@ -311,6 +325,7 @@ actor ExecutionSuspensionService {
         }
 
         operationToConversation[operationID] = conversationID
+        if let nodeID { operationToNode[operationID] = nodeID }
         beginPark(conversationID)
         logger.info("[Gate] Suspending operation \(operationID) for conversation: \(conversationID). Indefinite — container owns the deadline.")
 
@@ -329,6 +344,7 @@ actor ExecutionSuspensionService {
     /// Resumes a gate suspension with the user's chosen option (nil = cancelled / timed out / rejected).
     func resumeGate(for operationID: UUID, chosenOption: String?) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
+        operationToNode.removeValue(forKey: operationID)
         if let conversationID { endPark(conversationID) }
 
         guard let continuation = gateContinuations.removeValue(forKey: operationID) else {
@@ -351,46 +367,103 @@ actor ExecutionSuspensionService {
         let permissionOps = operationToConversation.filter { $0.value == conversationID }.map(\.key)
 
         for opID in permissionOps {
-            operationToConversation.removeValue(forKey: opID)
-            // ⚠️ Force-cancel closes the park too. Without this the depth never returns to zero and
-            // `cumulativeParkedTime` grows forever, so every later node in the conversation would
-            // believe it had been waiting on a human and its timeout would never fire.
-            endPark(conversationID)
-            editedArgs.removeValue(forKey: opID)
+            drainOperation(opID, conversationID: conversationID, outcome: "cancelled")
+        }
+    }
 
-            // Post the matching resolved notification (mirrors resume*/timeout) so every surface —
-            // the legacy banners, the unified InteractionCenter, and the ChatOps remote mirror —
-            // clears immediately on cancel rather than relying on a downstream finalize backstop.
-            // This is what makes remote-Stop (no Mac task to tear down) dismiss the banner too.
-            if let continuation = activeContinuations.removeValue(forKey: opID) {
-                logger.info("[Suspension] Force-cancelling permission for operation: \(opID)")
-                continuation.resume(returning: false)
-                postResolved(name: .hitlPermissionResolved, operationID: opID, conversationID: conversationID, extraInfo: [HITLResolvedKey.approved: false, HITLResolvedKey.outcome: "cancelled"])
-            }
+    /// Force-resolves every park belonging to ONE workflow node, leaving its siblings alone.
+    ///
+    /// ⚠️ THE N3 FIX, and the narrower sibling of `cancel(for:)` — NOT a replacement for it. A
+    /// conversation legitimately holds parks with no node dimension at all (chat and code runs, and
+    /// both MCP brokers, which build their origin with `nodeID: nil`), and a node-partitioned
+    /// reimplementation of the conversation-wide drain would silently stop draining those. That is
+    /// a HANG, not a warning, so the two stay separate.
+    ///
+    /// The `conversationID` term is not redundant with `nodeID`: it keeps the drain inside the
+    /// one-root-run-per-conversation boundary and guards against a stale node id from an earlier
+    /// run of the same graph.
+    ///
+    /// Returns the operations it resolved, so a caller can log what it actually did.
+    @discardableResult
+    func cancelNode(_ nodeID: UUID, in conversationID: UUID, outcome: String = "cancelled") -> [UUID] {
+        let ops = operationToConversation
+            .filter { $0.value == conversationID && operationToNode[$0.key] == nodeID }
+            .map(\.key)
 
-            if let continuation = clarificationContinuations.removeValue(forKey: opID) {
-                logger.info("[Suspension] Force-cancelling clarification for operation: \(opID)")
-                continuation.resume(returning: nil)
-                postResolved(name: .hitlClarificationResolved, operationID: opID, conversationID: conversationID, extraInfo: [HITLResolvedKey.outcome: "cancelled"])
-            }
+        guard !ops.isEmpty else { return [] }
+        for opID in ops {
+            drainOperation(opID, conversationID: conversationID, outcome: outcome)
+        }
+        logger.info("[Suspension] Node-scoped drain resolved \(ops.count) park(s) for node \(nodeID.uuidString.prefix(8)) in conversation \(conversationID.uuidString.prefix(8)). CONSEQUENCE: only this node's banners clear; a sibling node's parked request is untouched and still awaiting the user.")
+        return ops
+    }
 
-            if let continuation = planReviewContinuations.removeValue(forKey: opID) {
-                logger.info("[Suspension] Force-cancelling plan review for operation: \(opID)")
-                continuation.resume(returning: nil)
-                postResolved(name: .hitlPlanReviewResolved, operationID: opID, conversationID: conversationID, extraInfo: [HITLResolvedKey.outcome: "cancelled"])
-            }
+    /// Resolves ONE parked operation: drops its indexes, closes its park, resumes whichever
+    /// continuation kind it holds, and posts the matching resolved notification.
+    ///
+    /// ⚠️ SHARED BY BOTH DRAINS ON PURPOSE. This was the body of `cancel(for:)`; `cancelNode`
+    /// needs byte-identical semantics, and two copies of park accounting would be two chances to
+    /// unbalance it.
+    ///
+    /// ⚠️ Exactly ONE `endPark` per drained operation — `beginPark`/`endPark` are a reference count
+    /// over a UNION window keyed by CONVERSATION, so draining a subset correctly leaves the window
+    /// OPEN while a sibling is still parked. An extra `endPark` here would drive the depth to zero
+    /// early, close the window, and every later node in that conversation would stop crediting
+    /// parked time — its timeout would then fire on wall-clock, killing work that was only waiting.
+    ///
+    /// ⚠️ `outcome` is free-form and reaches the trace row and the remote mirror. "cancelled" is the
+    /// teardown value; a caller resolving a park for a different reason should say so, because
+    /// downstream surfaces render it verbatim.
+    private func drainOperation(_ opID: UUID, conversationID: UUID, outcome: String) {
+        operationToConversation.removeValue(forKey: opID)
+        operationToNode.removeValue(forKey: opID)
+        // ⚠️ Force-cancel closes the park too. Without this the depth never returns to zero and
+        // `cumulativeParkedTime` grows forever, so every later node in the conversation would
+        // believe it had been waiting on a human and its timeout would never fire.
+        endPark(conversationID)
+        editedArgs.removeValue(forKey: opID)
 
-            if let continuation = gateContinuations.removeValue(forKey: opID) {
-                logger.info("[Suspension] Force-cancelling gate for operation: \(opID)")
-                continuation.resume(returning: nil)
-                postResolved(name: .hitlGateResolved, operationID: opID, conversationID: conversationID, extraInfo: [HITLResolvedKey.outcome: "cancelled"])
-            }
+        // Post the matching resolved notification (mirrors resume*/timeout) so every surface —
+        // the legacy banners, the unified InteractionCenter, and the ChatOps remote mirror —
+        // clears immediately on cancel rather than relying on a downstream finalize backstop.
+        // This is what makes remote-Stop (no Mac task to tear down) dismiss the banner too.
+        if let continuation = activeContinuations.removeValue(forKey: opID) {
+            logger.info("[Suspension] Force-resolving permission for operation: \(opID) (\(outcome))")
+            continuation.resume(returning: false)
+            postResolved(name: .hitlPermissionResolved, operationID: opID, conversationID: conversationID, extraInfo: [HITLResolvedKey.approved: false, HITLResolvedKey.outcome: outcome])
+        }
+
+        if let continuation = clarificationContinuations.removeValue(forKey: opID) {
+            logger.info("[Suspension] Force-resolving clarification for operation: \(opID) (\(outcome))")
+            continuation.resume(returning: nil)
+            postResolved(name: .hitlClarificationResolved, operationID: opID, conversationID: conversationID, extraInfo: [HITLResolvedKey.outcome: outcome])
+        }
+
+        if let continuation = planReviewContinuations.removeValue(forKey: opID) {
+            logger.info("[Suspension] Force-resolving plan review for operation: \(opID) (\(outcome))")
+            continuation.resume(returning: nil)
+            postResolved(name: .hitlPlanReviewResolved, operationID: opID, conversationID: conversationID, extraInfo: [HITLResolvedKey.outcome: outcome])
+        }
+
+        if let continuation = gateContinuations.removeValue(forKey: opID) {
+            logger.info("[Suspension] Force-resolving gate for operation: \(opID) (\(outcome))")
+            continuation.resume(returning: nil)
+            postResolved(name: .hitlGateResolved, operationID: opID, conversationID: conversationID, extraInfo: [HITLResolvedKey.outcome: outcome])
         }
     }
 
     /// Checks if a conversation has any pending suspension.
     func isSuspended(for conversationID: UUID) -> Bool {
         return operationToConversation.values.contains(conversationID)
+    }
+
+    /// Whether a specific workflow NODE has a park awaiting the user. Drives per-node affordances
+    /// (the timeline's "Needs your input" state, and Phase B's skip button on a parked row).
+    ///
+    /// ⚠️ Answers only for parks that CARRY a node dimension. A chat park, or an MCP broker park
+    /// (`nodeID: nil` by construction), is invisible here however true `isSuspended(for:)` is.
+    func isSuspended(node nodeID: UUID, in conversationID: UUID) -> Bool {
+        operationToConversation.contains { $0.value == conversationID && operationToNode[$0.key] == nodeID }
     }
 
     // MARK: - Notification Helper

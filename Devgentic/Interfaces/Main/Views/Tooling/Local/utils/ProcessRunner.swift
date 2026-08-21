@@ -319,7 +319,21 @@ enum ProcessRunner {
         if killed.isSet {
             logger.info("[PROC] '\(label.prefix(120))' — killed at the \(Int(timeout ?? 0))s bound; \(out.data.count)B stdout, \(err.data.count)B stderr collected before the kill. Partial output is returned rather than discarded.")
         } else if !result.succeeded {
-            logger.info("[PROC] '\(label.prefix(120))' exited \(exitCode) — \(out.data.count)B stdout, \(err.data.count)B stderr. The caller decides whether a non-zero exit is a tool failure or a result.")
+            // ⚠️ On a NON-ZERO exit, print the head of stderr — that is the line that says WHY.
+            // This logged sizes only, so a device log read "exited 1 — 0B stdout, 57B stderr" and
+            // the 57 bytes carrying the reason never appeared anywhere. Bounded to 200 chars: enough
+            // for a shell diagnostic, short enough that a chatty command cannot flood the log. The
+            // command itself is already logged in full at the dispatch site, so this reveals nothing
+            // the log did not already carry.
+            let stderrHead: String = {
+                guard exitCode != 0, !err.data.isEmpty else { return "" }
+                let text = String(decoding: err.data.prefix(200), as: UTF8.self)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .replacingOccurrences(of: "\n", with: " ⏎ ")
+                guard !text.isEmpty else { return "" }
+                return " stderr: \"\(text)\(err.data.count > 200 ? "…" : "")\""
+            }()
+            logger.info("[PROC] '\(label.prefix(120))' exited \(exitCode) — \(out.data.count)B stdout, \(err.data.count)B stderr.\(stderrHead) The caller decides whether a non-zero exit is a tool failure or a result.")
         }
 
         return TimedResult(result: result, timedOut: killed.isSet)

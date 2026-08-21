@@ -36,6 +36,22 @@ struct LLMRetryStrategy: LLMRetryHandling {
     /// concurrency fault — nor a parse failure, since the model produced nothing to parse.
     private(set) var consecutiveModelSlotFailures = 0
 
+    /// Consecutive generations that returned NO output (`GenerationError.emptyResponse`).
+    ///
+    /// ⚠️ Its own budget, for the same reason `consecutiveModelSlotFailures` has one: the model
+    /// produced nothing to parse, so charging the parse budget both aborts on the wrong cap and
+    /// mislabels the run in telemetry.
+    private(set) var consecutiveEmptyResponses = 0
+
+    /// How many empty generations in a row before giving up.
+    ///
+    /// Lower than the parse cap on purpose. A parse failure can be argued out of the model with a
+    /// corrective nudge, so more attempts genuinely help; an empty response gets the identical
+    /// prompt back and only a different sample can change the outcome. If three fresh samples all
+    /// return nothing, the cause is configuration, not luck, and more attempts only delay the
+    /// diagnosis the abort message carries.
+    private static let maxConsecutiveEmptyResponses = 3
+
     /// ONE outer retry. `MLXService.container(expecting:)` already re-loads the expected model
     /// TWICE back-to-back before it throws (MLXService.swift:120-129), and `loadModel` coalesces
     /// behind any in-flight load (:210-212) — so the only thing an outer attempt adds is ELAPSED
@@ -76,6 +92,21 @@ struct LLMRetryStrategy: LLMRetryHandling {
             let cloudError = error as? CloudProviderError
             let providerLabel = cloudError.map { String(describing: $0.provider) } ?? "local"
             return apply(verdict, requestId: cloudError?.requestId, providerLabel: providerLabel)
+        }
+
+        // --- Empty output: NOT a parse failure ---
+        //
+        // ⚠️ Placement matters for the same reason the MLX block below documents: every arm here
+        // returns, so control never reaches `consecutiveParseFailures += 1`.
+        //
+        // Six generators used to throw an untyped `NSError(domain: <their own string>, code: 422)`
+        // for this, so nothing could match them and all six landed in the UNCLASSIFIED catch-all —
+        // which injects "Your last output failed validation … you MUST output valid JSON" into the
+        // model's context. For a model that emitted NOTHING that text is false, it grows the prompt
+        // by ~205 chars on every attempt, and it instructs the model to stop doing something it
+        // never did. A device log showed five of these in a row aborting a run on the parse cap.
+        if case GenerationError.emptyResponse(let generator) = error {
+            return emptyResponseAction(generator: generator)
         }
 
         // --- Typed local-runtime errors (MUST precede the string tests below) ---
@@ -190,6 +221,7 @@ struct LLMRetryStrategy: LLMRetryHandling {
         // Without this, an unrelated race later in the same run would arrive with the budget
         // already spent and fail on its first occurrence with no retry.
         consecutiveModelSlotFailures = 0
+        consecutiveEmptyResponses = 0
     }
 
     // MARK: - Budgeted Verdict Application
@@ -284,6 +316,41 @@ struct LLMRetryStrategy: LLMRetryHandling {
     /// "your last output failed validation" alert pinned in the model's own context and a burned
     /// iteration. Bare `.fatal` would remove that recovery and produce MORE hard failures than
     /// before; this keeps the recovery and drops the lie.
+    /// The provider returned successfully but produced no text and no tool call.
+    ///
+    /// ⚠️ ITS OWN BUDGET, and NO system alert — the two things that distinguish it from a parse
+    /// failure. There is no output to correct, so there is no honest corrective instruction to
+    /// give; the retry re-sends the SAME prompt and relies on sampling non-determinism, which is
+    /// what actually recovers it (a device log showed the identical prompt yielding a clean tool
+    /// call on one run and immediate EOS on the next, 7 tokens apart).
+    ///
+    /// Same shape and same reasoning as `modelSlotAction` below, whose own comment already draws
+    /// the distinction: not a parse failure "since the model produced nothing to parse".
+    private mutating func emptyResponseAction(generator: String) -> RetryAction {
+        consecutiveEmptyResponses += 1
+
+        // Locals only — a `mutating` func must not let `self` escape into a log autoclosure.
+        let attempt = consecutiveEmptyResponses
+        let cap = Self.maxConsecutiveEmptyResponses
+
+        if attempt >= cap {
+            logger.error("[GEN_EMPTY] \(generator) returned NO output \(attempt) time(s) in a row — giving up. CONSEQUENCE: the run stops. This is NOT charged to the parse budget and telemetry does not record .parseExhausted, because the model produced nothing to parse — the cause is upstream of the parser. Read the [MLX-GEN] line for this attempt BEFORE changing anything: it reports the framework's own generatedTokens, which says whether the model emitted nothing (sampling / chat template) or emitted output that was discarded downstream (tool-call parsing). Those two have opposite fixes.")
+            return .abort(
+                reason: "The model returned no output \(attempt) times in a row — not an unreadable answer, but nothing at all. Check this profile's Repetition Penalty (values near 1.05 are typical; high values over a small repetition-context window can suppress the model's first token) and Temperature. If those look right, the model's chat template or its tool-call format may not be producing a usable turn."
+            )
+        }
+
+        // ⚠️ `.networkRetry` deliberately, NOT `.parseRetry` — it re-runs the iteration WITHOUT
+        // putting a corrective alert into the model's context. `modelSlotAction` uses the same
+        // case for the same reason. Zero delay: nothing external needs time to settle, the next
+        // attempt just needs a fresh sample.
+        logger.warning("[GEN_EMPTY] \(generator) returned no output (\(attempt)/\(cap)) — retrying with the same message array (tool-schema key order may differ between renders; see BridgedToolsStore). CONSEQUENCE: no corrective alert enters the model's context (there is no output to correct, and the parse-failure alert would be a false statement that also grows the prompt every attempt), and the parse budget is untouched.")
+        return .networkRetry(
+            message: "The model returned nothing — retrying (\(attempt)/\(cap))...",
+            delaySeconds: 0
+        )
+    }
+
     private mutating func modelSlotAction(expected: String, actual: String) -> RetryAction {
         consecutiveModelSlotFailures += 1
 

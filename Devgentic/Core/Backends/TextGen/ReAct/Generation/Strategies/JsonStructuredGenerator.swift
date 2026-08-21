@@ -82,7 +82,7 @@ struct JsonStructuredGenerator: CognitiveGenerator {
 
         guard !responseText.isEmpty else {
             logLLMOps.error("❌ [JsonMode:\(reqId)] Empty response from model.")
-            throw NSError(domain: "JsonMode", code: 422, userInfo: [NSLocalizedDescriptionKey: "Empty response from model."])
+            throw GenerationError.emptyResponse(generator: "JsonMode")
         }
 
         let pipeline = CognitiveParsePipeline(

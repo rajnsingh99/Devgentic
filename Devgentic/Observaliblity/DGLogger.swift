@@ -189,6 +189,76 @@ struct DGLogger: Sendable {
         developerMode || (level >= .warning && diagnosticsEnabled)
     }
 
+    // MARK: - Full-content dumps (developer mode only)
+
+    /// Whether verbatim-content dumps are permitted right now.
+    ///
+    /// Callers MUST check this before building the payload — the whole point of these dumps is
+    /// that they are large, so constructing the string and then discarding it inside the logger
+    /// would pay the cost on every request for output nobody reads.
+    static var contentDumpsEnabled: Bool {
+        UserDefaults.standard.bool(forKey: AppSettings.developerModeKey)
+    }
+
+    /// Emits a multi-line block of VERBATIM content, chunked so the unified log does not truncate it.
+    ///
+    /// ⚠️ THIS DELIBERATELY BREAKS THE RULE STATED AT THE TOP OF THIS FILE — "DON'T log message
+    /// bodies (log lengths/ids instead)". That rule is right for the default build and stays in
+    /// force everywhere else. The exception exists because sizes-only logging has now cost this
+    /// project three wrong root causes in a row: a `<task>` silently fused with 2,000 chars of MCP
+    /// guidance, a "model emitted nothing" verdict that was actually output being discarded, and a
+    /// malformed tool call whose payload nobody could see. In each case the log said the prompt was
+    /// 1,749 chars and everyone had to GUESS what was in them. When the question is "what exactly
+    /// did the model read", only the bytes answer it.
+    ///
+    /// Three properties keep that safe:
+    ///   1. GATED on developer mode, which is default-OFF and user-toggled.
+    ///   2. Routed through `.debug`, which per the privacy note above is the ONLY level that is
+    ///      never written to the ring buffer — so this content cannot reach an exported diagnostic
+    ///      bundle, a sysdiagnose, or analytics. It exists solely in the live Xcode/Console stream.
+    ///   3. RAW — deliberately not sanitized. `TelemetrySanitizer` would rewrite `/Users/alice/...`
+    ///      to `[USER_PATH]`, and a prompt's literal home path is frequently the thing under
+    ///      investigation. Raw is only defensible BECAUSE of (2): nothing here is persisted.
+    ///
+    /// Chunks on Character boundaries, never UTF-8 bytes, so multi-byte characters cannot be split.
+    func dumpBlock(_ tag: String, title: String, body: String, chunkSize: Int = 800) {
+        guard Self.contentDumpsEnabled else { return }
+
+        let parts = Self.chunk(body, size: chunkSize)
+        debug("\(tag) ===== BEGIN \(title) — \(body.count) chars, \(parts.count) chunk(s) =====")
+        for (offset, part) in parts.enumerated() {
+            debug("\(tag) [\(offset + 1)/\(parts.count)] \(part)")
+        }
+        debug("\(tag) ===== END \(title) =====")
+    }
+
+    /// Splits `body` into log-sized pieces. Pure and `static` so the chunking contract is testable
+    /// without UserDefaults, a live logger, or scraping os_log — the same shape as
+    /// `shouldPersist(level:developerMode:diagnosticsEnabled:)` above.
+    ///
+    /// ⚠️ Splits on CHARACTERS, never UTF-8 bytes. Prompts routinely contain multi-byte content —
+    /// an em dash in a section header, a non-Latin filename, an emoji in a user query — and byte
+    /// slicing would tear one in half and emit replacement characters at every chunk seam, in a
+    /// diagnostic whose entire purpose is showing the exact text.
+    ///
+    /// Always returns at least one element, so callers can render "1/1" without a special case and
+    /// an empty prompt is visibly reported as empty rather than silently producing no output.
+    static func chunk(_ body: String, size: Int) -> [String] {
+        // A zero or negative size from a call site would divide by zero / loop forever.
+        let size = max(1, size)
+        let chars = Array(body)
+        guard !chars.isEmpty else { return ["<empty>"] }
+
+        var parts: [String] = []
+        var index = 0
+        while index < chars.count {
+            let end = min(index + size, chars.count)
+            parts.append(String(chars[index..<end]))
+            index = end
+        }
+        return parts
+    }
+
     private func route(level: LogLevel, sanitizedMessage: String, metadata: [String: String]) {
         let devMode = UserDefaults.standard.bool(forKey: AppSettings.developerModeKey)
         guard Self.shouldPersist(level: level,

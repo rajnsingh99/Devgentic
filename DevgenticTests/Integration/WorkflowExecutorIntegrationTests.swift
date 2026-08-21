@@ -2051,9 +2051,15 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertEqual(decoded?.resolvedMaxRetries, 2)
     }
 
-    /// ⚠️ Retry NEVER applies to structural kinds, and must not start. Re-running a Router is
-    /// pointless (deterministic — same input, same rules, same no-match); re-running a
-    /// sub-workflow re-runs everything inside it. A stored `maxNodeRetries` is inert there.
+    /// ⚠️ Retry does not apply to DETERMINISTIC structural kinds. Re-running a Router is pointless:
+    /// same input, same rules, same no-match. A stored `maxNodeRetries` is inert on Router / Code /
+    /// Gate / Trigger.
+    ///
+    /// ⚠️ UPDATED 2026-08-19 — this comment used to say retry never applies to structural kinds AT
+    /// ALL, including sub-workflows. That is no longer true and was the §9 N4 defect: a sub-workflow
+    /// is LLM-driven and non-deterministic, so it now DOES retry via the outer loop in
+    /// `executeStructuralNodeBounded`. See `testSubWorkflowNode_RetriesOnFailure…` below. The
+    /// vehicle here is a Router precisely because it is one of the kinds that still must not.
     ///
     /// ⚠️ WF-TS8 — WHY THE VEHICLE IS A ROUTER AND NOT A CODE NODE. This test used to configure
     /// `maxNodeRetries = 3` on a Code node with an unresolvable template and assert
@@ -2103,6 +2109,50 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let starts = WorkflowStreamCollector.nodeStartedEvents(from: events).filter { $0.nodeID == router }
         XCTAssertEqual(starts.count, 1,
                        "a structural node must not be retried — got \(starts.count) starts with maxNodeRetries = 3")
+    }
+
+    /// ⚠️ §9 N4 — a sub-workflow node MUST honour its Node-Level Retries setting.
+    ///
+    /// The stepper was rendered for these nodes and did nothing: they are dispatched structurally
+    /// (so they never reach `executeProfileNodeWithRetry`) and the structural path had no loop.
+    /// A user set Retries = 3 on a flaky nested pipeline and got exactly one attempt, with no log
+    /// line and no UI hint saying the setting was ignored.
+    ///
+    /// Uses the same observation as the Router test above: a retry re-enters the structural path,
+    /// which yields `.workflowNodeStarted` at its top, so each attempt shows as one start event.
+    func testSubWorkflowNode_RetriesOnFailure_WhenRetriesConfigured() async throws {
+        let scenario = WorkflowTestScenario()
+
+        let inner = InnerWorkflowBuilder()
+        let innerBot = inner.addBotNode(name: "Flaky Bot")
+        inner.save()
+        innerBuilders.append(inner)
+        for (id, profile) in inner.profileMap { scenario.profileMap[id] = profile }
+
+        let subWorkflow = scenario.addSubWorkflowNode(name: "Nested Step", workflowProfileID: inner.workflowProfileID)
+
+        var cfg = WorkflowNodeConfig()
+        cfg.maxNodeRetries = 2
+        cfg.retryDelay = 0        // keep the test fast; the delay is covered by the unit tests
+        scenario.setNodeConfig(cfg, for: subWorkflow)
+
+        // The child fails every time, so every configured attempt is used.
+        mockProvider.scriptError(for: inner.profileID(for: innerBot)!,
+                                 error: NSError(domain: "test", code: 1))
+
+        let events = try await execute(scenario)
+
+        // THE FIX: 2 retries means 3 attempts, each re-entering the structural path.
+        let starts = WorkflowStreamCollector.nodeStartedEvents(from: events).filter { $0.nodeID == subWorkflow }
+        XCTAssertEqual(starts.count, 3,
+                       "a sub-workflow node must honour maxNodeRetries = 2 (3 attempts) — got \(starts.count)")
+
+        // And the node reports failure exactly ONCE, at the end. Emitting the terminal event per
+        // attempt would show the node failing three times on the canvas and would activate its
+        // `error` port before the retries had run.
+        let failures = WorkflowStreamCollector.nodeFailedEvents(from: events).filter { $0.nodeID == subWorkflow }
+        XCTAssertEqual(failures.count, 1,
+                       "the failure must be reported once, after the last attempt — got \(failures.count)")
     }
 
     // MARK: - Node timeout: applies everywhere, counts compute not waiting
@@ -2179,7 +2229,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         var events: [AgentStreamEvent] = []
         for try await event in stream {
             events.append(event)
-            if case .requestGate(_, _, let opID, _, _, _, _) = event {
+            if case .requestGate(_, _, let opID, _, _, _, _, _) = event {
                 try await Task.sleep(for: .milliseconds(2200))
                 await ExecutionSuspensionService.shared.resumeGate(for: opID, chosenOption: "Billing")
             }
@@ -2420,7 +2470,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let (scenario, _, _, _) = ambiguousRouterScenario(askOnAmbiguity: true)
         let events = try await executeWithGate(scenario, choosing: "Urgent")
         for event in events {
-            if case .requestGate(_, _, _, let deadline, _, _, _) = event {
+            if case .requestGate(_, _, _, let deadline, _, _, _, _) = event {
                 XCTAssertNil(deadline, "the arbitration waits indefinitely — a countdown would lie")
             }
         }
@@ -4045,11 +4095,15 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
     }
 
     /// ⚠️ A GATE INSIDE A SUB-WORKFLOW BODY must reach the outer stream and, once answered, let the
-    /// child continue. The three HITL forwards in the sub-workflow arm (`requestConfirmation` /
-    /// `requestGate` / `requestClarification`, each keeping the INNER node's id) are the only thing
-    /// standing between a suspending inner node and the `default:` suppression arm — and a
-    /// swallowed suspending event is a PERMANENT hang: no banner, nobody to answer, and the compute
-    /// clock excludes parked time so not even the node timeout fires.
+    /// child continue. The FOUR HITL forwards in the sub-workflow arm (`requestConfirmation` /
+    /// `requestGate` / `requestClarification` / `requestPlanReview`, each keeping the INNER node's
+    /// id) are the only thing standing between a suspending inner node and the `default:`
+    /// suppression arm — and a swallowed suspending event is a PERMANENT hang: no banner, nobody to
+    /// answer, and the compute clock excludes parked time so not even the node timeout fires.
+    ///
+    /// ⚠️ This comment said "three" until 2026-08-19, and that count WAS the bug: `requestPlanReview`
+    /// was the missing fourth. Pinned by `testPlanReviewInsideSubWorkflowBody…` below. If a fifth
+    /// suspending event kind is ever added, it needs a forward here and a test beside that one.
     ///
     /// ⚠️ This pin previously lived in `LoopHITLForwardingTests` (a source scan over the loop arm)
     /// and was deleted with the Loop node (2026-08-15). This is its behavioural replacement, on the
@@ -4096,6 +4150,156 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
                        "the child must continue past the answered gate and publish its result")
         XCTAssertTrue(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: consumer)! },
                       "downstream must receive the completed sub-workflow's output")
+    }
+
+    /// ⚠️ A PLAN REVIEW INSIDE A SUB-WORKFLOW BODY must reach the outer stream. [design doc §9 N2]
+    ///
+    /// This was the FOURTH HITL kind and the only one the sub-workflow arm did not forward: it fell
+    /// into the `default:` suppression arm, so no banner ever appeared while the child sat in
+    /// `ExecutionSuspensionService.suspendForPlanReview`, which has NO timeout by design ("awaiting
+    /// user action"). The per-node compute timeout could not rescue it either — the sentinel
+    /// subtracts `cumulativeParkedTime` and extends itself by the shortfall, and a run doing nothing
+    /// but waiting on a human is 100% parked, so it re-armed forever. The user saw a workflow frozen
+    /// at N-1 of N nodes with no banner, no error and no timeout; only Stop ended it.
+    ///
+    /// The sibling test above (`testGateInsideSubWorkflowBody…`) pins the same property for gates,
+    /// and its doc comment said "the THREE HITL forwards" — that count WAS the bug.
+    ///
+    /// The inner node emits the event directly rather than driving a real PlanningCapability: what
+    /// is under test is the FORWARDER, not plan generation. Scripting it keeps the test fast and
+    /// deterministic, and a regression that drops the case back into `default:` fails the first
+    /// assertion immediately instead of hanging the suite.
+    func testPlanReviewInsideSubWorkflowBody_ReachesTheOuterStream() async throws {
+        let scenario = WorkflowTestScenario()
+        let reviewOpID = UUID()
+        let subtasks = [SubTask(id: "s1", description: "Draft the summary")]
+
+        let inner = InnerWorkflowBuilder()
+        let innerBot = inner.addBotNode(name: "Planner Bot")
+        inner.save()
+        innerBuilders.append(inner)
+        for (id, profile) in inner.profileMap { scenario.profileMap[id] = profile }
+
+        let subWorkflow = scenario.addSubWorkflowNode(name: "Nested Step", workflowProfileID: inner.workflowProfileID)
+        let consumer = scenario.addBotNode(name: "Consumer")
+        scenario.connect(from: subWorkflow, to: consumer)
+
+        mockProvider.scriptStream(for: inner.profileID(for: innerBot)!, events: [
+            .requestPlanReview(subtasks: subtasks, operationID: reviewOpID),
+            .content("PLANNED RESULT")
+        ])
+        mockProvider.scriptStream(for: scenario.profileID(for: consumer)!, events: [.content("done")])
+
+        let events = try await execute(scenario)
+
+        // 1. THE FIX: the request escaped the child stream via the forwarder, not `default:`.
+        let reviews = WorkflowStreamCollector.planReviewRequests(from: events)
+        XCTAssertEqual(reviews.count, 1,
+                       "a plan review raised inside a sub-workflow must surface on the outer stream — "
+                       + "swallowing it is a permanent hang with no banner and no timeout")
+        XCTAssertEqual(reviews.first?.operationID, reviewOpID,
+                       "the operationID must survive the hop — it is what the child is suspended on, "
+                       + "so a rewritten id would make the answer unroutable")
+
+        // 2. Attribution: the inner node's id is preserved (approval scope keys on it), and a
+        //    display name is carried so the banner is not a bare "Plan review" (design doc §9 N5).
+        XCTAssertNotNil(reviews.first?.sourceNodeID, "the request must be attributed to a node")
+        // FULL PATH: outer sub-workflow node › the inner node that actually asked.
+        //
+        // ⚠️ This asserted just "Nested Step" when first written, and the value IMPROVED when the
+        // direct profile-node path was fixed to stamp `sourceNodeID` on plan reviews. Before that
+        // fix the inner id arrived nil, so `hitlDisplayName(nil)` could only fall back to the
+        // sub-workflow node's own name. With the id present, the harvested inner name resolves too.
+        // The parent's `nodeResults` can never contain an inner node id, so this name has to travel
+        // with the event — the id alone is not resolvable on the far side.
+        XCTAssertEqual(reviews.first?.sourceNodeName, "Nested Step › Planner Bot",
+                       "the banner must name the sub-workflow node AND the inner node that asked")
+
+        // 3. The run still completes and the child's output flows downstream.
+        let completed = WorkflowStreamCollector.nodeCompletedEvents(from: events)
+        XCTAssertEqual(completed.first(where: { $0.nodeID == subWorkflow })?.summary, "PLANNED RESULT")
+        XCTAssertTrue(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: consumer)! },
+                      "downstream must receive the completed sub-workflow's output")
+    }
+
+    /// A plan review raised by a DIRECT workflow node must be attributed to that node.
+    ///
+    /// The profile-node path forwarded this as a bare `continuation.yield(event)` while its three
+    /// HITL siblings all stamped `sourceNodeID: nodeID`. `PlanningCapability` never sets the field,
+    /// so it arrived nil and flipped `enqueueHITL`'s
+    /// `isWorkflow = workflowState != nil && sourceNodeID != nil` to false. Nothing hung — but the
+    /// banner was labelled `.chat` with a speech-bubble icon, carried no node name, produced no
+    /// "awaiting input" badge (`WorkflowDedicatedView.awaitingNodeIDs` compactMaps nil away), and
+    /// the cross-conversation chip switched the app to CHAT mode instead of the canvas.
+    ///
+    /// ⚠️ Pairs with `testPlanReviewInsideSubWorkflowBody…`. Fixing N2 gave the NESTED path correct
+    /// attribution first, which briefly left the direct path worse-behaved than the nested one.
+    /// Both are pinned now; a regression in either shows up as a nil here.
+    func testPlanReviewFromDirectWorkflowNode_IsAttributedToThatNode() async throws {
+        let scenario = WorkflowTestScenario()
+        let reviewOpID = UUID()
+        let subtasks = [SubTask(id: "s1", description: "Draft the summary")]
+
+        let planner = scenario.addBotNode(name: "Planner Node")
+        let consumer = scenario.addBotNode(name: "Consumer")
+        scenario.connect(from: planner, to: consumer)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: planner)!, events: [
+            .requestPlanReview(subtasks: subtasks, operationID: reviewOpID),
+            .content("PLANNED RESULT")
+        ])
+        mockProvider.scriptStream(for: scenario.profileID(for: consumer)!, events: [.content("done")])
+
+        let events = try await execute(scenario)
+
+        let reviews = WorkflowStreamCollector.planReviewRequests(from: events)
+        XCTAssertEqual(reviews.count, 1, "the plan review must reach the outer stream")
+        XCTAssertEqual(reviews.first?.operationID, reviewOpID, "the operationID must survive the hop")
+
+        // THE FIX: nil here is the defect — it is what makes enqueueHITL label a workflow request
+        // as chat, drop the node name, and suppress the canvas badge.
+        XCTAssertEqual(reviews.first?.sourceNodeID, planner,
+                       "a plan review from a workflow node must carry THAT node's id — nil makes "
+                       + "enqueueHITL treat a workflow request as a chat one")
+        XCTAssertEqual(reviews.first?.sourceNodeName, "Planner Node",
+                       "and its display name, so the banner is not a bare 'Plan review' on a canvas "
+                       + "with several nodes in flight")
+    }
+
+    /// ⚠️ THE ENTRY-NODE TASK SHAPE — the fix for the field report where a single-node workflow
+    /// failed while the SAME agent profile answered fine in chat.
+    ///
+    /// `<task>` is the first and most heavily attended section of the system prompt. It used to be
+    /// built as `nodeTask + "\n\n---\nUser Query: " + userInput`, and `AgentConnect` prepended the
+    /// knowledge/attachment payloads onto `userInput` because a node had no other route to them —
+    /// so the section opened with "User Query: ### MCP server guidance", carried ~2,000 chars of
+    /// instructions for tools the node did not have, and buried the real 61-char question at the
+    /// very end. A 3B model derailed on it identically five times and the run aborted on
+    /// consecutive parse failures.
+    ///
+    /// Owner decision 2026-08-20: user query FIRST, node task second, NO inline label.
+    func testEntryNodeTask_IsUserQueryFirstThenNodeTask_WithNoLabel() async throws {
+        let scenario = WorkflowTestScenario()
+        let entry = scenario.addBotNode(name: "Entry")
+
+        var cfg = WorkflowNodeConfig()
+        cfg.taskDescription = "Summarise the input"
+        scenario.setNodeConfig(cfg, for: entry)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: entry)!, events: [.content("ok")])
+        _ = try await execute(scenario, userInput: "List all the files in Acme")
+
+        let ctx = mockProvider.workflowInvocations.first(where: { $0.context.nodeID == entry })?.context
+        let task = try XCTUnwrap(ctx?.taskDescription)
+
+        XCTAssertEqual(task, "List all the files in Acme\n\nSummarise the input",
+                       "entry task must be query first, node task second, joined by a blank line")
+
+        // The specific regressions, asserted by name so a re-fusion is caught explicitly.
+        XCTAssertFalse(task.contains("User Query:"), "the inline label must not come back")
+        XCTAssertFalse(task.contains("---"), "the separator line must not come back")
+        XCTAssertTrue(task.hasPrefix("List all the files"),
+                      "the user's question must be the FIRST thing in <task>, not the last")
     }
 
     /// A sub-workflow node with no task description must not block the run.

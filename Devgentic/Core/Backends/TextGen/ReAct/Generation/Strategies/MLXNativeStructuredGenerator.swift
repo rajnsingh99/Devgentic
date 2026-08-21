@@ -72,7 +72,7 @@ struct MLXNativeStructuredGenerator: CognitiveGenerator {
 
         guard !responseText.isEmpty else {
             logLLMOps.error("❌ [MLXModern:\(reqId)] Empty response from model.")
-            throw NSError(domain: "MLXModern", code: 422, userInfo: [NSLocalizedDescriptionKey: "Empty response from model."])
+            throw GenerationError.emptyResponse(generator: "MLXModern")
         }
 
         let pipeline = CognitiveParsePipeline(

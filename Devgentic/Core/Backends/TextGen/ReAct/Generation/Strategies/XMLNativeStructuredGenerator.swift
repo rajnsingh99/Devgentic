@@ -82,8 +82,7 @@ struct XMLNativeStructuredGenerator: CognitiveGenerator {
 
         guard !responseText.isEmpty else {
             logLLMOps.error("❌ [XMLNative:\(reqId)] Empty response from model.")
-            throw NSError(domain: "XMLNativeGenerator", code: 422,
-                          userInfo: [NSLocalizedDescriptionKey: "Empty response from model."])
+            throw GenerationError.emptyResponse(generator: "XMLNative")
         }
 
         let pipeline = CognitiveParsePipeline(

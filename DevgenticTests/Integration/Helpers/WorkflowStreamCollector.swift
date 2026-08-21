@@ -137,7 +137,7 @@ enum WorkflowStreamCollector {
 
     static func confirmationRequests(from events: [AgentStreamEvent]) -> [(toolName: String, params: String, operationID: UUID)] {
         events.compactMap { event -> (toolName: String, params: String, operationID: UUID)? in
-            if case .requestConfirmation(let name, let params, let opID, _) = event {
+            if case .requestConfirmation(let name, let params, let opID, _, _) = event {
                 return (name, params, opID)
             }
             return nil
@@ -148,9 +148,20 @@ enum WorkflowStreamCollector {
     /// ⚠️ WF-TS9: `deadline` is surfaced because it was previously discarded here, which made the
     /// gate's countdown — the thing the banner renders and the auto-decision fires on — invisible
     /// to every test in the suite.
+    /// Plan-review requests that reached the OUTER stream. The fourth HITL kind — and the one the
+    /// sub-workflow arm silently dropped until 2026-08-19, which was a permanent hang (design doc §9 N2).
+    static func planReviewRequests(from events: [AgentStreamEvent]) -> [(subtasks: [SubTask], operationID: UUID, sourceNodeID: UUID?, sourceNodeName: String?)] {
+        events.compactMap { event in
+            if case .requestPlanReview(let subtasks, let opID, let nodeID, let nodeName) = event {
+                return (subtasks, opID, nodeID, nodeName)
+            }
+            return nil
+        }
+    }
+
     static func gateRequests(from events: [AgentStreamEvent]) -> [(prompt: String, options: [String], operationID: UUID, deadline: Date?, inputText: String?, highlights: [RuleMatchSpan])] {
         events.compactMap { event -> (prompt: String, options: [String], operationID: UUID, deadline: Date?, inputText: String?, highlights: [RuleMatchSpan])? in
-            if case .requestGate(let prompt, let options, let opID, let deadline, _, let inputText, let highlights) = event {
+            if case .requestGate(let prompt, let options, let opID, let deadline, _, let inputText, let highlights, _) = event {
                 return (prompt, options, opID, deadline, inputText, highlights)
             }
             return nil
@@ -169,7 +180,7 @@ enum WorkflowStreamCollector {
         var events: [AgentStreamEvent] = []
         for try await event in stream {
             events.append(event)
-            if case .requestGate(_, _, let operationID, _, _, _, _) = event {
+            if case .requestGate(_, _, let operationID, _, _, _, _, _) = event {
                 try await Task.sleep(for: .milliseconds(50))
                 await ExecutionSuspensionService.shared.resumeGate(for: operationID, chosenOption: option)
             }

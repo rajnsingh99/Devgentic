@@ -23,6 +23,9 @@ actor MLXService {
     static let shared = MLXService()
     
     private let logger = DGLogger(category: "MLXService")
+
+    /// Instance-stable bridged tool schemas — see `BridgedToolsStore` for the measured rationale.
+    private var bridgedToolsStore = BridgedToolsStore()
     
     // MARK: - State
     
@@ -444,7 +447,11 @@ actor MLXService {
                 do {
                     // Use container.perform to safely access the ModelContext (which contains model, processor, tokenizer).
                     let wrappedMessages = UnsafeSendable(messages)
-                    let wrappedTools = UnsafeSendable(tools)
+                    // ⚠️ Bridged ON THE ACTOR, before the perform closure, because the stability
+                    // cache is actor state: equal content must hand the template the SAME
+                    // dictionary instances every render, or the `<tools>` bytes shuffle per call
+                    // (Swift dictionaries iterate in per-INSTANCE order — see BridgedToolsStore).
+                    let wrappedTools = UnsafeSendable(tools.map { self.bridgedToolsStore.stableInstances(for: $0) })
 
                     // Convert MLX C++ fatal errors (e.g. a VLM shape/broadcast mismatch)
                     // into a Swift throw instead of `fatalError` crashing the whole app.
@@ -463,15 +470,53 @@ actor MLXService {
                         // fallback drops to the bridge's upstream swift-transformers tokenizer
                         // which still has the richer API needed for literal-template override.
                         let sendableMessages = wrappedMessages.value.map { $0 as [String: any Sendable] }
-                        let mlxTools: [[String: any Sendable]]? = wrappedTools.value?.map { dict in
-                            dict.mapValues { Self.bridgeToSendable($0) }
-                        }
+                        let mlxTools: [[String: any Sendable]]? = wrappedTools.value
                         let toolCount = mlxTools?.count ?? 0
                         if toolCount > 0 {
                             logger.info("🔧 [Tools] Injecting \(toolCount) tool schema(s) into chat template")
                         }
 
                         let promptTokens: [Int]
+
+                        // ⚠️ KNOWN-CORRUPT TEMPLATE OVERRIDE — checked BEFORE the embedded render,
+                        // because the embedded path reads the template straight out of the
+                        // tokenizer, where the app cannot rewrite it. When the analyzer's extracted
+                        // copy (same bytes, same tokenizer_config.json) carries a corruption the
+                        // register can prove and fix, render via the bridge with the REPAIRED
+                        // template instead. Healthy templates take the embedded path unchanged —
+                        // zero behaviour change unless a repair actually applies.
+                        //
+                        // Why this exists: Qwen2.5-3B-4bit ships a tool-call example with doubled
+                        // braces, and the model dutifully copies it into invalid JSON that the
+                        // framework then silently discards (see ChatTemplateRepair.swift).
+                        let templateRepair: ChatTemplateRepair.Result? = {
+                            guard case .extracted(let raw) = chatTemplateSource else { return nil }
+                            let result = ChatTemplateRepair.repair(raw)
+                            return result.applied.isEmpty ? nil : result
+                        }()
+
+                        if let repair = templateRepair, let bridge = context.tokenizer as? TokenizerBridge {
+                            for fix in repair.applied {
+                                logger.warning("[TEMPLATE-REPAIR] Shipped chat template is corrupt — repaired: \(fix). CONSEQUENCE: rendering with the repaired template via the literal-template bridge instead of the tokenizer's embedded copy; the model now sees a well-formed formatting example. The on-disk artifact is untouched (re-downloads would clobber an edit) — report it upstream.")
+                            }
+                            promptTokens = try bridge.upstream.applyChatTemplate(
+                                messages: sendableMessages,
+                                chatTemplate: .literal(repair.template),
+                                addGenerationPrompt: true,
+                                truncation: false,
+                                maxLength: nil,
+                                tools: mlxTools
+                            )
+                            logger.info("🎯 [Template] repaired-literal render OK — prompt tokens=\(promptTokens.count), tools=\(toolCount)")
+                        } else {
+                        if templateRepair != nil {
+                            // The repair matched but the tokenizer is not the bridge type, so the
+                            // literal-template API is unreachable. Proceeding with the corrupt
+                            // embedded template is still better than failing the run — but it must
+                            // never be silent, because the discard it causes looks like a model
+                            // fault downstream.
+                            logger.error("[TEMPLATE-REPAIR] Repair matched but tokenizer is \(type(of: context.tokenizer)), not TokenizerBridge — CANNOT apply. CONSEQUENCE: rendering the CORRUPT embedded template; expect the doubled-brace tool-call discard on this model.")
+                        }
                         do {
                             promptTokens = try context.tokenizer.applyChatTemplate(
                                 messages: sendableMessages,
@@ -492,7 +537,14 @@ actor MLXService {
                                     userInfo: [NSLocalizedDescriptionKey: "Tokenizer fallback path requires TokenizerBridge; got \(type(of: context.tokenizer))."]
                                 )
                             }
-                            let fallback = Self.resolveFallbackTemplate(from: chatTemplateSource)
+                            // The fallback template is repaired through the same register — an
+                            // extracted template reaching this path carries the same bytes the
+                            // primary path would have repaired.
+                            let fallbackRepair = ChatTemplateRepair.repair(Self.resolveFallbackTemplate(from: chatTemplateSource))
+                            for fix in fallbackRepair.applied {
+                                logger.warning("[TEMPLATE-REPAIR] Fallback template repaired: \(fix)")
+                            }
+                            let fallback = fallbackRepair.template
                             logger.info("📝 [Template] Using fallback source=\(String(describing: chatTemplateSource)) (\(fallback.count) chars)")
                             promptTokens = try bridge.upstream.applyChatTemplate(
                                 messages: sendableMessages,
@@ -504,7 +556,30 @@ actor MLXService {
                             )
                             logger.info("✅ [Template] fallback render OK — prompt tokens=\(promptTokens.count), tools=\(toolCount)")
                         }
+                        }
                         
+                        // ⚠️ THE ONLY PLACE THE MODEL'S ACTUAL INPUT EXISTS. Everything logged
+                        // upstream is the app's message ARRAY — what we handed to the chat
+                        // template. This is what came OUT of it, and the two are not the same
+                        // document: the template injects the dialect's entire tool scaffolding
+                        // (for Qwen, a `<tools>` block of JSON schemas plus the instructions
+                        // telling the model to answer in `<tool_call>` tags), wraps every turn in
+                        // `<|im_start|>` / `<|im_end|>`, and appends the generation prompt. None
+                        // of that is visible anywhere else, in any log, at any level — yet it is
+                        // the majority of the 861 tokens and it is what the model is actually
+                        // reading when it decides how to format a tool call.
+                        //
+                        // `skipSpecialTokens: false` is load-bearing: the turn markers ARE the
+                        // structure. Decoding without them would show the text while hiding the
+                        // conversation shape, which is the half most likely to be wrong.
+                        if DGLogger.contentDumpsEnabled {
+                            // Explicit `String` annotations — see the GRDB `SQL` note at the
+                            // matching dump in CognitiveGeneratorProtocol.swift.
+                            let renderedTitle: String = "final chat-template output — \(promptTokens.count) tokens, \(toolCount) tool schema(s)"
+                            let renderedBody: String = context.tokenizer.decode(tokenIds: promptTokens, skipSpecialTokens: false)
+                            logger.dumpBlock("[PROMPT-RENDERED]", title: renderedTitle, body: renderedBody)
+                        }
+
                         // B. Create LMInput
                         let lmInput = LMInput(tokens: MLXArray(promptTokens))
                         
@@ -576,6 +651,22 @@ actor MLXService {
         var circuitBreaker = StreamingCircuitBreaker()
 
         var chunkCount = 0
+        // Counted so an empty result can be explained rather than merely reported.
+        var yieldedChars = 0
+        var toolCallCount = 0
+        // ⚠️ SPLIT BY EVENT KIND. `chunkCount` counts every event the stream yields — text, tool
+        // calls AND the terminal `.info` completion — so "1 chunk consumed" could mean an empty
+        // text chunk OR just the completion event with no generation at all. Those are different
+        // diagnoses (swallowed output vs the model emitting immediate EOS), and the first field
+        // report needed exactly that distinction.
+        var textChunkCount = 0
+        var infoEventCount = 0
+        // ⚠️ THE DISCRIMINATOR. Event counts ALONE cannot tell "the model emitted nothing" from
+        // "the model emitted plenty and the framework threw it away" — both arrive here as
+        // textChunks=0, toolCalls=0, infoEvents=1. The completion event carries the framework's own
+        // token counts, which settle it outright, and this method used to read that event for usage
+        // and then discard it. Keeping it is what stops the empty-output log from GUESSING.
+        var lastInfo: GenerateCompletionInfo?
 
         for await generation in stream {
             // The vendored evaluator's own `Task.isCancelled` check only fires between
@@ -589,6 +680,7 @@ actor MLXService {
 
             switch generation {
             case .chunk(let text):
+                textChunkCount += 1
 
                 // Circuit breaker: feed every chunk regardless of stop sequence mode
                 let breakerStatus = circuitBreaker.feed(text)
@@ -607,6 +699,7 @@ actor MLXService {
                             let beforeStop = String(trailingWindow[trailingWindow.startIndex..<range.lowerBound])
                             if !beforeStop.isEmpty {
                                 continuation.yield(beforeStop)
+                                yieldedChars += beforeStop.count
                             }
                         }
                         logger.info("Stop sequence detected: \(matchedStop) — terminating generation")
@@ -620,15 +713,18 @@ actor MLXService {
                         let safeIndex = trailingWindow.index(trailingWindow.startIndex, offsetBy: safeCount)
                         let safeText = String(trailingWindow[trailingWindow.startIndex..<safeIndex])
                         continuation.yield(safeText)
+                        yieldedChars += safeText.count
                         trailingWindow = String(trailingWindow[safeIndex...])
                     }
                 } else {
                     continuation.yield(text)
+                    yieldedChars += text.count
                 }
 
             case .toolCall(let toolCall):
                 if !trailingWindow.isEmpty && !stopSequences.isEmpty {
                     continuation.yield(trailingWindow)
+                    yieldedChars += trailingWindow.count
                     trailingWindow = ""
                 }
 
@@ -639,11 +735,19 @@ actor MLXService {
                     "arguments": argsDict
                 ]
 
-                if let syntheticData = try? JSONSerialization.data(withJSONObject: syntheticStep),
+                // `.sortedKeys` so the synthetic payload is byte-stable across iterations — the
+                // scratchpad, the identical-output loop detector, and the log Raw lines all
+                // compare these strings, and a shuffled key order makes "identical" calls look
+                // different to every one of them.
+                if let syntheticData = try? JSONSerialization.data(withJSONObject: syntheticStep, options: [.sortedKeys]),
                    let syntheticString = String(data: syntheticData, encoding: .utf8) {
                     continuation.yield(syntheticString)
+                    yieldedChars += syntheticString.count
+                    toolCallCount += 1
                 }
             case .info(let info):
+                infoEventCount += 1
+                lastInfo = info
                 // Terminal completion event: EXACT prompt/generation token counts from
                 // mlx-swift-lm. Surfaced so MLX reports real usage instead of the chars/4
                 // estimate. Fires only on natural completion — an early stop-sequence or
@@ -660,6 +764,64 @@ actor MLXService {
             logger.info("Circuit breaker terminated generation after \(circuitBreaker.accumulatedText.count) chars")
         } else if !stopDetected && !trailingWindow.isEmpty {
             continuation.yield(trailingWindow)
+            yieldedChars += trailingWindow.count
+        }
+
+        // ⚠️ MAKE "EMPTY RESPONSE" EXPLICABLE. The generators throw "Empty response from model" when
+        // nothing was yielded, and that error says nothing about WHY — the log could not
+        // distinguish "the model emitted zero tokens" from "tokens were produced and swallowed"
+        // (by a stop sequence at position 0, the circuit breaker, or a tool call the framework
+        // parsed and dropped). A field report showed five of these in a row with 2.4-9.4s of
+        // generation each, which is not the signature of a model emitting nothing, and there was
+        // no way to tell from the log which it was. Yielded-chars is the discriminator.
+        // Framework-reported facts, when the completion event arrived. `generated` is the ONLY
+        // thing that separates the two very different failures below.
+        let generated = lastInfo?.generationTokenCount
+        let stopReason = lastInfo.map { String(describing: $0.stopReason) } ?? "unknown"
+        let timing = lastInfo.map {
+            String(format: "prefill %.2fs/%d tok, decode %.2fs/%d tok",
+                   $0.promptTime, $0.promptTokenCount, $0.generateTime, $0.generationTokenCount)
+        } ?? "timings unavailable"
+
+        if yieldedChars == 0 {
+            // ⚠️ DO NOT INFER THE VERDICT FROM EVENT COUNTS. An earlier version of this log declared
+            // "the model generated NOTHING (immediate EOS)" purely because textChunks==0 &&
+            // toolCalls==0, and sent the operator to the sampling settings on that basis. Those
+            // counters are ALSO what a swallowed generation looks like:
+            //
+            //   MLXLMCommon.ToolCallProcessor buffers every chunk from `<tool_call>` onward and
+            //   returns nil while collecting. If the closing `</tool_call>` never arrives, or the
+            //   JSON between the tags fails to decode as ToolCall.Function (which requires exactly
+            //   `name` + `arguments` — a model writing `parameters` fails it), then `processEOS()`
+            //   parses the buffer, finds no tool call, and `onGenerationEnd` emits ONLY tool calls.
+            //   The buffered TEXT is dropped on the floor. Nothing is logged by the framework.
+            //
+            // The completion event's generationTokenCount tells the two apart with certainty, so
+            // this branches on evidence instead of asserting the more convenient explanation.
+            let verdict: String
+            switch generated {
+            case .none:
+                verdict = "UNKNOWN — no completion event arrived, so the framework's token counts "
+                        + "are unavailable. The loop exited early (cancellation, stop sequence, or "
+                        + "circuit breaker); check those three before anything else"
+            case .some(0):
+                verdict = "the model generated NOTHING (immediate EOS — 0 tokens decoded, confirmed "
+                        + "by the framework, not inferred). Look at sampling config (a repetition "
+                        + "penalty applied over a small repetition-context window can make the "
+                        + "end-of-turn token the argmax at low temperature) or the chat template's "
+                        + "tool-result turn. NOT the parser"
+            case .some(let n):
+                verdict = "the model generated \(n) token(s) and NONE of them reached the caller — "
+                        + "output was produced and then DISCARDED downstream, so sampling config is "
+                        + "NOT the cause. The prime suspect is MLXLMCommon's ToolCallProcessor: it "
+                        + "buffers from `<tool_call>` onward and silently drops the buffer when the "
+                        + "JSON inside fails to decode as ToolCall.Function (`name` + `arguments`, "
+                        + "both required — `parameters` instead of `arguments` fails it). Also check "
+                        + "the stop sequences and the circuit breaker"
+            }
+            logger.error("[MLX-GEN] Generation produced NO output — generatedTokens=\(generated.map(String.init) ?? "unknown") stopReason=\(stopReason), \(timing) | textChunks=\(textChunkCount) toolCalls=\(toolCallCount) infoEvents=\(infoEventCount) (total events \(chunkCount)), stopSequenceHit=\(stopDetected), circuitBreaker=\(circuitBreaker.hasTripped), trailingWindow=\(trailingWindow.count) chars. DIAGNOSIS: \(verdict). CONSEQUENCE: the caller throws GenerationError.emptyResponse, which aborts the run after 3 attempts without charging the parse budget.")
+        } else {
+            logger.debug("[MLX-GEN] Generation complete — \(yieldedChars) chars yielded, generatedTokens=\(generated.map(String.init) ?? "unknown") stopReason=\(stopReason), \(timing) | textChunks=\(textChunkCount) toolCalls=\(toolCallCount) infoEvents=\(infoEventCount), stopSequenceHit=\(stopDetected).")
         }
     }
 
@@ -892,21 +1054,8 @@ actor MLXService {
 
     // MARK: - Sendable Bridge
 
-    /// Recursively projects a JSON-compatible `Any` into a concrete `Sendable` type.
-    /// Tool schemas only contain JSON primitives (String/Int/Double/Bool/Array/Dict),
-    /// all of which are Sendable. Anything else is stringified as a defensive fallback.
-    private nonisolated static func bridgeToSendable(_ value: Any) -> any Sendable {
-        switch value {
-        case let v as String: return v
-        case let v as Bool: return v
-        case let v as Int: return v
-        case let v as Double: return v
-        case let v as [Any]: return v.map { bridgeToSendable($0) }
-        case let v as [String: Any]: return v.mapValues { bridgeToSendable($0) }
-        case is NSNull: return NSNull()
-        default: return String(describing: value)
-        }
-    }
+    // Tool-schema bridging + the instance-stability cache live in `BridgedToolsStore` —
+    // including the measured proof of WHY it must be an instance cache and not key sorting.
 
     // MARK: - Fallback Chat Templates (Two-Layer Strategy)
 

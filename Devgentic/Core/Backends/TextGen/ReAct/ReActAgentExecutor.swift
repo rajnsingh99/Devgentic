@@ -177,15 +177,22 @@ actor ReActAgentExecutor: Executor {
                     // stable system-prompt prefix at iter-1 seeding (later iters append only); on the
                     // legacy path the prompt is rebuilt each iteration, so a cached value keeps the
                     // profile from vanishing after iter 1 — without re-hitting MainActor/UserDefaults
-                    // per iteration. Suppressed in workflow mode (nodes use task+input, not personal context).
-                    let userProfile: String?
-                    if input.workflowContext == nil {
-                        userProfile = await MainActor.run {
-                            guard UserDefaults.standard.bool(forKey: AppSettings.ciFeatureUserPersonalKey) else { return nil }
-                            return UserPersonalService.shared.getProfileForInjection()
-                        }
-                    } else {
-                        userProfile = nil
+                    // per iteration.
+                    //
+                    // ⚠️ WORKFLOW NODES GET THIS TOO (owner decision, 2026-08-20). It used to be
+                    // suppressed under `input.workflowContext == nil` on the reasoning that "nodes
+                    // use task+input, not personal context" — but a node runs the user's own agent
+                    // profile on the user's behalf, and the personal layer carries their skills and
+                    // guardrails, which do not stop applying because the caller was a canvas. The
+                    // layer stays gated behind the Core Intelligence user-personal toggle (default
+                    // OFF), so this changes nothing for anyone who has not opted in.
+                    //
+                    // ⚠️ TWO GATES, NOT ONE. `PromptLayerConfig.workflow.includeUserProfile` gates
+                    // the same layer at the prompt-assembly seam. Flipping only one leaves the value
+                    // nil-but-permitted or permitted-but-nil — both render nothing, silently.
+                    let userProfile: String? = await MainActor.run {
+                        guard UserDefaults.standard.bool(forKey: AppSettings.ciFeatureUserPersonalKey) else { return nil }
+                        return UserPersonalService.shared.getProfileForInjection()
                     }
 
                     // --- Start Episode ---
@@ -279,6 +286,7 @@ actor ReActAgentExecutor: Executor {
                             workflowContext: input.workflowContext,
                             attachmentContext: input.attachmentContext,
                             knowledgeBaseContext: input.knowledgeBaseContext,
+                            toolGuidanceContext: input.toolGuidanceContext,
                             userImagePayload: input.userPayload
                         )
 
@@ -1362,7 +1370,17 @@ actor ReActAgentExecutor: Executor {
 
                 } catch is CancellationError {
                     logger.notice("🚫 Execution Task Cancelled cleanly.")
-                    await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    // ⚠️ NODE-SCOPED WHEN THIS RUN IS A WORKFLOW NODE (N3). The conversation-wide drain
+                    // force-resolves EVERY park in the conversation — including a SIBLING node's, whose
+                    // tool would then be reported "denied by the user" though the user never saw it.
+                    // A sub-workflow child is constructed with the PARENT's conversationID, so a child's
+                    // node timeout used to sweep the outer run's banners too. Chat and code runs have no
+                    // `workflowContext`, so they keep the conversation-wide sweep unchanged.
+                    if let nodeID = input.workflowContext?.nodeID {
+                        await ExecutionSuspensionService.shared.cancelNode(nodeID, in: input.conversationID)
+                    } else {
+                        await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    }
                     if !input.suppressEpisodeManagement {
                         sessionState.cancelActiveEpisode()
                         await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
@@ -1411,7 +1429,17 @@ actor ReActAgentExecutor: Executor {
                         span: input.traceContext,
                         error: classified
                     )
-                    await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    // ⚠️ NODE-SCOPED WHEN THIS RUN IS A WORKFLOW NODE (N3). The conversation-wide drain
+                    // force-resolves EVERY park in the conversation — including a SIBLING node's, whose
+                    // tool would then be reported "denied by the user" though the user never saw it.
+                    // A sub-workflow child is constructed with the PARENT's conversationID, so a child's
+                    // node timeout used to sweep the outer run's banners too. Chat and code runs have no
+                    // `workflowContext`, so they keep the conversation-wide sweep unchanged.
+                    if let nodeID = input.workflowContext?.nodeID {
+                        await ExecutionSuspensionService.shared.cancelNode(nodeID, in: input.conversationID)
+                    } else {
+                        await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    }
                     flushTokenUsage()
                     continuation.yield(.executionFinished(outcome: .failed, reason: classified.message))
                     continuation.finish(throwing: error)

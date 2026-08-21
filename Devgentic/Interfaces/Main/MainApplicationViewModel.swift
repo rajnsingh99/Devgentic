@@ -100,8 +100,28 @@ final class MainApplicationViewModel {
     // Intelligence Core
     var isIntelligenceCoreEnabled: Bool = false
 
-    var streamingMessageID: UUID? = nil
-    var streamingMessage: ChatMessage? = nil
+    /// The run the composer is talking about: what Stop targets, and whether the send button
+    /// shows Send or Stop. DERIVED — never stored.
+    ///
+    /// ⚠️ This was two stored `var`s until 2026-08-17. Five surfaces wrote them and five
+    /// completions nil'd them, none with an ownership guard, so whichever run finished first
+    /// silently orphaned every other run — the composer flipped back to Send and the survivor
+    /// became unstoppable from the UI. A clear-side identity guard provably does NOT fix that
+    /// (see `ForegroundRunResolver`), so the storage was removed instead of guarded.
+    ///
+    /// Scope rule: a run belongs to a conversation, and only the conversation on screen can stop
+    /// it. `nil` while a background scheduled or ChatOps run streams elsewhere is CORRECT — that
+    /// run is stopped by opening its conversation, not from here.
+    ///
+    /// `streamingMessage` was deleted outright rather than derived: it had one reader
+    /// (`MessagingCoordinator.cancelStreamingResponse`), which now takes the conversation id from
+    /// the resolver directly.
+    var streamingMessageID: UUID? {
+        ForegroundRunResolver.foregroundRun(
+            live: activeStreamManager.liveRunSnapshot(),
+            selectedConversation: selectedConversationID
+        )?.messageID
+    }
 
     // MARK: - Interface Mode (User-Switchable)
 
@@ -618,6 +638,30 @@ final class MainApplicationViewModel {
     // All bodies live in `MessagingCoordinator`. These are thin forwards for
     // API stability (multiple SwiftUI views and the three ChatOps bridges
     // call `viewModel.xxx(...)` directly).
+
+    /// Why Redo / Retry is unavailable for `message`, or `nil` if it may run.
+    ///
+    /// Single source for the button's disabled state AND the runtime refusal — they used to
+    /// disagree: the view hardcoded `generationAttempts >= 5` while the coordinator read
+    /// `ChatMessage.maxGenerationAttempts`, and nothing at all expressed "a run is already live
+    /// here". Reading this from a view body registers on `activeStreams`, so the control
+    /// re-enables by itself when the blocking run ends.
+    func regenerationRefusal(for message: ChatMessage) -> RunAdmissionPolicy.Refusal? {
+        RunAdmissionPolicy.admitRegeneration(
+            in: message.conversationId,
+            attempts: message.agentResponse?.generationAttempts,
+            live: activeStreamManager.liveRunSnapshot()
+        )
+    }
+
+    /// Why Resume is unavailable for `message`, or `nil` if it may run. Same rule as
+    /// `regenerationRefusal` minus the attempt cap — a resume consumes no generation attempt.
+    func resumeRefusal(for message: ChatMessage) -> RunAdmissionPolicy.Refusal? {
+        RunAdmissionPolicy.admitResume(
+            in: message.conversationId,
+            live: activeStreamManager.liveRunSnapshot()
+        )
+    }
 
     func regenerateResponse(for agentMessage: ChatMessage) {
         messagingCoordinator.regenerateResponse(for: agentMessage)

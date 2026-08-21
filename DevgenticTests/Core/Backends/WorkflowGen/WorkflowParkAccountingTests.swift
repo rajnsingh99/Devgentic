@@ -149,4 +149,143 @@ final class WorkflowParkAccountingTests: XCTestCase {
         _ = await parkedB.value
         await assertDrained()
     }
+
+    // MARK: - Node-scoped drain (N3, plan increment 1)
+
+    /// Parks a GATE for `op` attributed to `node`, returning once the continuation is really
+    /// installed. Same install barrier as `park` — see its note.
+    @discardableResult
+    private func parkNode(_ op: UUID, in conv: UUID, node: UUID, expecting count: Int) async throws -> Task<String?, Never> {
+        let t = Task { await ExecutionSuspensionService.shared.suspendForGate(for: op, conversationID: conv, nodeID: node) }
+        for _ in 0..<400 {
+            if await ExecutionSuspensionService.shared.pendingSuspensionCount() == count { return t }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("gate \(op) never parked")
+        return t
+    }
+
+    /// ⚠️ THE N3 DEFECT. Two nodes of one run park at once; draining ONE must leave the other
+    /// alone. Before this, cancelling node A force-resolved node B's banner too and B's tool was
+    /// reported "denied by the user" — a decision the user never made, on a request they never saw.
+    func testCancelNode_DrainsOnlyThatNodesParks() async throws {
+        await assertDrained()
+        let conv = UUID(), nodeA = UUID(), nodeB = UUID()
+        let opA = UUID(), opB = UUID()
+
+        let taskA = try await parkNode(opA, in: conv, node: nodeA, expecting: 1)
+        let taskB = try await parkNode(opB, in: conv, node: nodeB, expecting: 2)
+
+        let drained = await ExecutionSuspensionService.shared.cancelNode(nodeA, in: conv)
+        XCTAssertEqual(drained, [opA], "exactly node A's operation")
+        _ = await taskA.value
+
+        let pendingAfterDrain = await ExecutionSuspensionService.shared.pendingSuspensionCount()
+        XCTAssertEqual(pendingAfterDrain, 1, "node B's park must survive — this is the whole fix")
+        let bStillParked = await ExecutionSuspensionService.shared.isSuspended(node: nodeB, in: conv)
+        let aStillParked = await ExecutionSuspensionService.shared.isSuspended(node: nodeA, in: conv)
+        XCTAssertTrue(bStillParked)
+        XCTAssertFalse(aStillParked)
+
+        await ExecutionSuspensionService.shared.resumeGate(for: opB, chosenOption: "chosen")
+        let resolvedB = await taskB.value
+        XCTAssertEqual(resolvedB, "chosen", "B must still resolve with the USER's answer")
+        await assertDrained()
+    }
+
+    /// ⚠️ THE PARK-ACCOUNTING TRAP, and the reason this increment ships alone. `beginPark`/`endPark`
+    /// are a reference count over a UNION window keyed by CONVERSATION. A partial drain must call
+    /// `endPark` EXACTLY ONCE, leaving the window OPEN while a sibling is still parked. One extra
+    /// call drives the depth to zero early, closes the window, and then every later node in that
+    /// conversation stops crediting parked time — its timeout fires on wall-clock and kills work
+    /// that was only ever waiting on a human. Silent, and for the life of the process.
+    func testCancelNode_KeepsTheParkWindowOpenForTheSurvivor() async throws {
+        await assertDrained()
+        let conv = UUID(), nodeA = UUID(), nodeB = UUID()
+        let opA = UUID(), opB = UUID()
+
+        let taskA = try await parkNode(opA, in: conv, node: nodeA, expecting: 1)
+        let taskB = try await parkNode(opB, in: conv, node: nodeB, expecting: 2)
+
+        await ExecutionSuspensionService.shared.cancelNode(nodeA, in: conv)
+        _ = await taskA.value
+
+        // The window must still be OPEN: B is parked, so parked time keeps accruing.
+        let first = await ExecutionSuspensionService.shared.cumulativeParkedTime(for: conv)
+        try await Task.sleep(for: .milliseconds(120))
+        let second = await ExecutionSuspensionService.shared.cumulativeParkedTime(for: conv)
+        XCTAssertGreaterThan(second, first,
+                             "the survivor's park window closed early — every later node in this conversation would now time out on wall-clock")
+
+        await ExecutionSuspensionService.shared.resumeGate(for: opB, chosenOption: nil)
+        _ = await taskB.value
+
+        // Now that nothing is parked the window is closed and the total is frozen.
+        let afterClose = await ExecutionSuspensionService.shared.cumulativeParkedTime(for: conv)
+        try await Task.sleep(for: .milliseconds(80))
+        let stillFrozen = await ExecutionSuspensionService.shared.cumulativeParkedTime(for: conv)
+        XCTAssertEqual(afterClose, stillFrozen, accuracy: 0.02,
+                       "with no parks left the window must be CLOSED — an unbalanced count would keep it open forever")
+        await assertDrained()
+    }
+
+    /// A park with NO node dimension — every chat/code run, and both MCP brokers — must be
+    /// invisible to the node drain and still drained by the conversation-wide one. Getting this
+    /// wrong is a HANG, not a warning: nothing else would ever resolve it.
+    func testCancelNode_IgnoresParksWithNoNodeDimension() async throws {
+        await assertDrained()
+        let conv = UUID(), node = UUID(), chatOp = UUID()
+
+        let chatTask = try await park(chatOp, in: conv, expecting: 1)   // no nodeID
+        let drainedNothing = await ExecutionSuspensionService.shared.cancelNode(node, in: conv)
+        XCTAssertEqual(drainedNothing, [], "a node drain must not touch a park that carries no node")
+        let stillPending = await ExecutionSuspensionService.shared.pendingSuspensionCount()
+        XCTAssertEqual(stillPending, 1)
+
+        await ExecutionSuspensionService.shared.cancel(for: conv)
+        _ = await chatTask.value
+        await assertDrained()
+    }
+
+    /// The conversation boundary: the same node id under a DIFFERENT conversation must not match.
+    /// Guards a stale node id from an earlier run of the same graph.
+    func testCancelNode_IsScopedToItsConversation() async throws {
+        await assertDrained()
+        let convA = UUID(), convB = UUID(), node = UUID(), op = UUID()
+
+        let task = try await parkNode(op, in: convA, node: node, expecting: 1)
+        let wrongConv = await ExecutionSuspensionService.shared.cancelNode(node, in: convB)
+        XCTAssertEqual(wrongConv, [], "same node id, different conversation — must not drain")
+        let pending = await ExecutionSuspensionService.shared.pendingSuspensionCount()
+        XCTAssertEqual(pending, 1)
+
+        await ExecutionSuspensionService.shared.cancelNode(node, in: convA)
+        _ = await task.value
+        await assertDrained()
+    }
+
+    /// After a NORMAL resume, the node must no longer look parked and a later drain must find
+    /// nothing — so a resolved operation can never be re-resolved by a node-scoped drain.
+    ///
+    /// ⚠️ SCOPE, stated because a mutation proved the obvious reading wrong: this does NOT verify
+    /// that `operationToNode` itself is cleaned up. Every lookup (`isSuspended(node:in:)`,
+    /// `cancelNode`) is gated on `operationToConversation`, which `resume*` removes — so deleting
+    /// the `operationToNode.removeValue` from a resume path leaves this test GREEN. That removal is
+    /// hygiene against unbounded growth in a process-wide singleton with no reset, and it is
+    /// invisible to behaviour by construction. Verifying it would mean exposing the map's size as
+    /// production API purely for a test, which is not worth it — the gating is the real guarantee.
+    func testNormalResumeLeavesNothingForALaterDrain() async throws {
+        await assertDrained()
+        let conv = UUID(), node = UUID(), op = UUID()
+
+        let task = try await parkNode(op, in: conv, node: node, expecting: 1)
+        await ExecutionSuspensionService.shared.resumeGate(for: op, chosenOption: "yes")
+        _ = await task.value
+
+        let stale = await ExecutionSuspensionService.shared.isSuspended(node: node, in: conv)
+        XCTAssertFalse(stale, "a resolved operation must not still read as parked")
+        let nothingLeft = await ExecutionSuspensionService.shared.cancelNode(node, in: conv)
+        XCTAssertEqual(nothingLeft, [], "a resolved operation must leave nothing for a later drain to find")
+        await assertDrained()
+    }
 }

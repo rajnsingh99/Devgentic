@@ -43,6 +43,15 @@ struct WorkflowExecutionContext: Sendable {
     /// Downstream nodes receive `<input>[upstreamInput]</input>`.
     let isFirstNode: Bool
 
+    /// Current-turn attachment text, ENTRY NODE ONLY (nil elsewhere).
+    ///
+    /// ⚠️ This exists so attachments stop riding `userInput`. `AgentConnect`'s workflow arm used to
+    /// prepend the knowledge and attachment payloads onto `userInput` because a node had no other
+    /// route to them — and the entry-node merge then folded the result into `taskDescription`, so a
+    /// pasted file's text became part of the node's TASK. It travels as its own value now and is
+    /// rendered by the shared builder as `<attachments>`, the same section the chat path uses.
+    var attachmentContext: String? = nil
+
     /// Node display name for logging and tracing.
     let nodeName: String
 

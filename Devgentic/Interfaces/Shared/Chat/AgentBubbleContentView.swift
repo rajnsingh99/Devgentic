@@ -98,7 +98,8 @@ struct AgentBubbleContentView: View, Equatable {
             if !message.isStreaming, message.lifecycleState.isInterrupted {
                 InterruptedRunChip(
                     wasParked: message.lifecycleState.parkedOperationID != nil,
-                    onResume: chatActionsSuppressed ? nil : { mainAppViewModel.resumeRun(for: message) }
+                    onResume: chatActionsSuppressed ? nil : { mainAppViewModel.resumeRun(for: message) },
+                    refusal: mainAppViewModel.resumeRefusal(for: message)
                 )
             }
 
@@ -186,9 +187,10 @@ struct AgentBubbleContentView: View, Equatable {
                 // the failure the same affordance. `terminalOutcome` is only stamped at
                 // finalize, so this never shows mid-stream.
                 if message.terminalOutcome == .failed {
-                    RetryMessageButton {
-                        mainAppViewModel.regenerateResponse(for: message)
-                    }
+                    RetryMessageButton(
+                        action: { mainAppViewModel.regenerateResponse(for: message) },
+                        refusal: mainAppViewModel.regenerationRefusal(for: message)
+                    )
                 }
             }
 
@@ -209,9 +211,10 @@ struct AgentBubbleContentView: View, Equatable {
                 ErrorMessageView(title: title, details: details, category: category, suggestion: suggestion)
 
                 // P1: Retry button for failed agent responses
-                RetryMessageButton {
-                    mainAppViewModel.regenerateResponse(for: message)
-                }
+                RetryMessageButton(
+                    action: { mainAppViewModel.regenerateResponse(for: message) },
+                    refusal: mainAppViewModel.regenerationRefusal(for: message)
+                )
             }
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Error: \(title ?? "Unknown"). \(details)")
@@ -314,6 +317,11 @@ struct InterruptedRunChip: View {
     /// [G1 Piece 2] Resume action — present only when the run is parked AND resumable. Nil hides the
     /// Resume button (a mid-stream cut-off run has no clean re-entry point and isn't resumable in v1).
     var onResume: (() -> Void)? = nil
+    /// Why Resume is temporarily unavailable, or nil when it may run. Distinct from `onResume == nil`
+    /// on purpose: that means "never resumable" and HIDES the button, whereas this is a transient
+    /// state (a run is live in this conversation) that must DISABLE it with a reason instead — a
+    /// button that vanishes and returns reads as a glitch.
+    var refusal: RunAdmissionPolicy.Refusal? = nil
 
     @Environment(\.appTheme) private var theme
 
@@ -336,15 +344,17 @@ struct InterruptedRunChip: View {
             // Resume is offered for BOTH interruption types: parked (re-raise the dangling tool) and
             // streaming/mid-compute (drop the dangling tool, continue from completed work).
             if let onResume {
-                Button(action: onResume) {
+                Button(action: { if refusal == nil { onResume() } }) {
                     HStack(spacing: 4) {
                         Image(systemName: "play.circle.fill")
                         Text("Resume")
                     }
                     .font(.system(.caption, weight: .semibold))
-                    .foregroundColor(theme.accentColor)
+                    .foregroundColor(refusal == nil ? theme.accentColor : theme.tertiaryText)
                 }
                 .buttonStyle(.plain)
+                .disabled(refusal != nil)
+                .help(refusal?.userFacingReason ?? "Resume this interrupted run")
                 .accessibilityLabel("Resume interrupted run")
             }
         }

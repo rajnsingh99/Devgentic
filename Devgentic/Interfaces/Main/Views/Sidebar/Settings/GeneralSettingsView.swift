@@ -74,7 +74,7 @@ struct GeneralSettingsView: View {
                 SettingsCard(title: "Developer", icon: "hammer.fill", theme: theme) {
                     SettingsRow(
                         title: "Developer Mode",
-                        description: "When enabled, the Report button on messages opens a detailed execution trace inspector with span trees, event timelines, and JSON export. When disabled, a simplified feedback view is shown instead.",
+                        description: "When enabled, the Report button on messages opens a detailed execution trace inspector with span trees, event timelines, and JSON export, and the console logs the full prompt sent to the model (including the file contents and personal context it carries). Prompt logging is live-console only — it is never written to disk or included in an exported diagnostic bundle. When disabled, a simplified feedback view is shown instead.",
                         theme: theme
                     ) {
                         Toggle("", isOn: $developerMode)

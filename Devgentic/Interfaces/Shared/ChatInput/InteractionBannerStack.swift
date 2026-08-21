@@ -34,12 +34,30 @@ struct InteractionBannerStack: View {
     var body: some View {
         let selected = vm.selectedConversationID
         let current = selected.flatMap { vm.interactionCenter.current(for: $0) }
+        // How many requests are queued for THIS conversation. `current(for:)` is a FIFO of one, so
+        // when two workflow nodes park at the same time the second was completely invisible — the
+        // user answered one banner and a new one appeared with no warning it was coming, and no way
+        // to know how many more were behind it. `items(for:)` already existed for the node badges.
+        let queuedCount = selected.map { vm.interactionCenter.items(for: $0).count } ?? 0
 
         // NOTE: the cross-conversation "N others awaiting input" affordance lives in
         // `CrossConversationInputChip`, floated at the TOP of the chat area (MainApplicationView).
         // This bottom stack is only the HITL banner for the CURRENTLY focused conversation.
         return VStack(spacing: 6) {
             if let pending = current {
+                if queuedCount > 1 {
+                    HStack(spacing: 6) {
+                        Image(systemName: "square.stack.3d.up.fill")
+                            .font(.system(.caption2, weight: .semibold))
+                        Text("1 of \(queuedCount) requests awaiting your input")
+                            .font(.system(.caption2, weight: .medium))
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundColor(theme.warningColor.opacity(0.9))
+                    .padding(.horizontal, 10)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("1 of \(queuedCount) requests awaiting your input")
+                }
                 banner(for: pending)
                     // Reset per-item @State (typed answer, edited plan) when the FIFO advances.
                     .id(pending.id)
@@ -68,7 +86,9 @@ struct InteractionBannerStack: View {
         // auto-reject on a deadline they can't see.
         .onChange(of: current?.id, initial: true) { _, _ in
             guard let pending = current else { return }
-            AccessibilityAnnouncer.announce(Self.announcement(for: pending), urgency: .immediate)
+            let base = Self.announcement(for: pending)
+            let text = queuedCount > 1 ? "\(base). 1 of \(queuedCount) requests awaiting input." : base
+            AccessibilityAnnouncer.announce(text, urgency: .immediate)
         }
         // [HITL/E2] Flash the banner when the user taps an "awaiting input" node.
         .onChange(of: vm.interactionCenter.attentionPulse) { _, _ in

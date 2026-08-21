@@ -112,12 +112,14 @@ actor WorkflowExecutor: Executor {
         chatHistory: [ChatMessage],
         conversationID: UUID,
         ragContext: String?,
+        attachmentContext: String? = nil,
         traceContext: TraceContext,
         onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
         executeWorkflow(
             userInput: userInput, chatHistory: chatHistory,
             conversationID: conversationID, ragContext: ragContext,
+            attachmentContext: attachmentContext,
             traceContext: traceContext, onTraceUpdate: onTraceUpdate,
             layout: nil, profileMap: nil, streamProvider: nil
         )
@@ -130,6 +132,7 @@ actor WorkflowExecutor: Executor {
         chatHistory: [ChatMessage],
         conversationID: UUID,
         ragContext: String?,
+        attachmentContext: String? = nil,
         traceContext: TraceContext,
         onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void,
         layout injectedLayout: WorkflowLayout?,
@@ -392,6 +395,13 @@ actor WorkflowExecutor: Executor {
 
                     continuation.yield(.thought("Starting workflow with \(totalNodes) node(s) across \(levels.count) level(s)..."))
 
+                    // Phase A per-node SKIP (D2.1): start-of-run clear, ROOT runs only. A request left
+                    // over from a previous run must never skip a node in this one. Nested sub-workflow
+                    // runs share the conversationID, so clearing there would wipe the OUTER run's pending
+                    // requests — the depth guard is load-bearing, not defensive.
+                    if WorkflowDepth.current == 1 {
+                        await MainActor.run { WorkflowNodeSkipStore.shared.clear(conversationID: conversationID, reason: "run start") }
+                    }
                     for (levelIndex, level) in levels.enumerated() {
                         try Task.checkCancellation()
 
@@ -476,6 +486,58 @@ actor WorkflowExecutor: Executor {
                                 completedCount += 1
                                 continuation.yield(.workflowProgress(completed: completedCount, total: totalNodes))
                                 continue
+                            }
+
+                            // --- Phase A per-node SKIP (owner design §0.6 D2.1, ratified 2026-08-21) ---
+                            //
+                            // Consulted AFTER the cascade decision on purpose: a dead branch has no
+                            // input to pass through, so the cascade wins and the user's request is
+                            // left unconsumed (harmless — cleared at run end).
+                            //
+                            // PROFILE NODES ONLY — bot, agent, sub-workflow. Condition/Router bypass
+                            // is ill-defined (which port fires?), a Gate's skip IS a decision, and a
+                            // Trigger's skip makes the run meaningless. The UI never renders the
+                            // button on those kinds; this guard is the engine-side twin so a stray
+                            // store entry cannot skip them either.
+                            if case .profile = node.kind {
+                                let userSkipRequested = await MainActor.run {
+                                    WorkflowNodeSkipStore.shared.consume(nodeID: nodeID, conversationID: conversationID)
+                                }
+                                if userSkipRequested {
+                                    // Pass-through: the SAME aggregated input this node would have
+                                    // received. An entry node's input is the user's query itself —
+                                    // forwarding "" there would hand downstream a blank task.
+                                    let upstream = state.upstreamResultEnvelopes(for: nodeID, edges: layout.edges)
+                                    let passThrough = upstream.isEmpty
+                                        ? userInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                                        : WorkflowInputAssembler.compileForWorkflow(results: upstream)
+                                    let passedArtifacts = upstream.flatMap(\.artifacts)
+                                    // ⚠️ The transformer caveat, SURFACED (never gated): if this
+                                    // node's task transforms data, downstream now operates on the
+                                    // untransformed input. That is the user's call to make — this
+                                    // line is what makes the consequence visible in the log.
+                                    logger.notice("[WF_ROUTE] Skipping '\(node.displayName)' BY USER REQUEST — its input (\(passThrough.count) chars, \(passedArtifacts.count) artifact(s)) is forwarded downstream unchanged and NO port is activated: default edges below it stay LIVE, error branches do not fire (a user skip is an instruction, not a failure). CONSEQUENCE: downstream receives this node's INPUT, not its output.")
+                                    let skipResult = NodeResultEnvelope(
+                                        taskID: UUID(), nodeID: nodeID,
+                                        sourceProfileID: node.profileID ?? UUID(), profileName: node.displayName,
+                                        profileType: node.profileType ?? .bot,
+                                        status: .skipped(reason: .byUser),
+                                        output: passThrough, artifacts: passedArtifacts,
+                                        metadata: .simple(start: Date(), end: Date(), output: passThrough)
+                                    )
+                                    state.recordResult(from: skipResult)
+                                    let classified = ClassifiedAgentError.synthetic(
+                                        category: .wfNodeSkipped,
+                                        origin: "WorkflowExecutor.dispatch.userSkip",
+                                        message: NodeSkipReason.byUser.displayText,
+                                        context: ["node_name": node.displayName, "node_id": nodeID.uuidString]
+                                    )
+                                    await TraceRecorder.shared.emitAgentError(span: traceContext, error: classified, iteration: nil)
+                                    continuation.yield(.workflowNodeSkipped(nodeID: nodeID, profileName: node.displayName, reason: .byUser))
+                                    completedCount += 1
+                                    continuation.yield(.workflowProgress(completed: completedCount, total: totalNodes))
+                                    continue
+                                }
                             }
 
                             // --- Dispatch by node kind ---
@@ -623,7 +685,7 @@ actor WorkflowExecutor: Executor {
                             let (node, profile) = profileNodes[0]
                             let result = await Self.executeProfileNodeWithRetry(
                                 node: node, profile: profile,
-                                userInput: userInput,
+                                userInput: userInput, attachmentContext: attachmentContext,
                                 state: state, edges: layout.edges, nodes: layout.nodes,
                                 nodeIndex: completedCount + 1, totalNodes: totalNodes,
                                 conversationID: conversationID,
@@ -696,7 +758,7 @@ actor WorkflowExecutor: Executor {
                                         group.addTask {
                                             await Self.executeProfileNodeWithRetry(
                                                 node: node, profile: profile,
-                                                userInput: userInput,
+                                                userInput: userInput, attachmentContext: attachmentContext,
                                                 state: snapshotState, edges: layout.edges, nodes: layout.nodes,
                                                 nodeIndex: displayIndex, totalNodes: totalNodes,
                                                 conversationID: conversationID,
@@ -753,23 +815,49 @@ actor WorkflowExecutor: Executor {
                         return false
                     }
 
+                    // Terminals the user SKIPPED. Their `output` is the aggregated upstream input,
+                    // forwarded by the D2.1 pass-through contract — real content, produced by the
+                    // run, that simply did not come from this node's own execution.
+                    let passThroughTerminals = terminalOutputs.filter {
+                        if case .skipped(reason: .byUser) = $0.status { return true }
+                        return false
+                    }
+
+                    /// Terminals that have an answer to show — completed, or user-skipped.
+                    ///
+                    /// ⚠️ SEPARATE FROM `successfulTerminals`, which keeps meaning `.completed` so
+                    /// the log line "N terminal node(s) succeeded" stays true. A skipped node did
+                    /// NOT succeed; it also did not fail, and it is holding content. Before this,
+                    /// skipping the only terminal of a linear workflow dropped BOTH: zero successes
+                    /// and zero failures fell through to branch 3 and answered "The workflow
+                    /// finished without producing an answer" while the pass-through sat unused in
+                    /// the envelope. The composer Skip button (Phase B) makes that the easiest thing
+                    /// in the feature to hit, because a linear run's running node usually IS the
+                    /// terminal.
+                    let answeringTerminals = successfulTerminals + passThroughTerminals
+
                     // ⚠️ The run verdict is decided by whether anything FAILED, not by whether a
                     // terminal succeeded. Those are different questions, and conflating them is what
                     // reported a healthy branching run as a total failure.
                     let failedNodes = state.failedNodeSummaries()
 
-                    // Terminals that actually RAN. A `.skipped` terminal is an untaken branch —
-                    // normal condition/gate routing, not a result — so it is excluded entirely.
-                    // Listing it would put "## Fallback Handler — not run" in the answer of every
-                    // branching workflow, which is noise, not information.
+                    // Terminals that CONTRIBUTE to the answer. A cascade `.skipped` terminal is an
+                    // untaken branch — normal condition/gate routing, not a result — so it is
+                    // excluded entirely; listing it would put "## Fallback Handler — not run" in the
+                    // answer of every branching workflow, which is noise, not information.
+                    //
+                    // ⚠️ `.byUser` IS INCLUDED, and it is the only skip that is. It carries the
+                    // forwarded upstream input as its output, so excluding it ends the pass-through
+                    // contract one node short of the answer.
                     let ranTerminals = terminalOutputs.filter {
                         switch $0.status {
                         case .completed, .failed: return true
+                        case .skipped(reason: .byUser): return true
                         case .canceled, .skipped: return false
                         }
                     }
 
-                    if !successfulTerminals.isEmpty {
+                    if !answeringTerminals.isEmpty {
                         // Labeled, per-terminal output — successes AND failures together, so a
                         // partially-successful run shows what worked next to what didn't, each
                         // attributed to its node. Previously only successful terminals were joined
@@ -791,6 +879,18 @@ actor WorkflowExecutor: Executor {
                                 let body: String
                                 if case .failed(let reason) = terminal.status {
                                     body = "**Failed:** \(reason.localizedDescription)"
+                                } else if case .skipped(reason: .byUser) = terminal.status {
+                                    // ⚠️ MARKED, because the heading names a node that never ran.
+                                    // This terminal's text is its INPUT, forwarded by the skip
+                                    // contract — printing it bare under "## Research Agent" would
+                                    // attribute an upstream node's words to one the user skipped,
+                                    // which is the "never fabricate" rule broken by omission.
+                                    // `NodeSkipReason.byUser.displayText` is deliberately NOT reused
+                                    // here: it says "passed downstream unchanged", and a terminal
+                                    // has no downstream — the content became the answer instead.
+                                    body = terminal.text.isEmpty
+                                        ? "_(skipped by you — it had no input to pass on)_"
+                                        : "_(skipped by you — this is the input it would have processed)_\n\n" + terminal.text
                                 } else {
                                     body = terminal.text.isEmpty ? "_(no output)_" : terminal.text
                                 }
@@ -812,7 +912,10 @@ actor WorkflowExecutor: Executor {
                             logger.notice("[WF_EXEC] Run completed with an EMPTY final answer: \(successfulTerminals.count) successful terminal(s) produced no text. CONSEQUENCE: no `.content` is emitted — correct when the result is an artifact or a side effect, but if the user expected prose, check whether the terminal node's chosen output port is wired.")
                         }
                         let terminalNames = successfulTerminals.map(\.profileName).joined(separator: ", ")
-                        logger.info("[WF_EXEC] Workflow completed. \(successfulTerminals.count)/\(terminalOutputs.count) terminal node(s) succeeded: [\(terminalNames)]. Final output \(finalOutput.count) chars\(ranTerminals.count > 1 ? ", labeled per terminal" : "").")
+                        let passThroughNote = passThroughTerminals.isEmpty
+                            ? ""
+                            : " \(passThroughTerminals.count) terminal(s) were SKIPPED BY THE USER and contributed their forwarded INPUT instead of their own output: [\(passThroughTerminals.map(\.profileName).joined(separator: ", "))]. CONSEQUENCE: the answer contains upstream content that this node never processed."
+                        logger.info("[WF_EXEC] Workflow completed. \(successfulTerminals.count)/\(terminalOutputs.count) terminal node(s) succeeded: [\(terminalNames)]. Final output \(finalOutput.count) chars\(ranTerminals.count > 1 ? ", labeled per terminal" : "").\(passThroughNote)")
                         logger.debug("Final output preview:\n\(String(finalOutput.prefix(500)))")
                     } else if !failedNodes.isEmpty {
                         // Something genuinely failed. Report the ACTUAL reasons rather than the flat
@@ -877,7 +980,12 @@ actor WorkflowExecutor: Executor {
 
                     let executionLog = state.executionLog
                     let totalDuration = executionLog.reduce(0.0) { $0 + $1.duration }
-                    logger.notice("Workflow execution summary: \(executionLog.count) nodes processed in \(String(format: "%.1f", totalDuration))s")
+                    // Phase A per-node SKIP (D2.1): end-of-run hygiene clear, ROOT runs only (same depth
+                    // guard as the start clear). Un-consumed requests must not survive into a later run.
+                    if WorkflowDepth.current == 1 {
+                        await MainActor.run { WorkflowNodeSkipStore.shared.clear(conversationID: conversationID, reason: "run end") }
+                    }
+                                        logger.notice("Workflow execution summary: \(executionLog.count) nodes processed in \(String(format: "%.1f", totalDuration))s")
 
                     // Workflow-level terminal outcome. Per-node terminals emitted by inner
                     // executors are swallowed by the forwarder (they're node-scoped); the
@@ -897,7 +1005,17 @@ actor WorkflowExecutor: Executor {
 
                 } catch is CancellationError {
                     logger.notice("Workflow cancelled for conversation: \(conversationID)")
-                    await ExecutionSuspensionService.shared.cancel(for: conversationID)
+                    // ⚠️ ROOT RUNS ONLY (N3). A nested sub-workflow child is constructed with the
+                    // PARENT's conversationID, so this sweep — running in the CHILD on its own
+                    // cancellation, e.g. its node timeout — force-denied every park in the OUTER
+                    // run as well. At nested depth the child's own parks are structurally inside the
+                    // cancelled task tree and each suspend's `onCancel` handler resolves them, so
+                    // draining here adds nothing and costs the parent its banners.
+                    if WorkflowDepth.current == 1 {
+                        await ExecutionSuspensionService.shared.cancel(for: conversationID)
+                    } else {
+                        logger.info("[WF_HITL] Nested sub-workflow cancelled at depth \(WorkflowDepth.current) — NOT draining conversation \(conversationID.uuidString.prefix(8)). CONSEQUENCE: this child's own parks resolve through their own cancellation handlers; the parent run's parked banners are left alone instead of being force-denied on the user's behalf.")
+                    }
                     let classified = ClassifiedAgentError.synthetic(
                         category: .userCancelled,
                         origin: "WorkflowExecutor.executeWorkflow.cancelled",
@@ -956,6 +1074,7 @@ actor WorkflowExecutor: Executor {
         node: WorkflowNode,
         profile: BackendProfileModel,
         userInput: String,
+        attachmentContext: String? = nil,
         upstreamResults: [NodeResultEnvelope],
         isEntryNode: Bool,
         nodeIndex: Int,
@@ -1022,10 +1141,22 @@ actor WorkflowExecutor: Executor {
         let effectiveTaskDescription: String
         let trimmedUserInput = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
         if isFirstNode && !trimmedUserInput.isEmpty {
+            // ⚠️ USER QUERY FIRST, node task second, NO inline label (owner decision 2026-08-20).
+            //
+            // This was `baseTaskDescription + "\n\n---\nUser Query: " + trimmedUserInput`, and that
+            // ordering plus that label is what made a single-node workflow fail where the same
+            // profile succeeded in chat. `AgentConnect` prepended the knowledge/attachment payloads
+            // onto `userInput` (they had no other route to a node), so `<task>` — the FIRST and most
+            // heavily attended section of the system prompt — opened with
+            // "User Query: ### MCP server guidance" followed by ~2,000 chars of instructions for
+            // tools the node did not have, with the real 61-char question at the very end. A 3B
+            // model derailed on it identically five times and the run aborted on consecutive parse
+            // failures. Those payloads now travel their own sections (`<attachments>`,
+            // `<tool_guidance>`), so this carries only the query and the node's own task.
             effectiveTaskDescription = baseTaskDescription.isEmpty
                 ? trimmedUserInput
-                : baseTaskDescription + "\n\n---\nUser Query: " + trimmedUserInput
-            logger.info("Node '\(displayName)' first node: merged userInput (\(trimmedUserInput.count) chars) into taskDescription")
+                : trimmedUserInput + "\n\n" + baseTaskDescription
+            logger.info("Node '\(displayName)' first node: task = user query (\(trimmedUserInput.count) chars) + node task (\(baseTaskDescription.count) chars), query first.")
         } else {
             effectiveTaskDescription = baseTaskDescription
         }
@@ -1070,7 +1201,7 @@ actor WorkflowExecutor: Executor {
             }
         }
 
-        let workflowContext = WorkflowExecutionContext(
+        var workflowContext = WorkflowExecutionContext(
             taskDescription: effectiveTaskDescription,
             upstreamInput: upstreamInput,
             isFirstNode: isFirstNode,
@@ -1079,6 +1210,13 @@ actor WorkflowExecutor: Executor {
             upstreamArtifacts: upstreamArtifacts,
             upstreamArtifactText: upstreamArtifactText
         )
+        // ENTRY NODE ONLY — mirrors how `userInput` reaches the graph. Downstream nodes consume
+        // their upstream's OUTPUT, not the run's original attachments; forwarding the file text to
+        // every node would re-pay its whole token cost per node for data most of them never use.
+        if isFirstNode, let attachmentContext, !attachmentContext.isEmpty {
+            workflowContext.attachmentContext = attachmentContext
+            logger.info("Node '\(displayName)' entry node: \(attachmentContext.count) chars of attachments travel as <attachments>, NOT fused into the task.")
+        }
 
         if !upstreamArtifacts.isEmpty {
             logger.info("Node '\(displayName)' received \(upstreamArtifacts.count) upstream artifact(s), extracted \(upstreamArtifactText.count) chars of document text")
@@ -1201,13 +1339,13 @@ actor WorkflowExecutor: Executor {
                             // approval scope is keyed on it and the suspension resumes against it.
                             continuation.yield(.toolCall(name: name, params: params, sourceNodeID: nodeID, stepId: stepId))
 
-                        case .requestConfirmation(let toolName, let params, let operationID, _):
+                        case .requestConfirmation(let toolName, let params, let operationID, _, _):
                             continuation.yield(.requestConfirmation(toolName: toolName, params: params, operationID: operationID, sourceNodeID: nodeID))
 
-                        case .requestClarification(let question, let operationID, _, let options, let multiline):
+                        case .requestClarification(let question, let operationID, _, let options, let multiline, _):
                             continuation.yield(.requestClarification(question: "[\(displayName)] \(question)", operationID: operationID, sourceNodeID: nodeID, options: options, multiline: multiline))
 
-                        case .requestGate(let prompt, let options, let operationID, let deadline, _, let inputText, let highlights):
+                        case .requestGate(let prompt, let options, let operationID, let deadline, _, let inputText, let highlights, _):
                             // Gates are structural nodes, not profile-node output, so this is defensive —
                             // forward it tagged with this node id if it ever surfaces here.
                             continuation.yield(.requestGate(prompt: "[\(displayName)] \(prompt)", options: options, operationID: operationID, deadline: deadline, sourceNodeID: nodeID, inputText: inputText, highlights: highlights))
@@ -1253,8 +1391,22 @@ actor WorkflowExecutor: Executor {
                             media.append(artifact)
                             continuation.yield(event)
 
-                        case .requestPlanReview:
-                            continuation.yield(event)
+                        case .requestPlanReview(let subtasks, let operationID, _, _):
+                            // Stamp the node, exactly like the three HITL kinds above. This used to
+                            // be a bare `continuation.yield(event)` pass-through, and the producer
+                            // (`PlanningCapability`) never sets `sourceNodeID` — so a plan review
+                            // raised by a workflow node arrived with nil, which flipped
+                            // `enqueueHITL`'s `isWorkflow = workflowState != nil && sourceNodeID != nil`
+                            // to false. CONSEQUENCE, all attribution and none of it fatal: the banner
+                            // was labelled `.chat` (speech-bubble icon on a workflow request), had no
+                            // node name, produced no "awaiting input" badge on the canvas
+                            // (`awaitingNodeIDs` compactMaps the nil away), and the cross-conversation
+                            // chip switched the whole interface to CHAT mode instead of the canvas the
+                            // run belongs to. Fixing N2 made the nested sub-workflow path attribute
+                            // this correctly, which left the direct path as the odd one out.
+                            continuation.yield(.requestPlanReview(
+                                subtasks: subtasks, operationID: operationID,
+                                sourceNodeID: nodeID, sourceNodeName: displayName))
 
                         case .planGenerated, .planApproved, .subtaskStarted, .subtaskCompleted,
                              .reflectionTrialStarted, .reflectionEvaluating, .reflectionRetrying, .reflectionAccepted,
@@ -1543,6 +1695,7 @@ actor WorkflowExecutor: Executor {
         node: WorkflowNode,
         profile: BackendProfileModel,
         userInput: String,
+        attachmentContext: String? = nil,
         state: WorkflowState,
         edges: [WorkflowEdge],
         nodes: [WorkflowNode],
@@ -1573,7 +1726,17 @@ actor WorkflowExecutor: Executor {
 
         for attempt in 0...maxRetries {
             if attempt > 0 {
-                logger.info("Node '\(node.displayName)' retry \(attempt)/\(maxRetries) after \(retryDelay)s delay")
+                // Name the REASON, not just the attempt number. A retry log that says only
+                // "retry 2/3" cannot answer "why is this node costing so much?" after the fact.
+                let priorReason: AgentFailureReason? = {
+                    if case .failed(let r) = lastResult?.status { return r }
+                    return nil
+                }()
+                if case .iterationBudgetExhausted(let iterations) = priorReason {
+                    logger.notice("[WF_EXEC] Node '\(node.displayName)' retry \(attempt)/\(maxRetries) after the agent used all \(iterations) iterations WITHOUT producing an answer. CONSEQUENCE: this attempt costs another full \(iterations)-iteration budget, and exhaustion is a capacity limit rather than bad luck — if it recurs, raise Max Iterations or simplify the node's task instead of adding retries.")
+                } else {
+                    logger.info("[WF_EXEC] Node '\(node.displayName)' retry \(attempt)/\(maxRetries) after \(retryDelay)s delay — prior failure: \(priorReason?.localizedDescription ?? "unknown").")
+                }
                 continuation.yield(.thought("[\(node.displayName)] Retrying (attempt \(attempt + 1)/\(maxRetries + 1))..."))
                 if retryDelay > 0 {
                     try? await Task.sleep(for: .seconds(retryDelay))
@@ -1582,7 +1745,7 @@ actor WorkflowExecutor: Executor {
 
             let result = await executeNode(
                 node: node, profile: profile,
-                userInput: userInput,
+                userInput: userInput, attachmentContext: attachmentContext,
                 upstreamResults: upstreamResults,
                 isEntryNode: isEntryNode,
                 nodeIndex: nodeIndex, totalNodes: totalNodes,
@@ -1594,10 +1757,14 @@ actor WorkflowExecutor: Executor {
             )
             lastResult = result
 
-            // Success or non-retryable failure → stop
-            if case .completed = result.status { return result }
-            if case .failed(let reason) = result.status, !reason.isRetryable { return result }
-            if case .canceled = result.status { return result }
+            // Success, non-retryable failure, cancellation, or a skip → stop.
+            //
+            // ⚠️ The decision is `WorkflowRetryPolicy.stopsRetrying`, not inline `if case` lines.
+            // It used to be inline and was MISSING the `.skipped` arm entirely, which had no test
+            // surface to notice — the same gap that produced this file. The policy's switch is
+            // exhaustive, so a new status case cannot be added without deciding this at compile
+            // time. See `WorkflowRetryPolicyTests` for why the skip arm matters to Phase B.
+            if WorkflowRetryPolicy.stopsRetrying(after: result.status) { return result }
         }
 
         return lastResult!
@@ -1709,7 +1876,19 @@ actor WorkflowExecutor: Executor {
     /// ⚠️ Only Action nodes retry. A Code, Router or Gate node never did, so giving them a
     /// multiplied budget would weaken a real bound in exchange for nothing.
     static func plannedAttempts(for node: WorkflowNode, workflowConfig: WorkflowConfig) -> Int {
-        guard case .action = node.kind else { return 1 }
+        // Action nodes retry inside their own per-tool loop; sub-workflow nodes retry in the OUTER
+        // loop in `executeStructuralNodeBounded`. Both need the budget sized to the whole retry
+        // run, or attempt 1 eats it and the rest are unreachable (the WF-EX2 shape).
+        //
+        // ⚠️ Sub-workflow nodes are `.profile` KIND, which is why they were excluded and why the
+        // Node-Level Retries stepper did nothing for them (§9 N4). Bot/agent nodes are also
+        // `.profile`, but they never reach here — `outerTimeoutBudget` has exactly one caller and
+        // it is the structural path — so widening this cannot double-count their retries.
+        let isSubWorkflow = node.profileType == .workflow
+        guard case .action = node.kind else {
+            guard isSubWorkflow else { return 1 }
+            return max((node.nodeConfig?.maxNodeRetries ?? workflowConfig.resolvedMaxRetries) + 1, 1)
+        }
         return max((node.nodeConfig?.maxNodeRetries ?? workflowConfig.resolvedMaxRetries) + 1, 1)
     }
 
@@ -1863,10 +2042,31 @@ actor WorkflowExecutor: Executor {
         let limit = Self.outerTimeoutBudget(for: node, workflowConfig: workflowConfig)
 
         if attempts > 1, let perAttemptLimit, let limit {
-            logger.info("[WF_TIMEOUT] Action node '\(node.displayName)' is bounded at \(Int(perAttemptLimit))s PER ATTEMPT across \(attempts) attempt(s) (+\(Int(retryDelay))s between), so the node's outer backstop is \(Int(limit))s. CONSEQUENCE: a retry now gets its own full budget instead of whatever the first attempt left.")
+            logger.info("[WF_TIMEOUT] Node '\(node.displayName)' is bounded at \(Int(perAttemptLimit))s PER ATTEMPT across \(attempts) attempt(s) (+\(Int(retryDelay))s between), so the node's outer backstop is \(Int(limit))s. CONSEQUENCE: a retry now gets its own full budget instead of whatever the first attempt left.")
         }
 
+        // ⚠️ SUB-WORKFLOW NODES ONLY (§9 N4). The Node-Level Retries stepper was rendered for these
+        // nodes and did nothing: they are dispatched structurally (so they never reach
+        // `executeProfileNodeWithRetry`) and the structural path had no loop of its own.
+        //
+        // Deliberately NOT `attempts` — that is the TIMEOUT budget's count, and it is > 1 for Action
+        // nodes too. Looping here on it would multiply with the Action path's own per-tool loop
+        // (3 outer × 3 inner = 9 invocations for a setting that reads 3).
+        let outerAttempts = WorkflowRetryPolicy.structuralAttempts(
+            isSubWorkflow: node.profileType == .workflow,
+            maxNodeRetries: node.nodeConfig?.maxNodeRetries,
+            fallbackRetries: workflowConfig.resolvedMaxRetries
+        )
+
         let startTime = Date()
+        var lastFailure: StructuralNodeResult?
+
+        for outerAttempt in 0..<outerAttempts {
+        if outerAttempt > 0 {
+            logger.notice("[WF_EXEC] Sub-workflow node '\(node.displayName)' [node \(node.id.uuidString.prefix(8))] RETRY \(outerAttempt)/\(outerAttempts - 1) after \(Int(retryDelay))s. CONSEQUENCE: the ENTIRE child workflow re-runs from its first node — any side effect it already committed (a sent message, a written file) happens again. Its previous attempt's output is discarded.")
+            continuation.yield(.thought("[\(node.displayName)] Retrying nested workflow (attempt \(outerAttempt + 1)/\(outerAttempts))...", sourceNodeID: node.id))
+            if retryDelay > 0 { try? await Task.sleep(for: .seconds(retryDelay)) }
+        }
 
         do {
             let result = try await withComputeTimeout(limit, conversationID: conversationID, nodeName: node.displayName) {
@@ -1879,6 +2079,25 @@ actor WorkflowExecutor: Executor {
                     workflowConfig: workflowConfig
                 )
             }
+            // ⚠️ A STRUCTURAL FAILURE IS RETURNED, NOT THROWN. `executeStructuralNode` reports a
+            // failed child by returning an envelope with `.failed` status — only timeouts and
+            // cancellation come back as thrown errors. Retrying solely in the `catch` below
+            // therefore missed the ENTIRE case this loop exists for: a sub-workflow whose child
+            // failed ran exactly once, with the loop silently inert. (Caught by
+            // `testSubWorkflowNode_RetriesOnFailure…`, not by the unit tests — the policy was
+            // right and the wiring was not.)
+            if outerAttempt < outerAttempts - 1,
+               case .failed(let failReason) = result.envelope.status,
+               WorkflowRetryPolicy.shouldRetrySubWorkflow(after: failReason) {
+                if case .iterationBudgetExhausted(let iterations) = failReason {
+                    logger.notice("[WF_EXEC] Sub-workflow node '\(node.displayName)' [node \(node.id.uuidString.prefix(8))] attempt \(outerAttempt + 1)/\(outerAttempts) exhausted all \(iterations) iterations WITHOUT producing an answer — retrying. CONSEQUENCE: the ENTIRE child re-runs and costs another full iteration budget; exhaustion is a capacity limit, so raising Max Iterations or simplifying the task is more likely to help than more retries.")
+                } else {
+                    logger.notice("[WF_EXEC] Sub-workflow node '\(node.displayName)' [node \(node.id.uuidString.prefix(8))] attempt \(outerAttempt + 1)/\(outerAttempts) FAILED (\(failReason.localizedDescription)) — retrying. CONSEQUENCE: no terminal event is emitted for this attempt, so the canvas shows one outcome at the end rather than a node that appears to fail repeatedly.")
+                }
+                lastFailure = result
+                continue
+            }
+
             emitStructuralTerminalEvent(
                 node: node, envelope: result.envelope,
                 variableUpdates: result.variableUpdates, continuation: continuation
@@ -1912,6 +2131,8 @@ actor WorkflowExecutor: Executor {
             )
             logger.notice("[WF_EXEC] Structural node '\(node.displayName)' [node \(node.id.uuidString.prefix(8))] CANCELLED after \(Int(Date().timeIntervalSince(startTime)))s. CONSEQUENCE: recorded as cancelled (not failed); its `error` port is NOT activated, so no recovery branch runs — the run is being torn down.")
             continuation.yield(.workflowNodeCancelled(nodeID: node.id, profileName: node.displayName))
+            // ⚠️ Never retried — a cancel is the user pressing Stop, not a failure. Retrying would
+            // restart the run they just stopped. See WorkflowRetryPolicy's header.
             return StructuralNodeResult(envelope: envelope, activePorts: nil, variableUpdates: [:])
         } catch {
             let reason = (error as? AgentExecutionError)?.reason
@@ -1931,13 +2152,40 @@ actor WorkflowExecutor: Executor {
             // child's value went with it. Say so, because a discarded answer with no log is
             // indistinguishable in a support bundle from a node that produced nothing.
             logger.error("[WF_EXEC] Structural node '\(node.displayName)' [node \(node.id.uuidString.prefix(8))] failed after \(Int(Date().timeIntervalSince(startTime)))s: \(reason.localizedDescription). CONSEQUENCE: the node reports empty output and activates its `error` port. If this was a compute-timeout, any result the node produced while unwinding was DISCARDED — the timeout race keeps the losing side's value out of reach — so downstream sees \"\" rather than a late answer.")
+            // ⚠️ `activePorts: nil` so the driver activates `error`. Setting it here would suppress
+            // the one recovery route a timed-out node has.
+            let failed = StructuralNodeResult(envelope: envelope, activePorts: nil, variableUpdates: [:])
+
+            // Hold the TERMINAL event back while attempts remain: emitting it per attempt would
+            // show the node failing N times on the canvas and activate its `error` port before the
+            // retries had run.
+            if outerAttempt < outerAttempts - 1,
+               WorkflowRetryPolicy.shouldRetrySubWorkflow(after: reason) {
+                lastFailure = failed
+                continue
+            }
+
             continuation.yield(.workflowNodeFailed(
                 nodeID: node.id, profileName: node.displayName,
                 error: reason.localizedDescription))
-            // ⚠️ `activePorts: nil` so the driver activates `error`. Setting it here would suppress
-            // the one recovery route a timed-out node has.
-            return StructuralNodeResult(envelope: envelope, activePorts: nil, variableUpdates: [:])
+            return failed
         }
+        } // end retry loop
+
+        // Unreachable: every arm above returns or continues, and the last iteration cannot continue.
+        // Returning the last failure rather than force-unwrapping keeps a future edit from trapping.
+        return lastFailure ?? StructuralNodeResult(
+            envelope: NodeResultEnvelope(
+                taskID: UUID(), nodeID: node.id,
+                sourceProfileID: node.profileID ?? UUID(),
+                profileName: node.displayName,
+                profileType: node.profileType ?? .bot,
+                status: .failed(.modelError(provider: "workflow", error: "retry loop exited without a result")),
+                output: "", artifacts: [],
+                metadata: .simple(start: startTime, end: Date(), output: "")
+            ),
+            activePorts: nil, variableUpdates: [:]
+        )
     }
 
     /// Emits the ONE terminal event for a structural node (WF-EX4).
@@ -2082,6 +2330,21 @@ actor WorkflowExecutor: Executor {
             var childFailureReason: String? = nil
             var suppressedOrchestrationEvents = 0
 
+            // Inner node id → display name, harvested from the child's own (suppressed)
+            // `workflowNodeStarted` events. Used only to title a forwarded HITL banner.
+            var childNodeNames: [UUID: String] = [:]
+
+            /// Banner title for a request forwarded out of this sub-workflow.
+            ///
+            /// Prefers "SubWorkflowNode › InnerNode" so a user looking at the PARENT canvas can tell
+            /// which of two parallel sub-workflows is asking AND what inside it asked. Falls back to
+            /// the sub-workflow node's own name when the inner node has not announced itself yet
+            /// (a HITL raised before its `workflowNodeStarted` was observed).
+            func hitlDisplayName(_ innerNode: UUID?) -> String {
+                guard let innerNode, let inner = childNodeNames[innerNode] else { return displayName }
+                return "\(displayName) › \(inner)"
+            }
+
             do {
                 for try await event in childStream {
                     switch event {
@@ -2130,29 +2393,57 @@ actor WorkflowExecutor: Executor {
                     // and a workflow hung forever with no error and no timeout. `sourceNodeID`
                     // keeps the INNER node's id: it is what the approval scope is keyed on, so
                     // collapsing it here would pool approvals across every node in the child.
-                    case .requestConfirmation(let toolName, let params, let operationID, let innerNode):
+                    case .requestConfirmation(let toolName, let params, let operationID, let innerNode, _):
                         logger.notice("[WF_HITL] sub-workflow '\(displayName)' forwarding confirmation for '\(toolName)' [op \(operationID) node \(innerNode?.uuidString ?? nodeID.uuidString)] — run is now WAITING on the user")
                         continuation.yield(.requestConfirmation(
                             toolName: toolName, params: params,
-                            operationID: operationID, sourceNodeID: innerNode ?? nodeID))
+                            operationID: operationID, sourceNodeID: innerNode ?? nodeID,
+                            sourceNodeName: hitlDisplayName(innerNode)))
 
-                    case .requestGate(let prompt, let options, let operationID, let deadline, let innerNode, let inputText, let highlights):
+                    case .requestGate(let prompt, let options, let operationID, let deadline, let innerNode, let inputText, let highlights, _):
                         logger.notice("[WF_HITL] sub-workflow '\(displayName)' forwarding GATE [op \(operationID)] — run is now WAITING on the user")
                         continuation.yield(.requestGate(
                             prompt: prompt, options: options, operationID: operationID,
                             deadline: deadline, sourceNodeID: innerNode ?? nodeID,
-                            inputText: inputText, highlights: highlights))
+                            inputText: inputText, highlights: highlights,
+                            sourceNodeName: hitlDisplayName(innerNode)))
 
-                    case .requestClarification(let question, let operationID, let innerNode, let options, let multiline):
+                    case .requestClarification(let question, let operationID, let innerNode, let options, let multiline, _):
                         logger.notice("[WF_HITL] sub-workflow '\(displayName)' forwarding clarification [op \(operationID)] — run is now WAITING on the user")
                         continuation.yield(.requestClarification(
                             question: "[\(displayName)] \(question)",
                             operationID: operationID, sourceNodeID: innerNode ?? nodeID,
-                            options: options, multiline: multiline))
+                            options: options, multiline: multiline,
+                            sourceNodeName: hitlDisplayName(innerNode)))
+
+                    // ⚠️ THE FOURTH HITL KIND. Its absence here was a PERMANENT HANG: a plan
+                    // review raised inside a sub-workflow fell into `default:` below, so no banner
+                    // ever appeared, while the child sat in `suspendForPlanReview` — which has NO
+                    // timeout by design ("awaiting user action"). The node compute timeout cannot
+                    // rescue it either: the sentinel subtracts `cumulativeParkedTime` and EXTENDS
+                    // itself by the shortfall, and a run doing nothing but waiting on a human is
+                    // 100% parked time, so it re-arms forever. Only Stop ended the run.
+                    //
+                    // The profile-node path forwarded this correctly all along (:1256) — the two
+                    // paths simply disagreed. Design doc §9 N2.
+                    case .requestPlanReview(let subtasks, let operationID, let innerNode, _):
+                        logger.notice("[WF_HITL] sub-workflow '\(displayName)' forwarding PLAN REVIEW [op \(operationID) node \(innerNode?.uuidString ?? nodeID.uuidString)] — run is now WAITING on the user")
+                        continuation.yield(.requestPlanReview(
+                            subtasks: subtasks, operationID: operationID,
+                            sourceNodeID: innerNode ?? nodeID,
+                            sourceNodeName: hitlDisplayName(innerNode)))
+
+                    case .workflowNodeStarted(let innerID, let innerName, _, _):
+                        // SUPPRESSED from the parent's timeline exactly as before — but the NAME is
+                        // kept, because it is the only place the child's node names ever cross this
+                        // boundary. Without this, a HITL forwarded below can only be attributed to
+                        // the sub-workflow node, and the banner cannot say WHICH inner node asked.
+                        childNodeNames[innerID] = innerName
+                        suppressedOrchestrationEvents += 1
 
                     default:
-                        // The child's OWN orchestration events (its per-node started/completed,
-                        // its progress counter, its token usage). Re-emitting them would make the
+                        // The child's OWN orchestration events (its per-node completed/failed, its
+                        // progress counter, its token usage). Re-emitting them would make the
                         // parent's timeline show the child's nodes as siblings of its own and
                         // double-count progress against the parent's total. Counted, not silent —
                         // see the log line below.
@@ -2326,7 +2617,7 @@ actor WorkflowExecutor: Executor {
                     logger.notice("[WF_ROUTE] Router '\(displayName)' PARKED INDEFINITELY for ambiguity arbitration (operationID: \(operationID), options: [\(matchedLabels.joined(separator: " | "))]). CONSEQUENCE: this run makes no further progress on this branch until a human answers. There is no per-node timeout — only the container bounds it (Stop, or a scheduled run's 600s deadline, which cancels the ENTIRE run). ⚠️ A scheduled run renders NO banner for this: switch 'Ask Me Which Branch' off on Routers used in unattended workflows.")
 
                     let chosen = await ExecutionSuspensionService.shared.suspendForGate(
-                        for: operationID, conversationID: conversationID
+                        for: operationID, conversationID: conversationID, nodeID: nodeID
                     )
 
                     // ⚠️ Only a label that actually matched may be honoured. The suspension resolves
@@ -2514,7 +2805,7 @@ actor WorkflowExecutor: Executor {
                         logger.notice("[WF_ROUTE] Router '\(displayName)' PARKED INDEFINITELY for a routing decision (operationID: \(operationID), options: [\(options.joined(separator: " | "))]). CONSEQUENCE: this branch makes no further progress until a human answers. There is no per-node timeout — only the container bounds it (Stop, or a scheduled run's 600s deadline, which cancels the ENTIRE run).")
 
                         let chosen = await ExecutionSuspensionService.shared.suspendForGate(
-                            for: operationID, conversationID: conversationID
+                            for: operationID, conversationID: conversationID, nodeID: nodeID
                         )
 
                         // ⚠️ Only an OFFERED option may be honoured. The suspension resolves from
@@ -2740,7 +3031,7 @@ actor WorkflowExecutor: Executor {
                     chosenOption = try await withThrowingTaskGroup(of: String?.self) { group in
                         group.addTask {
                             await ExecutionSuspensionService.shared.suspendForGate(
-                                for: operationID, conversationID: conversationID
+                                for: operationID, conversationID: conversationID, nodeID: nodeID
                             )
                         }
                         group.addTask {
@@ -2757,7 +3048,7 @@ actor WorkflowExecutor: Executor {
                 }
             } else {
                 chosenOption = await ExecutionSuspensionService.shared.suspendForGate(
-                    for: operationID, conversationID: conversationID
+                    for: operationID, conversationID: conversationID, nodeID: nodeID
                 )
             }
 
@@ -2877,7 +3168,7 @@ actor WorkflowExecutor: Executor {
                     logger.info("Action node '\(displayName)': awaiting user confirmation for '\(toolRef.name)' [op \(operationID)]")
 
                     let approved = await ExecutionSuspensionService.shared.suspend(
-                        for: operationID, conversationID: conversationID
+                        for: operationID, conversationID: conversationID, nodeID: nodeID
                     )
 
                     // Honour argument edits made in the banner. Offering an editor and then
@@ -2887,6 +3178,20 @@ actor WorkflowExecutor: Executor {
                        let reEncoded = try? JSONEncoder().encode(edited) {
                         argsData = reEncoded
                         logger.info("Action node '\(displayName)': running '\(toolRef.name)' with user-edited arguments.")
+                    }
+
+                    // ⚠️ A CANCELLED PARK IS NOT A DENIAL — the Action-node twin of the guard in
+                    // `ToolExecutionLoop`. Stop resolves a waiting confirmation with `false`, and
+                    // without this the node is recorded as `.failed("User denied tool …")`, which
+                    // ACTIVATES ITS ERROR PORT: a recovery branch runs, and any webhook or message
+                    // wired there fires — on a run the user simply stopped. `.canceled` is the
+                    // established shape here (the sub-workflow and Router arms both use it) and it
+                    // routes NOWHERE, which is correct for a teardown.
+                    if Task.isCancelled {
+                        output = ""
+                        status = .canceled
+                        logger.notice("Action node '\(displayName)': confirmation for '\(toolRef.name)' was torn down by cancellation, NOT denied by the user. CONSEQUENCE: recorded as cancelled, so no error port activates and no recovery branch runs.")
+                        break
                     }
 
                     if !approved {
@@ -2997,8 +3302,14 @@ actor WorkflowExecutor: Executor {
                         attemptCategory = .executionThrew
                     }
 
-                    // Retry transient failures (timeout, network, MCP) up to the cap.
-                    if attempt < maxRetries {
+                    // Retry transient failures (timeout, network) up to the cap.
+                    //
+                    // ⚠️ THIS COMMENT USED TO BE FALSE. The condition was a bare `attempt < maxRetries`
+                    // inside a bare `catch`, so EVERY error retried — a bad argument, a missing file,
+                    // a permission denial. `attemptCategory` was computed just above but only ever
+                    // used for reporting. A tool call is deterministic, so those attempts burned the
+                    // node's budget to arrive at the identical error.
+                    if attempt < maxRetries, WorkflowRetryPolicy.isTransientToolError(error) {
                         attempt += 1
                         await TraceRecorder.shared.emitToolResult(span: structSpan, name: toolRef.name, success: false, output: error.localizedDescription, durationMs: attemptDurationMs)
                         continuation.yield(.toolFailed(
@@ -3013,6 +3324,9 @@ actor WorkflowExecutor: Executor {
                         continuation.yield(.thought("[\(displayName)] Tool failed — retrying (\(attempt)/\(maxRetries))...", sourceNodeID: nodeID))
                         if retryDelay > 0 { try? await Task.sleep(for: .seconds(retryDelay)) }
                         continue
+                    }
+                    if attempt < maxRetries {
+                        logger.notice("[WF_EXEC] Action node '\(displayName)': tool '\(toolRef.name)' failed on attempt \(attempt + 1)/\(maxRetries + 1) and \(maxRetries - attempt) retry/retries remain, but they were NOT used — \(WorkflowRetryPolicy.declineReason(for: error)). CONSEQUENCE: the node fails now rather than repeating a deterministic error until the budget runs out; the configured retry count is unchanged and still applies to transient failures.")
                     }
                     output = "Tool '\(toolRef.name)' failed: \(error.localizedDescription)"
                     status = .failed(.modelError(provider: "tool", error: error.localizedDescription))

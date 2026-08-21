@@ -177,6 +177,12 @@ enum NodeSkipReason: String, Sendable, Codable, Equatable, CaseIterable {
     case upstreamCancelled
     /// The run ended before this node was reached.
     case notReached
+    /// The user pressed Skip on this node (Phase A, §0.6 D2.1). ⚠️ THE ONE SKIP WHOSE DOWNSTREAM
+    /// RUNS: the node's INPUT was forwarded as its output, no port was activated, and every
+    /// default edge below it stayed live. Every other case in this enum means the subtree below
+    /// is dead — matchers that assume "skipped ⇒ downstream never ran" must treat this case
+    /// separately (`edgeIsLive`, `WorkflowInputAssembler`, and the cascade classifier already do).
+    case byUser
 
     /// Whether this skip traces back to something going WRONG, as opposed to ordinary routing.
     ///
@@ -185,9 +191,22 @@ enum NodeSkipReason: String, Sendable, Codable, Equatable, CaseIterable {
     /// "something upstream broke" (worth looking at), and before this existed both looked identical.
     var indicatesProblem: Bool {
         switch self {
-        case .notChosen, .errorPortNotTaken, .notReached: return false
+        case .notChosen, .errorPortNotTaken, .notReached, .byUser: return false
         case .upstreamFailed, .upstreamSkipped, .upstreamCancelled: return true
         }
+    }
+
+    /// Tolerant decoding (owner requirement, D2.1 — the loop-node deletion is the cautionary
+    /// tale). The synthesized conformance for a String-raw enum THROWS on an unknown rawValue,
+    /// which takes the entire containing record down with it. The run-record layer already guards
+    /// its own seam (`WorkflowRunRecord.NodeStatus.init(rawValue:)` falls back to `.notChosen`);
+    /// this covers every OTHER present or future direct `Codable` crossing, so the NEXT new case
+    /// is safe by construction rather than by remembering to guard each consumer.
+    /// `.notChosen` as the fallback matches the record layer's choice: the neutral reason —
+    /// a future cause must never decode as something going wrong.
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = NodeSkipReason(rawValue: raw) ?? .notChosen
     }
 
     /// The user-facing sentence. ⚠️ THE ONLY PLACE THIS WORDING LIVES — the previous arrangement had
@@ -206,6 +225,11 @@ enum NodeSkipReason: String, Sendable, Codable, Equatable, CaseIterable {
             return String(localized: "Not run — an upstream node was cancelled")
         case .notReached:
             return String(localized: "Not run — the workflow ended first")
+        case .byUser:
+            // Owner-decided wording (D2.1). Deliberately NOT "Not run — …": the consequence half
+            // (input passed through, downstream RAN) is the part the user needs, because a
+            // transformer node's skip means downstream operated on untransformed input.
+            return String(localized: "Skipped by you — its input was passed downstream unchanged.")
         }
     }
 
@@ -219,6 +243,9 @@ enum NodeSkipReason: String, Sendable, Codable, Equatable, CaseIterable {
         case .notReached:        return 3
         case .errorPortNotTaken: return 4
         case .notChosen:         return 5
+        // Least alarming of all: the user asked for it. When a dead branch is fed by both a
+        // crash and a user skip, the crash must win the report.
+        case .byUser:            return 6
         }
     }
 }

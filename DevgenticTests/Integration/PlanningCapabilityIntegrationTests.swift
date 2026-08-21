@@ -402,7 +402,7 @@ final class PlanningCapabilityIntegrationTests: XCTestCase {
         var count = 0
         for try await event in stream {
             events.append(event)
-            if case .requestClarification(_, let opID, _, _, _) = event {
+            if case .requestClarification(_, let opID, _, _, _, _) = event {
                 count += 1
                 try await Task.sleep(for: .milliseconds(50))
                 await ExecutionSuspensionService.shared.resumeClarification(for: opID, userInput: answer)

@@ -284,6 +284,7 @@ class BackendOrchestrationService {
                 // payload: extracted content vs a read_file path manifest. It never
                 // rides the user query.
                 var knowledgeBaseContext: String? = nil
+                var toolGuidanceContext: String? = nil
                 if let knowledgeSources = self.resolveKnowledgeSources(from: config.profile),
                    !knowledgeSources.isEmpty {
                     let localSources = knowledgeSources.filter { $0.isLocalFile && $0.exists }
@@ -320,14 +321,37 @@ class BackendOrchestrationService {
                 // parallel layer would mean threading a new field through five call sites
                 // for the same result. The heading keeps it distinguishable from profile
                 // knowledge sources in the rendered prompt.
-                let mcpInstructions = await MCPClientService.shared.connectedServerInstructions()
+                // ⚠️ TWO FIXES HERE (2026-08-20), both from the same field report: a single-node
+                // workflow failed where the identical agent profile succeeded in chat.
+                //
+                //   1. GATED PER SERVER. This used to ask "is any MCP server connected?" and inject
+                //      every one of them. The failing profile held `[final_answer, ask_user,
+                //      execute_shell]` — ZERO MCP tools — and still received ~2,000 chars telling it
+                //      how to drive 41 tools from two servers it could not call.
+                //   2. ITS OWN LAYER. It used to be appended to `knowledgeBaseContext`. Knowledge is
+                //      the USER's reference material; this is operating instructions for TOOLS. On
+                //      the workflow path that conflation was fatal: nodes get no knowledge layer, so
+                //      `AgentConnect` prepended the whole thing onto `userInput`, and it became the
+                //      node's `<task>` — pushing the real question to char ~2,160 of 2,224.
+                //
+                // The gate keys on the profile's CONFIGURED tools (the user's choice), which is
+                // known here; resolution happens later in `AgentConnect` and can only ever narrow
+                // this set, never widen it.
+                let enabledToolSourceIDs: Set<UUID> = {
+                    switch config.profile.details {
+                    case .agent(let c), .code(let c):
+                        return Set(c.tools.filter(\.isEnabled).map(\.sourceId))
+                    case .bot, .workflow, .imageGen:
+                        return []
+                    }
+                }()
+                let mcpInstructions = await MCPClientService.shared
+                    .connectedServerInstructions(forSourceIDs: enabledToolSourceIDs)
                 if !mcpInstructions.isEmpty {
-                    let block = "### MCP server guidance\n\n" + mcpInstructions
-                    knowledgeBaseContext = [knowledgeBaseContext, block]
-                        .compactMap { $0 }
-                        .filter { !$0.isEmpty }
-                        .joined(separator: "\n\n")
-                    logger.info("[MCP-INSTRUCTIONS] Injected guidance from \(mcpInstructions.count) chars of server instructions into the system knowledge layer.")
+                    toolGuidanceContext = mcpInstructions
+                    logger.info("[MCP-INSTRUCTIONS] Injected \(mcpInstructions.count) chars of server guidance into <tool_guidance>, from the server(s) supplying this profile's \(enabledToolSourceIDs.count) tool source(s). CONSEQUENCE: servers whose tools this profile does not hold contribute nothing.")
+                } else if !enabledToolSourceIDs.isEmpty {
+                    logger.debug("[MCP-INSTRUCTIONS] No server guidance applies — this profile's \(enabledToolSourceIDs.count) tool source(s) supplied no instructions. CONSEQUENCE: <tool_guidance> is omitted entirely.")
                 }
 
                 // 5. Pre-flight context-fit check — every piece of the prompt is known
@@ -535,6 +559,7 @@ class BackendOrchestrationService {
                             ragContext: ragContextString,
                             attachmentContext: attachmentContext,
                             knowledgeBaseContext: knowledgeBaseContext,
+                            toolGuidanceContext: toolGuidanceContext,
                             userPayload: attachedImagePayload,
                             traceContext: context,
                             onTraceUpdate: aggregatedTraceUpdate
@@ -568,6 +593,7 @@ class BackendOrchestrationService {
                             ragContext: ragContextString,
                             attachmentContext: attachmentContext,
                             knowledgeBaseContext: knowledgeBaseContext,
+                            toolGuidanceContext: toolGuidanceContext,
                             userPayload: attachedImagePayload,
                             resumeState: resumeState,
                             traceContext: context,
@@ -592,13 +618,13 @@ class BackendOrchestrationService {
                             case .toolCall(let name, let params, _, _):
                                 logger.debug("[TOOL_CALL] \(name) params: \(params)")
                                 continuation.yield(event)
-                            case .requestConfirmation(let toolName, _, _, _):
+                            case .requestConfirmation(let toolName, _, _, _, _):
                                 logger.debug("[HITL] Permission requested for \(toolName)")
                                 continuation.yield(event)
-                            case .requestClarification(let question, _, _, _, _):
+                            case .requestClarification(let question, _, _, _, _, _):
                                 logger.debug("[ASK_USER] Clarification requested: \(question)")
                                 continuation.yield(event)
-                            case .requestGate(let prompt, _, _, _, _, _, _):
+                            case .requestGate(let prompt, _, _, _, _, _, _, _):
                                 logger.debug("[GATE] Decision requested: \(prompt)")
                                 continuation.yield(event)
                             case .error(let err):
@@ -650,6 +676,7 @@ class BackendOrchestrationService {
                             ragContext: ragContextString,
                             attachmentContext: attachmentContext,
                             knowledgeBaseContext: knowledgeBaseContext,
+                            toolGuidanceContext: toolGuidanceContext,
                             userPayload: attachedImagePayload,
                             traceContext: context,
                             onTraceUpdate: aggregatedTraceUpdate
@@ -791,6 +818,7 @@ class BackendOrchestrationService {
                             ragContext: ragContextString,
                             attachmentContext: attachmentContext,
                             knowledgeBaseContext: knowledgeBaseContext,
+                            toolGuidanceContext: toolGuidanceContext,
                             userPayload: attachedImagePayload,
                             resumeState: resumeState,
                             traceContext: context,

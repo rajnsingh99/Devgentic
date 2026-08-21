@@ -122,15 +122,16 @@ actor PlanningExecutorWrapper: Executor {
                     )
 
                     // Read User Personal profile for planning context.
-                    // Suppressed in workflow mode — workflow nodes operate on task+input, not personal context.
-                    let userProfile: String?
-                    if input.workflowContext == nil {
-                        userProfile = await MainActor.run {
-                            guard UserDefaults.standard.bool(forKey: AppSettings.ciFeatureUserPersonalKey) else { return nil }
-                            return UserPersonalService.shared.getProfileForInjection()
-                        }
-                    } else {
-                        userProfile = nil
+                    //
+                    // ⚠️ THE TWIN of the same read in `ReActAgentExecutor`, and it carried the
+                    // identical workflow suppression. Both were lifted together (owner decision,
+                    // 2026-08-20): a plan drafted for a workflow node should honour the user's
+                    // skills and guardrails for exactly the reason the execution step does. Leaving
+                    // this one behind would have produced the worst outcome of the three — a plan
+                    // built without the guardrails, then executed by a step that has them.
+                    let userProfile: String? = await MainActor.run {
+                        guard UserDefaults.standard.bool(forKey: AppSettings.ciFeatureUserPersonalKey) else { return nil }
+                        return UserPersonalService.shared.getProfileForInjection()
                     }
 
                     // Both plan calls (initial + post-clarification) share this shape;
@@ -273,12 +274,20 @@ actor PlanningExecutorWrapper: Executor {
                         logger.info("Plan review requested. Suspending until user approves or rejects.")
 
                         guard let approvedPlan = await ExecutionSuspensionService.shared
-                            .suspendForPlanReview(for: reviewOperationID, conversationID: input.conversationID)
+                            .suspendForPlanReview(for: reviewOperationID, conversationID: input.conversationID, nodeID: input.workflowContext?.nodeID)
                         else {
-                            // User rejected the plan or stream was cancelled
-                            logger.info("Plan rejected by user.")
+                            // `nil` means BOTH "the user rejected the plan" and "the park was torn
+                            // down" — the suspension service resolves a cancelled plan review with
+                            // `nil` exactly as a rejection. The OUTCOME is `.cancelled` either way,
+                            // which is why this path was already honest where it mattered most; but
+                            // the episode message is PERSISTED to `SessionGraphStore` and the log
+                            // line is what a field report reads, and both asserted a rejection the
+                            // user may never have made. Distinguish them.
+                            let wasCancelled = Task.isCancelled
+                            let reason = wasCancelled ? "Plan review cancelled (run stopped)" : "Plan rejected by user"
+                            logger.info("\(reason).")
                             continuation.yield(.content("Plan was cancelled. Let me know if you'd like a different approach."))
-                            sessionState.closeActiveEpisode(outcome: .cancelled, message: "Plan rejected by user")
+                            sessionState.closeActiveEpisode(outcome: .cancelled, message: reason)
                             await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                             // Honest terminal for the session summary — a rejected plan is
                             // CANCELLED 🚫, not FAIL ❌ (observed in the reject-path manual run).
@@ -288,10 +297,10 @@ actor PlanningExecutorWrapper: Executor {
                                 parentSpanID: input.traceContext.parentSpanID,
                                 stepNumber: 0,
                                 state: .thinking(.finalizing),
-                                content: "Plan rejected by user.",
+                                content: "\(reason).",
                                 metadata: ["outcome": ExecutionOutcome.cancelled.rawValue]
                             ))
-                            continuation.yield(.executionFinished(outcome: .cancelled, reason: "Plan rejected by user"))
+                            continuation.yield(.executionFinished(outcome: .cancelled, reason: reason))
                             continuation.finish()
                             return
                         }
@@ -524,7 +533,17 @@ actor PlanningExecutorWrapper: Executor {
 
                 } catch is CancellationError {
                     logger.notice("Planning capability cancelled.")
-                    await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    // ⚠️ NODE-SCOPED WHEN THIS RUN IS A WORKFLOW NODE (N3). The conversation-wide drain
+                    // force-resolves EVERY park in the conversation — including a SIBLING node's, whose
+                    // tool would then be reported "denied by the user" though the user never saw it.
+                    // A sub-workflow child is constructed with the PARENT's conversationID, so a child's
+                    // node timeout used to sweep the outer run's banners too. Chat and code runs have no
+                    // `workflowContext`, so they keep the conversation-wide sweep unchanged.
+                    if let nodeID = input.workflowContext?.nodeID {
+                        await ExecutionSuspensionService.shared.cancelNode(nodeID, in: input.conversationID)
+                    } else {
+                        await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    }
                     sessionState.cancelActiveEpisode()
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                     continuation.yield(.thought("Cancelled by user."))
@@ -562,7 +581,17 @@ actor PlanningExecutorWrapper: Executor {
                         span: input.traceContext,
                         error: classified
                     )
-                    await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    // ⚠️ NODE-SCOPED WHEN THIS RUN IS A WORKFLOW NODE (N3). The conversation-wide drain
+                    // force-resolves EVERY park in the conversation — including a SIBLING node's, whose
+                    // tool would then be reported "denied by the user" though the user never saw it.
+                    // A sub-workflow child is constructed with the PARENT's conversationID, so a child's
+                    // node timeout used to sweep the outer run's banners too. Chat and code runs have no
+                    // `workflowContext`, so they keep the conversation-wide sweep unchanged.
+                    if let nodeID = input.workflowContext?.nodeID {
+                        await ExecutionSuspensionService.shared.cancelNode(nodeID, in: input.conversationID)
+                    } else {
+                        await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    }
                     continuation.yield(.executionFinished(outcome: .failed, reason: classified.message))
                     continuation.finish(throwing: error)
                 }
@@ -693,12 +722,12 @@ actor PlanningExecutorWrapper: Executor {
             case .toolFailed(let toolOutput, let category, let suggestion, _):
                 toolResults.append(toolOutput)
                 continuation.yield(.toolFailed(toolOutput, category: category, suggestion: suggestion))
-            case .requestConfirmation(let toolName, let params, let operationID, let sourceNodeID):
+            case .requestConfirmation(let toolName, let params, let operationID, let sourceNodeID, let sourceNodeName):
                 // [G9] Forward HITL permission requests — user must see these during subtasks.
-                continuation.yield(.requestConfirmation(toolName: toolName, params: params, operationID: operationID, sourceNodeID: sourceNodeID))
-            case .requestClarification(let question, let operationID, let sourceNodeID, let options, let multiline):
+                continuation.yield(.requestConfirmation(toolName: toolName, params: params, operationID: operationID, sourceNodeID: sourceNodeID, sourceNodeName: sourceNodeName))
+            case .requestClarification(let question, let operationID, let sourceNodeID, let options, let multiline, let sourceNodeName):
                 // [G9] Forward HITL clarification requests.
-                continuation.yield(.requestClarification(question: question, operationID: operationID, sourceNodeID: sourceNodeID, options: options, multiline: multiline))
+                continuation.yield(.requestClarification(question: question, operationID: operationID, sourceNodeID: sourceNodeID, options: options, multiline: multiline, sourceNodeName: sourceNodeName))
             case .error(let msg):
                 continuation.yield(.error(msg))
             case .warning(let cat, let msg, let relatedPath, _):

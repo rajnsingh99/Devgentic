@@ -212,6 +212,9 @@ final class MessagingCoordinator {
 
             self.logger.info("[sendMessage] Handing off to ActiveStreamManager — conversationID: \(conversationIDToUse.uuidString.prefix(8)), messageID: \(userMessage.id.uuidString.prefix(8)), historyCount: \(backendHistory.count), files: \(filesForBackend.count)")
 
+            // Log-only: the id is not known until `startMessageStream` returns, and the
+            // completion closure is built before that. Nothing behavioural reads it.
+            var agentMessageIDForLog: UUID?
             let agentMessage = self.activeStreamManager.startMessageStream(
                 withConfig: config,
                 conversationID: conversationIDToUse,
@@ -222,17 +225,14 @@ final class MessagingCoordinator {
                 workflowExecutionState: workflowTicket?.state,
                 onComplete: { [weak self] in
                     DispatchQueue.main.async {
-                        guard let self, let vm = self.viewModel else { return }
-                        vm.streamingMessageID = nil
-                        vm.streamingMessage = nil
-                        self.logger.info("Stream completed. Resetting streamingMessageID.")
+                        guard let self else { return }
+                        self.logger.info("[RUN_LIFECYCLE] send stream completed for message \(agentMessageIDForLog?.uuidString.prefix(8) ?? "?") — no slot to clear; the composer derives its state from ActiveStreamManager.")
                         workflowTicket?.finalize()
                     }
                 }
             )
 
-            vm.streamingMessageID = agentMessage.id
-            vm.streamingMessage = agentMessage
+            agentMessageIDForLog = agentMessage.id
             self.chatHistoryViewModel.currentChatMessages.insert(agentMessage, at: 0)
             self.logger.debug("Appended agent's streaming message placeholder into UI for real-time updates.")
 
@@ -243,10 +243,19 @@ final class MessagingCoordinator {
     // MARK: - Response Regeneration
 
     func regenerateResponse(for agentMessage: ChatMessage) {
-        // Cheap guard first so an over-cap message never pays for a history fetch.
-        guard let agentResponse = agentMessage.agentResponse,
-              agentResponse.generationAttempts < ChatMessage.maxGenerationAttempts else {
-            logger.warning("Max generation attempts reached for message \(agentMessage.id.uuidString).")
+        // Cheap guard first so a refused Redo never pays for a history fetch.
+        //
+        // ⚠️ The `conversationBusy` arm is the INTERIM one-root-run-per-conversation rule. Without
+        // it, Redo on an older message while another run streams starts a second root run whose
+        // `startMessageStream` overwrites `activeTasks[messageID]`, orphaning the first run's task
+        // handle permanently. The Redo button is gated per-message (`message.isStreaming`), so it
+        // stays live on older messages and this is reachable with one click and no automation.
+        if let refusal = RunAdmissionPolicy.admitRegeneration(
+            in: agentMessage.conversationId,
+            attempts: agentMessage.agentResponse?.generationAttempts,
+            live: viewModel?.activeStreamManager.liveRunSnapshot() ?? []
+        ) {
+            logger.warning("[RUN_CLAIM] Redo REFUSED for message \(agentMessage.id.uuidString.prefix(8)) in conversation \(agentMessage.conversationId.uuidString.prefix(8)): \(refusal.logReason)")
             return
         }
         // The history resolve is async and store-authoritative (a retry must not replay
@@ -265,6 +274,18 @@ final class MessagingCoordinator {
 
     private func continueRegeneration(for agentMessage: ChatMessage, history historyForRegeneration: [ChatMessage]) {
         guard let vm = viewModel else { return }
+
+        // Re-check after the async history resolve — that hop is a staleness window in which a
+        // scheduled task, a ChatOps message or another Redo can claim this conversation. The
+        // guards below already re-validate for the same reason; admission is no different.
+        if let refusal = RunAdmissionPolicy.admitRegeneration(
+            in: agentMessage.conversationId,
+            attempts: agentMessage.agentResponse?.generationAttempts,
+            live: vm.activeStreamManager.liveRunSnapshot()
+        ) {
+            logger.warning("[RUN_CLAIM] Redo REFUSED for message \(agentMessage.id.uuidString.prefix(8)) after the history resolve (a run claimed conversation \(agentMessage.conversationId.uuidString.prefix(8)) during the hop): \(refusal.logReason)")
+            return
+        }
 
         guard let agentMessageIndex = chatHistoryViewModel.currentChatMessages.firstIndex(of: agentMessage) else {
             logger.error("Could not find agent message in chat history to regenerate.")
@@ -307,7 +328,9 @@ final class MessagingCoordinator {
             origin: .regenerate
         )
 
-        let newStreamingMessage = activeStreamManager.startMessageStream(
+        // Return value intentionally unused: `updating: agentMessage` streams into that same
+        // object, so the returned reference is `agentMessage` itself.
+        _ = activeStreamManager.startMessageStream(
             withConfig: config,
             conversationID: agentMessage.conversationId,
             userQuery: userQuery,
@@ -317,17 +340,12 @@ final class MessagingCoordinator {
             workflowExecutionState: workflowTicket?.state,
             onComplete: { [weak self] in
                 DispatchQueue.main.async {
-                    guard let self, let vm = self.viewModel else { return }
-                    vm.streamingMessageID = nil
-                    vm.streamingMessage = nil
-                    self.logger.info("Regeneration stream completed for message \(agentMessage.id.uuidString).")
+                    guard let self else { return }
+                    self.logger.info("[RUN_LIFECYCLE] regeneration stream completed for message \(agentMessage.id.uuidString.prefix(8)).")
                     workflowTicket?.finalize()
                 }
             }
         )
-
-        vm.streamingMessageID = newStreamingMessage.id
-        vm.streamingMessage = newStreamingMessage
     }
 
     /// [G1 Piece 2] Resume an interrupted run after the app last closed. Rebuilds the in-flight reasoning
@@ -340,6 +358,15 @@ final class MessagingCoordinator {
     /// Scope: plain-ReAct native agent profiles only; guards refuse a capability-wrapped profile or a
     /// provider/dialect that drifted since the run started.
     func resumeRun(for agentMessage: ChatMessage) {
+        // Cheap guard first so a refused resume never pays for a history fetch.
+        if let refusal = RunAdmissionPolicy.admitResume(
+            in: agentMessage.conversationId,
+            live: viewModel?.activeStreamManager.liveRunSnapshot() ?? []
+        ) {
+            logger.warning("[RUN_CLAIM] Resume REFUSED for message \(agentMessage.id.uuidString.prefix(8)) in conversation \(agentMessage.conversationId.uuidString.prefix(8)): \(refusal.logReason)")
+            return
+        }
+
         // Resolve the replay history up front (store-authoritative — a resume must not
         // replay less context than the original run had), then run the ENTIRE original
         // body synchronously and in order. Splitting it this way keeps every guard and
@@ -356,6 +383,20 @@ final class MessagingCoordinator {
 
     private func continueResume(for agentMessage: ChatMessage, resolvedHistory: [ChatMessage]) {
         guard let vm = viewModel else { return }
+
+        // ⚠️ THE LOAD-BEARING GUARD. Re-check after the async history resolve: the Resume chip
+        // stays live throughout that hop (the message has not started streaming yet), so a
+        // double-press lands two runs on ONE message. The second `startMessageStream(updating:)`
+        // would overwrite `activeTasks[messageID]` and leave the first run's Task unreachable by
+        // `cancelStream(for:)` forever. From here to `startMessageStream` there is no suspension
+        // point, so the claim is atomic on the main actor.
+        if let refusal = RunAdmissionPolicy.admitResume(
+            in: agentMessage.conversationId,
+            live: vm.activeStreamManager.liveRunSnapshot()
+        ) {
+            logger.warning("[RUN_CLAIM] Resume REFUSED for message \(agentMessage.id.uuidString.prefix(8)) after the history resolve (a run claimed conversation \(agentMessage.conversationId.uuidString.prefix(8)) during the hop): \(refusal.logReason)")
+            return
+        }
 
         // Resume kind from the persisted lifecycle: parked (re-raise the dangling tool) vs streaming
         // (drop the dangling tool). `.final` is not interrupted → nothing to resume.
@@ -509,7 +550,9 @@ final class MessagingCoordinator {
         // front ("Workflow runs can't be resumed after an interruption yet", :399-400), so this
         // path is unreachable for them. If workflow resume is ever implemented, bootstrap here
         // too — `ActiveStreamManager`'s [WF_RUN] guard-rail will say so loudly in the meantime.
-        let streaming = activeStreamManager.startMessageStream(
+        // Return value intentionally unused: `updating: agentMessage` streams into that same
+        // object, so the returned reference is `agentMessage` itself.
+        _ = activeStreamManager.startMessageStream(
             withConfig: BackendRequestConfig(profile: profile),
             conversationID: agentMessage.conversationId,
             userQuery: userQuery,
@@ -519,16 +562,11 @@ final class MessagingCoordinator {
             resumeState: reconstruction,
             onComplete: { [weak self] in
                 DispatchQueue.main.async {
-                    guard let self, let vm = self.viewModel else { return }
-                    vm.streamingMessageID = nil
-                    vm.streamingMessage = nil
-                    self.logger.info("[resumeRun] Resume stream completed for message \(agentMessage.id.uuidString).")
+                    guard let self else { return }
+                    self.logger.info("[RUN_LIFECYCLE] [resumeRun] resume stream completed for message \(agentMessage.id.uuidString.prefix(8)).")
                 }
             }
         )
-
-        vm.streamingMessageID = streaming.id
-        vm.streamingMessage = streaming
     }
 
     /// Marks an interrupted message as definitively non-resumable: visible reason on
@@ -546,21 +584,41 @@ final class MessagingCoordinator {
     }
 
     func cancelStreamingResponse() {
-        guard let messageID = viewModel?.streamingMessageID else {
-            logger.warning("cancelStreamingResponse called but no streamingMessageID is set.")
+        guard let vm = viewModel else { return }
+
+        // Stop targets the run in the conversation ON SCREEN — never an app-global slot. A
+        // background scheduled / ChatOps / QuickAccess run in another conversation is deliberately
+        // out of reach here; it is stopped by opening its conversation (or from its own panel).
+        let live = vm.activeStreamManager.liveRunSnapshot()
+        let selected = vm.selectedConversationID
+        let candidates = ForegroundRunResolver.liveRuns(in: selected, from: live)
+
+        guard let target = ForegroundRunResolver.foregroundRun(live: live, selectedConversation: selected) else {
+            logger.warning("[RUN_STOP] Stop pressed for conversation \(selected?.uuidString.prefix(8) ?? "<none>") but no run is live there (\(live.count) live app-wide). CONSEQUENCE: Stop is a no-op; any run streaming in another conversation is untouched, which is the intended scope boundary.")
             return
         }
 
-        logger.info("User requested to cancel streaming for message: \(messageID.uuidString)")
-        activeStreamManager.cancelStream(for: messageID)
+        if candidates.count > 1 {
+            // Should be impossible under the product model (one root run per conversation) and
+            // will be refused at claim time by admission control. Until then Redo on an older
+            // message while a newer run streams can produce it, so say so rather than pick silently.
+            logger.error("[RUN_STOP] ⚠️ conversation \(target.conversationID.uuidString.prefix(8)) holds \(candidates.count) live runs: \(candidates.map { $0.messageID.uuidString.prefix(8) }.joined(separator: ", ")). CONSEQUENCE: Stop cancels only \(target.messageID.uuidString.prefix(8)) (most recently started, unparked first); the others keep streaming and must be stopped by pressing Stop again.")
+        }
+
+        logger.info("[RUN_STOP] Cancelling run \(target.messageID.uuidString.prefix(8)) in conversation \(target.conversationID.uuidString.prefix(8)) (parked: \(target.isParked)) — user pressed Stop.")
+        activeStreamManager.cancelStream(for: target.messageID)
 
         // [HITL/P0] If a HITL banner is up for this conversation, drain the parked suspension
         // immediately so Stop returns at once. The suspend* cancellation handlers cover the
         // task-cancellation path; this also covers a suspension whose owning task isn't the one
         // we just cancelled (defensive, idempotent — resume on a resolved op is a no-op).
-        if let conversationID = viewModel?.streamingMessage?.conversationId {
-            Task { await ExecutionSuspensionService.shared.cancel(for: conversationID) }
-        }
+        //
+        // ⚠️ Still CONVERSATION-scoped, not run-scoped: it drains every park in the target's
+        // conversation. Acceptable while one root run per conversation holds, but it does reach a
+        // sibling workflow NODE's park within the same run. Run-scoping is design-doc increment 2,
+        // deferred with per-node stop.
+        let conversationID = target.conversationID
+        Task { await ExecutionSuspensionService.shared.cancel(for: conversationID) }
     }
 
     // MARK: - [HITL] Human-in-the-Loop Permissions
@@ -676,10 +734,8 @@ final class MessagingCoordinator {
                 workflowExecutionState: workflowTicket?.state,
                 onComplete: { [weak self] in
                     DispatchQueue.main.async {
-                        guard let self, let vm = self.viewModel else { return }
-                        vm.streamingMessageID = nil
-                        vm.streamingMessage = nil
-                        self.logger.info("[ChatOps] Remote stream completed for conversation \(conversationID).")
+                        guard let self else { return }
+                        self.logger.info("[RUN_LIFECYCLE] [ChatOps] Remote stream completed for conversation \(conversationID.uuidString.prefix(8)).")
                         workflowTicket?.finalize()
                     }
                 }
@@ -687,8 +743,6 @@ final class MessagingCoordinator {
             }
 
             agentMessage.messageSource = source
-            vm.streamingMessageID = agentMessage.id
-            vm.streamingMessage = agentMessage
 
             // Insert agent streaming message into Mac UI
             self.chatHistoryViewModel.currentChatMessages.insert(agentMessage, at: 0)

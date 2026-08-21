@@ -27,6 +27,11 @@ struct WorkflowExecutionTimelineView: View {
     /// Re-runs this run's original input through the normal send path. Nil (or a live run) hides
     /// the button.
     var onRerun: (() -> Void)? = nil
+
+    /// Conversation this run belongs to — required for the per-node Skip toggle (D2.1), whose
+    /// store keys on it (sound under the one-root-run-per-conversation invariant). `nil` hides
+    /// the button entirely: a surface that cannot identify the run must not offer to change it.
+    var conversationID: UUID? = nil
     /// True while another send/stream is in flight. The pill stays VISIBLE but disabled with an
     /// honest tooltip — it used to be fully enabled during a stream and the click was dropped
     /// downstream with only a log line, which reads as a broken button (WF-UI4).
@@ -265,6 +270,34 @@ struct WorkflowExecutionTimelineView: View {
                         .font(.system(.caption))
                         .foregroundColor(theme.tertiaryText)
                         .lineLimit(1)
+                }
+
+                // Per-node SKIP toggle (Phase A, D2.1): PENDING profile nodes on a LIVE run only.
+                // Toggles freely until dispatch consumes the request — that single-shot consume is
+                // why no confirmation dialog exists. Reading the store in `body` registers
+                // Observation, so an engine-side consume flips the row back without the button.
+                if node.status == .pending, node.isUserSkippable, displayData.isRunning,
+                   let conversationID {
+                    let isRequested = WorkflowNodeSkipStore.shared.isRequested(nodeID: node.nodeID, conversationID: conversationID)
+                    Button {
+                        WorkflowNodeSkipStore.shared.toggle(nodeID: node.nodeID, conversationID: conversationID)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: isRequested ? "arrow.uturn.backward" : "forward.end")
+                                .font(.system(size: 9, weight: .semibold))
+                            Text(isRequested ? "Undo skip" : "Skip")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundColor(isRequested ? theme.warningColor : theme.secondaryText)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(theme.surfaceOverlay))
+                    }
+                    .buttonStyle(.plain)
+                    .help(isRequested
+                          ? "Cancel the skip — this node will run normally"
+                          : "Skip this node when the run reaches it — its input is passed downstream unchanged (downstream gets the node's input, not its output)")
+                    .accessibilityLabel(isRequested ? "Undo skip for \(node.profileName)" : "Skip \(node.profileName)")
                 }
 
                 if isSelected {

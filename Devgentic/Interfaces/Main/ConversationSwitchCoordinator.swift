@@ -118,8 +118,6 @@ final class ConversationSwitchCoordinator {
 
         let conversationID = vm.selectedConversationID
         let currentProfileID = backendConfiguration.selectedProfileID
-        let streamingActive = vm.streamingMessageID != nil
-        let activeStreamID = vm.streamingMessageID  // captured for log
 
         loadTask = Task { [weak self] in
             // Brief debounce so rapid selections only run the latest.
@@ -141,11 +139,17 @@ final class ConversationSwitchCoordinator {
             // activeStreams until answered (possibly hours) but is idle — excluding it lets the
             // model unload while parked (reloading cheaply on resume) instead of pinning multiple
             // large local models resident indefinitely.
-            let anyStreamActive = streamingActive
-                || (self.viewModel?.activeStreamManager.activeStreams.values.contains { message in
-                    if case .streaming = message.lifecycleState { return true }
-                    return false
-                } ?? false)
+            // ✅ SIMPLIFIED 2026-08-17 (design doc increment 1). This used to be
+            // `streamingActive || <scan>`, where `streamingActive` was the shared
+            // `streamingMessageID` slot. That first term DEFEATED [C7] below by accident: the scan
+            // deliberately excludes `.parkedHITL` runs, but the slot did not, so a parked run
+            // pinned a multi-GB model iff it happened to have last written the slot — i.e. the
+            // residency of a local model was decided by a race. With the slot gone, [C7] applies
+            // consistently, which is what it always said it did.
+            let anyStreamActive = self.viewModel?.activeStreamManager.activeStreams.values.contains { message in
+                if case .streaming = message.lifecycleState { return true }
+                return false
+            } ?? false
 
             if !anyStreamActive {
                 let newProfileID: UUID? = conversationID.flatMap {
@@ -160,7 +164,7 @@ final class ConversationSwitchCoordinator {
                     self.logger.info("Skipping model unload — new conversation uses same backend profile (\(currentProfileID?.uuidString ?? "nil")).")
                 }
             } else {
-                self.logger.info("Skipping model unload — a stream is active (main slot: \(activeStreamID?.uuidString ?? "nil"), or shared ActiveStreamManager).")
+                self.logger.info("[C7] Skipping model unload — at least one ACTIVELY-STREAMING run is live in ActiveStreamManager. CONSEQUENCE: the local model stays resident until it finishes; HITL-parked runs deliberately do not count and let the model unload (2-minute idle path), reloading on resume.")
             }
 
             await self.chatHistoryViewModel.loadConversation(id: conversationID)

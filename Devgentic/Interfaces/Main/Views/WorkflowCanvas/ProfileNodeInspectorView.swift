@@ -344,7 +344,15 @@ struct ProfileNodeInspectorView: View {
                 // Node-Level Retries
                 behaviorRow(
                     label: "Node-Level Retries",
-                    explainer: "Re-runs the whole node from scratch. Independent of the agent's parse-retry policy."
+                    // ⚠️ Honest as of 2026-08-19. This stepper was rendered for sub-workflow nodes
+                    // and did NOTHING for them (§9 N4) — they are dispatched structurally and that
+                    // path had no retry loop. It now retries, which for a nested workflow means the
+                    // ENTIRE child re-runs, so the explainer says so: a child that already sent a
+                    // message or wrote a file does it again. Surfaced, not enforced — the retry
+                    // count you set is always honoured.
+                    explainer: isSubWorkflowNode
+                        ? "Re-runs the ENTIRE nested workflow from its first node. Any side effect the child already performed — a sent message, a written file — happens again."
+                        : "Re-runs the whole node from scratch. Independent of the agent's parse-retry policy."
                 ) {
                     Stepper(
                         "\(maxRetriesBinding.wrappedValue)",

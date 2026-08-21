@@ -68,8 +68,7 @@ struct XMLStructuredGenerator: CognitiveGenerator {
 
         guard !responseText.isEmpty else {
             logLLMOps.error("❌ [MistralXML:\(reqId)] Empty response from model.")
-            throw NSError(domain: "MistralXMLGenerator", code: 422,
-                          userInfo: [NSLocalizedDescriptionKey: "Empty response from model."])
+            throw GenerationError.emptyResponse(generator: "MistralXML")
         }
 
         let pipeline = CognitiveParsePipeline(

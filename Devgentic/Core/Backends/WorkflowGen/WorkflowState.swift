@@ -164,12 +164,24 @@ struct WorkflowState: Sendable {
             isCompleted = false
         }
 
+        // Phase A user-skip (D2.1): the ONE skip that keeps downstream alive. The node's recorded
+        // output IS its forwarded input, so treating it as live is what makes "Skip" honest —
+        // without this arm the button would be skipAll wearing a Skip label. `.byUser` activates
+        // no ports, so it flows through the default-edge rule below, where the error-branch
+        // exclusion still applies (a user skip is an instruction, not a failure — no error port).
+        let isUserSkip: Bool
+        if case .skipped(reason: .byUser) = output.status {
+            isUserSkip = true
+        } else {
+            isUserSkip = false
+        }
+
         // Error routing: this edge leaves an `error` port that the upstream activated (on failure,
         // or on an upstream-cascade skip so recovery chains don't dead-end).
         let isErrorRoute = edge.sourcePortLabel == WorkflowEdge.errorPortLabel
             && activeOutputPorts[upstreamID]?.contains(WorkflowEdge.errorPortLabel) == true
 
-        guard isCompleted || isErrorRoute else { return false }
+        guard isCompleted || isUserSkip || isErrorRoute else { return false }
 
         if let activePorts = activeOutputPorts[upstreamID] {
             // Upstream made an explicit routing decision (condition rule, gate option, or `error`
@@ -177,8 +189,10 @@ struct WorkflowState: Sendable {
             return activePorts.contains(edge.sourcePortLabel ?? "")
         }
 
-        // No explicit port activation, and liveness above means the upstream COMPLETED. Every edge
-        // passes EXCEPT a dedicated `error` branch — an error handler must never run on success.
+        // No explicit port activation, and liveness above means the upstream COMPLETED (or was
+        // skipped by the user, which forwards its input and is not a failure). Every edge passes
+        // EXCEPT a dedicated `error` branch — an error handler must never run on success, and a
+        // user skip must never masquerade as a failure.
         return edge.sourcePortLabel != WorkflowEdge.errorPortLabel
     }
 
@@ -427,6 +441,15 @@ struct WorkflowState: Sendable {
         switch output.status {
         case .failed:  return .upstreamFailed
         case .canceled: return .upstreamCancelled
+        case .skipped(reason: .byUser):
+            // Cascade exclusion (D2.1): a user skip keeps its default edges LIVE, so a branch
+            // below one is only dead when it leaves exclusively by the `error` port — and a user
+            // skip is not a failure, so that handler correctly stood down. Never `.upstreamSkipped`
+            // here: "an earlier node in this branch did not run" is a problem-indicating cascade
+            // sentence, and nothing went wrong.
+            let allErrorRoutes = !branchEdges.isEmpty
+                && branchEdges.allSatisfy { $0.sourcePortLabel == WorkflowEdge.errorPortLabel }
+            return allErrorRoutes ? .errorPortNotTaken : .notChosen
         case .skipped: return .upstreamSkipped
         case .completed:
             // Upstream succeeded, so nothing failed anywhere on this branch. An edge leaving the

@@ -135,6 +135,16 @@ struct QwenHermesJsonParser: CognitiveParserProtocol {
                 }
                 searchStart = jsonRange.upperBound
             } else {
+                // No balanced object after the tag. One OBSERVED reason: the doubled-brace
+                // corruption truncated at EOS — `{{"name": …, "arguments": {…}}` — is unbalanced
+                // as a whole (depth never returns to 0), so the scanner cannot find it and the
+                // repair in `decodeToolCall` would never see it. Hand the remainder through,
+                // gated on the `{{` prefix so this stays the targeted repair path and not a
+                // general re-parse of arbitrary trailing text.
+                let remainder = String(text[afterTag...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if remainder.hasPrefix("{{"), let call = decodeToolCall(from: remainder) {
+                    results.append(call)
+                }
                 searchStart = afterTag
             }
         }
@@ -162,6 +172,53 @@ struct QwenHermesJsonParser: CognitiveParserProtocol {
     private func decodeToolCall(from jsonString: String) -> PendingToolCall? {
         let trimmed = jsonString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
+
+        if let call = decodeStrict(trimmed) {
+            return call
+        }
+
+        // ⚠️ DOUBLED-BRACE REPAIR (observed 2026-08-21). `mlx-community/Qwen2.5-3B-Instruct-4bit`
+        // ships a chat template whose tool-call example reads `{{\"name\": ...}}` — an upstream
+        // f-string escaping artifact — and the model copies it faithfully:
+        //
+        //     <tool_call>
+        //     {{"name": "execute_shell", "arguments": {"command": "/Users/alice/Desktop"}}
+        //     }}
+        //     </tool_call>
+        //
+        // The render path repairs that template (`ChatTemplateRepair`), so on MLX this branch
+        // should never fire — it is DEFENSE IN DEPTH for output that reaches this parser from a
+        // route the repair does not cover: another provider serving the same corrupt artifact, or
+        // a sibling model trained/templated the same way.
+        //
+        // Discipline (the recovery-budget rules this file already lives by):
+        //   • STRUCTURAL POSITION ONLY. `{{` at the very start of a candidate is never valid
+        //     JSON — an object's first non-whitespace child cannot be another bare `{` — so the
+        //     trigger cannot be content. A `{{` INSIDE a string value (a sed script, a template
+        //     file) is protected twice over: it cannot be at position zero, and the re-scan below
+        //     is string/escape-aware, so it never counts quoted braces.
+        //   • The mutation is exactly: drop ONE leading brace, then keep the first balanced
+        //     object and discard trailing garbage (the model's orphaned `}}`). No byte inside any
+        //     string value is touched.
+        //   • Logged on every firing — a silent repair of model output would be the same sin as
+        //     the silent framework discard this whole incident started from.
+        if trimmed.hasPrefix("{{") {
+            let stripped = String(trimmed.dropFirst())
+            let candidate = BalancedJSONScanner.firstObject(in: stripped).map(String.init) ?? stripped
+            if let call = decodeStrict(candidate) {
+                logger.warning("[PARSE-REPAIR] Doubled-brace tool call repaired ({{…}} → {…}, \(trimmed.count) → \(candidate.count) chars) — the known corrupt-template output shape. CONSEQUENCE: the call is recovered instead of failing the parse; if this fires on MLX, the render-side ChatTemplateRepair did not cover this model and its template needs a register entry.")
+                return call
+            }
+        }
+
+        logger.warning("QwenHermesJsonParser: Failed to decode tool call JSON: \(trimmed.prefix(200))")
+        return nil
+    }
+
+    /// The two ordinary decode attempts — verbatim, then structurally sanitized (trailing commas,
+    /// Python literals). Factored out so the doubled-brace repair reuses them without recursing
+    /// into itself.
+    private func decodeStrict(_ trimmed: String) -> PendingToolCall? {
         guard let data = trimmed.data(using: .utf8) else { return nil }
 
         if let decoded = try? JSONDecoder().decode(ToolCallObject.self, from: data),
@@ -187,7 +244,6 @@ struct QwenHermesJsonParser: CognitiveParserProtocol {
             )
         }
 
-        logger.warning("QwenHermesJsonParser: Failed to decode tool call JSON: \(trimmed.prefix(200))")
         return nil
     }
 

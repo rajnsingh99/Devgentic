@@ -457,7 +457,8 @@ actor ChatExecutor: Executor {
             promptLayerConfig: workflowContext != nil ? .workflow : .bot,
             workflowContext: workflowContext,
             attachmentContext: input.attachmentContext,
-            knowledgeBaseContext: input.knowledgeBaseContext
+            knowledgeBaseContext: input.knowledgeBaseContext,
+            toolGuidanceContext: input.toolGuidanceContext
         )
     }
 }

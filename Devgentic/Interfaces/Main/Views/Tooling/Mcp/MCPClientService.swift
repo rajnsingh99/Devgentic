@@ -668,8 +668,34 @@ final class MCPClientService {
     /// Capped per server: `instructions` is server-controlled text that lands in EVERY
     /// request's system prefix, so an oversized one would silently eat the context window
     /// on all subsequent turns.
-    func connectedServerInstructions() -> String {
-        let blocks: [String] = activeSessions.values.compactMap { session in
+    /// Server-authored guidance, for the servers whose tools this run actually holds.
+    ///
+    /// ⚠️ `forSourceIDs` IS THE FIX. This used to take no argument and walk every connected
+    /// session, so the text shipped in EVERY request regardless of which tools the profile enabled.
+    /// A profile with three built-in tools and zero MCP tools still received ~2,000 chars of
+    /// guidance for 41 tools it did not have — and on the workflow path that text landed inside
+    /// `<task>`, which is what made a single-node workflow fail where the same profile succeeded in
+    /// chat.
+    ///
+    /// Gating is per SERVER, not per tool: instructions describe how to drive a server as a whole,
+    /// so trimming them against individual enabled tools would not be meaningful. Pass the
+    /// `sourceId`s of the run's RESOLVED tools — a server contributes iff at least one of its tools
+    /// is among them.
+    ///
+    /// Passing `nil` restores the old take-everything behaviour and is NOT for the request path;
+    /// it exists for callers that legitimately want the full set (diagnostics, settings preview).
+    func connectedServerInstructions(forSourceIDs sourceIDs: Set<UUID>? = nil) -> String {
+        let sessions = activeSessions.filter { key, _ in
+            guard let sourceIDs else { return true }
+            return sourceIDs.contains(key)
+        }
+        if let sourceIDs {
+            let skipped = activeSessions.count - sessions.count
+            if skipped > 0 {
+                logger.debug("[MCP-INSTRUCTIONS] \(skipped) connected server(s) contribute no guidance — this run holds none of their tools (\(sourceIDs.count) tool source(s) in play). CONSEQUENCE: their instructions are omitted from the prompt instead of costing every request.")
+            }
+        }
+        let blocks: [String] = sessions.values.compactMap { session in
             guard let info = session.serverInfo,
                   let instructions = info.instructions?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !instructions.isEmpty else { return nil }

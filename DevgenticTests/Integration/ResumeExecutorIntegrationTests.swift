@@ -61,10 +61,10 @@ final class ResumeExecutorIntegrationTests: XCTestCase {
         for try await ev in stream {
             events.append(ev)
             switch ev {
-            case .requestConfirmation(_, _, let opID, _):
+            case .requestConfirmation(_, _, let opID, _, _):
                 try await Task.sleep(for: .milliseconds(50))
                 await ExecutionSuspensionService.shared.resume(for: opID, approved: true)
-            case .requestClarification(_, let opID, _, _, _):
+            case .requestClarification(_, let opID, _, _, _, _):
                 try await Task.sleep(for: .milliseconds(50))
                 await ExecutionSuspensionService.shared.resumeClarification(for: opID, userInput: "yes, proceed")
             default:

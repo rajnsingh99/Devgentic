@@ -237,7 +237,15 @@ private func executeSingleTool(
             multiline: AskUserInterceptor.extractMultiline(arguments)
         ))
 
-        let userResponse = await ExecutionSuspensionService.shared.suspendForClarification(for: operationID, conversationID: conversationID)
+        let userResponse = await ExecutionSuspensionService.shared.suspendForClarification(for: operationID, conversationID: conversationID, nodeID: approvalNodeID)
+
+        // ⚠️ The `ask_user` twin of the permission check above. A cancelled clarification resolves
+        // `nil`, which this path reads as "the user skipped or did not respond" — it records that
+        // non-answer in `RunInteractionMemory` so an identical re-ask REPLAYS the fabricated skip,
+        // and yields `.toolFailed(… .cancelled)` for a question the user was never given the chance
+        // to answer. Checked BEFORE `recordAnswer` so nothing is written.
+        if Task.isCancelled { throw CancellationError() }
+
         // [Loop Safety] Remember the response (or skip) so an identical re-ask replays it.
         await interactionMemory.recordAnswer(question: question, response: userResponse)
         let didAnswer = userResponse != nil
@@ -316,7 +324,24 @@ private func executeSingleTool(
             let operationID = UUID()
             continuation.yield(.requestConfirmation(toolName: toolName, params: ps, operationID: operationID))
 
-            let approved = await ExecutionSuspensionService.shared.suspend(for: operationID, conversationID: conversationID)
+            let approved = await ExecutionSuspensionService.shared.suspend(for: operationID, conversationID: conversationID, nodeID: approvalNodeID)
+
+            // ⚠️ A CANCELLED PARK IS NOT A DENIAL. Every teardown path resolves a waiting
+            // permission with `false` — `cancel(for:)` force-resolves it, and the suspend's own
+            // `onCancel` handler resumes `approved: false` — so without this check, pressing Stop
+            // while a permission banner is up records a decision the user never made. That is not
+            // cosmetic: the `!approved` body below writes a denial into `RunInteractionMemory`
+            // (auto-denying an identical later call with NO banner), emits `.toolFailed(…
+            // .userDenied)` into the node timeline and the persisted record, feeds the agent a
+            // "user denied" observation it then reasons about, and charges the dedicated 2-strike
+            // denial circuit breaker. `false` here means "not approved", and only a live user can
+            // turn that into "denied".
+            //
+            // Throwing is safe and is the established shape: this function is `async throws`, its
+            // sequential caller already does `try Task.checkCancellation()` per interactive tool,
+            // and `ReActAgentExecutor` absorbs it in `catch is CancellationError`.
+            if Task.isCancelled { throw CancellationError() }
+
             if approved, let edited = await ExecutionSuspensionService.shared.consumeEditedArguments(for: operationID) {
                 // [HITL/A3] The user corrected the arguments in the banner — run with those.
                 effectiveArguments = edited

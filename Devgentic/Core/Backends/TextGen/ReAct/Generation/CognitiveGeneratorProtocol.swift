@@ -9,6 +9,10 @@
 import Foundation
 import os
 
+/// Same category as the generator strategies, so a prompt line and the request it belongs to
+/// sit together in a filtered log.
+private let logPrompt = DGLogger(category: "LLMOps")
+
 /// File-scoped logger for the prompt-builder helpers (protocol extensions have no
 /// `self` to borrow one from).
 private let promptLogger = Logger(subsystem: "com.devgentic", category: "PromptBuilder")
@@ -23,6 +27,16 @@ enum PromptWrapping: Sendable {
     case markdown  // ## Tag\ncontent
 
     /// Wraps content in a named structural section.
+    /// Short name for logs. The wrapping mode is not cosmetic — it changes the bytes the model
+    /// reads, and a small quantized model can format its tool call differently under markdown
+    /// headings than under XML tags, so a log that omits it cannot explain a formatting failure.
+    var logLabel: String {
+        switch self {
+        case .xml: return "xml"
+        case .markdown: return "markdown"
+        }
+    }
+
     func section(_ tag: String, content: String) -> String {
         switch self {
         case .xml:
@@ -55,7 +69,12 @@ struct PromptLayerConfig: Sendable {
     let includeUserProfile: Bool
 
     static let agent = PromptLayerConfig(includeRAG: true, includeEpisodicMemory: true, includeUserProfile: true)
-    static let workflow = PromptLayerConfig(includeRAG: false, includeEpisodicMemory: false, includeUserProfile: false)
+    /// ⚠️ `includeUserProfile: true` is deliberate, and deliberately asymmetric with RAG/episodic
+    /// (owner decision, 2026-08-20). A node must not inherit conversation memory — it has no
+    /// conversation — but it DOES run the user's own profile, and the personal layer is their skills
+    /// and guardrails. Its twin gate is in `ReActAgentExecutor`, which nils the value out if that
+    /// one is not also open.
+    static let workflow = PromptLayerConfig(includeRAG: false, includeEpisodicMemory: false, includeUserProfile: true)
     static let bot = PromptLayerConfig(includeRAG: true, includeEpisodicMemory: true, includeUserProfile: false)
     static let code = PromptLayerConfig(includeRAG: false, includeEpisodicMemory: true, includeUserProfile: false)
 }
@@ -332,6 +351,20 @@ enum PromptBuilder {
             systemContent += "\n\n" + wrapping.section("knowledge_base", content: knowledgeBase)
         }
 
+        // Layer 5.6: CONTEXT — MCP server guidance for the tools THIS run actually holds.
+        //
+        // Its own section rather than the knowledge layer (owner decision 2026-08-20): knowledge is
+        // the user's reference material, this is how to drive the tools. It sits beside
+        // `<knowledge_base>` rather than near `<available_tools>` because that section exists only
+        // on legacy non-native flows — most modern models get their schemas from the chat template,
+        // so anchoring guidance to it would make it vanish exactly where it is most used.
+        //
+        // ⚠️ Populated per-SERVER by the caller (see `SemanticContext.toolGuidanceContext`), so a
+        // profile holding none of a server's tools never sees its instructions.
+        if let toolGuidance = context.toolGuidanceContext, !toolGuidance.isEmpty {
+            systemContent += "\n\n" + wrapping.section("tool_guidance", content: toolGuidance)
+        }
+
         // Layer 6: CONTEXT — RAG grounding (configurable)
         if layerConfig.includeRAG {
             let grounding = context.longTermMemory.getStaticGrounding()
@@ -382,6 +415,30 @@ enum PromptBuilder {
         // MESSAGE ARRAY
         // =====================================================================
 
+        // ⚠️ THE DIAGNOSTIC THAT WAS MISSING. Nothing anywhere logged how the system prompt was
+        // COMPOSED — only its token count after templating. So a workflow node whose `<task>` had
+        // been fused with ~2,000 chars of MCP guidance looked, in the log, exactly like a healthy
+        // node: "prompt tokens=1315". The bug took a full source reconstruction to find because the
+        // log could not answer "what did the model actually read?".
+        //
+        // One line, sizes only — never the content, which can carry file text, knowledge payloads
+        // and user data. Sizes are enough to spot the failure mode this exists for: a `<task>` that
+        // is thousands of chars when the user typed forty.
+        let layerSizes: [(String, Int)] = [
+            ("task", task.count),
+            ("clarification", context.latestClarification.map { $0.query.count + $0.response.count } ?? 0),
+            ("instructions", (context.instructions ?? "").count),
+            ("environment", envContent.count),
+            ("knowledge_base", (context.knowledgeBaseContext ?? "").count),
+            ("tool_guidance", (context.toolGuidanceContext ?? "").count),
+            ("episodic", layerConfig.includeEpisodicMemory ? (context.recentHistory ?? "").count : 0),
+            ("user_profile", layerConfig.includeUserProfile ? (context.userProfile ?? "").count : 0),
+            ("attachments", includeAttachmentContext ? (context.attachmentContext ?? "").count : 0)
+        ]
+        let rendered = layerSizes.filter { $0.1 > 0 }.map { "\($0.0)=\($0.1)" }.joined(separator: " ")
+        let omitted = layerSizes.filter { $0.1 == 0 }.map(\.0).joined(separator: ",")
+        logPrompt.info("[PROMPT] system=\(systemContent.count) chars | \(rendered) | omitted: \(omitted.isEmpty ? "none" : omitted) | tools=\(context.availableTools.count) native=\(isNativeFlow) wrapping=\(wrapping.logLabel) layers=\(layerConfig.includeRAG ? "R" : "-")\(layerConfig.includeEpisodicMemory ? "E" : "-")\(layerConfig.includeUserProfile ? "U" : "-")")
+
         var messages: [[String: String]] = [["role": "system", "content": systemContent]]
 
         // History messages: prose-only user/assistant turn pairs carry conversation
@@ -419,7 +476,11 @@ enum PromptBuilder {
         // `includeAttachmentContext: false` and composes them into its kickoff
         // turn instead (same rationale as `includeWorkingMemory`).
         if includeAttachmentContext, let attachments = context.attachmentContext, !attachments.isEmpty {
-            userContent += attachments
+            // Delimited (owner decision 2026-08-20). This used to be appended RAW, with nothing
+            // separating a pasted file's text from the query that follows it — fine for a large
+            // model, ambiguous for a small one, and the same class of fusion that broke the
+            // workflow `<task>`. The tag is the label, so no prose header is needed.
+            userContent += wrapping.section("attachments", content: attachments)
         }
 
         let resolvedPrefix: String? = {
@@ -442,6 +503,35 @@ enum PromptBuilder {
 
         if !userContent.isEmpty {
             messages.append(["role": "user", "content": userContent])
+        }
+
+        // ⚠️ THE VERBATIM DUMP. Everything above logs SIZES; this logs the actual bytes, and only
+        // when the user has switched developer mode on (see `DGLogger.dumpBlock` for why that
+        // exception exists and why it is routed to a never-persisted level).
+        //
+        // Why the whole ARRAY and not just the system prompt: the message array is where the two
+        // interfaces visibly diverge. A workflow node can carry an extra `user` turn that chat does
+        // not, and a size-only line renders that difference invisible. Reading "3 messages" tells
+        // you nothing; reading the turns tells you everything.
+        //
+        // Built lazily behind the gate — this string is several KB and must not be assembled on
+        // every request just to be dropped.
+        if DGLogger.contentDumpsEnabled {
+            // `-> String` on the closure and on `body` are both REQUIRED (see the GRDB note
+            // below): without them the interpolated literal is inferred as GRDB's `SQL`, the map
+            // yields `[SQL]`, and `joined` then produces `SQL` rather than a String.
+            let body: String = messages.enumerated().map { (index, message) -> String in
+                let role = message["role"] ?? "?"
+                let content = message["content"] ?? ""
+                return "--- [\(index)] role=\(role) (\(content.count) chars) ---\n\(content)"
+            }.joined(separator: "\n")
+            // ⚠️ Explicit `String` annotations are REQUIRED, not stylistic. GRDB is linked into
+            // this target and its `SQL` type is `ExpressibleByStringInterpolation`, so an
+            // interpolated literal passed straight into a multi-argument call can be solved as
+            // `SQL` and fail with "cannot convert value of type 'SQL' to expected argument type
+            // 'String'". Annotating pins the literal before overload resolution sees it.
+            let dumpTitle: String = "message array — \(messages.count) message(s), wrapping=\(wrapping.logLabel), native=\(isNativeFlow), tools=\(context.availableTools.count)"
+            logPrompt.dumpBlock("[PROMPT-FULL]", title: dumpTitle, body: body)
         }
 
         return messages

@@ -22,6 +22,7 @@ final class PromptBuilderContextLayerTests: XCTestCase {
         attachmentContext: String? = nil,
         knowledgeBaseContext: String? = nil,
         ragContext: String = "",
+        userProfile: String? = nil,
         layerConfig: PromptLayerConfig = .bot
     ) -> SemanticContext {
         SemanticContext(
@@ -43,7 +44,7 @@ final class PromptBuilderContextLayerTests: XCTestCase {
             negativeConstraints: [],
             hallucinatedTools: [],
             availableTools: [],
-            userProfile: nil,
+            userProfile: userProfile,
             skillManifests: nil,
             taskDescription: nil,
             promptLayerConfig: layerConfig,
@@ -59,6 +60,46 @@ final class PromptBuilderContextLayerTests: XCTestCase {
 
     private func userContents(of messages: [[String: String]]) -> [String] {
         messages.filter { $0["role"] == "user" }.compactMap { $0["content"] }
+    }
+
+    // MARK: - User profile in WORKFLOW mode (owner decision, 2026-08-20)
+
+    /// THE DECISION, pinned. A workflow node must not inherit conversation memory — it has no
+    /// conversation — but it DOES run the user's own profile, so their skills and guardrails apply.
+    /// Before this, `.workflow` set all three layer flags to false together, and the personal layer
+    /// was collateral damage of "a node has no conversation history".
+    ///
+    /// ⚠️ This asserts the ASYMMETRY, not just the one flag. A future cleanup that "tidies" the
+    /// three flags back into agreement is exactly the regression this exists to catch.
+    func testWorkflowLayerConfig_KeepsUserProfileButNotConversationMemory() {
+        XCTAssertTrue(PromptLayerConfig.workflow.includeUserProfile,
+                      "a node runs the user's profile on their behalf — skills and guardrails still apply")
+        XCTAssertFalse(PromptLayerConfig.workflow.includeRAG,
+                       "a node has no conversation to retrieve from")
+        XCTAssertFalse(PromptLayerConfig.workflow.includeEpisodicMemory,
+                       "a node has no episodic history")
+    }
+
+    func testUserProfile_RendersOnTheWorkflowPath() {
+        let context = makeContext(userProfile: "Prefers metric units. Never run destructive shell commands.",
+                                  layerConfig: .workflow)
+        let system = systemContent(of: PromptBuilder.buildStandardMessages(context: context, layerConfig: .workflow))
+
+        XCTAssertTrue(system.contains("Never run destructive shell commands."),
+                      "the personal layer must reach a workflow node's system prompt")
+    }
+
+    /// ⚠️ THE TWIN GATE. `PromptLayerConfig` only PERMITS the layer; the value itself is read in
+    /// `ReActAgentExecutor` / `PlanningCapability`, which used to nil it out whenever
+    /// `workflowContext != nil`. Flipping one and not the other renders nothing, silently — which is
+    /// indistinguishable from the feature being off. This pins the assembly half: permitted plus
+    /// absent must stay absent, so a green flag alone is never mistaken for a working layer.
+    func testWorkflowUserProfile_AbsentWhenTheExecutorSuppliedNone() {
+        let context = makeContext(userProfile: nil, layerConfig: .workflow)
+        let system = systemContent(of: PromptBuilder.buildStandardMessages(context: context, layerConfig: .workflow))
+
+        XCTAssertFalse(system.contains("<user_profile>"),
+                       "permitting the layer must not invent one when the executor passed nil")
     }
 
     // MARK: - <knowledge_base> layer

@@ -52,7 +52,15 @@ enum AgentStreamEvent: Sendable {
     /// - toolName: The name of the sensitive tool (e.g. "delete_file")
     /// - params: The parameters needed for the tool (e.g. path)
     /// - operationID: Unique identifier for this HITL operation (for multi-surface dedup)
-    case requestConfirmation(toolName: String, params: String, operationID: UUID = UUID(), sourceNodeID: UUID? = nil)
+
+    /// Human-readable name of the node that raised this, for the banner title. Carried
+    /// SEPARATELY from `sourceNodeID` because that id is the APPROVAL-SCOPE key and, for a
+    /// request forwarded out of a sub-workflow, it names an INNER node the parent's
+    /// `WorkflowExecutionState.nodeResults` has never heard of (the child's node events are
+    /// deliberately suppressed). Resolving the title from the id therefore always missed and
+    /// every nested request rendered as a bare "Permission required". One field cannot be both
+    /// the security key and the display key.
+    case requestConfirmation(toolName: String, params: String, operationID: UUID = UUID(), sourceNodeID: UUID? = nil, sourceNodeName: String? = nil)
 
     /// [E1] A workflow Gate node is asking the user to pick one of `options`. The choice routes the
     /// workflow to the matching output port. `deadline` is the absolute auto-reject time (live countdown).
@@ -61,7 +69,7 @@ enum AgentStreamEvent: Sendable {
     /// event is a permanent hang, not a visible failure, because the executor is already parked on
     /// the operationID and nothing times out. Defaulted values keep every existing positional
     /// binding compiling while a NEW case would silently fall into those `default:` arms.
-    case requestGate(prompt: String, options: [String], operationID: UUID = UUID(), deadline: Date? = nil, sourceNodeID: UUID? = nil, inputText: String? = nil, highlights: [RuleMatchSpan] = [])
+    case requestGate(prompt: String, options: [String], operationID: UUID = UUID(), deadline: Date? = nil, sourceNodeID: UUID? = nil, inputText: String? = nil, highlights: [RuleMatchSpan] = [], sourceNodeName: String? = nil)
 
     /// The tool executed successfully. Carries the observation payload for the LLM + UI.
     /// - durationMs: optional wall-clock execution time (from dispatch to completion)
@@ -82,7 +90,7 @@ enum AgentStreamEvent: Sendable {
     /// The agent needs clarification from the user before it can proceed.
     /// - question: The question to display to the user
     /// - operationID: Unique identifier for this HITL operation (for multi-surface dedup)
-    case requestClarification(question: String, operationID: UUID = UUID(), sourceNodeID: UUID? = nil, options: [String]? = nil, multiline: Bool = false)
+    case requestClarification(question: String, operationID: UUID = UUID(), sourceNodeID: UUID? = nil, options: [String]? = nil, multiline: Bool = false, sourceNodeName: String? = nil)
 
     /// A terminal error. Carries a `StructuredError` (category + message +
     /// optional relatedPath/suggestion). Legacy `.error("string")` call sites
@@ -194,7 +202,7 @@ enum AgentStreamEvent: Sendable {
     /// Execution is suspended until the user approves, edits, or rejects the plan.
     /// - subtasks: The generated subtask plan (user may edit before approving)
     /// - operationID: Unique identifier for this HITL operation (for multi-surface dedup)
-    case requestPlanReview(subtasks: [SubTask], operationID: UUID = UUID(), sourceNodeID: UUID? = nil)
+    case requestPlanReview(subtasks: [SubTask], operationID: UUID = UUID(), sourceNodeID: UUID? = nil, sourceNodeName: String? = nil)
 
     // MARK: - History Compaction
 

@@ -48,6 +48,7 @@ class AgentConnect: @unchecked Sendable {
         ragContext: String? = nil,
         attachmentContext: String? = nil,
         knowledgeBaseContext: String? = nil,
+        toolGuidanceContext: String? = nil,
         userPayload: Payload? = nil,
         resumeState: TimelineReconstruction? = nil,
         traceContext: TraceContext,
@@ -90,17 +91,27 @@ class AgentConnect: @unchecked Sendable {
                         // Workflows have no layered per-node prompt for chat context, and the
                         // engine merges userInput into the FIRST node's task only — so knowledge
                         // and attachment payloads must ride userInput here or they'd be dropped.
-                        var workflowInputParts: [String] = []
-                        if let kb = knowledgeBaseContext, !kb.isEmpty { workflowInputParts.append(kb) }
-                        if let attachments = attachmentContext, !attachments.isEmpty { workflowInputParts.append(attachments) }
-                        workflowInputParts.append(userInput)
-                        let composedWorkflowInput = workflowInputParts.joined(separator: "\n\n")
+                        // ⚠️ THE FUSION IS GONE (2026-08-20). This used to build
+                        // `[knowledgeBase, attachments, userInput].joined()` and pass the result as
+                        // `userInput`, because a node had no other route to those payloads. The
+                        // entry-node merge then folded that whole string into `taskDescription`, so
+                        // `<task>` — the first and most heavily attended section of the prompt —
+                        // opened with reference material and buried the real question at the end.
+                        // A 3B model derailed on it five times running and the workflow aborted,
+                        // while the SAME agent profile answered fine in chat, where the identical
+                        // payloads sit in their own labelled sections.
+                        //
+                        // Attachments now travel their own channel to the ENTRY node and render as
+                        // `<attachments>`. Profile knowledge does NOT ride along: `WorkflowConfig`
+                        // has no `knowledgeSources` field, so a workflow profile cannot define any
+                        // — the old `kb` term here was always nil for the workflow arm.
                         let workflowExecutor = WorkflowExecutor(workflowProfileID: profile.id)
                         let wfStream = workflowExecutor.executeWorkflow(
-                            userInput: composedWorkflowInput,
+                            userInput: userInput,
                             chatHistory: chatHistory,
                             conversationID: conversationID,
                             ragContext: ragContext,
+                            attachmentContext: attachmentContext,
                             traceContext: traceContext,
                             onTraceUpdate: { log in onTraceUpdate?(log) }
                         )
@@ -467,6 +478,7 @@ class AgentConnect: @unchecked Sendable {
                         userPayload: userPayload,
                         attachmentContext: attachmentContext,
                         knowledgeBaseContext: knowledgeBaseContext,
+                        toolGuidanceContext: toolGuidanceContext,
                         chatHistory: chatHistory,
                         // Vision BOTS re-attach prior-turn images (ChatExecutor reads
                         // chatHistory). Gated on vision alone — NOT tool capability —
@@ -770,9 +782,29 @@ class AgentConnect: @unchecked Sendable {
                         return imageArtifacts.map { .image(ImagePayload(reference: $0.reference, mimeType: $0.mimeType, alt: $0.label)) }
                     }()
 
+                    // Per-NODE MCP guidance. `rawTools` is this node's profile's configured tool
+                    // list, so the gate follows the node rather than the workflow profile (which
+                    // holds no tools of its own). A node with no MCP tools gets no `<tool_guidance>`
+                    // section at all — which is the whole point: the failing report had an agent
+                    // with three built-in tools receiving ~2,000 chars about 41 MCP tools.
+                    let nodeToolSourceIDs = Set((rawTools ?? []).filter(\.isEnabled).map(\.sourceId))
+                    var nodeToolGuidance: String? = nil
+                    if !nodeToolSourceIDs.isEmpty {
+                        let text = await MCPClientService.shared
+                            .connectedServerInstructions(forSourceIDs: nodeToolSourceIDs)
+                        nodeToolGuidance = text.isEmpty ? nil : text
+                        logger.debug("[MCP-INSTRUCTIONS] node '\(workflowContext.nodeName)': \(text.count) chars of guidance from \(nodeToolSourceIDs.count) tool source(s). CONSEQUENCE: servers whose tools this node does not hold contribute nothing to its prompt.")
+                    }
+
                     let input = AgentInput(
                         userInput: userInputForNode,
                         userPayload: workflowImagePayload,
+                        // Attachments render as `<attachments>` — the same section the chat path
+                        // uses — instead of being fused into this node's task.
+                        attachmentContext: workflowContext.attachmentContext,
+                        // Gated on THIS NODE's own tools, not the workflow profile's (it has none):
+                        // each node picks its own profile and therefore its own MCP servers.
+                        toolGuidanceContext: nodeToolGuidance,
                         chatHistory: [],
                         conversationID: conversationID,
                         tools: activeTools,
@@ -802,7 +834,13 @@ class AgentConnect: @unchecked Sendable {
                         nativeContextBudgetChars: nativeContextBudgetChars
                     )
 
-                    logger.info("[Workflow] AgentInput: tools=\(activeTools.count), generator=\(type(of: generator)), node='\(workflowContext.nodeName)'")
+                    // ⚠️ Tool NAMES, not just a count. This said only "tools=3" — which cannot
+                    // answer "which three?" from a field log, and that question came up twice
+                    // while diagnosing a node. The sampling config is deliberately NOT repeated
+                    // here: the ReAct banner below already prints the provider's full
+                    // `generationConfig`, and a second copy would be noise, not coverage.
+                    let toolNames = activeTools.map(\.name).sorted().joined(separator: ", ")
+                    logger.info("[Workflow] AgentInput node='\(workflowContext.nodeName)': tools=\(activeTools.count) [\(toolNames)], generator=\(type(of: generator)), model=\(llmConfig.modelName)")
 
                     // 8. Execute
                     let executor = ExecutorFactory.create(for: profile)

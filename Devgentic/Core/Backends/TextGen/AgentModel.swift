@@ -532,6 +532,21 @@ struct AgentInput: Sendable {
     /// budgeted content (directInjection) or a path manifest (stateless).
     var knowledgeBaseContext: String? = nil
 
+    /// MCP server-authored guidance on how to drive THIS run's tools, rendered as `<tool_guidance>`.
+    ///
+    /// ⚠️ Separate from `knowledgeBaseContext` on purpose (owner decision 2026-08-20). It used to
+    /// ride the knowledge layer, which conflated two things: knowledge is the USER's reference
+    /// material, this is operating instructions for TOOLS. It also cannot live in
+    /// `<available_tools>` — that section renders only for LEGACY (non-native) flows and holds
+    /// schemas rather than prose.
+    ///
+    /// ⚠️ GATED PER SERVER by the caller: only servers with at least one tool in this run's
+    /// resolved set contribute. Before that gate every connected server's instructions shipped in
+    /// every request — an agent with 3 built-in tools and ZERO MCP tools still received ~2,000
+    /// chars explaining how to drive 41 tools it did not have, and on the workflow path that text
+    /// became its `<task>`.
+    var toolGuidanceContext: String? = nil
+
     // NOTE: Used ONLY by ChatExecutor (Bots). ReActAgentExecutor completely ignores this
     // to enforce the "Zero-History Context" architecture.
     var chatHistory: [ChatMessage]
@@ -653,6 +668,7 @@ struct AgentInput: Sendable {
         userPayload: Payload? = nil,
         attachmentContext: String? = nil,
         knowledgeBaseContext: String? = nil,
+        toolGuidanceContext: String? = nil,
         chatHistory: [ChatMessage],
         botHistoryImagesEnabled: Bool = false,
         conversationID: UUID,
@@ -684,6 +700,7 @@ struct AgentInput: Sendable {
         self.userPayload = userPayload
         self.attachmentContext = attachmentContext
         self.knowledgeBaseContext = knowledgeBaseContext
+        self.toolGuidanceContext = toolGuidanceContext
         self.chatHistory = chatHistory
         self.botHistoryImagesEnabled = botHistoryImagesEnabled
         self.conversationID = conversationID
@@ -788,6 +805,21 @@ struct SemanticContext: Sendable {
     /// layer: budgeted content (directInjection) or a path manifest (stateless).
     var knowledgeBaseContext: String? = nil
 
+    /// MCP server-authored guidance on how to drive THIS run's tools, rendered as `<tool_guidance>`.
+    ///
+    /// ⚠️ Separate from `knowledgeBaseContext` on purpose (owner decision 2026-08-20). It used to
+    /// ride the knowledge layer, which conflated two things: knowledge is the USER's reference
+    /// material, this is operating instructions for TOOLS. It also cannot live in
+    /// `<available_tools>` — that section renders only for LEGACY (non-native) flows and holds
+    /// schemas rather than prose.
+    ///
+    /// ⚠️ GATED PER SERVER by the caller: only servers with at least one tool in this run's
+    /// resolved set contribute. Before that gate every connected server's instructions shipped in
+    /// every request — an agent with 3 built-in tools and ZERO MCP tools still received ~2,000
+    /// chars explaining how to drive 41 tools it did not have, and on the workflow path that text
+    /// became its `<task>`.
+    var toolGuidanceContext: String? = nil
+
     /// Current-turn image attachments (already vision-gated upstream — nil for a
     /// non-vision local model). The NATIVE path reads `input.userPayload` directly;
     /// this field is the only channel by which the LEGACY/dialect generators can see
@@ -800,8 +832,30 @@ struct SemanticContext: Sendable {
 
 /// Typed failure signals enabling intelligent retry/skip/reroute decisions.
 /// Replaces opaque error strings with structured reasons the workflow layer can act on.
+/// ⚠️ `iterationBudgetExhausted` has a history worth knowing before you touch it.
+///
+/// It was declared in 6c2c0b4 with three switch arms and NEVER CONSTRUCTED — so `isRetryable`
+/// returned `true` for it and `remediation` offered advice that no user could ever see. It was
+/// DELETED as dead on 2026-08-19, then REINSTATED the same day once the investigation showed there
+/// is a real failure that should carry it. The lesson stands: **a case here is only worth having if
+/// something constructs it.** Do not re-add one without a construction site.
+///
+/// WHAT ACTUALLY HAPPENS ON EXHAUSTION (`ErrorRecovery.onIterationExhaustion` in `ReActAgentExecutor`):
+///   • `.synthesizeBestEffort` (the DEFAULT) with usable partial text → `.completedWithWarnings`.
+///     The workflow node stays `.completed`. **Not a failure, and not retried.**
+///   • `.synthesizeBestEffort` with an EMPTY response → `.failed`. This is the case that was missing:
+///     it reaches the workflow node on the DEFAULT policy, so it is not rare.
+///   • `.failHard` → `.failed` always.
+///
+/// ⚠️ Until this was reinstated, both failing paths were classified as `.modelError`, so the node's
+/// remediation read "The model provider returned an error. Check connectivity, credentials, and the
+/// selected model." for a run that had simply run out of steps.
+///
+/// ⚠️ NO `bestEffortOutput` PAYLOAD, deliberately. The old shape had one and it would always have
+/// been nil: a non-empty best effort produces `.completedWithWarnings`, which never becomes a
+/// failure reason at all. A payload that is structurally always nil is the same lie in miniature.
 enum AgentFailureReason: Sendable, Codable, Equatable {
-    case iterationBudgetExhausted(iterations: Int, bestEffortOutput: String?)
+    case iterationBudgetExhausted(iterations: Int)
     case consecutiveParseFailures(count: Int, lastError: String)
     case consecutiveToolFailures(count: Int, lastTool: String, lastError: String)
     case repetitiveActionLoop(action: String, count: Int)
@@ -811,6 +865,10 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
 
     var isRetryable: Bool {
         switch self {
+        // Retried per the owner's rule (a profile-node failure retries). The agent is
+        // non-deterministic, so a fresh sample may terminate where this one did not — but it is the
+        // most EXPENSIVE reason to retry, since each attempt costs a full iteration budget. The
+        // retry sites log it distinctly for exactly that reason.
         case .iterationBudgetExhausted: true
         case .consecutiveParseFailures: true
         case .consecutiveToolFailures: false
@@ -823,8 +881,8 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
 
     var localizedDescription: String {
         switch self {
-        case .iterationBudgetExhausted(let iterations, _):
-            "Iteration budget exhausted after \(iterations) iterations"
+        case .iterationBudgetExhausted(let iterations):
+            "Ran out of steps after \(iterations) iterations without producing an answer"
         case .consecutiveParseFailures(let count, let lastError):
             "\(count) consecutive parse failures (last: \(lastError))"
         case .consecutiveToolFailures(let count, let lastTool, let lastError):
@@ -846,8 +904,8 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
     /// it surfaces in every run card (Round 2 Phase 4).
     var remediation: String? {
         switch self {
-        case .iterationBudgetExhausted:
-            return "The agent ran out of iterations. Simplify the node's task or raise its iteration limit."
+        case .iterationBudgetExhausted(let iterations):
+            return "The agent used all \(iterations) of its steps without producing an answer. Simplify the node's task, or raise the profile's Max Iterations."
         case .consecutiveParseFailures:
             return "The model's structured output couldn't be parsed repeatedly. Try a different model or a simpler task."
         case .consecutiveToolFailures(_, let lastTool, _):
@@ -870,6 +928,16 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
     /// for a loop the agent was stuck in). Marker strings match `CognitiveCircuitBreaker`'s abort
     /// reasons. Falls back to `.modelError` for anything unrecognized.
     static func classify(agentReasonText text: String, provider: String = "agent") -> AgentFailureReason {
+        // ⚠️ TWO DIFFERENT PHRASINGS, and matching only one covers only one path. The executor's
+        // `.failHard` arm says "Reached maximum allowed steps (N) without completion." while the
+        // `.synthesizeBestEffort` arm's terminalReason says "Reached maximum iterations (N) without
+        // explicit completion". The SECOND is the one that matters most: it is the default policy,
+        // and it reaches here whenever the agent produced no text. Both are matched on the shared
+        // "Reached maximum" prefix plus the parenthesised count, so a reworded message degrades to
+        // `.modelError` rather than silently matching the wrong thing.
+        if let iterations = exhaustedIterationCount(in: text) {
+            return .iterationBudgetExhausted(iterations: iterations)
+        }
         if text.contains("Breaking stale loop") {
             // "Tool 'X' has been called N times with the same parameters…"
             let action = text.split(separator: "'").dropFirst().first.map(String.init) ?? "the same action"
@@ -879,6 +947,20 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
             return .repetitiveActionLoop(action: action, count: count)
         }
         return .modelError(provider: provider, error: text)
+    }
+
+    /// The iteration count from an exhaustion message, or nil if this is not one.
+    ///
+    /// Pure and total so the parsing is testable without an executor — the same shape as the rest of
+    /// the retry policy work. Returns nil rather than a default count when the number cannot be
+    /// read: a wrong count in a remediation string ("you used all 0 of your steps") is worse than
+    /// falling back to the generic reason.
+    static func exhaustedIterationCount(in text: String) -> Int? {
+        guard text.contains("Reached maximum") else { return nil }
+        guard let open = text.firstIndex(of: "("),
+              let close = text[open...].firstIndex(of: ")") else { return nil }
+        let digits = text[text.index(after: open)..<close]
+        return Int(digits.trimmingCharacters(in: .whitespaces))
     }
 }
 

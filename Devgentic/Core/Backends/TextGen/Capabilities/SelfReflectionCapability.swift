@@ -260,12 +260,12 @@ actor SelfReflectionExecutorWrapper: Executor {
                                         isSuccess: false
                                     )
                                     continuation.yield(.toolFailed(output, category: category, suggestion: suggestion))
-                                case .requestConfirmation(let toolName, let params, let operationID, let sourceNodeID):
+                                case .requestConfirmation(let toolName, let params, let operationID, let sourceNodeID, let sourceNodeName):
                                     // [G8] Forward HITL permission requests — user must see these during trials.
-                                    continuation.yield(.requestConfirmation(toolName: toolName, params: params, operationID: operationID, sourceNodeID: sourceNodeID))
-                                case .requestClarification(let question, let operationID, let sourceNodeID, let options, let multiline):
+                                    continuation.yield(.requestConfirmation(toolName: toolName, params: params, operationID: operationID, sourceNodeID: sourceNodeID, sourceNodeName: sourceNodeName))
+                                case .requestClarification(let question, let operationID, let sourceNodeID, let options, let multiline, let sourceNodeName):
                                     // [G8] Forward HITL clarification requests.
-                                    continuation.yield(.requestClarification(question: question, operationID: operationID, sourceNodeID: sourceNodeID, options: options, multiline: multiline))
+                                    continuation.yield(.requestClarification(question: question, operationID: operationID, sourceNodeID: sourceNodeID, options: options, multiline: multiline, sourceNodeName: sourceNodeName))
                                 case .error(let msg):
                                     continuation.yield(.error(msg))
                                 case .warning(let cat, let msg, let relatedPath, _):
@@ -392,7 +392,17 @@ actor SelfReflectionExecutorWrapper: Executor {
 
                 } catch is CancellationError {
                     logger.notice("Self-reflection cancelled.")
-                    await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    // ⚠️ NODE-SCOPED WHEN THIS RUN IS A WORKFLOW NODE (N3). The conversation-wide drain
+                    // force-resolves EVERY park in the conversation — including a SIBLING node's, whose
+                    // tool would then be reported "denied by the user" though the user never saw it.
+                    // A sub-workflow child is constructed with the PARENT's conversationID, so a child's
+                    // node timeout used to sweep the outer run's banners too. Chat and code runs have no
+                    // `workflowContext`, so they keep the conversation-wide sweep unchanged.
+                    if let nodeID = input.workflowContext?.nodeID {
+                        await ExecutionSuspensionService.shared.cancelNode(nodeID, in: input.conversationID)
+                    } else {
+                        await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    }
                     sessionState.cancelActiveEpisode()
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                     continuation.yield(.thought("Cancelled by user."))
@@ -430,7 +440,17 @@ actor SelfReflectionExecutorWrapper: Executor {
                         span: input.traceContext,
                         error: classified
                     )
-                    await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    // ⚠️ NODE-SCOPED WHEN THIS RUN IS A WORKFLOW NODE (N3). The conversation-wide drain
+                    // force-resolves EVERY park in the conversation — including a SIBLING node's, whose
+                    // tool would then be reported "denied by the user" though the user never saw it.
+                    // A sub-workflow child is constructed with the PARENT's conversationID, so a child's
+                    // node timeout used to sweep the outer run's banners too. Chat and code runs have no
+                    // `workflowContext`, so they keep the conversation-wide sweep unchanged.
+                    if let nodeID = input.workflowContext?.nodeID {
+                        await ExecutionSuspensionService.shared.cancelNode(nodeID, in: input.conversationID)
+                    } else {
+                        await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    }
                     continuation.yield(.executionFinished(outcome: .failed, reason: classified.message))
                     continuation.finish(throwing: error)
                 }

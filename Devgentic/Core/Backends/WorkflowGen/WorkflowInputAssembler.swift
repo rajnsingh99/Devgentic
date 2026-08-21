@@ -63,6 +63,11 @@ enum WorkflowInputAssembler {
             switch result.status {
             case .completed:            return true
             case .failed:               return includeFailures
+            // A user-skipped upstream (D2.1) carries its INPUT as its output, and it counts as an
+            // arrival everywhere — including fan-in joins (owner-ratified 2026-08-21): a join
+            // requiring all inputs must never turn a skip into a silent run-killer. This is also
+            // what makes CHAINED user skips compose: each pass-through feeds the next.
+            case .skipped(reason: .byUser): return true
             case .canceled, .skipped:   return false
             }
         }

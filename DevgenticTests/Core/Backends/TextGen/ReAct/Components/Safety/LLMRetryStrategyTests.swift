@@ -61,11 +61,26 @@ final class LLMRetryStrategyTests: XCTestCase {
         .modelIdentityMismatch(expected: expected, actual: actual)
     }
 
-    /// The REAL parse-failure producer — an empty-response guard in the generation strategies,
-    /// not a hand-written string. The negative control depends on this staying genuine.
-    private func makeEmptyResponseError() -> NSError {
-        NSError(domain: "MLXModern", code: 422,
-                userInfo: [NSLocalizedDescriptionKey: "Empty response from model."])
+    /// An UNRECOGNISED error, in the exact shape the generators used to throw for an empty
+    /// response before `GenerationError.emptyResponse` existed.
+    ///
+    /// ⚠️ RENAMED AND REDOCUMENTED 2026-08-20. This was `makeEmptyResponseError`, documented as
+    /// "the REAL parse-failure producer … not a hand-written string". That stopped being true the
+    /// moment the six generators started throwing a typed error: no production code produces this
+    /// NSError any more, so a test asserting "an empty response is a parse retry" through it was
+    /// asserting a fiction while still passing.
+    ///
+    /// It is kept — under an honest name — because the negative control it serves is still
+    /// valuable: an error the strategy does NOT recognise must still charge the parse budget,
+    /// rather than every unknown error quietly acquiring a free retry.
+    private func makeUnrecognisedError() -> NSError {
+        NSError(domain: "SomeUnrecognisedDomain", code: 422,
+                userInfo: [NSLocalizedDescriptionKey: "Something the strategy has no arm for."])
+    }
+
+    /// What the generators ACTUALLY throw for an empty response now.
+    private func makeEmptyResponse() -> GenerationError {
+        .emptyResponse(generator: "QwenHermes")
     }
 
     // MARK: - Parse Failure Counting (unchanged contract)
@@ -534,9 +549,9 @@ final class LLMRetryStrategyTests: XCTestCase {
         _ = strategy.handleError(makeIdentityMismatch())
         _ = strategy.handleError(makeIdentityMismatch())
 
-        let action = strategy.handleError(makeEmptyResponseError())
+        let action = strategy.handleError(makeUnrecognisedError())
         guard case .parseRetry(_, let attempt, _) = action else {
-            return XCTFail("a real empty response is still a parse failure, got \(action)")
+            return XCTFail("an unrecognised error is still a parse failure, got \(action)")
         }
         XCTAssertEqual(attempt, 1, "the first REAL parse failure must be attempt 1, not pre-charged by two races")
         XCTAssertEqual(strategy.consecutiveParseFailures, 1)
@@ -584,17 +599,98 @@ final class LLMRetryStrategyTests: XCTestCase {
     }
 
     /// ⚠️ NEGATIVE CONTROL. A fix that routed EVERYTHING away from `.parseRetry` would pass every
-    /// test above. A genuine malformed/empty model response must still be treated as one.
-    func testEmptyModelResponse_IsStillAParseRetry() {
+    /// test above. An error the strategy has no arm for must still charge the parse budget.
+    ///
+    /// ⚠️ The vehicle changed 2026-08-20: this used to pass an untyped "Empty response from model"
+    /// NSError and was named `testEmptyModelResponse_IsStillAParseRetry`. Empty responses are now
+    /// typed and correctly NOT parse failures, so keeping that name and payload would have asserted
+    /// behaviour no production code can produce. The control now uses a genuinely unrecognised error.
+    func testUnrecognisedError_IsStillAParseRetry() {
         var strategy = LLMRetryStrategy(transport: mlxTransport)
-        let action = strategy.handleError(makeEmptyResponseError())
+        let action = strategy.handleError(makeUnrecognisedError())
 
         guard case .parseRetry(let alert, let attempt, _) = action else {
-            return XCTFail("a real empty response IS a parse failure, got \(action)")
+            return XCTFail("an unrecognised error IS a parse failure, got \(action)")
         }
         XCTAssertEqual(attempt, 1)
         XCTAssertEqual(strategy.consecutiveParseFailures, 1)
         XCTAssertTrue(alert.contains("reasoning"), "the corrective alert is still correct HERE: \(alert)")
+    }
+
+    // MARK: - Empty response: NOT a parse failure
+
+    /// ⚠️ THE ASSERTION THAT MATTERS MOST. A model that produced nothing must not be told
+    /// "Your last output failed validation … you MUST output valid JSON … no markdown fences."
+    /// That text is false, it is ~205 chars added to the prompt on EVERY attempt, and it instructs
+    /// a silent model to stop doing something it never did. A device log showed it accumulating —
+    /// scratchpad 21 → 203 → 408 → 613 — across five empties that then aborted the run.
+    func testEmptyResponse_InjectsNothingIntoTheModelsContext() {
+        var strategy = LLMRetryStrategy(transport: mlxTransport)
+        let action = strategy.handleError(makeEmptyResponse())
+
+        if case .parseRetry(let alert, _, _) = action {
+            XCTFail("an empty response must NOT return .parseRetry — that injects '\(alert)' into the model's context")
+        }
+        guard case .networkRetry = action else {
+            return XCTFail("expected a retry that carries no corrective alert, got \(action)")
+        }
+    }
+
+    /// It must not burn the budget meant for malformed OUTPUT — otherwise a genuine parse failure
+    /// afterwards arrives pre-charged, exactly the defect `testModelSlotRace_DoesNotBurnTheParseBudget`
+    /// pins for the MLX race.
+    func testEmptyResponse_DoesNotBurnTheParseBudget() {
+        var strategy = LLMRetryStrategy(transport: mlxTransport)
+        _ = strategy.handleError(makeEmptyResponse())
+        _ = strategy.handleError(makeEmptyResponse())
+
+        XCTAssertEqual(strategy.consecutiveParseFailures, 0, "empties must not charge the parse budget")
+        XCTAssertEqual(strategy.consecutiveEmptyResponses, 2)
+
+        guard case .parseRetry(_, let attempt, _) = strategy.handleError(makeUnrecognisedError()) else {
+            return XCTFail("a real parse failure must still be one")
+        }
+        XCTAssertEqual(attempt, 1, "the first REAL parse failure must be attempt 1, not pre-charged by two empties")
+    }
+
+    /// The abort names the actual lever. The old message said "the model is returning responses I
+    /// can't interpret — try rephrasing your request or switching to a different model", which sent
+    /// the reader toward the prompt when the cause was a sampling setting.
+    func testEmptyResponse_AbortsWithSamplingAdviceNotRephraseAdvice() {
+        var strategy = LLMRetryStrategy(transport: mlxTransport)
+        var last: RetryAction = .abort(reason: "")
+        for _ in 0..<5 { last = strategy.handleError(makeEmptyResponse()) }
+
+        guard case .abort(let reason) = last else {
+            return XCTFail("repeated empties must eventually abort, got \(last)")
+        }
+        XCTAssertTrue(reason.localizedCaseInsensitiveContains("repetition penalty"),
+                      "the abort must name the setting that actually causes this: \(reason)")
+        XCTAssertFalse(reason.localizedCaseInsensitiveContains("rephras"),
+                       "rephrasing cannot fix a model that emitted nothing: \(reason)")
+        XCTAssertFalse(reason.localizedCaseInsensitiveContains("can't interpret"),
+                       "there was nothing to interpret: \(reason)")
+    }
+
+    /// Bounded — and lower than the parse cap, because a fresh sample is the only variable an
+    /// empty-response retry changes.
+    func testEmptyResponse_IsBoundedBelowTheParseCap() {
+        var strategy = LLMRetryStrategy(maxConsecutiveParseFailures: 5, transport: mlxTransport)
+        var aborted = 0
+        for _ in 0..<5 {
+            if case .abort = strategy.handleError(makeEmptyResponse()) { aborted += 1 }
+        }
+        XCTAssertGreaterThan(aborted, 0, "empties must be bounded, not retried forever")
+        XCTAssertEqual(strategy.consecutiveParseFailures, 0)
+    }
+
+    func testResetClearsEmptyResponseBudget() {
+        var strategy = LLMRetryStrategy(transport: mlxTransport)
+        _ = strategy.handleError(makeEmptyResponse())
+        XCTAssertEqual(strategy.consecutiveEmptyResponses, 1)
+        strategy.resetParseFailures()
+        XCTAssertEqual(strategy.consecutiveEmptyResponses, 0,
+                       "a successful iteration must clear this, or an unrelated empty later in the run starts pre-charged")
     }
 
     func testResetClearsModelSlotBudget() {
