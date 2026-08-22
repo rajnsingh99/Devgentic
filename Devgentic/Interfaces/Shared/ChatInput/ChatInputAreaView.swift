@@ -654,6 +654,13 @@ struct ChatInputAreaView: View {
                 onStopStreaming: { inputViewModel.cancelStreamingResponse() }
             )
 
+            // Per-node SKIP for a live workflow run (Phase B increment 7, D2.1) — the composer is
+            // the only skip surface when a workflow runs from chat mode. A LEAF view on purpose:
+            // it reads the observable workflow state in ITS body, so node events re-render a
+            // capsule instead of the whole composer. Renders nothing unless the selected
+            // conversation has a live run with exactly the right shape (see ComposerSkipResolver).
+            ComposerWorkflowSkipButton(conversationID: mainViewModel.selectedConversationID)
+
             // Send / stop — the shared accent button (same as the QuickAccess panel).
             ComposerSendStopButton(
                 isSending: isSending || inputViewModel.isStreaming,

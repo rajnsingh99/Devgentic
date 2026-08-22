@@ -193,7 +193,8 @@ final class WorkflowExecutionState {
         }
     }
 
-    /// A node that DID NOT RUN. Never routed through `handleNodeFailed` — that was the bug.
+    /// A node that DID NOT RUN — or, since Phase B, one the user skipped MID-FLIGHT.
+    /// Never routed through `handleNodeFailed` — that was the bug.
     func handleNodeSkipped(nodeID: UUID, profileName: String, reason: NodeSkipReason) {
         let detail = reason.displayText
         if let idx = nodeResults.firstIndex(where: { $0.nodeID == nodeID }) {
@@ -208,6 +209,18 @@ final class WorkflowExecutionState {
                 status: .skipped(reason), detail: detail,
                 startTime: Date(), endTime: Date()
             ))
+        }
+        // A RUNNING-skip can abandon an in-flight tool. Nothing else closes per-node tool rows at
+        // node end (only run-end settling — cancel/failure paths — and freeze, whose unconditional
+        // close paints the row as a RED failure). Close them here with skip semantics: no badge,
+        // no failure count, an output that says what happened. `.byUser` only — a cascade skip
+        // never ran, so it has no rows to close, and touching them would hide a real defect.
+        if case .byUser = reason, var events = nodeTimelines[nodeID], !events.isEmpty {
+            let closed = DanglingToolRowCloser.closeForUserSkip(&events)
+            if closed > 0 {
+                nodeTimelines[nodeID] = events
+                workflowLogger.info("[WF_EVENT] Node '\(profileName)' skipped by user with \(closed) tool row(s) still executing — closed with skip semantics. CONSEQUENCE: the rows settle as 'Interrupted — the node was skipped by you' instead of spinning for the rest of the run and freezing as red failures.")
+            }
         }
     }
 

@@ -820,6 +820,13 @@ actor MLXService {
                         + "the stop sequences and the circuit breaker"
             }
             logger.error("[MLX-GEN] Generation produced NO output — generatedTokens=\(generated.map(String.init) ?? "unknown") stopReason=\(stopReason), \(timing) | textChunks=\(textChunkCount) toolCalls=\(toolCallCount) infoEvents=\(infoEventCount) (total events \(chunkCount)), stopSequenceHit=\(stopDetected), circuitBreaker=\(circuitBreaker.hasTripped), trailingWindow=\(trailingWindow.count) chars. DIAGNOSIS: \(verdict). CONSEQUENCE: the caller throws GenerationError.emptyResponse, which aborts the run after 3 attempts without charging the parse budget.")
+        } else if infoEventCount == 0 {
+            // Text WAS yielded but the framework's terminal `.info` event never arrived — the
+            // stream ended before completing. On-device this is the teardown shape: the consumer
+            // was cancelled mid-generation (Stop, node timeout, or per-node skip) and the yielded
+            // text is a PARTIAL that goes nowhere. Logging it as a plain "complete" with
+            // "unknown" counts read as a diagnostic dead-end (observed 2026-08-22).
+            logger.notice("[MLX-GEN] Generation ended WITHOUT a completion event — \(yieldedChars) chars yielded then the stream stopped (Task.isCancelled=\(Task.isCancelled)) | textChunks=\(textChunkCount) toolCalls=\(toolCallCount), stopSequenceHit=\(stopDetected). CONSEQUENCE: token counts and timings are unavailable and the yielded text is PARTIAL — cancelled mid-generation (Stop / node timeout / per-node skip) if isCancelled is true, otherwise a framework fault worth reporting.")
         } else {
             logger.debug("[MLX-GEN] Generation complete — \(yieldedChars) chars yielded, generatedTokens=\(generated.map(String.init) ?? "unknown") stopReason=\(stopReason), \(timing) | textChunks=\(textChunkCount) toolCalls=\(toolCallCount) infoEvents=\(infoEventCount), stopSequenceHit=\(stopDetected).")
         }

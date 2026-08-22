@@ -227,9 +227,19 @@ actor ChatExecutor: Executor {
                         }
                     }
 
-                    logger.info("--- 🏁 CHAT EXECUTOR COMPLETE 🏁 ---")
-                    logger.info("Final Response: \(fullResponse)")
-                    logger.info("-----------------------------------")
+                    // Honest completion logging: a torn-down consumer ends the provider stream
+                    // QUIETLY (no throw), so this path also runs when the task was cancelled
+                    // mid-stream — Stop, a node timeout, or a per-node skip. Logging that as
+                    // "COMPLETE" with a Final Response dump narrated a discarded partial answer
+                    // as a success, seconds before the engine logged the same text as
+                    // "PARTIAL OUTPUT DISCARDED" (observed on-device, 2026-08-22).
+                    if Task.isCancelled {
+                        logger.notice("--- 🚫 CHAT EXECUTOR TORN DOWN (cancelled mid-stream) 🚫 — \(fullResponse.count) chars of partial output DISCARDED; the consumer is gone (Stop, node timeout, or per-node skip). CONSEQUENCE: nothing below reaches the run — its outcome was decided by whoever cancelled this task, and the events yielded from here land in a dead stream.")
+                    } else {
+                        logger.info("--- 🏁 CHAT EXECUTOR COMPLETE 🏁 ---")
+                        logger.info("Final Response: \(fullResponse)")
+                        logger.info("-----------------------------------")
+                    }
                     await TraceRecorder.shared.emitLLMResponse(span: traceSpan, durationMs: Int(Date().timeIntervalSince(callStart) * 1000), preview: fullResponse)
                     chatSucceeded = true
 

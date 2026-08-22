@@ -507,11 +507,24 @@ actor WorkflowExecutor: Executor {
                                     // Pass-through: the SAME aggregated input this node would have
                                     // received. An entry node's input is the user's query itself —
                                     // forwarding "" there would hand downstream a blank task.
+                                    //
+                                    // ⚠️ `includeFailures: true` — MIRRORS THE DISPATCH PATH (`executeNode`
+                                    // compiles with it unconditionally). This shipped as the default `false`,
+                                    // which quietly broke one shape: skipping an ERROR-HANDLER node (its only
+                                    // upstream is a `.failed` envelope on a live error edge) filtered that
+                                    // envelope out and forwarded "" — downstream recovery got a blank instead
+                                    // of the annotated failure the handler itself would have received.
                                     let upstream = state.upstreamResultEnvelopes(for: nodeID, edges: layout.edges)
                                     let passThrough = upstream.isEmpty
                                         ? userInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                                        : WorkflowInputAssembler.compileForWorkflow(results: upstream)
+                                        : WorkflowInputAssembler.compileForWorkflow(results: upstream, includeFailures: true)
                                     let passedArtifacts = upstream.flatMap(\.artifacts)
+                                    // Forward structured JSON by the SAME rule every consumer reads it with
+                                    // (`upstreamResults.compactMap(\.structuredOutput).first` — Code/Action
+                                    // nodes' `{{ input.json.path }}`). Omitting it silently defaulted the
+                                    // field to nil, so a skip between a JSON producer and a Code node broke
+                                    // the template's json access with no error anywhere.
+                                    let passedStructured = upstream.compactMap(\.structuredOutput).first
                                     // ⚠️ The transformer caveat, SURFACED (never gated): if this
                                     // node's task transforms data, downstream now operates on the
                                     // untransformed input. That is the user's call to make — this
@@ -523,7 +536,8 @@ actor WorkflowExecutor: Executor {
                                         profileType: node.profileType ?? .bot,
                                         status: .skipped(reason: .byUser),
                                         output: passThrough, artifacts: passedArtifacts,
-                                        metadata: .simple(start: Date(), end: Date(), output: passThrough)
+                                        metadata: .simple(start: Date(), end: Date(), output: passThrough),
+                                        structuredOutput: passedStructured
                                     )
                                     state.recordResult(from: skipResult)
                                     let classified = ClassifiedAgentError.synthetic(
@@ -1279,6 +1293,25 @@ actor WorkflowExecutor: Executor {
                     }
                 }
 
+                // Running-skip sentinel — Phase B increment 5 (D2.1). Parks on the skip store and
+                // throws the typed `WorkflowNodeSkipRequested` when the user skips this RUNNING
+                // node; when the node finishes first the group cancels it and the await resolves
+                // as a plain CancellationError, absorbed by group teardown.
+                //
+                // ⚠️ UNCONDITIONAL, deliberately unlike the timeout sentinel above: copying that
+                // `if let` shape would make Skip silently dead on exactly the nodes most worth
+                // skipping — the unbounded ones (timeout disabled), which are the ones that can
+                // run away. Sub-workflow nodes never reach this group (they dispatch down the
+                // structural path), so a running-skip cannot fire for them — increment 8's
+                // deferral is enforced by construction, not by a guard.
+                do {
+                    let convID = conversationID
+                    let nid = nodeID
+                    group.addTask {
+                        try await Self.runningSkipSentinel(nodeID: nid, conversationID: convID)
+                    }
+                }
+
                 // Actual stream consumption — accumulates state locally
                 group.addTask {
                     var output = ""
@@ -1488,9 +1521,41 @@ actor WorkflowExecutor: Executor {
                 }
             }
             logger.debug("Node '\(displayName)' raw output preview:\n\(String(nodeOutput.prefix(300)))")
+        } catch is WorkflowNodeSkipRequested {
+            // ⚠️ ABOVE `catch is CancellationError`, load-bearing: the group teardown that follows
+            // this throw cancels the work child, and inherited cancellation must never be
+            // classified as a skip — the policy re-checks `Task.isCancelled` so Stop wins even
+            // when it lands mid-skip.
+            let verdict = UserSkipTeardownPolicy.classify(
+                caughtSkipSignal: true, externallyCancelled: Task.isCancelled, skipFired: true)
+            let settled = await Self.settleUserSkipTeardown(
+                verdict: verdict, nodeID: nodeID, displayName: displayName,
+                conversationID: conversationID,
+                passThrough: upstreamResults.isEmpty ? trimmedUserInput : upstreamInput)
+            nodeStatus = settled.status
+            if let output = settled.output { nodeOutput = output }
         } catch is CancellationError {
-            nodeStatus = .canceled
-            logger.notice("Node '\(displayName)' cancelled")
+            // Verdict repair — the race where a fired skip's typed signal LOST `group.next()` to
+            // the work child's own CancellationError. Near-unreachable (the skip child completes
+            // its throw before anything cancels the work child), kept because misclassifying it
+            // silently turns a Skip into a Stop. The decision is `UserSkipTeardownPolicy`, tested
+            // exhaustively where this race cannot be staged.
+            let fired = await MainActor.run {
+                WorkflowNodeSkipStore.shared.runningSkipFired(nodeID: nodeID, conversationID: conversationID)
+            }
+            let verdict = UserSkipTeardownPolicy.classify(
+                caughtSkipSignal: false, externallyCancelled: Task.isCancelled, skipFired: fired)
+            if verdict == .cancelled {
+                nodeStatus = .canceled
+                logger.notice("Node '\(displayName)' cancelled")
+            } else {
+                let settled = await Self.settleUserSkipTeardown(
+                    verdict: verdict, nodeID: nodeID, displayName: displayName,
+                    conversationID: conversationID,
+                    passThrough: upstreamResults.isEmpty ? trimmedUserInput : upstreamInput)
+                nodeStatus = settled.status
+                if let output = settled.output { nodeOutput = output }
+            }
         } catch let agentError as AgentExecutionError {
             nodeStatus = .failed(agentError.reason)
             logger.error("Node '\(displayName)' failed: \(agentError.reason.localizedDescription)")
@@ -1505,9 +1570,19 @@ actor WorkflowExecutor: Executor {
         // array (optionally fenced), expose it as `structuredOutput` so downstream
         // nodes can do `{{ input.json.path }}` access and field routing. Plain text
         // stays `nil`. Zero-config — no per-node schema required for the common case.
-        let structured = JSONValue.parseStructured(nodeOutput)
-        if structured != nil {
-            logger.info("Node '\(displayName)' produced structured (JSON) output")
+        //
+        // A user-skipped node did not PRODUCE anything: its output is the pass-through input, so
+        // structured JSON is FORWARDED from upstream by the same rule every consumer reads it
+        // with (`compactMap(\.structuredOutput).first`) — re-parsing the joined pass-through text
+        // would drop upstream JSON whenever more than one upstream contributed.
+        let structured: JSONValue?
+        if case .skipped(reason: .byUser) = nodeStatus {
+            structured = upstreamResults.compactMap(\.structuredOutput).first
+        } else {
+            structured = JSONValue.parseStructured(nodeOutput)
+            if structured != nil {
+                logger.info("Node '\(displayName)' produced structured (JSON) output")
+            }
         }
 
         // --- Build Result Envelope ---
@@ -1868,6 +1943,51 @@ actor WorkflowExecutor: Executor {
 
             remaining = limit - compute
             logger.info("[WF_TIMEOUT] Node '\(nodeName)' timeout extended by \(Int(remaining))s — \(Int(parked))s of the elapsed \(Int(wall))s was spent awaiting a human, which does not count against the compute budget.")
+        }
+    }
+
+    /// The RUNNING-skip racer child — Phase B increment 5 (D2.1). Parks on the skip store until
+    /// the user skips this RUNNING node, then throws the typed signal. `-> Never` like
+    /// `computeTimeoutSentinel`: it resolves only by throwing — `WorkflowNodeSkipRequested` on
+    /// the signal, or `CancellationError` when the node finishes first and the group cancels it.
+    static func runningSkipSentinel(nodeID: UUID, conversationID: UUID) async throws -> Never {
+        try await WorkflowNodeSkipStore.shared.awaitRunningSkip(nodeID: nodeID, conversationID: conversationID)
+        throw WorkflowNodeSkipRequested(nodeID: nodeID)
+    }
+
+    /// Applies a `UserSkipTeardownPolicy` verdict to an interrupted node run.
+    ///
+    /// For `.skippedByUser`: the node settles exactly like a Phase A pre-dispatch skip —
+    /// `.skipped(reason: .byUser)`, its aggregated INPUT as output (partial generated output is
+    /// discarded with the work child; it was never assigned out of the racer tuple), upstream
+    /// artifacts forwarded by the shared envelope build. Downstream stays live; no port activates.
+    ///
+    /// Also drains any park this node still holds, as BELT-AND-BRACES with outcome "skipped":
+    /// the group teardown already cancelled the inner producer task (its `onTermination` →
+    /// `task.cancel()`), which resolves every park in that task's tree through the suspension
+    /// service's own cancellation handlers — so this drain normally finds nothing. It exists for
+    /// a park OUTSIDE that tree (an unstructured task a capability might one day spawn), where
+    /// it is the only thing standing between the skip and a banner that never clears.
+    private nonisolated static func settleUserSkipTeardown(
+        verdict: UserSkipTeardownPolicy.Verdict,
+        nodeID: UUID,
+        displayName: String,
+        conversationID: UUID,
+        passThrough: String
+    ) async -> (status: NodeExecutionStatus, output: String?) {
+        switch verdict {
+        case .cancelled:
+            // Stop landed while the skip was in flight — Stop wins (see the policy's header).
+            logger.notice("[NODE-SKIP] Node '\(displayName)' [node \(nodeID.uuidString.prefix(8))] had a RUNNING-skip in flight when the run was cancelled — settling as CANCELLED, not skipped. CONSEQUENCE: downstream dies with the run; no pass-through is forwarded (a skip continues a run, and there is no run left to continue).")
+            return (.canceled, nil)
+        case .skippedByUser:
+            let drained = await ExecutionSuspensionService.shared.cancelNode(
+                nodeID, in: conversationID, outcome: "skipped")
+            if !drained.isEmpty {
+                logger.notice("[NODE-SKIP] RUNNING-skip of '\(displayName)' drained \(drained.count) park(s) the task-tree cancellation did not reach. CONSEQUENCE: their banners clear with outcome \"skipped\"; without this drain they would have waited forever.")
+            }
+            logger.notice("[WF_ROUTE] Skipping RUNNING node '\(displayName)' [node \(nodeID.uuidString.prefix(8))] BY USER REQUEST — its in-flight work was torn down and PARTIAL OUTPUT DISCARDED; its input (\(passThrough.count) chars) is forwarded downstream unchanged and NO port is activated: default edges below it stay LIVE, error branches do not fire (a user skip is an instruction, not a failure). CONSEQUENCE: downstream receives this node's INPUT, not its output — and not the partial output it produced before the skip.")
+            return (.skipped(reason: .byUser), passThrough)
         }
     }
 

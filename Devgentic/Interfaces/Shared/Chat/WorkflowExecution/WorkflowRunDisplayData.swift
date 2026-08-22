@@ -64,6 +64,13 @@ struct WorkflowRunDisplayData {
         /// skippable. The engine enforces the same restriction independently.
         var isUserSkippable: Bool = false
 
+        /// RUNNING-skip eligibility (Phase B increment 5) — strictly narrower than
+        /// `isUserSkippable`: bot/agent only, NEVER sub-workflow. A pending sub-workflow node is
+        /// skippable (the pre-dispatch consult handles it), but a RUNNING one is not — it executes
+        /// down the structural path, which the running-skip racer never enters (increment 8,
+        /// deferred). Rendering the button there would offer an action the engine cannot honour.
+        var isRunningSkippable: Bool = false
+
         enum NodeStatus: Sendable {
             case pending, running, completed, failed, skipped, cancelled
             /// A status written by a NEWER build than this one. The node FINISHED (its detail,
@@ -209,6 +216,15 @@ struct WorkflowRunDisplayData {
                 return state.userInput.isEmpty ? nil : "User input"
             }()
 
+            // Hoisted above the live-result branch: a RUNNING node always carries a result, so it
+            // takes that branch — setting skippability only on the pending placeholder was why the
+            // flag never survived the pending→running transition (the row is rebuilt from a
+            // different construction site with the default false).
+            let isProfileKind: Bool = {
+                if case .profile = layoutNode.kind { return true }
+                return false
+            }()
+
             if let result = resultByNodeID[nodeID] {
                 return NodeDisplayData(
                     id: result.id,
@@ -222,15 +238,13 @@ struct WorkflowRunDisplayData {
                     nodeTimeline: state.nodeTimelines[nodeID] ?? [],
                     isStreaming: result.status == .running,
                     hasWarnings: result.hasWarnings,
-                    supportsTimeline: kindSupportsTimeline(layoutNode.kind)
+                    supportsTimeline: kindSupportsTimeline(layoutNode.kind),
+                    isUserSkippable: isProfileKind,
+                    isRunningSkippable: isProfileKind && layoutNode.profileType != .workflow
                 )
             }
 
             // Pending placeholder
-            let isProfileKind: Bool = {
-                if case .profile = layoutNode.kind { return true }
-                return false
-            }()
             return NodeDisplayData(
                 id: nodeID,
                 nodeID: nodeID,

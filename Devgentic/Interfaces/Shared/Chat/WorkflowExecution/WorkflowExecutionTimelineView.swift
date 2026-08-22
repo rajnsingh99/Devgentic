@@ -300,6 +300,37 @@ struct WorkflowExecutionTimelineView: View {
                     .accessibilityLabel(isRequested ? "Undo skip for \(node.profileName)" : "Skip \(node.profileName)")
                 }
 
+                // RUNNING-skip (Phase B increment 5): bot/agent rows of a LIVE run, mid-flight.
+                // NOT undoable — the engine's racer child tears the node down the moment it fires,
+                // so once clicked the button becomes a disabled "Skipping…" (driven observably by
+                // the store's in-flight state; the row itself flips to Skipped when the engine's
+                // event lands). Sub-workflow rows never qualify (`isRunningSkippable` excludes
+                // them — the structural path has no racer; increment 8 is deferred).
+                if node.status == .running, node.isRunningSkippable, displayData.isRunning,
+                   let conversationID {
+                    let inFlight = WorkflowNodeSkipStore.shared.runningSkipInFlight(nodeID: node.nodeID, conversationID: conversationID)
+                    Button {
+                        WorkflowNodeSkipStore.shared.requestRunningSkip(nodeID: node.nodeID, conversationID: conversationID)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "forward.end")
+                                .font(.system(size: 9, weight: .semibold))
+                            Text(inFlight ? "Skipping…" : "Skip")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundColor(inFlight ? theme.tertiaryText : theme.secondaryText)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(theme.surfaceOverlay))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(inFlight)
+                    .help(inFlight
+                          ? "Skip is in progress — the node's in-flight work is being torn down"
+                          : "Skip this node NOW — its in-flight work is discarded and its input is passed downstream unchanged (not undoable; downstream gets the node's input, not its output)")
+                    .accessibilityLabel(inFlight ? "Skipping \(node.profileName)" : "Skip \(node.profileName) now")
+                }
+
                 if isSelected {
                     expandedContent(for: node)
                         .padding(.top, 6)

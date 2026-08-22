@@ -27,9 +27,7 @@ enum DanglingToolRowCloser {
     /// stream fresh events. Here the run is over and the row is the record of what happened.
     @discardableResult
     static func close(_ events: inout [TimelineEvent], outcome: ExecutionOutcome?) -> Int {
-        var closed = 0
-
-        func close(_ data: inout ToolExecutionData) {
+        walk(&events) { data in
             data.isExecuting = false
             data.isSuccess = false
             if outcome == .cancelled {
@@ -41,6 +39,38 @@ enum DanglingToolRowCloser {
                     ? "Cancelled before the tool finished."
                     : "Interrupted before the tool finished."
             }
+        }
+    }
+
+    /// The USER-SKIP close (Phase B increment 5): the node was deliberately skipped mid-flight,
+    /// so its abandoned tool rows are neither failures nor cancellations — `isSuccess` stays nil
+    /// (statusIcon renders no badge, `summarize` counts nothing failed) and the output says what
+    /// actually happened. Without this, `WorkflowRunRecord.freeze`'s unconditional `.failed`
+    /// close painted a RED "Interrupted before the tool finished." row inside a node whose row
+    /// says "Skipped by you" — a failure claim about a run in which nothing failed.
+    @discardableResult
+    static func closeForUserSkip(_ events: inout [TimelineEvent]) -> Int {
+        walk(&events) { data in
+            data.isExecuting = false
+            if data.output == nil {
+                // Persisted tool output — deliberately unlocalized (category-c, must stay stable).
+                data.output = "Interrupted — the node was skipped by you."
+            }
+        }
+    }
+
+    /// The shared traversal: every still-executing tool row, including rows nested inside
+    /// capability cards. Split from the two close bodies so they cannot drift in COVERAGE —
+    /// a row shape one close reaches and the other misses would be this file's founding defect
+    /// reborn one level down.
+    private static func walk(
+        _ events: inout [TimelineEvent],
+        applying mutate: (inout ToolExecutionData) -> Void
+    ) -> Int {
+        var closed = 0
+
+        func close(_ data: inout ToolExecutionData) {
+            mutate(&data)
             closed += 1
         }
 

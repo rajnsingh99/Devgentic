@@ -75,12 +75,15 @@ actor ReActAgentExecutor: Executor {
                     spanID: input.traceContext.spanID,
                     phase: .tooling
                 ) {
+                // Declared ABOVE the `do` so the CancellationError catch can report how far the
+                // run got — a teardown line with no iteration count could not be tied back to
+                // the abandoned work.
+                var currentIteration = 0
                 do {
                     logger.info("🚀 ReAct Execution Initiated. Model Instance: \(String(describing: model))")
 
                     let spyModel = APISpyModel(inner: model)
 
-                    var currentIteration = 0
                     var latestClarification: ClarificationContext? = nil
                     var executionSummary = ExecutionSummary(originalGoal: input.userInput)
                     let executionTrace = input.traceContext
@@ -1369,7 +1372,11 @@ actor ReActAgentExecutor: Executor {
                     continuation.finish()
 
                 } catch is CancellationError {
-                    logger.notice("🚫 Execution Task Cancelled cleanly.")
+                    // Field-debuggability: name WHOSE run died and how far it got. This line used to
+                    // be a bare "Cancelled cleanly", which — landing seconds after unrelated log
+                    // traffic (a workflow node's teardown resolves asynchronously) — could not be
+                    // tied back to a node, a conversation, or the work it abandoned.
+                    logger.notice("🚫 Execution Task Cancelled cleanly — \(input.workflowContext.map { "workflow node '\($0.nodeName)' [\($0.nodeID.uuidString.prefix(8))]" } ?? "chat run") conv \(input.conversationID.uuidString.prefix(8)), torn down during iteration \(currentIteration). CONSEQUENCE: partial progress is discarded; the outcome (Stop vs node timeout vs per-node skip) is decided by whoever cancelled this task, not here.")
                     // ⚠️ NODE-SCOPED WHEN THIS RUN IS A WORKFLOW NODE (N3). The conversation-wide drain
                     // force-resolves EVERY park in the conversation — including a SIBLING node's, whose
                     // tool would then be reported "denied by the user" though the user never saw it.
