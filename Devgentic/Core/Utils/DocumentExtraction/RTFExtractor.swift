@@ -16,7 +16,7 @@ struct RTFExtractor: DocumentExtractor {
     var supportedTypes: [UTType] { [.rtf, .rtfd] }
     var supportedExtensions: Set<String> { ["rtf", "rtfd"] }
 
-    private let logger = Logger(subsystem: "com.devgentic", category: "RTFExtractor")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "RTFExtractor")
 
     func extract(from url: URL, maxSize: Int) async throws -> ExtractionResult {
         logger.info("Starting RTF extraction: \(url.lastPathComponent)")

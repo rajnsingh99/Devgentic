@@ -12,7 +12,7 @@ import os
 /// for all incoming Telegram updates.
 actor ChatOpsSecurityGate {
 
-    private let logger = Logger(subsystem: "com.devgentic", category: "ChatOpsSecurity")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "ChatOpsSecurity")
 
     // MARK: - Rate Limiter State
 

@@ -22,7 +22,7 @@ actor SlackSocketClient {
     private let appToken: String
     private let session: URLSession
     private var webSocket: URLSessionWebSocketTask?
-    private let logger = Logger(subsystem: "com.devgentic", category: "SlackSocket")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "SlackSocket")
 
     // MARK: - State
 

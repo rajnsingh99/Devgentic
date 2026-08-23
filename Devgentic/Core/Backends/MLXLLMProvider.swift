@@ -9,7 +9,7 @@ import Foundation
 import MLXLMCommon
 import os
 
-private let logger = Logger(subsystem: "com.devgentic", category: "MLXLLMProvider")
+private let logger = Logger(subsystem: DGLogger.subsystem, category: "MLXLLMProvider")
 
 /// Thread-safe sink for the exact token counts MLXService surfaces via its terminal
 /// completion event. `@unchecked Sendable` + a lock because the `@Sendable onUsage`

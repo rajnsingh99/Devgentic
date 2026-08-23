@@ -17,7 +17,7 @@ final class SlackTransport: ChatOpsTransport, @unchecked Sendable {
     let transportID = "slack"
 
     private let apiClient: SlackAPIClient
-    private let logger = Logger(subsystem: "com.devgentic", category: "SlackTransport")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "SlackTransport")
 
     init(apiClient: SlackAPIClient) {
         self.apiClient = apiClient

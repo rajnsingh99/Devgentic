@@ -85,7 +85,11 @@ actor PlanningExecutorWrapper: Executor {
                 do {
                     logger.info("Planning capability initiated.")
 
-                    let spyModel = APISpyModel(inner: model)
+                    // Fixed scope = the capability's own context: plan-generation LLM calls
+                    // (previously invisible — "uncounted LLM spend") record as llmCall spans
+                    // at capability level. Inner subtask executors build their OWN spy with a
+                    // per-iteration scope, so nothing double-counts.
+                    let spyModel = APISpyModel(inner: model, spanScope: LLMSpanScope(input.traceContext))
                     let executionTrace = input.traceContext
 
                     // --- Start Episode ---
@@ -631,8 +635,9 @@ actor PlanningExecutorWrapper: Executor {
         await TraceRecorder.shared.beginSpan(context: subtaskSpan, name: "subtask:\(subtaskIndex)", kind: .subtask)
         var subtaskSucceeded = false
         defer {
+            let endedAt = Date() // real end, captured before the hop (earliest-wins)
             let status: SpanStatus = subtaskSucceeded ? .completed : .error
-            Task { await TraceRecorder.shared.endSpan(spanID: subtaskSpan.spanID, status: status) }
+            Task { await TraceRecorder.shared.endSpan(spanID: subtaskSpan.spanID, status: status, at: endedAt) }
         }
 
         // Optionally filter tools based on toolHints

@@ -52,6 +52,11 @@ final class WorkflowRunRecordSD {
     /// Raw value of `WorkflowRunRecord.RunStatus` — used as a discriminator.
     var statusRaw: String
 
+    /// Observability join key → traces.sqlite `traces.traceID` (Run-Report Phase 5).
+    /// Optional: pre-V2 rows have none, and the two stores keep independent
+    /// retention, so a nil or dangling value is normal and handled by readers.
+    var traceID: String?
+
     // JSON blobs — never queried, only displayed.
     var nodeResultsData: Data
     var variablesData: Data
@@ -104,6 +109,7 @@ final class WorkflowRunRecordSD {
         self.finalOutput = record.finalOutput
         self.errorMessage = record.error
         self.statusRaw = record.status.rawValue
+        self.traceID = record.traceID
         // ⚠️ On INSERT there are no prior bytes to protect, so refusal is not available — but the
         // stored value must not be a valid-looking empty one. These markers cannot decode as any of
         // the three accepted shapes, so `decodeNodeResults`/`decodeVariables` log and flag the row
@@ -159,6 +165,7 @@ final class WorkflowRunRecordSD {
         finalOutput = newValue.finalOutput
         errorMessage = newValue.error
         statusRaw = newValue.status.rawValue
+        traceID = newValue.traceID
         // ⚠️ A nil blob means the encoder REFUSED (see `encodeNodeResults`). Skip the assignment so
         // the previously-stored bytes survive; overwriting them with an empty-but-valid payload is
         // exactly the silent loss this guard exists to prevent. Every other column above has already
@@ -212,6 +219,7 @@ final class WorkflowRunRecordSD {
         let errorMessage: String?
         let nodeResultsData: Data
         let variablesData: Data
+        let traceID: String?
     }
 
     /// Cheap on-main copy — references only; no decoding happens here. Rows written THIS session
@@ -223,7 +231,7 @@ final class WorkflowRunRecordSD {
             workflowName: workflowName, timestamp: timestamp, userInput: userInput,
             finalOutput: finalOutput, statusRaw: statusRaw, duration: duration,
             errorMessage: errorMessage, nodeResultsData: nodeResultsData,
-            variablesData: variablesData
+            variablesData: variablesData, traceID: traceID
         )
     }
 
@@ -243,7 +251,8 @@ final class WorkflowRunRecordSD {
             variables: decodeVariables(from: snapshot.variablesData),
             status: status,
             duration: snapshot.duration,
-            error: snapshot.errorMessage
+            error: snapshot.errorMessage,
+            traceID: snapshot.traceID
         )
     }
 
@@ -266,7 +275,8 @@ final class WorkflowRunRecordSD {
             variables: variables,
             status: status,
             duration: duration,
-            error: errorMessage
+            error: errorMessage,
+            traceID: traceID
         )
     }
 

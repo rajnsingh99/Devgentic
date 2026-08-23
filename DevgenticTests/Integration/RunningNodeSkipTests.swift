@@ -119,7 +119,18 @@ final class RunningNodeSkipTests: XCTestCase {
     private func skipReasons(in events: [AgentStreamEvent]) -> [UUID: NodeSkipReason] {
         var out: [UUID: NodeSkipReason] = [:]
         for event in events {
-            if case .workflowNodeSkipped(let nodeID, _, let reason) = event { out[nodeID] = reason }
+            if case .workflowNodeSkipped(let nodeID, _, let reason, _) = event { out[nodeID] = reason }
+        }
+        return out
+    }
+
+
+    /// What the EXECUTOR said about whether each skipped node had started. Asserted separately
+    /// from the reason because the two settle sites produce the same reason and differ only here.
+    private func ranBeforeSkipFlags(in events: [AgentStreamEvent]) -> [UUID: Bool] {
+        var out: [UUID: Bool] = [:]
+        for event in events {
+            if case .workflowNodeSkipped(let nodeID, _, _, let ran) = event { out[nodeID] = ran }
         }
         return out
     }
@@ -165,8 +176,14 @@ final class RunningNodeSkipTests: XCTestCase {
 
         XCTAssertEqual(skipReasons(in: events)[b], .byUser,
                        "a running-skip must settle the node as skipped-by-user")
+        // ⚠️ THE SOURCE OF TRUTH for the "Not run" mislabel. The node dispatched and burned model
+        // time before the skip landed; every display surface reads this flag to decide its wording.
+        // Asserted HERE, at the executor, because a display-level test would pass on a hardcoded
+        // value and never notice the emit site was wrong.
+        XCTAssertEqual(ranBeforeSkipFlags(in: events)[b], true,
+                       "a RUNNING skip must report that the node had already started")
         XCTAssertEqual(events.filter {
-            if case .workflowNodeSkipped(let id, _, _) = $0 { return id == b }; return false
+            if case .workflowNodeSkipped(let id, _, _, _) = $0 { return id == b }; return false
         }.count, 1, "exactly ONE terminal skip event — a second would race the state handler")
         XCTAssertFalse(cancelledNodeIDs(in: events).contains(b),
                        "a skip is not a cancellation — emitting both is a last-writer-wins race on the row")
@@ -754,6 +771,124 @@ final class RunningSkippabilityDisplayTests: XCTestCase {
 
 // MARK: - State handler: skip closes the node's dangling tool rows
 
+// MARK: - "Not run" vs "Skipped" — the mid-run skip mislabel (2026-08-23)
+
+@MainActor
+final class RanBeforeSkipLabellingTests: XCTestCase {
+
+    private func state(startFirst: Bool, reason: NodeSkipReason, ranBeforeSkip: Bool) -> (WorkflowExecutionState, UUID) {
+        let state = WorkflowExecutionState()
+        state.isRunning = true
+        let node = UUID()
+        if startFirst { state.handleNodeStarted(nodeID: node, profileName: "Agent 3", index: 1, total: 1) }
+        state.handleNodeSkipped(nodeID: node, profileName: "Agent 3", reason: reason, ranBeforeSkip: ranBeforeSkip)
+        return (state, node)
+    }
+
+    /// The observed defect: a node skipped MID-FLIGHT had started, spent model time and produced
+    /// output that was discarded — yet every surface tagged it "Not run".
+    func testMidRunSkipIsLabelledSkippedNotNotRun() throws {
+        let (st, node) = state(startFirst: true, reason: .byUser, ranBeforeSkip: true)
+        let data = WorkflowRunDisplayData.from(live: st)
+        let row = try XCTUnwrap(data.nodeResults.first { $0.nodeID == node })
+
+        XCTAssertEqual(row.ranBeforeSkip, true)
+        XCTAssertEqual(data.skipTagLabel(for: row), "Skipped",
+                       "the node ran — 'Not run' asserts three things that are all false")
+        XCTAssertEqual(row.status, .skipped, "it is still a skip; only the wording changes")
+    }
+
+    /// The twin: a skip that landed before dispatch genuinely never ran.
+    func testPreDispatchSkipKeepsNotRun() throws {
+        let (st, node) = state(startFirst: false, reason: .byUser, ranBeforeSkip: false)
+        let data = WorkflowRunDisplayData.from(live: st)
+        let row = try XCTUnwrap(data.nodeResults.first { $0.nodeID == node })
+
+        XCTAssertEqual(row.ranBeforeSkip, false)
+        XCTAssertEqual(data.skipTagLabel(for: row), "Not run")
+    }
+
+    /// Cascade skips are unaffected — they never dispatched.
+    func testCascadeSkipKeepsNotRun() throws {
+        let (st, node) = state(startFirst: false, reason: .notChosen, ranBeforeSkip: false)
+        let data = WorkflowRunDisplayData.from(live: st)
+        let row = try XCTUnwrap(data.nodeResults.first { $0.nodeID == node })
+        XCTAssertEqual(data.skipTagLabel(for: row), "Not run")
+    }
+
+    /// ⚠️ THE ANTI-PROSE TEST. This codebase's recidivist defect is deciding structure by matching
+    /// English out of `detail` — nine surfaces re-derived one such rule and three got it wrong. An
+    /// implementation that sniffed `detail.contains("Skipped by you")` would pass the tests above
+    /// and die here, where the detail is empty and then actively misleading.
+    func testLabelIgnoresDetailProseEntirely() throws {
+        for misleading in ["", "Model returned an error", "Not run — the workflow branched away"] {
+            let st = WorkflowExecutionState()
+            let node = UUID()
+            st.handleNodeStarted(nodeID: node, profileName: "Agent 3", index: 1, total: 1)
+            st.handleNodeSkipped(nodeID: node, profileName: "Agent 3", reason: .byUser, ranBeforeSkip: true)
+            if let i = st.nodeResults.firstIndex(where: { $0.nodeID == node }) {
+                let p = st.nodeResults[i]
+                st.nodeResults[i] = WorkflowNodeResult(
+                    id: p.id, nodeID: p.nodeID, profileName: p.profileName, status: p.status,
+                    detail: misleading, startTime: p.startTime, endTime: p.endTime,
+                    hasWarnings: p.hasWarnings, ranBeforeSkip: p.ranBeforeSkip)
+            }
+            let data = WorkflowRunDisplayData.from(live: st)
+            let row = try XCTUnwrap(data.nodeResults.first { $0.nodeID == node })
+            XCTAssertEqual(data.skipTagLabel(for: row), "Skipped",
+                           "the STRUCTURAL fact decides, not the prose — detail was: '\(misleading)'")
+        }
+    }
+
+    /// ⚠️ THE TWIN-PATH GUARD. Live and historical are two adapters; this repo's recorded failure
+    /// mode is fixing one and leaving the other, so the flag must survive freeze AND come back out.
+    func testRanBeforeSkipSurvivesFreezeAndTheRecordAdapter() throws {
+        let (st, node) = state(startFirst: true, reason: .byUser, ranBeforeSkip: true)
+        st.handleFinalOutput("done")
+
+        let record = WorkflowRunRecord.freeze(
+            from: st, conversationID: UUID(), workflowProfileID: UUID(),
+            workflowName: "wf", userInput: "go", timestamp: st.startedAt)
+
+        let snapshot = try XCTUnwrap(record.nodeResults.first { $0.nodeID == node })
+        XCTAssertEqual(snapshot.ranBeforeSkip, true, "freeze must carry it — it replaces the whole struct")
+
+        let data = WorkflowRunDisplayData.from(record: record)
+        let row = try XCTUnwrap(data.nodeResults.first { $0.nodeID == node })
+        XCTAssertEqual(data.skipTagLabel(for: row), "Skipped",
+                       "the historical view must say what the live view said")
+    }
+
+    /// ⚠️ OLD RECORDS. A strict `decode` of the new key throws on every already-persisted run, and
+    /// the resilient tier answers a failed snapshot by DROPPING THE WHOLE NODE — status, duration
+    /// and up to 400 timeline events. This pins that a snapshot without the key still decodes.
+    func testSnapshotWrittenBeforeTheFieldStillDecodesIntact() throws {
+        let json = """
+        {"id":"\(UUID().uuidString)","nodeID":"\(UUID().uuidString)","profileName":"Old Node",
+         "status":"skipped:byUser","detail":"Skipped by you","duration":1.7}
+        """
+        let snap = try JSONDecoder().decode(
+            WorkflowRunRecord.WorkflowNodeResultSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(snap.profileName, "Old Node", "the node must survive, not be dropped")
+        XCTAssertNil(snap.ranBeforeSkip, "absent means unknown, not false")
+        XCTAssertEqual(snap.duration, 1.7)
+    }
+
+    /// For those nil records the label falls back to what IS on disk. A pre-dispatch skip is
+    /// stamped with two adjacent `Date()` calls (duration ~0) and accumulates no timeline, so the
+    /// heuristic errs toward the old wording and never toward a false "it ran".
+    func testLegacyRecordsUseDurationAndTraceAsTheFallback() {
+        func row(duration: TimeInterval) -> WorkflowRunDisplayData.NodeDisplayData {
+            .init(id: UUID(), nodeID: UUID(), profileName: "n", status: .skipped, detail: "d",
+                  duration: duration, input: nil, inputSourceLabel: nil, nodeTimeline: [],
+                  isStreaming: false, ranBeforeSkip: nil, supportsTimeline: false)
+        }
+        let data = WorkflowRunDisplayData.from(live: WorkflowExecutionState())
+        XCTAssertEqual(data.skipTagLabel(for: row(duration: 1.7)), "Skipped")
+        XCTAssertEqual(data.skipTagLabel(for: row(duration: 0.0)), "Not run")
+    }
+}
+
 @MainActor
 final class HandleNodeSkippedToolRowTests: XCTestCase {
 
@@ -771,7 +906,7 @@ final class HandleNodeSkippedToolRowTests: XCTestCase {
         let node = UUID()
         state.nodeTimelines[node] = [executingRow()]
 
-        state.handleNodeSkipped(nodeID: node, profileName: "Agent", reason: .byUser)
+        state.handleNodeSkipped(nodeID: node, profileName: "Agent", reason: .byUser, ranBeforeSkip: true)
 
         guard case .toolExecution(let data)? = state.nodeTimelines[node]?.first else { return XCTFail() }
         XCTAssertFalse(data.isExecuting)
@@ -786,7 +921,7 @@ final class HandleNodeSkippedToolRowTests: XCTestCase {
         let node = UUID()
         state.nodeTimelines[node] = [executingRow()]
 
-        state.handleNodeSkipped(nodeID: node, profileName: "Agent", reason: .notChosen)
+        state.handleNodeSkipped(nodeID: node, profileName: "Agent", reason: .notChosen, ranBeforeSkip: false)
 
         guard case .toolExecution(let data)? = state.nodeTimelines[node]?.first else { return XCTFail() }
         XCTAssertTrue(data.isExecuting, "only .byUser closes rows — a cascade skip closing them would mask the anomaly")

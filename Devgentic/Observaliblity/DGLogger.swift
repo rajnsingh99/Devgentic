@@ -36,6 +36,19 @@ struct DGLogger: Sendable {
 
     // MARK: - Identity
 
+    /// THE subsystem the whole app logs under — the one place the string is decided.
+    ///
+    /// ⚠️ 29 `Logger(subsystem:)` sites used to hardcode `"com.devgentic"` while the app's real
+    /// bundle identifier is `com.dev.devgentic`, so every one of them logged under a subsystem
+    /// that does not exist: filtering Console or `log stream` by the app's actual identifier
+    /// silently missed them, and three different fallback spellings were in circulation
+    /// (`"com.devgentic"`, `"com.devgentic.app"`, and the real one). A logging standard that
+    /// requires the app to be debuggable from logs alone cannot have the subsystem be a literal
+    /// each site retypes.
+    static let subsystem: String = Bundle.main.bundleIdentifier ?? "com.dev.devgentic"
+
+    // MARK: - Identity (instance)
+
     /// Log subsystem — typically the app bundle ID. Inherited from `Bundle.main` by default.
     let subsystem: String
 
@@ -47,7 +60,7 @@ struct DGLogger: Sendable {
 
     // MARK: - Init
 
-    init(subsystem: String = Bundle.main.bundleIdentifier ?? "com.devgentic.app",
+    init(subsystem: String = DGLogger.subsystem,
          category: String) {
         self.subsystem = subsystem
         self.category = category
@@ -182,11 +195,27 @@ struct DGLogger: Sendable {
     /// verbose info/notice/debug stream stays gated behind developer mode (Gap #4). Both
     /// paths sanitize message + metadata, snapshot the current LogContext task-locals, and
     /// hand to LogRecorder.
-    /// Whether a log at `level` should be persisted to the ring buffer: warning/error
-    /// whenever diagnostics are enabled (default-on), everything in developer mode. Pure +
-    /// static so the un-gating policy is unit-testable without touching UserDefaults (Gap #4).
-    static func shouldPersist(level: LogLevel, developerMode: Bool, diagnosticsEnabled: Bool) -> Bool {
-        developerMode || (level >= .warning && diagnosticsEnabled)
+    /// Whether a log at `level` should be persisted to the ring buffer: warning/error, and only
+    /// while diagnostics recording is enabled (default-on). Pure + static so the policy is
+    /// unit-testable without touching UserDefaults.
+    ///
+    /// ⚠️ Developer mode is NOT an input here any more (removed 2026-08-23). It used to add
+    /// `developerMode ||`, which did two things that both turned out to be wrong:
+    ///
+    ///  1. It escalated the floor to info, and MEASUREMENT killed that idea — on a machine
+    ///     running with it on, `log_entries` held 1,060,962 rows over 30 days in a 295 MB store,
+    ///     of which 95.1% was info/notice and 74% came from just two categories. Meanwhile the
+    ///     Run Report renders `span_events` and never reads a log row at all (there is no
+    ///     `LogEntry` anywhere in RunReportInput), so none of that volume was visible to anyone.
+    ///  2. It OVERRODE the diagnostics opt-out. A user who turned recording off still had
+    ///     everything written to disk if developer mode happened to be on — a consent switch
+    ///     that another switch could silently veto.
+    ///
+    /// One consent switch, one floor. `debug`/`trace` remain os_log-only (see below), so live
+    /// Console debugging is unchanged; what is lost is verbose info in an EXPORTED bundle, which
+    /// nothing consumed.
+    static func shouldPersist(level: LogLevel, diagnosticsEnabled: Bool) -> Bool {
+        level >= .warning && diagnosticsEnabled
     }
 
     // MARK: - Full-content dumps (developer mode only)
@@ -234,7 +263,7 @@ struct DGLogger: Sendable {
 
     /// Splits `body` into log-sized pieces. Pure and `static` so the chunking contract is testable
     /// without UserDefaults, a live logger, or scraping os_log — the same shape as
-    /// `shouldPersist(level:developerMode:diagnosticsEnabled:)` above.
+    /// `shouldPersist(level:diagnosticsEnabled:)` above.
     ///
     /// ⚠️ Splits on CHARACTERS, never UTF-8 bytes. Prompts routinely contain multi-byte content —
     /// an em dash in a section header, a non-Latin filename, an emoji in a user query — and byte
@@ -260,9 +289,9 @@ struct DGLogger: Sendable {
     }
 
     private func route(level: LogLevel, sanitizedMessage: String, metadata: [String: String]) {
-        let devMode = UserDefaults.standard.bool(forKey: AppSettings.developerModeKey)
+        // One UserDefaults read per persisted log call instead of two — this runs on every
+        // warning/error, so the removed developer-mode lookup is a small hot-path win as well.
         guard Self.shouldPersist(level: level,
-                                 developerMode: devMode,
                                  diagnosticsEnabled: AppSettings.diagnosticsRecordingEnabled) else { return }
 
         // `sanitizedMessage` is already scrubbed by the caller (same TelemetrySanitizer pass

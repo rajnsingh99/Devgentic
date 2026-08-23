@@ -81,6 +81,13 @@ struct WorkflowExecutionTimelineView: View {
     /// The engine now writes the structural cause into `detail` via `NodeSkipReason.displayText`, so
     /// a Router that branched elsewhere says so instead of claiming an upstream failure. The
     /// fallback covers records written before 2026-08-15, whose detail is the old sentence.
+    /// THE status word for a skipped node. Both the visible tag and the VoiceOver label go
+    /// through here — they used to hard-code "Not run" independently, which is false for a node
+    /// the user skipped mid-flight (it started, spent model time, and its output was discarded).
+    private func skipTagLabel(for node: WorkflowRunDisplayData.NodeDisplayData) -> String {
+        displayData.skipTagLabel(for: node)
+    }
+
     private func notRunMessage(for node: WorkflowRunDisplayData.NodeDisplayData) -> String {
         displayData.notRunMessage(for: node)
     }
@@ -254,7 +261,7 @@ struct WorkflowExecutionTimelineView: View {
                     name: node.profileName,
                     nameColor: (node.status == .pending && !isAwaiting) || notRun ? theme.secondaryText : theme.primaryText,
                     tagLabel: isAwaiting ? "Needs your input"
-                        : (notRun ? "Not run"
+                        : (notRun ? skipTagLabel(for: node)
                         : (degraded ? "Completed · warnings" : node.status.label)),
                     tagColor: isAwaiting ? theme.warningColor : (node.status == .pending || notRun ? theme.secondaryText : statusColor),
                     tagIcon: isAwaiting ? "hand.raised.fill" : nil,
@@ -357,7 +364,7 @@ struct WorkflowExecutionTimelineView: View {
         // ⚠️ Must agree with the visible tag. This read the RAW status, so on every conditional
         // run VoiceOver announced "Failed" for a node the screen labelled "Not run" — the two
         // descriptions of the same row contradicted each other.
-        .accessibilityLabel("\(node.profileName), \(isNotRun(node) ? String(localized: "Not run") : node.status.label)")
+        .accessibilityLabel("\(node.profileName), \(isNotRun(node) ? skipTagLabel(for: node) : node.status.label)")
         .accessibilityHint(isSelected ? "Selected step" : "Show step details")
         .accessibilityAction { selectedNodeID = node.nodeID }
     }
@@ -610,7 +617,13 @@ struct WorkflowExecutionTimelineView: View {
         let statusColor = isNotRun(node) ? theme.secondaryText.opacity(0.6) : node.status.color(theme)
 
         detailContainer(edgeColor: statusColor) {
-            if isNotRun(node) {
+            // ⚠️ Only a node that NEVER STARTED gets the bare one-line treatment. A node the user
+            // skipped MID-FLIGHT has a real trace — reasoning, tool calls, the model response —
+            // which is captured live AND persisted by `freeze`. Suppressing it here is why the
+            // same run showed an 829ms model call in the Run Report and nothing at all in the
+            // timeline (observed 2026-08-23): the label fix alone would have made the tag honest
+            // while still hiding the evidence behind it.
+            if isNotRun(node), !displayData.nodeRanBeforeSkip(node) {
                 // The node's own reason, never a hardcoded sentence. "an upstream node failed" was
                 // asserted over ordinary Router/Gate routing and over an error handler that
                 // correctly stood down — on runs where nothing failed at all.

@@ -83,16 +83,18 @@ class ReportInspectorPanelManager {
         conversationID: UUID,
         traceID: String?,
         theme: any Theme,
-        isDeveloperMode: Bool
+        isDeveloperMode: Bool,
+        answerPreview: String? = nil
     ) {
         // If a panel is already active, close it first
         close()
-        
+
         // Pass a close handler so the SwiftUI view can dismiss the panel
         let rootView = ReportInspectorView(
             messageID: messageID,
             conversationID: conversationID,
             traceID: traceID,
+            answerPreview: answerPreview,
             onClose: { [weak self] in
                 self?.close()
             }
@@ -101,10 +103,9 @@ class ReportInspectorPanelManager {
         
         let hostingView = NSHostingView(rootView: rootView)
         
-        let minSize = NSSize(
-            width: isDeveloperMode ? 1000 : 550,
-            height: isDeveloperMode ? 700 : 550
-        )
+        // One unified report now — the old user-mode 550×550 can't hold the
+        // stream + inspector split, so both modes share the same floor.
+        let minSize = NSSize(width: 900, height: 600)
         
         let panel = ReportInspectorPanel(contentView: hostingView, minSize: minSize, isDeveloperMode: isDeveloperMode)
         panel.minSize = minSize
@@ -124,14 +125,19 @@ class ReportInspectorPanelManager {
     
     func close() {
         guard let panel = activePanel else { return }
-        
+        // Release ownership SYNCHRONOUSLY, before the fade. The completion used to nil
+        // `activePanel` 0.15s later — by which time `show()` had already stored the NEW
+        // panel there, so the manager forgot it: the second panel's ✕ went dead (borderless
+        // panels have no close button of their own) and further clicks stacked more panels.
+        // The fade-out below animates the LOCAL reference and needs no manager state.
+        activePanel = nil
+
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.15
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             panel.animator().alphaValue = 0
-        }, completionHandler: { [weak self] in
+        }, completionHandler: {
             panel.orderOut(nil)
-            self?.activePanel = nil
         })
     }
 }

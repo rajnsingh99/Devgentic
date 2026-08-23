@@ -23,7 +23,7 @@ import os
 @Observable @MainActor
 final class DiscordPairingService {
 
-    private let logger = Logger(subsystem: "com.devgentic", category: "DiscordPairing")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "DiscordPairing")
     private let config = ChatOpsConfigManager.shared
 
     /// Called after pairing succeeds so the caller can start the Discord bridge.

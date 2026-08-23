@@ -32,6 +32,18 @@ struct TraceExportDTO: Codable, Identifiable, Sendable {
     let status: String
     let errorSummary: String?
     let metadataJSON: String?
+
+    // v5 columns (build attribution + token/cost accounting). These were silently
+    // DROPPED from every export until 2026-08-22 — the DTO predates the migration
+    // and nobody extended it, so bundles carried no version or spend data. All
+    // optional, so old bundles decode unchanged in the viewer.
+    let appVersion: String?
+    let buildNumber: String?
+    let inputTokens: Int?
+    let outputTokens: Int?
+    let estimatedCostUSD: Double?
+    let tokensEstimated: Bool?
+
     let rootSpans: [SpanExportDTO]
 
     var id: String { traceID }
@@ -50,6 +62,12 @@ struct TraceExportDTO: Codable, Identifiable, Sendable {
         status = t.status.rawValue
         errorSummary = t.errorSummary
         metadataJSON = t.metadataJSON
+        appVersion = t.appVersion
+        buildNumber = t.buildNumber
+        inputTokens = t.inputTokens
+        outputTokens = t.outputTokens
+        estimatedCostUSD = t.estimatedCostUSD
+        tokensEstimated = t.tokensEstimated
         rootSpans = (t.rootSpans ?? []).map(SpanExportDTO.init)
     }
 }

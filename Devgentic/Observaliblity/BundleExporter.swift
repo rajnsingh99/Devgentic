@@ -30,7 +30,7 @@ enum BundleExporter {
         case invalidScope(String)
     }
 
-    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic",
+    private static let logger = Logger(subsystem: DGLogger.subsystem,
                                         category: "BundleExporter")
 
     // MARK: - Public entry point
@@ -183,7 +183,12 @@ enum BundleExporter {
         try writeJSON(payload, to: dir.appendingPathComponent("trace.json"), sanitize: true, level: level)
     }
 
-    private static func fetchTraces(for scope: DiagnosticBundle.Scope) async throws -> [TraceRecord] {
+    /// Internal (not private) so the hydration contract is testable: EVERY scope must
+    /// return traces with their span/event tree attached. The conversation and recent
+    /// arms used to return the row-only fetches — so those bundles shipped a trace.json
+    /// with `"rootSpans": []` on every trace, silently reintroducing the hollow-export
+    /// defect (Gap #2) that `TraceExportDTO` was written to fix.
+    static func fetchTraces(for scope: DiagnosticBundle.Scope) async throws -> [TraceRecord] {
         switch scope {
         case .trace(let traceID):
             if let record = await TraceRecorder.shared.fetchFullTrace(traceID: traceID) {
@@ -191,16 +196,27 @@ enum BundleExporter {
             }
             return []
         case .conversation(let conversationID):
-            return await TraceRecorder.shared.fetchTraces(forConversationID: conversationID.uuidString)
+            let rows = await TraceRecorder.shared.fetchTraces(forConversationID: conversationID.uuidString)
+            return await hydrate(rows)
         case .recent(let hours):
-            // Fetch full traces within window. fetchTraces on TraceRecorder doesn't
-            // directly support time-range queries, so we pull a reasonable batch
-            // from the store and filter in memory. For a 30-day purge window this
-            // is bounded and cheap.
+            // Row fetch within the window, then hydrate. For a 30-day purge window
+            // this is bounded and cheap.
             guard let store = TraceStore.shared else { return [] }
             let since = Date().addingTimeInterval(-Double(hours) * 3600)
-            return (try? store.fetchTracesSince(since)) ?? []
+            let rows = (try? store.fetchTracesSince(since)) ?? []
+            return await hydrate(rows)
         }
+    }
+
+    /// Replaces each header row with its fully-hydrated trace; a row whose tree cannot
+    /// be fetched (purged mid-export) keeps the header rather than vanishing.
+    private static func hydrate(_ rows: [TraceRecord]) async -> [TraceRecord] {
+        var result: [TraceRecord] = []
+        result.reserveCapacity(rows.count)
+        for row in rows {
+            result.append(await TraceRecorder.shared.fetchFullTrace(traceID: row.traceID) ?? row)
+        }
+        return result
     }
 
     /// Nested struct so the exported JSON has an object root (versioned, extensible)
@@ -454,12 +470,18 @@ enum BundleExporter {
         let prefsDir = dir.appendingPathComponent("preferences")
         try FileManager.default.createDirectory(at: prefsDir, withIntermediateDirectories: true)
 
-        let d = UserDefaults.standard
+        let snapshot = exportablePreferenceSnapshot(from: UserDefaults.standard)
+        try writeJSON(snapshot, to: prefsDir.appendingPathComponent("app_settings.json"), sanitize: true, level: level)
+    }
 
-        // Explicit allowlist. Anything not in this set does NOT appear in the bundle.
-        // Review this list carefully when adding new UserDefaults keys elsewhere —
-        // the privacy posture of the bundle depends on it.
-        let safeKeys: [String] = [
+    /// The keys that may leave the user's machine in a diagnostic bundle.
+    ///
+    /// ⚠️ ALLOWLIST, never a denylist: anything not named here does NOT appear in the bundle, so
+    /// a new UserDefaults key added anywhere in the app is private by default. Exposed `static`
+    /// (it was a local `let` inside the writer) for one reason — this is the control that decides
+    /// what leaves the machine, and it had NO TEST. A privacy boundary that cannot be asserted is
+    /// one refactor away from silently widening.
+    static let exportablePreferenceKeys: [String] = [
             AppSettings.developerModeKey,
             AppSettings.useStreamingResponseKey,
             AppSettings.speechModelKey,
@@ -482,19 +504,24 @@ enum BundleExporter {
             AppSettings.speechPlaybackRateKey,
             AppSettings.speechPlaybackVoiceKey,
             AppSettings.speechPauseOnCodeKey,
-            AppSettings.morningBriefIncludeAISummaryKey
-        ]
+        AppSettings.morningBriefIncludeAISummaryKey
+    ]
 
+    /// Extracts exactly the allowlisted preferences from a defaults store.
+    ///
+    /// Pure and injectable so the allowlist can be tested against a store deliberately seeded
+    /// with secrets — the only way to assert "anything not in this set does NOT appear" rather
+    /// than merely reading the list and hoping the writer honours it.
+    static func exportablePreferenceSnapshot(from defaults: UserDefaults) -> [String: AnyCodable] {
         var snapshot: [String: AnyCodable] = [:]
-        for key in safeKeys {
+        for key in exportablePreferenceKeys {
             // Read raw Any then coerce to a codable. Bool/Int/Double/String pass through;
             // anything else we stringify defensively.
-            if let value = d.object(forKey: key) {
+            if let value = defaults.object(forKey: key) {
                 snapshot[key] = AnyCodable(value: value)
             }
         }
-
-        try writeJSON(snapshot, to: prefsDir.appendingPathComponent("app_settings.json"), sanitize: true, level: level)
+        return snapshot
     }
 
     // MARK: - User feedback section
@@ -818,7 +845,9 @@ private struct EncodableRating: Codable {
 /// Type-erased wrapper for UserDefaults values. Handles Bool/Int/Double/String
 /// natively; anything else gets stringified via `String(describing:)` so the
 /// JSON encoder doesn't throw on unknown types.
-private struct AnyCodable: Codable {
+/// Internal (was `private`) so the export allowlist's extraction seam can return it and be
+/// tested. An inert Codable box — widening its visibility carries no privacy meaning.
+struct AnyCodable: Codable {
     let value: Any
 
     init(value: Any) { self.value = value }

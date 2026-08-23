@@ -17,7 +17,7 @@ actor TraceLogAggregator {
     // In-memory buffer: TraceID -> Ordered List of Logs
     private var traceBuffer: [String: [AgentTraceLog]] = [:]
     
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "TraceAggregator")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "TraceAggregator")
     
     private init() {}
     

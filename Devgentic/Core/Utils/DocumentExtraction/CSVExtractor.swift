@@ -13,7 +13,7 @@ struct CSVExtractor: DocumentExtractor {
     var supportedTypes: [UTType] { [.commaSeparatedText, .tabSeparatedText] }
     var supportedExtensions: Set<String> { ["csv", "tsv"] }
 
-    private let logger = Logger(subsystem: "com.devgentic", category: "CSVExtractor")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "CSVExtractor")
 
     func extract(from url: URL, maxSize: Int) async throws -> ExtractionResult {
         let ext = url.pathExtension.lowercased()

@@ -15,7 +15,7 @@ struct DOCXExtractor: DocumentExtractor {
     }
     var supportedExtensions: Set<String> { ["docx"] }
 
-    private let logger = Logger(subsystem: "com.devgentic", category: "DOCXExtractor")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "DOCXExtractor")
 
     func extract(from url: URL, maxSize: Int) async throws -> ExtractionResult {
         logger.info("Starting DOCX extraction: \(url.lastPathComponent)")

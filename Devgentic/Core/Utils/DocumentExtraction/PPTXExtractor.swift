@@ -15,7 +15,7 @@ struct PPTXExtractor: DocumentExtractor {
     }
     var supportedExtensions: Set<String> { ["pptx"] }
 
-    private let logger = Logger(subsystem: "com.devgentic", category: "PPTXExtractor")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "PPTXExtractor")
 
     func extract(from url: URL, maxSize: Int) async throws -> ExtractionResult {
         logger.info("Starting PPTX extraction: \(url.lastPathComponent)")

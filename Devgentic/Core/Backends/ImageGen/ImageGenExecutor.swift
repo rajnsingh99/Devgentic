@@ -97,8 +97,14 @@ struct ImageGenExecutor: Sendable {
                     continuation.yield(.mediaProgress(toolName: "imageGen", percent: 1.0, status: "Complete"))
                     continuation.yield(.artifactProduced(artifact))
 
-                    await TraceRecorder.shared.emitLLMResponse(span: genSpan, durationMs: Int(Date().timeIntervalSince(genStart) * 1000), preview: "image \(artifact.id)")
-                    await TraceRecorder.shared.endSpan(spanID: genSpan.spanID, status: .completed)
+                    let genMs = Int(Date().timeIntervalSince(genStart) * 1000)
+                    await TraceRecorder.shared.emitLLMResponse(span: genSpan, durationMs: genMs, preview: "image \(artifact.id)")
+                    // Declared so the Model lane counts generation time (see
+                    // RunReportProjection.declaredModelMs). The span itself also brackets the
+                    // feasibility check, so its wall-clock must not be used.
+                    await TraceRecorder.shared.endSpan(
+                        spanID: genSpan.spanID, status: .completed,
+                        metadata: ["model": modelName, "duration_ms": "\(genMs)"])
                     logger.info("Image generation complete: \(artifact.id)")
                     continuation.yield(.executionFinished(outcome: .completed, reason: nil))
                     continuation.finish()

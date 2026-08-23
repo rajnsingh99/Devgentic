@@ -53,11 +53,26 @@ actor ChatExecutor: Executor {
                     // Begin the span so EvaluationLogger-bridged events FK-link instead of
                     // being dropped, and the bot path appears in the trace tree (Gap #9).
                     await TraceRecorder.shared.beginSpan(context: traceSpan, name: "chat_call", kind: .llmCall)
-                    let callStart = Date()
                     var chatSucceeded = false
+                    // The NARROW model-call duration (callStart → response), declared in the
+                    // span's metadata because the Run Report's Model lane counts declared
+                    // measurements, not span wall-clock: this span brackets message assembly and
+                    // the whole retry loop, so its own duration over-reads. Without this the bot
+                    // path contributed NOTHING to the Model lane and its real model time landed
+                    // in "Unattributed" — 12.0s of a 14.0s run, observed on-device 2026-08-23.
+                    var modelCallMs: Int? = nil
                     defer {
+                        // End time captured HERE, before the fire-and-forget hop — the real end
+                        // survives losing the race against endTrace's clamp (earliest-wins).
+                        let endedAt = Date()
                         let s: SpanStatus = chatSucceeded ? .completed : .error
-                        Task { await TraceRecorder.shared.endSpan(spanID: traceSpan.spanID, status: s) }
+                        // nil when the call never reached the model (assembly threw, or the
+                        // consumer was torn down first) — the lane then honestly counts nothing
+                        // rather than charging teardown time to the model.
+                        let meta = modelCallMs.map {
+                            ["model": model.modelName, "duration_ms": "\($0)"]
+                        }
+                        Task { await TraceRecorder.shared.endSpan(spanID: traceSpan.spanID, status: s, at: endedAt, metadata: meta) }
                     }
 
                     onTraceUpdate(AgentTraceLog(
@@ -74,8 +89,18 @@ actor ChatExecutor: Executor {
 
                     // 2. Construct Messages
                     // We combine instructions, RAG context, history, and the user query.
+                    let assemblyStart = Date()
                     let messages = self.buildMessages(input: input)
+                    // Input-lane clock (Run-Report Phase 3): the bot path's assembly is one
+                    // synchronous build — small, but measured rather than guessed.
+                    await TraceRecorder.shared.emitMetric(
+                        span: traceSpan, key: "input_assembly",
+                        valueMs: Int(Date().timeIntervalSince(assemblyStart) * 1000))
                     await TraceRecorder.shared.emitLLMRequest(span: traceSpan, model: model.modelName, messageCount: messages.count)
+                    // The model-time clock starts AFTER message assembly — it used to start
+                    // before buildMessages, so the bot lane charged prompt-building (history
+                    // render, RAG splice) to the model and the Model lane over-read.
+                    let callStart = Date()
 
                     logger.info("--- 🤖 CHAT EXECUTOR START 🤖 ---")
                     logger.info("Model: \(model.modelName)")
@@ -240,7 +265,9 @@ actor ChatExecutor: Executor {
                         logger.info("Final Response: \(fullResponse)")
                         logger.info("-----------------------------------")
                     }
-                    await TraceRecorder.shared.emitLLMResponse(span: traceSpan, durationMs: Int(Date().timeIntervalSince(callStart) * 1000), preview: fullResponse)
+                    let callMs = Int(Date().timeIntervalSince(callStart) * 1000)
+                    modelCallMs = callMs
+                    await TraceRecorder.shared.emitLLMResponse(span: traceSpan, durationMs: callMs, preview: fullResponse)
                     chatSucceeded = true
 
                     // Emit token usage — prefer the provider's real counts captured from the

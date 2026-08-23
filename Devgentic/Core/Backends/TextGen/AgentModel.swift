@@ -70,13 +70,87 @@ enum TerminalKind: Sendable, Codable, Equatable {
     case askUser
 }
 
+/// Mutable parent-span carrier for `APISpyModel`'s per-call telemetry.
+///
+/// The spy is constructed ONCE per run (before the ReAct loop), but each LLM call must
+/// parent under the CURRENT iteration/subtask span — so the executor updates this box as
+/// it opens each step span, and the spy reads it at call time. Access is sequential in
+/// practice (one cognitive loop, one call at a time); the lock makes the handoff safe
+/// anyway so a future concurrent caller degrades to a stale parent, never a torn read.
+final class LLMSpanScope: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _context: TraceContext?
+
+    init(_ context: TraceContext? = nil) { self._context = context }
+
+    func set(_ context: TraceContext?) {
+        lock.lock(); _context = context; lock.unlock()
+    }
+
+    var context: TraceContext? {
+        lock.lock(); defer { lock.unlock() }
+        return _context
+    }
+}
+
+/// Pass-through `LLMProvider` decorator sitting in front of every model on the ReAct,
+/// Planning and Reflexion paths. With a `spanScope`, each BLOCKING model call becomes a
+/// real `.llmCall` span (child of whatever the executor last put in the scope) carrying
+/// per-call duration and token counts in `spans.metadataJSON`, plus the
+/// llmRequest/llmResponse event pair — before this, the agent path had ZERO llmCall
+/// spans and every run's "Calls" count read 0. Streaming methods stay uninstrumented
+/// (the bot path's `chat_call` span covers its one stream); a nil scope is a strict
+/// pass-through, so headless/test constructions record nothing new by accident.
 struct APISpyModel: LLMProvider {
     let inner: any LLMProvider
+    var spanScope: LLMSpanScope? = nil
 
     var modelName: String { inner.modelName }
 
+    /// Wraps one blocking call in an llmCall span. `messageCount` feeds the request
+    /// event; `usage` (extracted from the result AFTER the call) and the measured
+    /// duration land in the span's metadata at end.
+    private func traced<T>(
+        messageCount: Int,
+        preview: @escaping (T) -> String,
+        usage: @escaping (T) -> TokenUsage?,
+        _ body: () async throws -> T
+    ) async rethrows -> T {
+        guard let parent = spanScope?.context else { return try await body() }
+
+        let callSpan = parent.newSpan()
+        let started = Date()
+        await TraceRecorder.shared.beginSpan(context: callSpan, name: "llm:\(inner.modelName)", kind: .llmCall, at: started)
+        await TraceRecorder.shared.emitLLMRequest(span: callSpan, model: inner.modelName, messageCount: messageCount, at: started)
+
+        do {
+            let result = try await body()
+            let ended = Date()
+            let durationMs = Int(ended.timeIntervalSince(started) * 1000)
+            var meta: [String: String] = ["model": inner.modelName, "duration_ms": "\(durationMs)"]
+            if let u = usage(result) {
+                meta["input_tokens"] = "\(u.inputTokens)"
+                meta["output_tokens"] = "\(u.outputTokens)"
+                meta["tokens_estimated"] = "\(u.isEstimated)"
+            }
+            await TraceRecorder.shared.emitLLMResponse(span: callSpan, durationMs: durationMs, preview: preview(result), at: ended)
+            await TraceRecorder.shared.endSpan(spanID: callSpan.spanID, status: .completed, at: ended, metadata: meta)
+            return result
+        } catch {
+            let ended = Date()
+            let durationMs = Int(ended.timeIntervalSince(started) * 1000)
+            await TraceRecorder.shared.endSpan(
+                spanID: callSpan.spanID, status: .error, at: ended,
+                metadata: ["model": inner.modelName, "duration_ms": "\(durationMs)"]
+            )
+            throw error
+        }
+    }
+
     func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
-        return try await inner.generate(messages: messages, tools: tools, responseSchema: responseSchema)
+        try await traced(messageCount: messages.count, preview: { String($0.prefix(300)) }, usage: { _ in nil }) {
+            try await inner.generate(messages: messages, tools: tools, responseSchema: responseSchema)
+        }
     }
 
     func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {
@@ -84,7 +158,9 @@ struct APISpyModel: LLMProvider {
     }
 
     func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
-        return try await inner.generateCognitiveStep(messages: messages, tools: tools)
+        try await traced(messageCount: messages.count, preview: Self.stepPreview, usage: { $0.tokenUsage }) {
+            try await inner.generateCognitiveStep(messages: messages, tools: tools)
+        }
     }
 
     /// G12: forward the native-turn overload to the inner provider. Without this
@@ -92,19 +168,33 @@ struct APISpyModel: LLMProvider {
     /// `tool_calls` arrays into Swift description strings via `"\(value)"` and
     /// breaks the native-turn request shape before it ever reaches the real provider.
     func generateCognitiveStep(nativeMessages: [[String: Any]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
-        return try await inner.generateCognitiveStep(nativeMessages: nativeMessages, tools: tools)
+        try await traced(messageCount: nativeMessages.count, preview: Self.stepPreview, usage: { $0.tokenUsage }) {
+            try await inner.generateCognitiveStep(nativeMessages: nativeMessages, tools: tools)
+        }
     }
 
     func generateWithUsage(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?) {
-        return try await inner.generateWithUsage(messages: messages, tools: tools, responseSchema: responseSchema)
+        try await traced(messageCount: messages.count, preview: { String($0.text.prefix(300)) }, usage: { $0.usage }) {
+            try await inner.generateWithUsage(messages: messages, tools: tools, responseSchema: responseSchema)
+        }
     }
 
     func generateWithUsage(payload: [ProviderMessage], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?) {
-        return try await inner.generateWithUsage(payload: payload, tools: tools, responseSchema: responseSchema)
+        try await traced(messageCount: payload.count, preview: { String($0.text.prefix(300)) }, usage: { $0.usage }) {
+            try await inner.generateWithUsage(payload: payload, tools: tools, responseSchema: responseSchema)
+        }
     }
 
     func streamWithUsage(messages: [[String: String]], tools: [[String: Any]]?, onUsage: (@Sendable (TokenUsage) -> Void)?) -> AsyncThrowingStream<String, Error> {
         return inner.streamWithUsage(messages: messages, tools: tools, onUsage: onUsage)
+    }
+
+    /// A cognitive step's most informative one-liner: the thought when present,
+    /// else the tool call names, else the reasoning prefix.
+    private static func stepPreview(_ step: ModernCognitiveStep) -> String {
+        if let thought = step.thought, !thought.isEmpty { return String(thought.prefix(300)) }
+        if !step.toolCalls.isEmpty { return "tools: " + step.toolCalls.map(\.name).joined(separator: ", ") }
+        return String(step.reasoning.prefix(300))
     }
 }
 
@@ -826,6 +916,11 @@ struct SemanticContext: Sendable {
     /// current-turn images, since a generator's sole input is this context. Defaulted,
     /// so text-only construction sites are untouched.
     var userImagePayload: Payload? = nil
+
+    /// The span the prompt builder attributes its CONTEXT-injection telemetry to
+    /// (Run-Report Phase 3). Defaulted nil — construction sites that don't carry
+    /// tracing (planning fixtures, tests) stay untouched and emit nothing.
+    var traceContext: TraceContext? = nil
 }
 
 // MARK: - Agent Failure Reasons

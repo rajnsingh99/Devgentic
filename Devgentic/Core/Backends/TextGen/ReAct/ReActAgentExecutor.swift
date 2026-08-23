@@ -82,7 +82,12 @@ actor ReActAgentExecutor: Executor {
                 do {
                     logger.info("🚀 ReAct Execution Initiated. Model Instance: \(String(describing: model))")
 
-                    let spyModel = APISpyModel(inner: model)
+                    // Per-call LLM spans: the scope tells the spy which STEP span to parent
+                    // each model call under; the loop updates it as it opens each iteration
+                    // span. Before the first iteration it carries the root context, so a
+                    // pre-loop call would still parent somewhere real.
+                    let llmSpanScope = LLMSpanScope(input.traceContext)
+                    let spyModel = APISpyModel(inner: model, spanScope: llmSpanScope)
 
                     var latestClarification: ClarificationContext? = nil
                     var executionSummary = ExecutionSummary(originalGoal: input.userInput)
@@ -242,9 +247,26 @@ actor ReActAgentExecutor: Executor {
                         let iterationMetadata: [String: String] = ["iteration": "\(currentIteration)"]
                         
                         await TraceRecorder.shared.beginSpan(context: iterationSpan, name: "iteration_\(currentIteration)", kind: .iteration)
-                        
+                        // This iteration's model calls parent under THIS step span.
+                        llmSpanScope.set(iterationSpan)
+                        // Input-lane clock (Run-Report Phase 3): everything between here and
+                        // the model call is prompt/context assembly — the report's Input lane.
+                        let contextBuildStart = Date()
+
+                        // Honest per-iteration status: continue/break-to-cognitiveLoop are the
+                        // loop's DELIBERATE exits (retry, final answer) and each sets this flag
+                        // inline; the seven mid-body `return`s are all failure terminals and any
+                        // throw (Stop, provider fatal) unwinds past them — both leave it false,
+                        // so an aborted iteration finally records `.error` instead of the old
+                        // hardcoded `.completed`. `endedAt` is captured HERE, synchronously in
+                        // the defer, so the persisted end is the real end even when this
+                        // fire-and-forget write loses the race against endTrace's clamp
+                        // (earliest-wins in TraceStore.updateSpan).
+                        var iterationFinishedNormally = false
                         defer {
-                            Task { await TraceRecorder.shared.endSpan(spanID: iterationSpan.spanID, status: .completed) }
+                            let endedAt = Date()
+                            let s: SpanStatus = iterationFinishedNormally ? .completed : .error
+                            Task { await TraceRecorder.shared.endSpan(spanID: iterationSpan.spanID, status: s, at: endedAt) }
                         }
                         
                         // --- Build Context ---
@@ -269,7 +291,7 @@ actor ReActAgentExecutor: Executor {
                             return input.tools.filter { !gatedToolNames.contains($0.name) }
                         }()
 
-                        let context = SemanticContext(
+                        var context = SemanticContext(
                             instructions: input.instructions,
                             environmentFacts: envFacts,
                             longTermMemory: input.longTermMemory,
@@ -292,6 +314,9 @@ actor ReActAgentExecutor: Executor {
                             toolGuidanceContext: input.toolGuidanceContext,
                             userImagePayload: input.userPayload
                         )
+                        // Prompt-builder telemetry (Run-Report Phase 3): CONTEXT-injection
+                        // events attribute to this iteration's span.
+                        context.traceContext = iterationSpan
 
                         // G12: Seed native conversation turns on iter 1. System prompt and
                         // history are built via PromptBuilder (no working_memory), normalized
@@ -446,7 +471,7 @@ actor ReActAgentExecutor: Executor {
                             // 4. Jump to the parked iteration; the loop's `currentIteration += 1` makes the
                             //    next generated step iteration N+1. Iter-1 native seeding won't re-run.
                             currentIteration = recon.resumeIteration
-                            continue cognitiveLoop
+                            iterationFinishedNormally = true; continue cognitiveLoop
                         }
 
                         try Task.checkCancellation()
@@ -492,6 +517,13 @@ actor ReActAgentExecutor: Executor {
                             logger.info("📝 Compiled Scratchpad Length: \(context.compiledScratchpad.count) chars. Budget utilization: \(String(format: "%.0f", utilization * 100))%.")
                             
                             let genStart = Date()
+                            // Close the Input-lane bracket: context assembly ran from the top
+                            // of this iteration to here (the model call starts now).
+                            await TraceRecorder.shared.emitMetric(
+                                span: iterationSpan,
+                                key: "input_assembly",
+                                valueMs: Int(genStart.timeIntervalSince(contextBuildStart) * 1000)
+                            )
                             if let nativeGen = nativeGenerator {
                                 // G12 native path: thread the growing turn array through the provider.
                                 step = try await nativeGen.generateNativeStep(
@@ -575,7 +607,7 @@ actor ReActAgentExecutor: Executor {
                                     try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                                 }
                                 currentIteration -= 1
-                                continue cognitiveLoop
+                                iterationFinishedNormally = true; continue cognitiveLoop
 
                             case .networkRetry(let message, let delaySeconds):
                                 continuation.yield(.warning(category: .retry, message: message))
@@ -587,7 +619,7 @@ actor ReActAgentExecutor: Executor {
                                     try? await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
                                 }
                                 currentIteration -= 1
-                                continue cognitiveLoop
+                                iterationFinishedNormally = true; continue cognitiveLoop
 
                             case .parseRetry(let systemAlert, let attemptCount, let maxAttempts):
                                 memoryStrategy.recordSystemAlert(msg: systemAlert)
@@ -596,7 +628,7 @@ actor ReActAgentExecutor: Executor {
                                 }
                                 continuation.yield(.warning(category: .parseFailure, message: "Invalid JSON output. Retrying (\(attemptCount)/\(maxAttempts))..."))
                                 await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
-                                continue cognitiveLoop
+                                iterationFinishedNormally = true; continue cognitiveLoop
 
                             case .modelReload(let message):
                                 continuation.yield(.warning(category: .retry, message: message))
@@ -609,7 +641,7 @@ actor ReActAgentExecutor: Executor {
                                     return
                                 }
                                 currentIteration -= 1 // Don't count reload as an iteration
-                                continue cognitiveLoop
+                                iterationFinishedNormally = true; continue cognitiveLoop
 
                             case .abort(let reason):
                                 // Structured classification for the retry-strategy abort path.
@@ -745,7 +777,7 @@ actor ReActAgentExecutor: Executor {
                                 content: "Model answered directly (no tool calls).",
                                 metadata: ["iteration": "\(currentIteration)"]
                             ))
-                            break cognitiveLoop
+                            iterationFinishedNormally = true; break cognitiveLoop
                         case .suspectedFormatFailure(let originalReason, _):
                             // Identical-output detection. If the model emits byte-identical
                             // reasoning multiple iterations in a row, the corrective alert
@@ -830,7 +862,7 @@ actor ReActAgentExecutor: Executor {
                                 message: warningMessage
                             ))
                             logger.warning("🔄 Suspected format failure [\(reason.uiChipLabel)]. Injecting typed corrective alert and retrying iteration \(currentIteration).")
-                            continue cognitiveLoop
+                            iterationFinishedNormally = true; continue cognitiveLoop
                         case .proceed:
                             // Parse succeeded — reset the identical-output guard so
                             // intermittent format failures (which the corrective alert
@@ -840,7 +872,7 @@ actor ReActAgentExecutor: Executor {
                             break
                         }
 
-                        if step.toolCalls.isEmpty { break cognitiveLoop }
+                        if step.toolCalls.isEmpty { iterationFinishedNormally = true; break cognitiveLoop }
 
                         // 3. ACTING & OBSERVING PHASE (Shared Parallel Execution)
                         // Pass the same filtered list used in the schema so that a gated tool
@@ -905,7 +937,7 @@ actor ReActAgentExecutor: Executor {
                                 artifacts: terminal.artifacts
                             )
                             logger.info("🏁 Terminal signal received (final_answer). Exiting cognitive loop at iteration \(currentIteration).")
-                            break cognitiveLoop
+                            iterationFinishedNormally = true; break cognitiveLoop
                         }
 
                         // Commit observations to memory strategy.
@@ -1186,7 +1218,10 @@ actor ReActAgentExecutor: Executor {
                             content: "Observed \(observations.count) tools natively executed.",
                             metadata: iterationMetadata
                         ))
-                        
+
+                        // Natural fall-through to the next iteration — the tenth and last
+                        // deliberate exit of the loop body (see the flag's declaration above).
+                        iterationFinishedNormally = true
                     } // End While Loop
 
                     // --- Cancellation Gate ---
@@ -1463,7 +1498,7 @@ actor ReActAgentExecutor: Executor {
 // MARK: - G12 Native-Turn Helpers
 
 /// Logger for the file-scope native-turn helpers, which have no `self` to borrow one from.
-fileprivate let nativeTurnLogger = Logger(subsystem: "com.devgentic", category: "NativeTurns")
+fileprivate let nativeTurnLogger = Logger(subsystem: DGLogger.subsystem, category: "NativeTurns")
 
 /// Approximate serialized character footprint of a native turn dict — recursively sums
 /// string lengths and dictionary keys. Used to budget the native conversation payload

@@ -19,7 +19,7 @@ import os
 @MainActor
 final class RemoteMirrorService: ActiveStreamMirrorDelegate {
 
-    private let logger = Logger(subsystem: "com.devgentic", category: "RemoteMirrorService")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "RemoteMirrorService")
 
     // MARK: - State
 

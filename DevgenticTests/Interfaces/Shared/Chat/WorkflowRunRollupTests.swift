@@ -40,6 +40,42 @@ final class WorkflowRunRollupTests: XCTestCase {
         ))
     }
 
+    // MARK: - Report join key (workflow Report button, 2026-08-23)
+
+    /// The workflow surface has no chat bubbles, so its Report button reads the join
+    /// key off the display projection — BOTH adapters must carry it, or one of the
+    /// two views (live vs historical) silently opens an empty report.
+    func testDisplayDataCarriesTraceIDAndRunIDFromRecord() {
+        let recordID = UUID()
+        let d = WorkflowRunDisplayData.from(record: WorkflowRunRecord(
+            id: recordID, conversationID: UUID(), workflowProfileID: UUID(),
+            workflowName: "wf", timestamp: Date(), userInput: "go",
+            nodeResults: [], finalOutput: "", variables: [:],
+            status: .completed, duration: 3, error: nil, traceID: "trace-abc"
+        ))
+        XCTAssertEqual(d.traceID, "trace-abc")
+        XCTAssertEqual(d.runID, recordID)
+    }
+
+    @MainActor
+    func testDisplayDataCarriesTraceIDAndRunIDFromLiveState() {
+        let state = WorkflowExecutionState()
+        state.traceID = "trace-live"
+        let recordID = UUID()
+        state.runRecordID = recordID
+        let d = WorkflowRunDisplayData.from(live: state)
+        XCTAssertEqual(d.traceID, "trace-live")
+        XCTAssertEqual(d.runID, recordID)
+    }
+
+    /// Pre-trace-era rows have no traceID — the projection must say so honestly
+    /// (nil), because the report panel's "never recorded" state keys off it.
+    func testPreTraceRecordYieldsNilTraceID() {
+        let d = record(.completed, nodes: [])
+        XCTAssertNil(d.traceID)
+        XCTAssertNotNil(d.runID)
+    }
+
     // MARK: - The pill: persisted status WINS over derived heuristics
 
     /// The `.running` orphan stub (finalize never ran — crash, or reconcile skipped). Deriving

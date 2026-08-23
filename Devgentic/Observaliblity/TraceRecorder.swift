@@ -23,7 +23,7 @@ actor TraceRecorder {
     private var flushTask: Task<Void, Never>?
     private var closedTraceIDs: Set<String> = []
     
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "TraceRecorder")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "TraceRecorder")
     
     // Configuration
     private let flushInterval: TimeInterval = 1.0
@@ -31,11 +31,15 @@ actor TraceRecorder {
     
     // MARK: - Initialization
     
-    private init() {
+    /// `store` is injectable so tests can drive a REAL recorder against a hermetic
+    /// `TraceStore(inMemory:)` — before this seam the recorder was hard-bound to
+    /// `TraceStore.shared` and had zero tests. Production uses the default:
+    /// `.shared` keeps the one-pool/one-migration topology described below.
+    init(store: TraceStore? = TraceStore.shared) {
         // Use the shared TraceStore singleton so LogRecorder, MetricsAggregator, and
         // future observability actors share one connection pool + one migration run.
         // Previously each created its own TraceStore, which would race on migrations.
-        self.store = TraceStore.shared
+        self.store = store
         if self.store != nil {
             logger.info("TraceRecorder initialized with shared persistent store.")
         } else {
@@ -149,19 +153,25 @@ actor TraceRecorder {
     }
 
     /// Records the start of a new span within a trace.
-    func beginSpan(context: TraceContext, name: String, kind: SpanKind) {
+    ///
+    /// `at` defaults to `Date()` — and Swift evaluates default arguments AT THE CALL SITE,
+    /// so the stamp is the moment the caller reached this line, not the (later, load-varying)
+    /// moment this actor got around to running. Callers hopping through an unstructured
+    /// `Task {}` must capture the date BEFORE the hop and pass it explicitly.
+    func beginSpan(context: TraceContext, name: String, kind: SpanKind, at: Date = Date(), metadata: [String: String]? = nil) {
         guard let store else { return }
-        
+
         let span = Span(
             spanID: context.spanID,
             traceID: context.traceID,
             parentSpanID: context.parentSpanID,
             name: name,
             kind: kind,
-            startedAt: Date(),
-            status: .running
+            startedAt: at,
+            status: .running,
+            metadataJSON: Self.serializeSpanMetadata(metadata)
         )
-        
+
         do {
             try store.insertSpan(span)
             logger.debug("Began span: \(name) [\(context.spanID)]")
@@ -169,16 +179,31 @@ actor TraceRecorder {
             logger.error("Failed to insert span '\(name)': \(error.localizedDescription)")
         }
     }
-    
-    /// Marks a span as completed or errored.
-    func endSpan(spanID: String, status: SpanStatus) {
+
+    /// Marks a span as completed or errored. `at` is call-site-stamped (see `beginSpan`);
+    /// the `defer { Task { … } }` sites capture it before the hop so the persisted end is
+    /// the real end even when the write lands after `endTrace`'s clamp (earliest-wins in
+    /// `TraceStore.updateSpan`).
+    func endSpan(spanID: String, status: SpanStatus, at: Date = Date(), metadata: [String: String]? = nil) {
         guard let store else { return }
-        
+
         do {
-            try store.updateSpan(spanID: spanID, endedAt: Date(), status: status)
+            try store.updateSpan(spanID: spanID, endedAt: at, status: status,
+                                 metadataJSON: Self.serializeSpanMetadata(metadata))
         } catch {
             logger.error("Failed to end span \(spanID): \(error.localizedDescription)")
         }
+    }
+
+    /// Span metadata is a flat, short-string bag (per-call tokens, durations, model ids) —
+    /// sanitized per value because callers occasionally pass tool-derived strings. Sorted
+    /// keys so byte-identical inputs produce byte-identical blobs.
+    static func serializeSpanMetadata(_ metadata: [String: String]?) -> String? {
+        guard let metadata, !metadata.isEmpty else { return nil }
+        var sanitized: [String: String] = [:]
+        for (k, v) in metadata { sanitized[k] = TelemetrySanitizer.sanitize(v) }
+        guard let data = try? JSONSerialization.data(withJSONObject: sanitized, options: [.sortedKeys]) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
     
     /// Marks a trace as completed or errored.
@@ -195,8 +220,14 @@ actor TraceRecorder {
             try store.updateTrace(traceID: traceID, endedAt: endedAt, status: status, errorSummary: sanitizedError)
             // Close any spans still open for this trace — notably the root span, which no
             // executor ends on the chat path, plus any span leaked by an abnormal exit.
-            // Map the trace's terminal status onto the 3-case SpanStatus (Gap #13).
-            let spanStatus: SpanStatus = (status == .completed) ? .completed : .error
+            // Honest clamp mapping (Phase 5): degraded success is still success at span
+            // level (the failed step already carries its own .error span/event), and a
+            // user Stop clamps open spans as .cancelled, not .error — nothing went wrong.
+            let spanStatus: SpanStatus = switch status {
+            case .completed, .completedWithWarnings: .completed
+            case .cancelled: .cancelled
+            case .running, .failed, .error, .interrupted: .error
+            }
             try store.closeOpenSpans(traceID: traceID, endedAt: endedAt, status: spanStatus)
             logger.debug("Ended trace: \(traceID) with status: \(status.rawValue)")
         } catch {
@@ -281,7 +312,7 @@ actor TraceRecorder {
     /// `AgentErrorCategory` (e.g. `.toolSemanticFail` when the tool returned
     /// error-shaped output) — this drives the per-tool failure-breakdown chart
     /// in the Trends dashboard.
-    func emitToolResult(span: TraceContext, name: String, success: Bool, output: String, durationMs: Int) {
+    func emitToolResult(span: TraceContext, name: String, success: Bool, output: String, durationMs: Int, at: Date = Date()) {
         let detail: [String: Any] = [
             "tool_name": name,
             "is_success": success,
@@ -301,6 +332,7 @@ actor TraceRecorder {
         emit(SpanEvent(
             spanID: span.spanID,
             traceID: span.traceID,
+            timestamp: at,
             eventType: .toolResult,
             content: "\(name): \(success ? "success" : "failed")",
             detailJSON: serializeDetail(detail),
@@ -312,11 +344,12 @@ actor TraceRecorder {
     }
     
     /// Records an LLM request being sent.
-    func emitLLMRequest(span: TraceContext, model: String, messageCount: Int) {
+    func emitLLMRequest(span: TraceContext, model: String, messageCount: Int, at: Date = Date()) {
         let detail: [String: Any] = ["model": model, "messages_count": messageCount]
         emit(SpanEvent(
             spanID: span.spanID,
             traceID: span.traceID,
+            timestamp: at,
             eventType: .llmRequest,
             content: "Request to \(model)",
             detailJSON: serializeDetail(detail),
@@ -325,7 +358,7 @@ actor TraceRecorder {
     }
     
     /// Records an LLM response received.
-    func emitLLMResponse(span: TraceContext, durationMs: Int, preview: String) {
+    func emitLLMResponse(span: TraceContext, durationMs: Int, preview: String, at: Date = Date()) {
         let detail: [String: Any] = [
             "duration_ms": durationMs,
             "response_preview": String(TelemetrySanitizer.sanitize(preview).prefix(300))
@@ -333,6 +366,7 @@ actor TraceRecorder {
         emit(SpanEvent(
             spanID: span.spanID,
             traceID: span.traceID,
+            timestamp: at,
             eventType: .llmResponse,
             content: "Response received (\(durationMs)ms)",
             detailJSON: serializeDetail(detail),
@@ -370,13 +404,14 @@ actor TraceRecorder {
     }
     
     /// Records a user interaction event (HITL permission, clarification).
-    func emitUserInteraction(span: TraceContext, type: String, toolName: String?, outcome: String) {
+    func emitUserInteraction(span: TraceContext, type: String, toolName: String?, outcome: String, at: Date = Date()) {
         let safeOutcome = TelemetrySanitizer.sanitize(outcome)
         var detail: [String: Any] = ["type": type, "outcome": safeOutcome]
         if let t = toolName { detail["tool"] = t }
         emit(SpanEvent(
             spanID: span.spanID,
             traceID: span.traceID,
+            timestamp: at,
             eventType: .userInteraction,
             content: "\(type): \(safeOutcome)",
             detailJSON: serializeDetail(detail),
@@ -397,7 +432,9 @@ actor TraceRecorder {
         toolName: String?,
         nodeName: String?,
         title: String,
-        raisedAt: Date
+        raisedAt: Date,
+        traceID: String? = nil,
+        spanID: String? = nil
     ) {
         guard let store else { return }
         let record = HITLAuditRecord(
@@ -408,7 +445,9 @@ actor TraceRecorder {
             toolName: toolName,
             nodeName: nodeName,
             title: TelemetrySanitizer.sanitize(title),
-            raisedAt: raisedAt
+            raisedAt: raisedAt,
+            traceID: traceID,
+            spanID: spanID
         )
         do {
             try store.insertHITLAudit(record)
@@ -456,7 +495,7 @@ actor TraceRecorder {
     }
 
     /// Records a general error.
-    func emitError(span: TraceContext, error: String, isRecoverable: Bool) {
+    func emitError(span: TraceContext, error: String, isRecoverable: Bool, at: Date = Date()) {
         let detail: [String: Any] = [
             "error": TelemetrySanitizer.sanitize(error),
             "is_recoverable": isRecoverable
@@ -464,6 +503,7 @@ actor TraceRecorder {
         emit(SpanEvent(
             spanID: span.spanID,
             traceID: span.traceID,
+            timestamp: at,
             eventType: .error,
             content: TelemetrySanitizer.sanitize(error),
             detailJSON: serializeDetail(detail),
@@ -471,12 +511,37 @@ actor TraceRecorder {
         ))
     }
     
+    /// Records ONE prompt-context injection — a system-prompt layer (instructions,
+    /// knowledge base, episodic memory, retrieval, …) that shipped in this run's
+    /// request, with its provenance (Run-Report Phase 3). Rides the pre-existing
+    /// `.memoryOp` event type (a case since schema v1 with zero producers until now)
+    /// rather than a new case, so OLD builds reading NEW rows keep decoding.
+    /// `preview` should arrive pre-truncated and is sanitized here at `.minimal`,
+    /// matching the store's posture for tool args/output.
+    func emitContextInjection(span: TraceContext, source: String, chars: Int, preview: String, at: Date = Date()) {
+        let detail: [String: Any] = [
+            "source": source,
+            "chars": chars,
+            "preview": TelemetrySanitizer.sanitize(String(preview.prefix(200)))
+        ]
+        emit(SpanEvent(
+            spanID: span.spanID,
+            traceID: span.traceID,
+            timestamp: at,
+            eventType: .memoryOp,
+            content: source,
+            detailJSON: serializeDetail(detail),
+            severity: .info
+        ))
+    }
+
     /// Records a performance metric.
-    func emitMetric(span: TraceContext, key: String, valueMs: Int) {
+    func emitMetric(span: TraceContext, key: String, valueMs: Int, at: Date = Date()) {
         let detail: [String: Any] = ["key": key, "value_ms": valueMs]
         emit(SpanEvent(
             spanID: span.spanID,
             traceID: span.traceID,
+            timestamp: at,
             eventType: .metric,
             content: "\(key): \(valueMs)ms",
             detailJSON: serializeDetail(detail),
@@ -561,7 +626,8 @@ actor TraceRecorder {
         span: TraceContext,
         error: ClassifiedAgentError,
         iteration: Int? = nil,
-        causedBy: Int64? = nil
+        causedBy: Int64? = nil,
+        at: Date = Date()
     ) {
         let devModeOn = UserDefaults.standard.bool(forKey: AppSettings.developerModeKey)
         // v2 columns (sanitized, non-PII) record whenever diagnostics are enabled; the
@@ -618,6 +684,7 @@ actor TraceRecorder {
         let event = SpanEvent(
             spanID: span.spanID,
             traceID: span.traceID,
+            timestamp: at,
             eventType: .error,
             content: sanitizedMessage,
             detailJSON: serializeDetail(detail),
@@ -634,7 +701,14 @@ actor TraceRecorder {
     }
     
     // MARK: - Flush
-    
+
+    /// Drains the event buffer NOW. The Run Report calls this when it opens (and on
+    /// each live tick) so the panel never misses the tail of a just-ended run — the
+    /// periodic loop alone leaves up to 1s / 50 events unflushed at any moment.
+    func flushNow() {
+        flush()
+    }
+
     /// Flushes all pending events to the persistent store in a single transaction.
     private func flush() {
         guard !pendingEvents.isEmpty, let store else { return }

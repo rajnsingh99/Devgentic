@@ -68,7 +68,18 @@ final class UserNodeSkipTests: XCTestCase {
     private func skipReasons(in events: [AgentStreamEvent]) -> [UUID: NodeSkipReason] {
         var out: [UUID: NodeSkipReason] = [:]
         for event in events {
-            if case .workflowNodeSkipped(let nodeID, _, let reason) = event { out[nodeID] = reason }
+            if case .workflowNodeSkipped(let nodeID, _, let reason, _) = event { out[nodeID] = reason }
+        }
+        return out
+    }
+
+
+    /// What the EXECUTOR said about whether each skipped node had started. Asserted separately
+    /// from the reason because the two settle sites produce the same reason and differ only here.
+    private func ranBeforeSkipFlags(in events: [AgentStreamEvent]) -> [UUID: Bool] {
+        var out: [UUID: Bool] = [:]
+        for event in events {
+            if case .workflowNodeSkipped(let nodeID, _, _, let ran) = event { out[nodeID] = ran }
         }
         return out
     }
@@ -150,6 +161,10 @@ final class UserNodeSkipTests: XCTestCase {
         let events = try await execute(scenario, userInput: "the shared query")
 
         XCTAssertEqual(skipReasons(in: events)[b], .byUser)
+        // The twin of the running-skip assertion: this skip landed BEFORE dispatch, so the node
+        // genuinely never started and "Not run" is the honest word for it.
+        XCTAssertEqual(ranBeforeSkipFlags(in: events)[b], false,
+                       "a pre-dispatch skip must report that the node never started")
         let cInvocation = mockProvider.invocations.first { $0.profileID == scenario.profileID(for: c)! }
         XCTAssertNotNil(cInvocation, "the join must fire — the skipped branch counts as an arrival")
         XCTAssertTrue(cInvocation?.userInput.contains("alpha") == true, "the live branch contributes its output")

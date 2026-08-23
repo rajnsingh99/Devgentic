@@ -109,7 +109,10 @@ actor SelfReflectionExecutorWrapper: Executor {
                 do {
                     logger.info("Self-reflection capability initiated (maxTrials: \(self.config.maxTrials)).")
 
-                    let spyModel = APISpyModel(inner: model)
+                    // Fixed scope = the capability's own context: the reflection evaluator's
+                    // LLM calls (previously invisible) record as llmCall spans at capability
+                    // level. Trial executors build their OWN spy with a per-iteration scope.
+                    let spyModel = APISpyModel(inner: model, spanScope: LLMSpanScope(input.traceContext))
                     let executionTrace = input.traceContext
                     let reflectionEvaluator = ReflectionEvaluator()
                     var reflexionMemory = ReflexionMemoryState()
@@ -146,8 +149,9 @@ actor SelfReflectionExecutorWrapper: Executor {
                         await TraceRecorder.shared.beginSpan(context: trialSpan, name: "trial_\(trial)", kind: .subtask)
                         var trialSucceeded = false
                         defer {
+                            let endedAt = Date() // real end, captured before the hop (earliest-wins)
                             let status: SpanStatus = trialSucceeded ? .completed : .error
-                            Task { await TraceRecorder.shared.endSpan(spanID: trialSpan.spanID, status: status) }
+                            Task { await TraceRecorder.shared.endSpan(spanID: trialSpan.spanID, status: status, at: endedAt) }
                         }
                         onTraceUpdate(AgentTraceLog(
                             traceID: trialSpan.traceID,

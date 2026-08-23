@@ -15,7 +15,7 @@ private let logPrompt = DGLogger(category: "LLMOps")
 
 /// File-scoped logger for the prompt-builder helpers (protocol extensions have no
 /// `self` to borrow one from).
-private let promptLogger = Logger(subsystem: "com.devgentic", category: "PromptBuilder")
+private let promptLogger = Logger(subsystem: DGLogger.subsystem, category: "PromptBuilder")
 
 // MARK: - Prompt Structural Wrapping
 
@@ -250,7 +250,12 @@ extension CognitiveGenerator {
         }
         var executionMessages = compileMessages(from: context)
         executionMessages.append(["role": "user", "content": promptTrigger(for: iteration)])
-        return try await model.generate(messages: executionMessages, tools: nil, responseSchema: responseSchema)
+        // Route through the usage-bearing overload (default impl falls back to `generate`
+        // with nil usage, so non-reporting providers are unchanged). The point is the
+        // APISpyModel seam in front of `model`: it can only record per-call token counts
+        // for calls that travel a usage-reporting method — the bare `generate` here was
+        // one of the drop sites that left legacy-dialect runs with NULL token telemetry.
+        return try await model.generateWithUsage(messages: executionMessages, tools: nil, responseSchema: responseSchema).text
     }
 
     /// Finds the contiguous run of `block` inside `haystack`, returning its start
@@ -366,8 +371,10 @@ enum PromptBuilder {
         }
 
         // Layer 6: CONTEXT — RAG grounding (configurable)
+        // Hoisted to a local so the telemetry block below can report it — the
+        // rendered bytes are unchanged.
+        let grounding = layerConfig.includeRAG ? context.longTermMemory.getStaticGrounding() : ""
         if layerConfig.includeRAG {
-            let grounding = context.longTermMemory.getStaticGrounding()
             if !grounding.isEmpty {
                 systemContent += "\n\n" + wrapping.section("semantic_context", content: grounding)
             }
@@ -431,6 +438,7 @@ enum PromptBuilder {
             ("environment", envContent.count),
             ("knowledge_base", (context.knowledgeBaseContext ?? "").count),
             ("tool_guidance", (context.toolGuidanceContext ?? "").count),
+            ("retrieval", grounding.count),
             ("episodic", layerConfig.includeEpisodicMemory ? (context.recentHistory ?? "").count : 0),
             ("user_profile", layerConfig.includeUserProfile ? (context.userProfile ?? "").count : 0),
             ("attachments", includeAttachmentContext ? (context.attachmentContext ?? "").count : 0)
@@ -438,6 +446,42 @@ enum PromptBuilder {
         let rendered = layerSizes.filter { $0.1 > 0 }.map { "\($0.0)=\($0.1)" }.joined(separator: " ")
         let omitted = layerSizes.filter { $0.1 == 0 }.map(\.0).joined(separator: ",")
         logPrompt.info("[PROMPT] system=\(systemContent.count) chars | \(rendered) | omitted: \(omitted.isEmpty ? "none" : omitted) | tools=\(context.availableTools.count) native=\(isNativeFlow) wrapping=\(wrapping.logLabel) layers=\(layerConfig.includeRAG ? "R" : "-")\(layerConfig.includeEpisodicMemory ? "E" : "-")\(layerConfig.includeUserProfile ? "U" : "-")")
+
+        // Run-Report Phase 3: each layer that actually SHIPPED becomes one CONTEXT
+        // record with a provenance, so the report answers "what did the model read,
+        // and where did it come from" instead of only "how big was it". Gated on the
+        // FIRST iteration (the legacy path rebuilds this prompt every iteration —
+        // per-iteration re-emission would multiply storage by iteration count for
+        // content that rarely changes mid-run) and on a traceContext being present
+        // (test/planning fixtures carry none and emit nothing). Previews are built
+        // INSIDE the gate so non-emitting builds pay nothing. Timestamps stagger by
+        // 1ms per layer to preserve layer ORDER under the projection's time sort.
+        if let contextSpan = context.traceContext, context.currentIteration <= 1 {
+            let layerContents: [(String, String)] = [
+                ("task", task),
+                ("clarification", context.latestClarification.map { "\($0.query)\n\($0.response)" } ?? ""),
+                ("instructions", context.instructions ?? ""),
+                ("environment", envContent),
+                ("knowledge_base", context.knowledgeBaseContext ?? ""),
+                ("tool_guidance", context.toolGuidanceContext ?? ""),
+                ("retrieval", grounding),
+                ("episodic", layerConfig.includeEpisodicMemory ? (context.recentHistory ?? "") : ""),
+                ("user_profile", layerConfig.includeUserProfile ? (context.userProfile ?? "") : ""),
+                ("attachments", includeAttachmentContext ? (context.attachmentContext ?? "") : "")
+            ]
+            let at = Date() // captured BEFORE the hop (invariant 74's companion rule)
+            Task {
+                for (index, layer) in layerContents.enumerated() where !layer.1.isEmpty {
+                    await TraceRecorder.shared.emitContextInjection(
+                        span: contextSpan,
+                        source: layer.0,
+                        chars: layer.1.count,
+                        preview: String(layer.1.prefix(200)),
+                        at: at.addingTimeInterval(Double(index) * 0.001)
+                    )
+                }
+            }
+        }
 
         var messages: [[String: String]] = [["role": "system", "content": systemContent]]
 

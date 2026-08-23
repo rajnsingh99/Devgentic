@@ -35,6 +35,14 @@ struct WorkflowRunDisplayData {
     /// Wall-clock duration of the run so the header can show "Total time X.Xs".
     /// For live runs, computed from `startedAt`; for historical, from the record.
     let duration: TimeInterval
+    /// Join key into the trace store — the title bar's Report button opens the run
+    /// report with it. nil for pre-trace-era historical rows; the report panel
+    /// renders its own "never recorded" explanation for those, so the button does
+    /// not need to guess.
+    var traceID: String? = nil
+    /// The run's record identity (live: `state.runRecordID`, historical: `record.id`),
+    /// passed as the report panel's stable id. Not a chat message id.
+    var runID: UUID? = nil
 
     struct NodeDisplayData: Identifiable {
         let id: UUID
@@ -50,6 +58,18 @@ struct WorkflowRunDisplayData {
         /// Degraded success: completed on a best-effort answer after an early stop
         /// (circuit breaker / iteration budget). Badged amber instead of green.
         var hasWarnings: Bool = false
+        /// For a `.skipped` node: did it BEGIN EXECUTING before the skip settled? nil = the record
+        /// predates the field, so the label falls back to the legacy heuristic below rather than
+        /// asserting a confident wrong answer.
+        ///
+        /// ⚠️ Presentational ONLY. `NodeStatus` stays flat and `nodeDidNotRun` stays untouched, so
+        /// run roll-ups, the "N failed" badge and the history card keep their current meaning — a
+        /// skip is a skip whether or not work was discarded.
+        var ranBeforeSkip: Bool? = nil
+        /// Why this node did not run. `NodeStatus` is deliberately flat, so the reason would
+        /// otherwise die at `mapLiveStatus`/`mapRecordStatus` — which is exactly why the canvas
+        /// overlay could not tell a pass-through user skip from a dead branch.
+        var skipReason: NodeSkipReason? = nil
         /// Whether this node kind produces a meaningful step-by-step timeline
         /// (agent reasoning + tool calls, or an Action node's tool invocation).
         /// Bots, image generators, and structural transform nodes are single-shot;
@@ -146,6 +166,8 @@ struct WorkflowRunDisplayData {
                     nodeTimeline: state.nodeTimelines[result.nodeID] ?? [],
                     isStreaming: result.status == .running,
                     hasWarnings: result.hasWarnings,
+                    ranBeforeSkip: result.ranBeforeSkip,
+                    skipReason: liveSkipReason(result.status),
                     // No layout available to resolve the node kind — preserve the
                     // prior behavior of showing the toggle whenever a timeline exists.
                     supportsTimeline: true
@@ -176,7 +198,9 @@ struct WorkflowRunDisplayData {
             // red "Failed" pill for the whole window between stopping and the record freezing.
             // The run genuinely is cancelled at this point, live or not.
             status: state.wasCancelled ? .cancelled : nil,
-            duration: elapsed
+            duration: elapsed,
+            traceID: state.traceID,
+            runID: state.runRecordID
         )
     }
 
@@ -238,6 +262,8 @@ struct WorkflowRunDisplayData {
                     nodeTimeline: state.nodeTimelines[nodeID] ?? [],
                     isStreaming: result.status == .running,
                     hasWarnings: result.hasWarnings,
+                    ranBeforeSkip: result.ranBeforeSkip,
+                    skipReason: liveSkipReason(result.status),
                     supportsTimeline: kindSupportsTimeline(layoutNode.kind),
                     isUserSkippable: isProfileKind,
                     isRunningSkippable: isProfileKind && layoutNode.profileType != .workflow
@@ -292,6 +318,8 @@ struct WorkflowRunDisplayData {
                 nodeTimeline: state.nodeTimelines[result.nodeID] ?? [],
                 isStreaming: result.status == .running,
                 hasWarnings: result.hasWarnings,
+                    ranBeforeSkip: result.ranBeforeSkip,
+                    skipReason: liveSkipReason(result.status),
                 // The node's kind is unknowable without its layout entry; default to showing the
                 // timeline — the orphan's live trace is exactly the evidence being preserved.
                 supportsTimeline: true
@@ -349,6 +377,8 @@ struct WorkflowRunDisplayData {
                 nodeTimeline: timeline,
                 isStreaming: false,
                 hasWarnings: snapshot.hasWarnings ?? false,
+                ranBeforeSkip: snapshot.ranBeforeSkip,
+                skipReason: recordSkipReason(snapshot.status),
                 supportsTimeline: supportsTimeline
             )
         }
@@ -363,7 +393,9 @@ struct WorkflowRunDisplayData {
             userInput: record.userInput,
             timestamp: record.timestamp,
             status: record.status,
-            duration: record.duration
+            duration: record.duration,
+            traceID: record.traceID,
+            runID: record.id
         )
     }
 
@@ -388,6 +420,18 @@ struct WorkflowRunDisplayData {
             // no tool, artifact or agent events.
             return false
         }
+    }
+
+    /// The reason behind a `.skipped` live status, before the flattening loses it.
+    static func liveSkipReason(_ s: WorkflowNodeResult.Status) -> NodeSkipReason? {
+        if case .skipped(let r) = s { return r }
+        return nil
+    }
+
+    /// The reason behind a `.skipped` persisted status.
+    static func recordSkipReason(_ s: WorkflowRunRecord.WorkflowNodeResultSnapshot.NodeStatus) -> NodeSkipReason? {
+        if case .skipped(let r) = s { return r }
+        return nil
     }
 
     private static func mapLiveStatus(_ s: WorkflowNodeResult.Status) -> NodeDisplayData.NodeStatus {
@@ -433,6 +477,35 @@ extension WorkflowRunDisplayData {
     func nodeDidNotRun(_ node: NodeDisplayData) -> Bool {
         if node.status == .skipped { return true }
         return node.status == .failed && WorkflowNodeOutcome.isLegacyUpstreamSkip(detail: node.detail)
+    }
+
+    /// The status word shown for a node that did not run — THE single source for the visible tag,
+    /// the VoiceOver label, and anything else that names a skip.
+    ///
+    /// ⚠️ Both surfaces used to hard-code "Not run", which is a lie for a RUNNING skip: that node
+    /// started, spent model time and produced output that was then discarded. Observed on-device
+    /// 2026-08-23 — a node tagged "Not run" whose own report showed an 829ms model call and a
+    /// 1.7s duration next to the tag. The codebase already forbids this wording for `.byUser`
+    /// (`UserNodeSkipTests` pins that `byUser.displayText` must not start with "Not run"); the
+    /// DETAIL line obeyed it while the TAG directly above contradicted it.
+    ///
+    /// Decided from the STRUCTURAL fact, never from `detail` prose — prose-matching is this
+    /// codebase's recidivist defect (nine surfaces re-derived it, three got it wrong).
+    func skipTagLabel(for node: NodeDisplayData) -> String {
+        guard nodeDidNotRun(node) else { return node.status.label }
+        return nodeRanBeforeSkip(node) ? String(localized: "Skipped") : String(localized: "Not run")
+    }
+
+    /// Whether a skipped node had already started when the skip landed.
+    ///
+    /// `nil` means the record was written before the fact was persisted. The legacy tier reads the
+    /// two signals that ARE already on disk: a pre-dispatch skip is stamped with two adjacent
+    /// `Date()` calls so its duration is ~0 by construction, and it never accumulates a timeline.
+    /// It has false negatives (a node skipped microseconds after starting), so it errs toward the
+    /// OLD wording and never toward a false "it ran".
+    func nodeRanBeforeSkip(_ node: NodeDisplayData) -> Bool {
+        if let known = node.ranBeforeSkip { return known }
+        return node.duration > 0.05 || !node.nodeTimeline.isEmpty
     }
 
     /// What to tell the user about a node that did not run. The engine writes the structural cause

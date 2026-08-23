@@ -333,6 +333,9 @@ final class ActiveStreamManager {
             do {
                 let traceContext = TraceContext(profile: config.profile, messageID: agentMessage.id)
                 agentMessage.traceID = traceContext.traceID
+                // Run-Report Phase 5: the workflow run record carries the same join key,
+                // so run history and the trace store stop being unlinkable (old Seam 4).
+                workflowExecutionState?.traceID = traceContext.traceID
 
                 let profileType = config.profile.profileType.rawValue
                 logger.info("[TRACE_INIT] traceID: \(traceContext.traceID), spanID: \(traceContext.spanID), profileType: \(profileType), messageID: \(agentMessage.id.uuidString.prefix(8)), conversationID: \(conversationID.uuidString.prefix(8))")
@@ -342,7 +345,11 @@ final class ActiveStreamManager {
                         context: traceContext,
                         conversationID: conversationID,
                         messageID: agentMessage.id,
-                        modelName: nil
+                        // The resolved model for single-model profiles (bot/agent/code/imageGen);
+                        // nil for workflows, which have no single model. This column is what
+                        // `recordTokenUsage` prices against — passing nil here was why
+                        // `traces.estimatedCostUSD` had been NULL on every run ever recorded.
+                        modelName: config.profile.resolvedLLMConfig?.modelName
                     )
 
                     // Phase B: capture the complete request configuration so the
@@ -650,8 +657,8 @@ final class ActiveStreamManager {
                         logger.info("[WF_EVENT] NodeFailed: '\(profileName)' [\(nodeID)] error=\(error)")
                         workflowExecutionState?.handleNodeFailed(nodeID: nodeID, profileName: profileName, error: error, suggestion: suggestion)
 
-                    case .workflowNodeSkipped(let nodeID, let profileName, let reason):
-                        workflowExecutionState?.handleNodeSkipped(nodeID: nodeID, profileName: profileName, reason: reason)
+                    case .workflowNodeSkipped(let nodeID, let profileName, let reason, let ranBeforeSkip):
+                        workflowExecutionState?.handleNodeSkipped(nodeID: nodeID, profileName: profileName, reason: reason, ranBeforeSkip: ranBeforeSkip)
 
                     case .workflowNodeCancelled(let nodeID, let profileName):
                         workflowExecutionState?.handleNodeCancelled(nodeID: nodeID, profileName: profileName)
@@ -864,12 +871,23 @@ final class ActiveStreamManager {
                 
                 logger.info("[STREAM_LOOP_END] Finished — traceID: \(traceContext.traceID), messageID: \(agentMessage.id.uuidString.prefix(8)), profileType: \(profileType)")
 
-                // Forward final output to workflow execution state
+                // Forward the stream's end to the workflow execution state.
+                //
+                // ⚠️ `Task.isCancelled` is load-bearing here, not decoration. A workflow Stop
+                // tears this loop down WITHOUT throwing (see `handleStreamEnd`), so the
+                // `catch is CancellationError` arm below never runs for one — this is the only
+                // place the workflow state can learn the run was stopped. Passing the flag
+                // through is what keeps the frozen record's status agreeing with the trace
+                // status stamped a few lines down.
                 if let wfState = workflowExecutionState {
                     let finalText = agentMessage.content.textContent ?? ""
-                    logger.info("[WF_EVENT] FinalOutput: \(finalText.count) chars, nodeTimelines=\(wfState.nodeTimelines.count) nodes tracked")
+                    let stopped = Task.isCancelled
+                    logger.info("[WF_EVENT] StreamEnd: cancelled=\(stopped), \(finalText.count) chars, nodeTimelines=\(wfState.nodeTimelines.count) nodes tracked")
                     logger.debug("[WF_EVENT] FinalOutput preview: \(String(finalText.prefix(300)))")
-                    wfState.handleFinalOutput(finalText)
+                    wfState.handleStreamEnd(finalText: finalText, cancelled: stopped)
+                    if stopped {
+                        logger.info("[WF_EVENT] Run STOPPED by user — state latched wasCancelled. CONSEQUENCE: the frozen record persists .cancelled with its in-flight node settled .cancelled, instead of a red 'Failed' reporting the user's own action back as an error.")
+                    }
                 }
 
                 // Stop-button race: cancelling the consumer tears the stream down before
@@ -1080,7 +1098,11 @@ final class ActiveStreamManager {
             toolName: kindToolName,
             nodeName: nodeName,
             title: title,
-            raisedAt: raisedAt
+            raisedAt: raisedAt,
+            // v8 join keys: the audit row now names its run exactly, so the Run
+            // Report stops guessing approvals into runs by time window.
+            traceID: traceContext.traceID,
+            spanID: traceContext.spanID
         ) }
     }
 

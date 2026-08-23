@@ -20,7 +20,7 @@ import os
 @MainActor
 final class ConversationSyncService {
 
-    private let logger = Logger(subsystem: "com.devgentic", category: "ConversationSync")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "ConversationSync")
 
     private weak var chatHistoryViewModel: ChatHistoryViewModel?
     private weak var activeStreamManager: ActiveStreamManager?

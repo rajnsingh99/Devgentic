@@ -32,7 +32,7 @@ import os
 
 struct NativeHistoryConverter {
 
-    private static let logger = Logger(subsystem: "com.devgentic", category: "NativeHistoryConverter")
+    private static let logger = Logger(subsystem: DGLogger.subsystem, category: "NativeHistoryConverter")
 
     // MARK: - Checkpoint Extraction
 

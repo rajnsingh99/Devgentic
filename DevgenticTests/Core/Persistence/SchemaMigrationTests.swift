@@ -86,9 +86,11 @@ final class SchemaMigrationTests: XCTestCase {
 
     /// The `Schema` the app builds must equal the one built from the extracted model list.
     func testSchemaBuiltFromModelsIsStable() {
-        XCTAssertEqual(DevgenticSchema.schema, Schema(DevgenticSchema.models))
-        XCTAssertEqual(DevgenticSchema.schema.version, Schema.Version(1, 0, 0),
-                       "Schema version drifted from the implicit default the shipped store will carry.")
+        // The versioned schema carries currentVersion's identifier; a bare Schema(models)
+        // defaults to (1,0,0), so the comparison must supply the version explicitly.
+        XCTAssertEqual(DevgenticSchema.schema, Schema(DevgenticSchema.models, version: DevgenticSchema.currentVersion.versionIdentifier))
+        XCTAssertEqual(DevgenticSchema.schema.version, DevgenticSchema.currentVersion.versionIdentifier,
+                       "Schema version drifted from the declared current version (V2 as of 2026-08-22).")
     }
 
     // MARK: - G67: the OS-side collection-storage regression
@@ -244,6 +246,28 @@ final class SchemaMigrationTests: XCTestCase {
     /// store still opened cleanly — because with one declared version and zero stages SwiftData
     /// never engages staged migration, leaving the identifier inert. It becomes load-bearing the
     /// moment a V2 exists, which is precisely when it is too late to discover a wrong value.
+    /// The nested frozen V1 model copies (added 2026-08-22 with V2) must render the
+    /// EXACT shape SchemaBaselineV1 recorded — this is what makes hand-copied legacy
+    /// classes safe: any drifted attribute, relationship, delete rule or option shows
+    /// up as a line-level diff here instead of as a failed migration on a user's store.
+    func testV1NestedModelsRenderExactlyTheV1Baseline() {
+        let v1 = DevgenticSchema.structuralDescriptor(for: Schema(versionedSchema: DevgenticSchemaV1.self))
+        guard v1 != SchemaBaselineV1.descriptor else { return }
+        let baselineLines = SchemaBaselineV1.descriptor.components(separatedBy: "\n")
+        let currentLines = v1.components(separatedBy: "\n")
+        let removed = Set(baselineLines).subtracting(currentLines).sorted()
+        let added = Set(currentLines).subtracting(baselineLines).sorted()
+        XCTFail(
+            """
+            The frozen V1 nested models no longer render V1's recorded shape.
+            Removed (\(removed.count)):
+            \(removed.map { "  - \($0)" }.joined(separator: "\n"))
+            Added (\(added.count)):
+            \(added.map { "  + \($0)" }.joined(separator: "\n"))
+            """
+        )
+    }
+
     func testVersionedSchemaIsHashIdenticalToUnversioned() {
         let unversioned = Schema(DevgenticSchemaV1.models)
         let versioned = Schema(versionedSchema: DevgenticSchemaV1.self)
@@ -404,7 +428,7 @@ final class SchemaMigrationTests: XCTestCase {
         let current = DevgenticSchema.structuralDescriptor(for: DevgenticSchema.schema)
 
         if ProcessInfo.processInfo.environment["DEVGENTIC_WRITE_SCHEMA_BASELINE"] != nil {
-            // Regeneration escape hatch. Prints the descriptor for pasting into SchemaBaselineV1.swift.
+            // Regeneration escape hatch. Prints the descriptor for pasting into SchemaBaselineV2.swift.
             print("=== BEGIN SCHEMA DESCRIPTOR ===\n\(current)\n=== END SCHEMA DESCRIPTOR ===")
             // ⚠️ SKIP, not `return`. A bare return reports this test as PASSED — so the run that
             // regenerates the baseline also announces that the schema matches it, which is the one
@@ -413,23 +437,23 @@ final class SchemaMigrationTests: XCTestCase {
             // `XCTSkip` makes the suite say "not checked" instead of "checked and fine".
             throw XCTSkip(
                 "Baseline regeneration mode — the drift check did NOT run. Paste the descriptor above "
-                + "into SchemaBaselineV1.swift, then re-run WITHOUT DEVGENTIC_WRITE_SCHEMA_BASELINE "
+                + "into SchemaBaselineV2.swift, then re-run WITHOUT DEVGENTIC_WRITE_SCHEMA_BASELINE "
                 + "to actually verify it."
             )
         }
 
-        guard !SchemaBaselineV1.descriptor.isEmpty else {
+        guard !SchemaBaselineV2.descriptor.isEmpty else {
             return XCTFail(
-                "SchemaBaselineV1.descriptor is empty. Regenerate it with:\n"
+                "SchemaBaselineV2.descriptor is empty. Regenerate it with:\n"
                 + "  DEVGENTIC_WRITE_SCHEMA_BASELINE=1 xcodebuild test-without-building "
                 + "-only-testing:devgenticTests/SchemaMigrationTests/testSchemaStructureMatchesCheckedInBaseline"
             )
         }
 
-        guard current != SchemaBaselineV1.descriptor else { return }
+        guard current != SchemaBaselineV2.descriptor else { return }
 
         // Emit a line-level diff — a 13-entity descriptor is far too long to eyeball whole.
-        let baselineLines = SchemaBaselineV1.descriptor.components(separatedBy: "\n")
+        let baselineLines = SchemaBaselineV2.descriptor.components(separatedBy: "\n")
         let currentLines = current.components(separatedBy: "\n")
         let removed = Set(baselineLines).subtracting(currentLines).sorted()
         let added = Set(currentLines).subtracting(baselineLines).sorted()
@@ -646,50 +670,40 @@ final class SchemaMigrationTests: XCTestCase {
     ///
     /// ⚠️ If the fixture is ever regenerated without re-seeding that row (see the warning in the
     /// regenerator), this test keeps passing while proving nothing.
-    func testRetiredCodeViewerEntityDropsWithoutLosingConversations() throws {
-        guard let fixture = Self.locateFixtureStore() else {
-            throw XCTSkip("No checked-in fixture store found.")
+    /// ⚠️ MEANING FLIPPED 2026-08-22 with V2 (and renamed accordingly below). The original
+    /// test proved the retired `CodeViewerSessionSD` entity DROPPED SILENTLY on open —
+    /// behavior of the zero-stage plan, where SwiftData fell back to automatic inference.
+    /// Staged migration deliberately replaces that: a store whose model hash matches NO
+    /// declared version (this pre-V1 artifact mismatches on BOTH the retired entity and a
+    /// pre-freeze ConversationSD shape) is REFUSED with NSCocoaErrorDomain 134504 instead
+    /// of being silently guessed at — and the app's fatal-store alert + StoreRecovery
+    /// quarantine own that path. Pre-V1 stores exist only on dev machines (nothing has
+    /// shipped); the refusal is the honest outcome, and this test pins it.
+    func testPreV1StoreIsRefusedLoudlyUnderStagedMigration() throws {
+        guard let fixture = Self.locateLegacyFixtureStore() else {
+            throw XCTSkip("No checked-in pre-V1 legacy fixture found (\(Self.legacyFixtureBaseName).store).")
         }
 
-        // Confirm the fixture really is a pre-retirement store — otherwise the assertions below
-        // are vacuous.
-        //
-        // ⚠️ This used to grep the raw bytes for the string "ZCODEVIEWERSESSIONSD", which is the
-        // TABLE NAME and therefore present in the schema whether or not the table holds anything.
-        // An EMPTY retired table satisfied it — and an empty table proves nothing, because SwiftData
-        // dropping a table with no rows is trivially safe. The whole point of this test is that rows
-        // were discarded without collateral damage, so the guard has to count ROWS.
+        // The artifact must genuinely be pre-V1: it carries ROWS of the retired
+        // CodeViewerSessionSD entity (and a pre-freeze ConversationSD shape), so its
+        // model hash matches no declared version.
         let retiredRowCount = try Self.rowCount(inFixture: fixture, table: "ZCODEVIEWERSESSIONSD")
-        XCTAssertGreaterThan(
-            retiredRowCount, 0,
-            """
-            The fixture's ZCODEVIEWERSESSIONSD table holds \(retiredRowCount) rows, so this test \
-            cannot prove anything about dropping the entity — SwiftData discarding an EMPTY table is \
-            not evidence. Re-seed a row while the type still exists (see the regenerator's warning), \
-            or restore the pre-retirement fixture.
-            """
-        )
+        XCTAssertGreaterThan(retiredRowCount, 0,
+                             "The legacy fixture no longer carries retired-entity rows — it cannot prove the refusal.")
 
         let storeURL = workDirectory.appendingPathComponent(DevgenticSchema.storeFilename)
         try Self.copyStoreArtifacts(from: fixture, to: storeURL)
-
-        // The entity is absent from the current schema; opening must still succeed.
-        let container = try Self.makeContainer(at: storeURL)
-        let context = ModelContext(container)
 
         XCTAssertFalse(
             DevgenticSchema.schema.entities.map(\.name).contains("CodeViewerSessionSD"),
             "CodeViewerSessionSD is still registered — the retirement is incomplete."
         )
 
-        let conversations = try context.fetch(FetchDescriptor<ConversationSD>())
-        XCTAssertEqual(conversations.count, 1,
-                       "The conversation that owned the retired row must survive the entity drop.")
-        XCTAssertEqual(conversations.first?.userDefinedTitle, Self.fixtureConversationTitle)
-
-        // Everything else in the store must be untouched by the drop.
-        XCTAssertGreaterThan(try context.fetchCount(FetchDescriptor<PromptModel>()), 0)
-        XCTAssertGreaterThan(try context.fetchCount(FetchDescriptor<BackendProfile>()), 0)
+        // Staged migration must REFUSE the unknown version — loudly, not by guessing.
+        // (The app surfaces this through the fatal-store alert + StoreRecovery
+        // quarantine; silent inference of unknown shapes ended with the zero-stage plan.)
+        XCTAssertThrowsError(try Self.makeContainer(at: storeURL),
+                             "A pre-V1 store (unknown model version) must be refused under staged migration, not silently inferred.")
     }
 
     /// Writes the checked-in fixture. Not a test: gated behind an env var so a normal run never
@@ -706,9 +720,25 @@ final class SchemaMigrationTests: XCTestCase {
         let storeURL = output.appendingPathComponent("\(Self.fixtureBaseName).store")
 
         try autoreleasepool {
-            let container = try Self.makeContainer(at: storeURL)
+            // ⚠️ Written with the FROZEN V1 schema (nested legacy classes), NOT the current
+            // one — the fixture's whole purpose since V2 landed (2026-08-22) is to be a
+            // genuine PREVIOUS-version store so `testFixtureStoreOpensUnderCurrentSchema`
+            // exercises the real V1→V2 staged lightweight migration. Writing it with
+            // `makeContainer` (current schema) would produce an already-migrated store and
+            // reduce that test to a no-op reopen.
+            //
+            // (Historical note: the 2026-08-04 fixture predated even the V1 freeze — it
+            // carried the retired `CodeViewerSessionSD` and a pre-freeze `ConversationSD`
+            // shape, which staged migration correctly REFUSES as an unknown version. That
+            // artifact now lives on as the legacy-refusal fixture — see
+            // `testPreV1StoreIsRefusedLoudlyUnderStagedMigration`.)
+            let v1Schema = Schema(versionedSchema: DevgenticSchemaV1.self)
+            let config = ModelConfiguration(DevgenticSchema.configurationName, schema: v1Schema, url: storeURL)
+            let container = try ModelContainer(for: v1Schema, configurations: config)
             let context = ModelContext(container)
-            let conversation = ConversationSD(userDefinedTitle: Self.fixtureConversationTitle)
+
+            let conversation = DevgenticSchemaV1.ConversationSD()
+            conversation.userDefinedTitle = Self.fixtureConversationTitle
             context.insert(conversation)
             context.insert(PromptModel(title: "Fixture prompt", text: "body", category: "general",
                                        isUserDefined: true, tags: Self.fixturePromptTags))
@@ -717,19 +747,15 @@ final class SchemaMigrationTests: XCTestCase {
                 displayName: Self.fixtureProfileName,
                 details: .bot(BotConfig(llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "llama3")))
             ))
-
-            // ⚠️ DO NOT REGENERATE THE FIXTURE CASUALLY.
-            //
-            // The committed fixture was written on 2026-08-04 while `CodeViewerSessionSD` still
-            // existed, and deliberately carries a ROW of it cascade-linked to the conversation
-            // above. That row is the entire reason the fixture can PROVE an entity drop is safe
-            // instead of assuming it (see
-            // `testRetiredCodeViewerEntityDropsWithoutLosingConversations`). The seeding code is
-            // gone with the type; regenerating from here produces a fixture WITHOUT that row and
-            // silently weakens the retirement test to a tautology.
-            //
-            // To seed a retired entity again, add the row while its type still exists, generate,
-            // and only then delete the type.
+            // One V1 workflow-run row, so the V1→V2 migration has an actual row to carry
+            // through the +traceID column change (Core Data's mandatory-attribute
+            // validation only fires for entities WITH rows — the all-entities lesson).
+            let run = DevgenticSchemaV1.WorkflowRunRecordSD(
+                conversationID: conversation.id, workflowName: "Fixture workflow",
+                userInput: "fixture input", finalOutput: "fixture output", statusRaw: "completed",
+                nodeResultsData: Data("[]".utf8), variablesData: Data("{}".utf8))
+            run.conversation = conversation
+            context.insert(run)
 
             try context.save()
         }
@@ -1121,6 +1147,11 @@ final class SchemaMigrationTests: XCTestCase {
     // MARK: - Helpers
 
     static let fixtureBaseName = "devgentic-schema-v1-fixture"
+    /// The 2026-08-04 artifact — PRE-V1 (carries retired CodeViewerSessionSD rows and a
+    /// pre-freeze ConversationSD). Kept precisely because no version matches it: it is
+    /// the refusal-path fixture. Regenerating it is impossible by design (the retired
+    /// type is gone), so treat the file as irreplaceable.
+    static let legacyFixtureBaseName = "devgentic-pre-v1-legacy-fixture"
     static let fixtureProfileName = "Fixture Bot"
     static let fixtureConversationTitle = "Fixture conversation"
     static let fixturePromptTags = ["alpha", "beta"]
@@ -1174,6 +1205,10 @@ final class SchemaMigrationTests: XCTestCase {
 
     private static func locateFixtureStore() -> URL? {
         Bundle(for: SchemaMigrationTests.self).url(forResource: fixtureBaseName, withExtension: "store")
+    }
+
+    private static func locateLegacyFixtureStore() -> URL? {
+        Bundle(for: SchemaMigrationTests.self).url(forResource: legacyFixtureBaseName, withExtension: "store")
     }
 
     /// Copies a store and every sidecar that exists beside it.

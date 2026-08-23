@@ -35,7 +35,7 @@ enum ViewLayout {
     /// Tuned to ~880 (down from 1000) so long-form chat lines stay in a more readable
     /// measure; the transcript, composer, and DynamicIslandBar all share this value so
     /// they remain width-aligned.
-    static let maxContentWidth: CGFloat = 880
+    static let maxContentWidth: CGFloat = 1000
     /// Standard padding for ScrollView content in container views.
     static let containerPadding: CGFloat = 24
     /// Standard sidebar row padding.

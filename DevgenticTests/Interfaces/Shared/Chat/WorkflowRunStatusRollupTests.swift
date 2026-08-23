@@ -114,6 +114,90 @@ final class WorkflowRunStatusRollupTests: XCTestCase {
                        "A run the user stopped must not be persisted as Failed")
     }
 
+    // MARK: - The Stop path as the app actually reaches it (2026-08-23)
+
+    /// ⚠️ THE GAP `testUserCancelIsRecordedAsCancelledNotFailed` LEFT OPEN. That test calls
+    /// `handleError(cancelled: true)` directly — it proves `freeze`'s mapping and nothing about
+    /// whether the app ever makes that call. It did not: a workflow Stop does not throw
+    /// `CancellationError` (the executor ends its cancel arm with `continuation.finish()`, and a
+    /// cancelled AsyncThrowingStream terminates rather than throws), so the consume loop exited
+    /// NORMALLY into the success branch and the record froze `.failed`. `handleStreamEnd` is the
+    /// seam the consumer now goes through, so this drives the real entry point.
+    func testStreamEndWhileCancelledPersistsCancelled() throws {
+        let state = conditionalRunState()
+        state.isRunning = true
+        state.nodeResults.append(result(.running, name: "Agent 3", detail: "Running..."))
+
+        state.handleStreamEnd(finalText: "partial answer", cancelled: true)
+
+        XCTAssertTrue(state.wasCancelled, "the stream ending on a cancelled task IS the stop signal")
+        let record = freeze(state)
+        XCTAssertEqual(record.status, .cancelled,
+                       "the run the user stopped must not persist as Failed")
+        let node = try XCTUnwrap(record.nodeResults.first { $0.profileName == "Agent 3" })
+        XCTAssertEqual(node.status, .cancelled, "an interrupted node is cancelled, not failed")
+        XCTAssertFalse(node.isGenuineFailure,
+                       "a stopped node must not feed the 'N failed' badge or the failure roll-up")
+        XCTAssertTrue(node.detail.contains("Cancelled before the node finished."),
+                      "wording must say cancelled, not 'Interrupted' — got: \(node.detail)")
+    }
+
+    /// A Stop must not cost the user the output the run had already produced. The buggy path
+    /// called `handleFinalOutput`, so it DID keep the text (while lying about the status); the
+    /// fix must not trade one for the other.
+    func testStreamEndWhileCancelledKeepsPartialOutput() {
+        let state = conditionalRunState()
+        state.isRunning = true
+
+        state.handleStreamEnd(finalText: "the half-written essay", cancelled: true)
+
+        XCTAssertEqual(freeze(state).finalOutput, "the half-written essay")
+    }
+
+    /// The control: a normal stream end is untouched by the new seam.
+    func testStreamEndWithoutCancelIsUnchanged() {
+        let state = conditionalRunState()
+        state.isRunning = true
+
+        state.handleStreamEnd(finalText: "done", cancelled: false)
+
+        XCTAssertFalse(state.wasCancelled)
+        XCTAssertEqual(freeze(state).status, .completed)
+        XCTAssertEqual(freeze(state).finalOutput, "done")
+    }
+
+    /// `freeze`'s force-settle is the LAST gate, reached only when `settleInFlightWork` did not
+    /// run (the buffered-event race). Its default used to be `.failed` unconditionally, which
+    /// re-created the whole defect one layer down: a `.failed` node satisfies `isGenuineFailure`,
+    /// which rolls the RUN up as `.failed` even though `wasCancelled` said otherwise.
+    func testFreezeBackstopSettlesRunningNodeAsCancelledWhenStopped() throws {
+        let state = conditionalRunState()
+        // Latch the cancel WITHOUT running settleInFlightWork, so the node reaches freeze `.running`.
+        state.wasCancelled = true
+        state.nodeResults.append(result(.running, name: "Agent 3", detail: "Running..."))
+
+        let record = freeze(state)
+
+        let node = try XCTUnwrap(record.nodeResults.first { $0.profileName == "Agent 3" })
+        XCTAssertEqual(node.status, .cancelled)
+        XCTAssertFalse(node.isGenuineFailure)
+        XCTAssertEqual(record.status, .cancelled,
+                       "the backstop must not manufacture a failure that overturns wasCancelled")
+    }
+
+    /// The control for the backstop: without a cancel, an unsettled node is still a failure.
+    func testFreezeBackstopStillFailsRunningNodeWhenNotStopped() throws {
+        let state = conditionalRunState()
+        state.nodeResults.append(result(.running, name: "Agent 3", detail: "Running..."))
+
+        let record = freeze(state)
+
+        let node = try XCTUnwrap(record.nodeResults.first { $0.profileName == "Agent 3" })
+        XCTAssertEqual(node.status, .failed)
+        XCTAssertTrue(node.detail.contains("Interrupted before the node finished."))
+        XCTAssertEqual(record.status, .failed)
+    }
+
     /// The control: a genuine workflow error is still `.failed`. Without this the fix could be
     /// passing by calling everything cancelled.
     func testWorkflowErrorWithoutCancelIsStillFailed() {

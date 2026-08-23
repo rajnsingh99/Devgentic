@@ -218,3 +218,109 @@ final class TraceStoreLifecycleTests: XCTestCase {
         ))
     }
 }
+
+// MARK: - Metrics + log-window correctness (pre-existing P1s, fixed 2026-08-23)
+
+final class ObservabilityQueryCorrectnessTests: XCTestCase {
+
+    private var store: TraceStore!
+    private var recorder: TraceRecorder!
+
+    override func setUpWithError() throws {
+        store = try TraceStore(inMemory: true)
+        recorder = TraceRecorder(store: store)
+    }
+
+    override func tearDown() { store = nil; recorder = nil; super.tearDown() }
+
+    /// Drives the REAL emitter so the assertion covers the actual persisted shape.
+    private func record(tool: String, successes: Int, failures: Int) async {
+        let ctx = TraceContext(subAgentName: "metrics", provider: .anthropic)
+        await recorder.beginTrace(context: ctx, conversationID: UUID(), messageID: UUID(), modelName: nil)
+        for i in 0..<successes {
+            await recorder.emitToolResult(span: ctx, name: tool, success: true, output: "ok", durationMs: 100 + i)
+        }
+        for i in 0..<failures {
+            await recorder.emitToolResult(span: ctx, name: tool, success: false, output: "boom", durationMs: 200 + i)
+        }
+        await recorder.flushNow()
+    }
+
+    /// ⚠️ THE DEFECT: `toolReliabilityStats` grouped by `content`, which `emitToolResult` writes as
+    /// "<name>: success" / "<name>: failed" — the outcome baked into the key. Every tool therefore
+    /// appeared TWICE, one row at 100% success and one at 0%, and the tool's real reliability rate
+    /// was never displayed anywhere. The whole feature reported the opposite of its purpose.
+    func testEachToolIsOneRowWithItsRealSuccessRate() async throws {
+        await record(tool: "read_file", successes: 3, failures: 1)
+
+        let stats = try store.toolReliabilityStats(since: Date(timeIntervalSince1970: 0))
+        let readFile = stats.filter { $0.toolName == "read_file" }
+
+        XCTAssertEqual(readFile.count, 1,
+                       "one tool, one row — got \(stats.map(\.toolName))")
+        XCTAssertEqual(readFile.first?.totalCalls, 4)
+        XCTAssertEqual(readFile.first?.successCount, 3)
+        XCTAssertEqual(readFile.first?.failureCount, 1)
+        // And the name is the TOOL, never the display string.
+        XCTAssertFalse(stats.contains { $0.toolName.contains(":") },
+                       "a row keyed on the display string leaks 'name: success' into the chart")
+    }
+
+    /// The per-tool follow-up queries (percentiles, failure breakdown) match on the same key. If
+    /// only the GROUP BY were fixed they would silently find nothing and every tool would show
+    /// null latency with an empty breakdown.
+    func testPerToolPercentilesAndBreakdownFindTheMergedRows() async throws {
+        await record(tool: "execute_shell", successes: 2, failures: 2)
+
+        let stats = try store.toolReliabilityStats(since: Date(timeIntervalSince1970: 0))
+        let shell = try XCTUnwrap(stats.first { $0.toolName == "execute_shell" })
+
+        XCTAssertNotNil(shell.p50DurationMs, "percentile query must match the same tool key")
+        XCTAssertFalse(shell.failureBreakdown.isEmpty,
+                       "failure breakdown must match the same tool key")
+        XCTAssertEqual(shell.failureBreakdown.values.reduce(0, +), 2)
+    }
+
+    /// Two different tools must stay separate — the fix must merge outcomes, not merge tools.
+    func testDifferentToolsStaySeparate() async throws {
+        await record(tool: "read_file", successes: 1, failures: 0)
+        await record(tool: "write_file", successes: 1, failures: 0)
+
+        let stats = try store.toolReliabilityStats(since: Date(timeIntervalSince1970: 0))
+        XCTAssertEqual(Set(stats.map(\.toolName)), ["read_file", "write_file"])
+    }
+
+    /// ⚠️ THE DEFECT: `fetchLogEntries` ordered ASCENDING then applied the row cap, so a window
+    /// holding more than the cap returned the OLDEST entries and silently dropped everything
+    /// newer — handing back the start of the period and discarding exactly the lines around
+    /// whatever was being investigated. The cap has to bite at the far end from the question.
+    func testLogFetchKeepsTheNEWESTEntriesWhenCapped() throws {
+        let base = Date(timeIntervalSince1970: 1_000_000)
+        let entries = (0..<50).map { i in
+            LogEntry(timestamp: base.addingTimeInterval(Double(i)), level: .error,
+                     subsystem: "t", category: "t", message: "entry-\(i)")
+        }
+        try store.insertLogEntries(entries)
+
+        let capped = try store.fetchLogEntries(since: base.addingTimeInterval(-1), limit: 10)
+
+        XCTAssertEqual(capped.count, 10)
+        XCTAssertEqual(capped.last?.message, "entry-49", "the most recent line must survive the cap")
+        XCTAssertEqual(capped.first?.message, "entry-40")
+        XCTAssertFalse(capped.contains { $0.message == "entry-0" },
+                       "the oldest entries are what the cap should drop")
+    }
+
+    /// The documented contract is unchanged: callers still receive oldest-first.
+    func testCappedLogFetchStillReturnsAscendingOrder() throws {
+        let base = Date(timeIntervalSince1970: 2_000_000)
+        try store.insertLogEntries((0..<20).map { i in
+            LogEntry(timestamp: base.addingTimeInterval(Double(i)), level: .error,
+                     subsystem: "t", category: "t", message: "e\(i)")
+        })
+
+        let rows = try store.fetchLogEntries(since: base.addingTimeInterval(-1), limit: 5)
+        XCTAssertEqual(rows.map(\.timestamp), rows.map(\.timestamp).sorted(),
+                       "the reverse must restore ascending order for callers")
+    }
+}

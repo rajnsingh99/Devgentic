@@ -134,7 +134,17 @@ enum AgentStreamEvent: Sendable {
     ///   • nine surfaces string-matched the message back into "did not run", and three of them
     ///     forgot, so one node read "Not run" on screen and "Failed" to VoiceOver.
     /// Emit this — never `workflowNodeFailed` — for a node that did not execute.
-    case workflowNodeSkipped(nodeID: UUID, profileName: String, reason: NodeSkipReason)
+    /// `ranBeforeSkip` = did this node BEGIN EXECUTING before the skip settled?
+    ///
+    /// ⚠️ Deliberately NON-defaulted so the compiler forces every emit site to answer. The two
+    /// user-skip settle sites produce the IDENTICAL `.skipped(reason: .byUser)` — correct for the
+    /// engine (both keep downstream edges live and forward the input unchanged) but it left the UI
+    /// no way to tell "never started" from "started, worked, output discarded", so a node that had
+    /// just burned an 829ms model call was tagged "Not run" (observed on-device 2026-08-23).
+    /// The criterion is positional and checkable: a site AFTER the node's `workflowNodeStarted`
+    /// yields true. Carried structurally rather than inferred UI-side, because the executor knows
+    /// it by control flow while the UI could only guess from row presence.
+    case workflowNodeSkipped(nodeID: UUID, profileName: String, reason: NodeSkipReason, ranBeforeSkip: Bool)
 
     /// A workflow node was cancelled mid-flight. Distinct from failure: the user asked for it.
     case workflowNodeCancelled(nodeID: UUID, profileName: String)

@@ -15,7 +15,7 @@ actor DiscordAPIClient {
     private let botToken: String
     private let session: URLSession
     private let baseURL = "https://discord.com/api/v10"
-    private let logger = Logger(subsystem: "com.devgentic", category: "DiscordAPI")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "DiscordAPI")
 
     /// Application ID — set after READY event provides it.
     var applicationID: String?

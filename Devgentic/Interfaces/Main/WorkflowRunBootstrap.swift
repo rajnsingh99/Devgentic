@@ -157,7 +157,8 @@ final class WorkflowRunTicket {
                 variables: frozen.variables,
                 status: frozen.status,
                 duration: frozen.duration,
-                error: frozen.error
+                error: frozen.error,
+                traceID: frozen.traceID
             )
         } else {
             // Should not happen — `begin` always sets it — but a missing id means the upsert would

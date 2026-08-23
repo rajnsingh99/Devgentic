@@ -36,6 +36,14 @@ struct WorkflowNodeResult: Identifiable, Sendable {
     /// Degraded success — the node completed on a best-effort answer after an early stop
     /// (circuit breaker / iteration budget). Badged amber instead of green in the UI.
     var hasWarnings: Bool = false
+    /// For a `.skipped` node only: did it BEGIN EXECUTING before the skip settled?
+    ///
+    /// ⚠️ Presentational, and deliberately NOT named `didRun` — `NodeDisplayData.NodeStatus.didRun`
+    /// already exists and answers a different question (it is false for every skip). Two properties
+    /// answering "did it run" differently in one layer is the trap; this one is scoped to skips by
+    /// its name. It must NEVER feed `didNotRun` / `isGenuineFailure` / the run roll-ups — a skip is
+    /// still a skip whether or not work was discarded.
+    var ranBeforeSkip: Bool = false
 
     var duration: TimeInterval {
         (endTime ?? Date()).timeIntervalSince(startTime)
@@ -129,6 +137,11 @@ final class WorkflowExecutionState {
     /// resolve "the in-progress history row" back to this live state.
     var runRecordID: UUID?
 
+    /// The run's observability traceID, stamped by ActiveStreamManager the moment the
+    /// trace is minted (Run-Report Phase 5). Rides into the persisted WorkflowRunRecord
+    /// so run history and the trace store finally share a join key (old Seam 4).
+    var traceID: String?
+
     // MARK: - Per-Node Timeline
 
     /// Appends a timeline event to a specific node's timeline.
@@ -195,19 +208,27 @@ final class WorkflowExecutionState {
 
     /// A node that DID NOT RUN — or, since Phase B, one the user skipped MID-FLIGHT.
     /// Never routed through `handleNodeFailed` — that was the bug.
-    func handleNodeSkipped(nodeID: UUID, profileName: String, reason: NodeSkipReason) {
+    func handleNodeSkipped(nodeID: UUID, profileName: String, reason: NodeSkipReason, ranBeforeSkip: Bool) {
         let detail = reason.displayText
         if let idx = nodeResults.firstIndex(where: { $0.nodeID == nodeID }) {
             nodeResults[idx] = WorkflowNodeResult(
                 id: nodeResults[idx].id, nodeID: nodeID, profileName: profileName,
                 status: .skipped(reason), detail: detail,
-                startTime: nodeResults[idx].startTime, endTime: Date()
+                startTime: nodeResults[idx].startTime, endTime: Date(),
+                // ⚠️ Stored as TOLD, never re-derived from row presence. Row presence is a good
+                // proxy but not the fact: the executor knows by control flow which side of the
+                // node's start event it is on, and a `WorkflowNodeSkipStore` bridge can turn a
+                // PENDING skip request into a running skip after dispatch — so "which button the
+                // user pressed" and "did it run" are genuinely different questions.
+                hasWarnings: nodeResults[idx].hasWarnings,
+                ranBeforeSkip: ranBeforeSkip
             )
         } else {
             nodeResults.append(WorkflowNodeResult(
                 id: UUID(), nodeID: nodeID, profileName: profileName,
                 status: .skipped(reason), detail: detail,
-                startTime: Date(), endTime: Date()
+                startTime: Date(), endTime: Date(),
+                ranBeforeSkip: ranBeforeSkip
             ))
         }
         // A RUNNING-skip can abandon an in-flight tool. Nothing else closes per-node tool rows at
@@ -253,6 +274,32 @@ final class WorkflowExecutionState {
         finalOutput = output
         isRunning = false
         completedAt = Date()
+    }
+
+    /// The stream driving this run has ended. `cancelled` is the consumer's `Task.isCancelled`
+    /// at the moment its loop exited.
+    ///
+    /// ⚠️ This is ONE method with a REQUIRED `cancelled:` argument, not an `if` at the call
+    /// site, because the `if` is exactly the shape that shipped the defect: a workflow Stop
+    /// does NOT throw `CancellationError` — `WorkflowExecutor` ends its cancel arm with
+    /// `continuation.finish()` (not `finish(throwing:)`), and a cancelled `AsyncThrowingStream`
+    /// TERMINATES rather than throws — so `ActiveStreamManager`'s consume loop fell out of
+    /// `for try await` NORMALLY, took the success branch into `handleFinalOutput`, and left
+    /// `wasCancelled` false. `freeze` then force-settled the still-`.running` node to `.failed`
+    /// and rolled the whole run up as `.failed`: the workflow timeline reported the user's own
+    /// Stop back to them as a red "Failed", while the trace store (stamped from the message's
+    /// `terminalOutcome` on the same exit) correctly said "Cancelled". Two stores, two answers,
+    /// one run. Making the caller name the outcome removes the branch that can be forgotten.
+    func handleStreamEnd(finalText: String, cancelled: Bool) {
+        guard cancelled else {
+            handleFinalOutput(finalText)
+            return
+        }
+        // Keep whatever the run did produce before latching — a Stop discards no evidence.
+        // (`handleError` does not set `finalOutput`, and the buggy path did, so omitting this
+        // would trade a wrong status for a lost partial answer.)
+        finalOutput = finalText
+        handleError("Cancelled", cancelled: true)
     }
 
     /// - Parameter cancelled: true when the user stopped the run, false for a thrown failure.

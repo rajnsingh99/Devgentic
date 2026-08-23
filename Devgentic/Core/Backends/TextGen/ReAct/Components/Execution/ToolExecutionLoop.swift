@@ -190,7 +190,10 @@ private func executeSingleTool(
         stepNumber: currentIteration,
         state: .acting(.tool(name: toolName)),
         content: "Executing '\(toolName)'...",
-        metadata: ["tool_name": toolName]
+        // `tool_params` rides along like the result record below already does (:~430) — the
+        // .toolCall span event used to carry only the NAME, so the report could show that a
+        // tool ran but not what it was asked to do until the result landed.
+        metadata: ["tool_name": toolName, "tool_params": paramsString]
     ))
 
     // Intercept ask_user

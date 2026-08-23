@@ -846,7 +846,24 @@ class AgentConnect: @unchecked Sendable {
                     let executor = ExecutorFactory.create(for: profile)
                     logger.info("[Workflow] Executor: \(executor.executorLabel) for '\(workflowContext.nodeName)'")
 
+                    // EvaluationLogger bridge — the same three lines the chat path has had all
+                    // along (streamAgentResponse). Without it, a workflow node's thought /
+                    // toolCall / stateChange records never became span events, so the SAME
+                    // profile recorded its reasoning in chat and NOTHING inside a workflow.
+                    let evalSessionID = UUID()
+                    if !activeTools.isEmpty {
+                        EvaluationLogger.shared.startSession(id: evalSessionID, availableTools: activeTools)
+                    }
+                    defer {
+                        if !activeTools.isEmpty {
+                            _ = EvaluationLogger.shared.endSession(id: evalSessionID)
+                        }
+                    }
+
                     let traceHandler: @Sendable (AgentTraceLog) -> Void = { log in
+                        if !activeTools.isEmpty {
+                            EvaluationLogger.shared.logStep(id: evalSessionID, log: log)
+                        }
                         onTraceUpdate?(log)
                     }
 

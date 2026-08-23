@@ -151,6 +151,17 @@ enum SpanStatus: String, Codable, Sendable, DatabaseValueConvertible {
     case running
     case completed
     case error
+    /// The user (or the engine's routing) deliberately skipped this work — not a
+    /// failure. Added 2026-08-22 (Run-Report Phase 5): skips used to close spans
+    /// GREEN (`.completed`), making a skipped node indistinguishable from one that
+    /// ran. Stored as rawValue TEXT, so no DB migration — but a PRE-Phase-5 build
+    /// reading a trace containing one of these rows fails the enum decode for that
+    /// trace (accepted: the trace store is 30-day ephemeral diagnostics, and the
+    /// rows age out).
+    case skipped
+    /// The user stopped the run while this span was open. Distinct from `.error`
+    /// (nothing went wrong) and from `.skipped` (nothing was chosen against).
+    case cancelled
 }
 
 // MARK: - Span (Logical operation unit)

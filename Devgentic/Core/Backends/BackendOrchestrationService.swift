@@ -103,6 +103,9 @@ class BackendOrchestrationService {
                 // delivery is always deterministic, never dependent on retrieval. The
                 // payload lands at the top of the USER message (executors render it
                 // ahead of the query) — never in the system <task>.
+                // Input-lane clock (Run-Report Phase 3): attachments + RAG retrieval +
+                // knowledge assembly below are the request's real pre-flight cost.
+                let preRequestAssemblyStart = Date()
                 var attachmentContext: String? = nil
                 if !files.isEmpty {
                     logger.info("Processing \(files.count) attached files with strategy: \(fileContextStrategy.rawValue). (Trace: \(context.traceID))")
@@ -353,6 +356,13 @@ class BackendOrchestrationService {
                 } else if !enabledToolSourceIDs.isEmpty {
                     logger.debug("[MCP-INSTRUCTIONS] No server guidance applies — this profile's \(enabledToolSourceIDs.count) tool source(s) supplied no instructions. CONSEQUENCE: <tool_guidance> is omitted entirely.")
                 }
+
+                // Close the Input-lane bracket opened above the attachment block: this
+                // covers attachment extraction, RAG retrieval, knowledge assembly and MCP
+                // guidance — the run's pre-flight cost, attributed to the root span.
+                await TraceRecorder.shared.emitMetric(
+                    span: context, key: "input_assembly",
+                    valueMs: Int(Date().timeIntervalSince(preRequestAssemblyStart) * 1000))
 
                 // 5. Pre-flight context-fit check — every piece of the prompt is known
                 // here, BEFORE any tokens stream. Oversize prompts on local models don't

@@ -31,6 +31,12 @@ struct HITLAuditRecord: Codable, Identifiable, Sendable {
     var resolvedAt: Date?               // nil while pending; set on resolve / interrupted reconcile
     var outcome: String?                // approved/denied/answered/skipped/rejected/cancelled/interrupted
 
+    // v8 join keys (Run-Report Phase 5) — nullable, still no FK: rows must keep
+    // surviving trace purge and process death. nil on pre-v8 rows, which the Run
+    // Report matches by conversation + time window instead.
+    var traceID: String?
+    var spanID: String?
+
     init(
         operationID: String,
         conversationID: String,
@@ -41,7 +47,9 @@ struct HITLAuditRecord: Codable, Identifiable, Sendable {
         title: String,
         raisedAt: Date = Date(),
         resolvedAt: Date? = nil,
-        outcome: String? = nil
+        outcome: String? = nil,
+        traceID: String? = nil,
+        spanID: String? = nil
     ) {
         self.operationID = operationID
         self.conversationID = conversationID
@@ -53,6 +61,8 @@ struct HITLAuditRecord: Codable, Identifiable, Sendable {
         self.raisedAt = raisedAt
         self.resolvedAt = resolvedAt
         self.outcome = outcome
+        self.traceID = traceID
+        self.spanID = spanID
     }
 }
 
@@ -67,6 +77,6 @@ extension HITLAuditRecord: FetchableRecord, PersistableRecord {
 
     enum Columns: String, ColumnExpression {
         case operationID, conversationID, interface, type, toolName, nodeName, title
-        case raisedAt, resolvedAt, outcome
+        case raisedAt, resolvedAt, outcome, traceID, spanID
     }
 }

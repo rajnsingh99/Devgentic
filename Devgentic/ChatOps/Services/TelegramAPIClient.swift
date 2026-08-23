@@ -15,7 +15,7 @@ actor TelegramAPIClient {
     private let botToken: String
     private let session: URLSession
     private let baseURL: String
-    private let logger = Logger(subsystem: "com.devgentic", category: "TelegramAPI")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "TelegramAPI")
 
     init(botToken: String) {
         self.botToken = botToken

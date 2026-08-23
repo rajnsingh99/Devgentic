@@ -38,6 +38,9 @@ struct WorkflowDedicatedView: View {
     @State private var followRunningNode = true
     @State private var validationIssues: [WorkflowValidationIssue] = []
     @State private var isHoveringFix = false
+    // The workflow surface renders no chat bubbles, so it needs its own Report entry
+    // point — same panel, same developer-mode sizing memory as the chat one.
+    @AppStorage(AppSettings.developerModeKey) private var isDeveloperMode: Bool = false
 
     /// Cached workflow layout.
     ///
@@ -487,6 +490,12 @@ struct WorkflowDedicatedView: View {
             Text("Workflow execution")
                 .font(theme.fontTitle3.weight(.semibold))
                 .foregroundColor(theme.primaryText)
+                // Truncate, never wrap: this is the element that absorbs the squeeze once the
+                // controls to its right refuse to compress. Without an explicit limit a Text
+                // grows a second line and the whole bar gets taller instead of narrower.
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .layoutPriority(-1)
                 .accessibilityAddTraits(.isHeader)
 
             // Historical badge — only shown for historical runs.
@@ -505,7 +514,9 @@ struct WorkflowDedicatedView: View {
 
             Spacer()
 
-            // Right: History menu + Canvas button
+            // Right: Report + History menu + Canvas button
+            reportButton(data: data)
+
             if !runHistory.isEmpty || !data.isLive {
                 runPickerMenu
             }
@@ -521,6 +532,38 @@ struct WorkflowDedicatedView: View {
                 .frame(height: 0.5),
             alignment: .bottom
         )
+    }
+
+    /// Opens the unified run report for the run this view is showing (live or the
+    /// selected historical run). Rendered whenever there is a conversation to scope
+    /// HITL rows to — a nil traceID still opens the panel, which explains
+    /// "recorded before trace support" itself (the four-way unavailability states
+    /// exist so entry points never have to guess).
+    @ViewBuilder
+    private func reportButton(data: WorkflowRunDisplayData) -> some View {
+        if let cid = conversationID {
+            Button {
+                ReportInspectorPanelManager.shared.show(
+                    messageID: data.runID ?? UUID(),
+                    conversationID: cid,
+                    traceID: data.traceID,
+                    theme: theme,
+                    isDeveloperMode: isDeveloperMode,
+                    answerPreview: data.finalOutput.isEmpty ? nil : data.finalOutput
+                )
+            } label: {
+                Label("Report", systemImage: "chart.bar.doc.horizontal")
+                    .font(theme.fontCaption.weight(.medium))
+                    .foregroundColor(theme.secondaryText)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(theme.surfaceOverlay))
+            }
+            .buttonStyle(.plain)
+            .fixedSize(horizontal: true, vertical: false)   // same reason as the segmented control
+            .help("What happened during this run")
+            .accessibilityLabel("Open the run report for this workflow run")
+        }
     }
 
     @ViewBuilder
@@ -824,6 +867,15 @@ struct WorkflowDedicatedView: View {
         .padding(3)
         .background(Capsule().fill(theme.surfaceOverlay))
         .shadow(color: Color.black.opacity(0.15), radius: 4, y: 2)
+        // ⚠️ THE FIX FOR "Canva s" / "Executi on". In a crowded HStack SwiftUI compresses flexible
+        // children, and a bare `Text` answers by WRAPPING — so adding the Report button pushed
+        // these two labels into two lines each. Raising `ViewLayout.maxContentWidth` does NOT fix
+        // it: that is a MAX and only binds when the window is WIDE, while the clipping happens
+        // when it is narrow (the app's own `minWidth` is 760 and this bar wants ~780). Making the
+        // control refuse to shrink moves the squeeze onto the title, which truncates cleanly —
+        // the right thing to sacrifice, since the title is the one element you can infer.
+        // Applied here rather than at the call site so all four usages are covered.
+        .fixedSize(horizontal: true, vertical: false)
     }
 
 }

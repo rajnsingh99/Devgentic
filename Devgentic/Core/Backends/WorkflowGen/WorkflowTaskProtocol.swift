@@ -184,6 +184,24 @@ enum NodeSkipReason: String, Sendable, Codable, Equatable, CaseIterable {
     /// separately (`edgeIsLive`, `WorkflowInputAssembler`, and the cascade classifier already do).
     case byUser
 
+    /// Whether the subtree BELOW this node stayed live.
+    ///
+    /// ⚠️ The rule this type's own `byUser` doc comment demands ("matchers that assume
+    /// `skipped ⇒ downstream never ran` must treat this case separately"), given a name so the
+    /// next matcher reads it instead of re-deriving it. Three sites already complied by hand
+    /// (`edgeIsLive`, `WorkflowInputAssembler`, the cascade classifier) and a fourth — the canvas
+    /// run overlay — did not, painting the outgoing edge of a user-skipped node "not taken" even
+    /// though the node below it ran and received that node's input over exactly that edge.
+    ///
+    /// Exhaustive on purpose: no `default`, so a new skip reason cannot inherit an answer.
+    var keepsDownstreamAlive: Bool {
+        switch self {
+        case .byUser: return true
+        case .notChosen, .errorPortNotTaken, .upstreamFailed,
+             .upstreamSkipped, .upstreamCancelled, .notReached: return false
+        }
+    }
+
     /// Whether this skip traces back to something going WRONG, as opposed to ordinary routing.
     ///
     /// Drives presentation only — a skip is NEVER counted as a failure, whatever this returns.

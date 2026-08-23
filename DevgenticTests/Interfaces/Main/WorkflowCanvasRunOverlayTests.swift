@@ -92,7 +92,74 @@ final class WorkflowCanvasRunOverlayTests: XCTestCase {
 
     // MARK: - Derivation limits
 
+    /// ⚠️ THE COUNTER-CASE this file was missing. The test below exercises only cascade reasons,
+    /// where `.notTaken` is right, but its wording generalises to "a skipped source" — and the
+    /// production rule WAS that general, so it silently blessed the wrong answer for `.byUser`.
+    /// A user skip is the ONE reason whose downstream still runs: the node's input is forwarded
+    /// as its output and every default edge below it stays live, so drawing those edges dead told
+    /// the user the run took a path it did not take.
+    func testUserSkippedSourceStillFiresItsOutgoingEdge() {
+        let skipped = UUID(), downstream = UUID()
+        let o = overlay([
+            result(.skipped(.byUser), nodeID: skipped, name: "Middle"),
+            result(.completed, nodeID: downstream, name: "Last")
+        ])
+        XCTAssertEqual(o?.edgeState(from: skipped, to: downstream), .fired,
+                       "the node below a user-skipped node ran on that node's input")
+    }
+
+    /// And the edge INTO it: the skipped node did receive the upstream output it passed on.
+    func testEdgeIntoAUserSkippedNodeIsNotDrawnDead() {
+        let upstream = UUID(), skipped = UUID()
+        let o = overlay([
+            result(.completed, nodeID: upstream, name: "First"),
+            result(.skipped(.byUser), nodeID: skipped, name: "Middle")
+        ])
+        XCTAssertNotEqual(o?.edgeState(from: upstream, to: skipped), .notTaken,
+                          "data flowed along this edge — the skip forwarded it downstream")
+    }
+
+    /// ⚠️ THE CONTRACT ITSELF, pinned explicitly. The loop test below iterates
+    /// `where !reason.keepsDownstreamAlive`, so it re-derives its expectation from the very
+    /// property under test — a self-referential test that cannot catch that property being wrong
+    /// (proved: a mutation adding `.notChosen` to the pass-through set left it green and was
+    /// caught only by an unrelated pre-existing test). This one names the answer per case.
+    func testKeepsDownstreamAliveIsByUserAndNothingElse() {
+        XCTAssertTrue(NodeSkipReason.byUser.keepsDownstreamAlive,
+                      "the one skip whose downstream runs")
+        for reason in NodeSkipReason.allCases where reason != .byUser {
+            XCTAssertFalse(reason.keepsDownstreamAlive,
+                           "\(reason) means the subtree below it is dead")
+        }
+    }
+
+    /// The rule reads the CONTRACT, not a hardcoded case list: every reason that kills the subtree
+    /// must still draw dead. Guards a future skip reason from silently inheriting pass-through.
+    func testEveryNonPassThroughReasonStillKillsTheEdge() {
+        for reason in NodeSkipReason.allCases where !reason.keepsDownstreamAlive {
+            let skipped = UUID(), downstream = UUID()
+            let o = overlay([
+                result(.skipped(reason), nodeID: skipped, name: "Middle"),
+                result(.completed, nodeID: downstream, name: "Last")
+            ])
+            XCTAssertEqual(o?.edgeState(from: skipped, to: downstream), .notTaken,
+                           "\(reason) kills the subtree below it")
+        }
+    }
+
+    /// A live run must still leave an unstarted target neutral — the pass-through change must not
+    /// collapse `.undetermined` into `.fired`.
+    func testPendingTargetStaysUndeterminedDuringALiveRun() {
+        let ranNode = UUID(), notYet = UUID()
+        let o = overlay([
+            result(.completed, nodeID: ranNode, name: "A"),
+            result(.running, nodeID: notYet, name: "B")
+        ], isRunning: true)
+        XCTAssertEqual(o?.edgeState(from: ranNode, to: notYet), .fired)
+    }
+
     /// A skipped SOURCE kills its outgoing edges too, not just incoming ones.
+    /// (Cascade reasons only — the `.byUser` counter-case is pinned above.)
     func testSkippedSourceMakesItsOutgoingEdgeNotTaken() {
         let skipped = UUID(), downstream = UUID()
         let o = overlay([

@@ -21,7 +21,7 @@ import os
 @Observable @MainActor
 final class SlackPairingService {
 
-    private let logger = Logger(subsystem: "com.devgentic", category: "SlackPairing")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "SlackPairing")
     private let config = ChatOpsConfigManager.shared
 
     var onPairingComplete: (() -> Void)?

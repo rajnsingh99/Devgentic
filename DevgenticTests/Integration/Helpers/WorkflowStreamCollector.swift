@@ -65,10 +65,10 @@ enum WorkflowStreamCollector {
     /// `workflowNodeFailed`, so tests asserted things like "3 failed events for A fails + B skipped
     /// + C skipped" — encoding the defect as the expectation. Assert the SPLIT instead: it is the
     /// distinction the whole state model exists to make.
-    static func nodeSkippedEvents(from events: [AgentStreamEvent]) -> [(nodeID: UUID, profileName: String, reason: NodeSkipReason)] {
+    static func nodeSkippedEvents(from events: [AgentStreamEvent]) -> [(nodeID: UUID, profileName: String, reason: NodeSkipReason, ranBeforeSkip: Bool)] {
         events.compactMap { event in
-            if case .workflowNodeSkipped(let nodeID, let name, let reason) = event {
-                return (nodeID, name, reason)
+            if case .workflowNodeSkipped(let nodeID, let name, let reason, let ranBeforeSkip) = event {
+                return (nodeID, name, reason, ranBeforeSkip)
             }
             return nil
         }

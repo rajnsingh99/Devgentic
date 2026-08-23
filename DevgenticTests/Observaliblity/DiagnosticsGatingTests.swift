@@ -36,24 +36,33 @@ final class DiagnosticsGatingTests: XCTestCase {
     // MARK: - DGLogger persistence gate
 
     func testGate_recordsWarningAndError_whenDiagnosticsOn() {
-        XCTAssertTrue(DGLogger.shouldPersist(level: .error, developerMode: false, diagnosticsEnabled: true))
-        XCTAssertTrue(DGLogger.shouldPersist(level: .warning, developerMode: false, diagnosticsEnabled: true))
-        XCTAssertFalse(DGLogger.shouldPersist(level: .notice, developerMode: false, diagnosticsEnabled: true),
-                       "Below warning is gated unless developer mode is on")
-        XCTAssertFalse(DGLogger.shouldPersist(level: .info, developerMode: false, diagnosticsEnabled: true))
-        XCTAssertFalse(DGLogger.shouldPersist(level: .debug, developerMode: false, diagnosticsEnabled: true))
+        XCTAssertTrue(DGLogger.shouldPersist(level: .error, diagnosticsEnabled: true))
+        XCTAssertTrue(DGLogger.shouldPersist(level: .warning, diagnosticsEnabled: true))
+        XCTAssertFalse(DGLogger.shouldPersist(level: .notice, diagnosticsEnabled: true),
+                       "the floor is warning — nothing below it is ever persisted")
+        XCTAssertFalse(DGLogger.shouldPersist(level: .info, diagnosticsEnabled: true))
+        XCTAssertFalse(DGLogger.shouldPersist(level: .debug, diagnosticsEnabled: true))
     }
 
-    func testGate_optOutDropsEverything_unlessDeveloperMode() {
-        XCTAssertFalse(DGLogger.shouldPersist(level: .error, developerMode: false, diagnosticsEnabled: false))
-        XCTAssertFalse(DGLogger.shouldPersist(level: .warning, developerMode: false, diagnosticsEnabled: false))
-        // Developer mode is an explicit opt-in to full logging — it overrides the opt-out.
-        XCTAssertTrue(DGLogger.shouldPersist(level: .info, developerMode: true, diagnosticsEnabled: false))
-    }
-
-    func testGate_developerMode_recordsAllLevels() {
+    /// ⚠️ The opt-out is now ABSOLUTE. It previously read
+    /// `developerMode || (level >= .warning && diagnosticsEnabled)`, so a user who turned
+    /// diagnostics recording OFF still had every level written to disk whenever developer mode
+    /// happened to be on — a consent switch another switch could silently veto.
+    func testGate_optOutDropsEverything() {
         for level: LogLevel in [.debug, .info, .notice, .warning, .error] {
-            XCTAssertTrue(DGLogger.shouldPersist(level: level, developerMode: true, diagnosticsEnabled: true))
+            XCTAssertFalse(DGLogger.shouldPersist(level: level, diagnosticsEnabled: false),
+                           "\(level) must not persist once the user has opted out")
+        }
+    }
+
+    /// The floor is a property of the LEVEL alone now — no second axis can raise it.
+    /// Measured justification: with the old escalation on, `log_entries` reached 1,060,962 rows
+    /// in a 295 MB store over 30 days, 95.1% of it info/notice, none of which any UI reads —
+    /// the Run Report renders span_events and never loads a log row.
+    func testGate_hasNoSecondAxisThatCanRaiseTheFloor() {
+        for level: LogLevel in [.debug, .info, .notice] {
+            XCTAssertFalse(DGLogger.shouldPersist(level: level, diagnosticsEnabled: true),
+                           "\(level) is os_log-only by design; nothing may escalate it to disk")
         }
     }
 

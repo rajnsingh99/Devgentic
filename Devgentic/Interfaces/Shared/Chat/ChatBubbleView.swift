@@ -248,17 +248,18 @@ struct AgentMessageActionsView: View {
                             conversationID: message.conversationId,
                             traceID: message.traceID,
                             theme: theme,
-                            isDeveloperMode: isDeveloperMode
+                            isDeveloperMode: isDeveloperMode,
+                            // The report's ANSWER row shows the full prose without a
+                            // cross-store fetch — the bubble already holds it.
+                            answerPreview: message.currentAgentContent?.textContent
                         )
                     }) {
-                        Label(
-                            isDeveloperMode ? "Trace" : "Feedback",
-                            systemImage: isDeveloperMode ? "chart.bar.doc.horizontal" : "bubble.left.and.exclamationmark.bubble.right"
-                        )
+                        // One unified report now — the Trace/Feedback fork is gone.
+                        Label("Report", systemImage: "chart.bar.doc.horizontal")
                     }
                     .foregroundColor(theme.secondaryText)
-                    .help(isDeveloperMode ? "View Execution Trace" : "Share Feedback")
-                    .accessibilityLabel(isDeveloperMode ? "View execution trace" : "Share feedback on this response")
+                    .help("What happened during this run")
+                    .accessibilityLabel("Open the run report for this response")
                 }
 
                 // Read Aloud

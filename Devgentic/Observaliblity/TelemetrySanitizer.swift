@@ -47,10 +47,21 @@ struct TelemetrySanitizer {
 
     // MARK: - Public API
 
-    /// Basic sanitization (original behavior preserved). Home paths, IPs, emails.
-    /// Callers upgrading to full sanitization should migrate to `sanitizeFull(_:level:)`.
+    /// Default sanitization — full `.standard` redaction.
+    ///
+    /// ⚠️ This was `.minimal` (home paths, IPs, emails ONLY) until 2026-08-23, framed as a
+    /// compat shim "callers should migrate away from". Nobody migrated; instead 18 call sites
+    /// accumulated on the SHORT name — every content-bearing TraceRecorder emitter (tool
+    /// arguments/output previews, LLM response previews, raw parse output, thoughts, errors,
+    /// HITL titles) plus EvaluationLogger's bridged content. All of that lands in
+    /// `span_events.detailJSON`, which is written UNGATED for every user on every run and
+    /// ships in the diagnostic bundle — so a tool that read a `.env` file stored the key
+    /// UNREDACTED, because API-key/bearer/JSON-secret scrubbing only starts at `.standard`.
+    /// The shim was the leak. Making the short name safe is the drift-proof fix: a future
+    /// call site that reaches for `sanitize(...)` now gets secret scrubbing by default, and
+    /// anything that genuinely wants less must say `sanitizeFull(_, level: .minimal)` out loud.
     static func sanitize(_ text: String) -> String {
-        sanitizeFull(text, level: .minimal)
+        sanitizeFull(text, level: .standard)
     }
 
     /// Full sanitization at the requested level. Safe to call on any string.
@@ -85,9 +96,21 @@ struct TelemetrySanitizer {
         replace(text, pattern: "(\\/)(?:Users|home)\\/[^\\/]+", with: "$1[USER_PATH]")
     }
 
-    /// Replaces IPv4 addresses with `[IP_ADDR]`.
+    /// Replaces IP addresses (v4 and v6) with `[IP_ADDR]`.
+    ///
+    /// IPv6 was missing entirely — real addresses (e.g. the `2606:4700:…` Cloudflare edges in
+    /// this app's own network logs) passed every level. Two deliberate shapes, chosen so
+    /// timestamps survive: the FULL 8-group form, and any `::`-compressed form. "12:30:45"
+    /// has three groups and no `::`, so neither matches; an uncompressed IPv6 is always
+    /// 8 groups, so nothing real slips between the two patterns.
     static func sanitizeIP(_ text: String) -> String {
-        replace(text, pattern: "\\b(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\b", with: "[IP_ADDR]")
+        var s = text
+        s = replace(s, pattern: "\\b(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\b", with: "[IP_ADDR]")
+        // Full 8-group IPv6.
+        s = replace(s, pattern: "\\b(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}\\b", with: "[IP_ADDR]")
+        // ::-compressed IPv6 (fe80::1, 2001:db8::, a:b::c). Requires the double colon.
+        s = replace(s, pattern: "\\b(?:[0-9A-Fa-f]{1,4}:){1,6}:(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,5})?\\b", with: "[IP_ADDR]")
+        return s
     }
 
     /// Replaces email addresses with `[EMAIL]`.
@@ -95,24 +118,51 @@ struct TelemetrySanitizer {
         replace(text, pattern: "[A-Z0-9a-z._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,64}", with: "[EMAIL]")
     }
 
-    /// Redacts provider API keys. Covers the common vendor formats:
-    ///   OpenAI-style           sk-[A-Za-z0-9]{20,}        → `sk-[API_KEY]`
-    ///   Anthropic              sk-ant-[A-Za-z0-9-_]{20,}  → `sk-ant-[API_KEY]`
-    ///   GitHub Personal Access ghp_[A-Za-z0-9]{20,}       → `ghp_[API_KEY]`
-    ///   Slack bot              xoxb-[A-Za-z0-9-]{20,}     → `xoxb-[API_KEY]`
-    ///   Generic `AIza`-prefixed (Google) AIza[A-Za-z0-9-_]{20,} → `AIza[API_KEY]`
-    ///   Generic hex 40+ chars  \b[a-fA-F0-9]{40,}\b        → `[API_KEY_HEX]`
+    /// Redacts provider API keys, vendor-prefixed so diagnostics can still say WHICH
+    /// provider leaked.
+    ///
+    /// ⚠️ Executed-test lesson (2026-08-23): 8 of 11 secret classes SURVIVED the previous
+    /// list — verified by RUNNING the regexes, not reading them. `sk-proj-` (OpenAI's current
+    /// default format) escaped because `sk-[A-Za-z0-9]{20,}` cannot cross the hyphen after
+    /// "proj"; `hf_` was absent although this app downloads MLX models from the HuggingFace
+    /// Hub with exactly those tokens; `github_pat_`/`gho_`-family/`glpat-`/`AKIA` postdated
+    /// the list; and the app's own ChatOps transports hold Slack app, Telegram bot and
+    /// Discord bot tokens that had no pattern at all. Every pattern is now `\b`-anchored —
+    /// the old un-anchored `sk-` rule could bite the tail of hyphenated prose ("risk-…").
     static func sanitizeAPIKey(_ text: String) -> String {
         var s = text
-        // Vendor-prefixed forms: preserve the prefix so diagnostics can tell which provider leaked.
-        s = replace(s, pattern: "sk-ant-[A-Za-z0-9\\-_]{20,}",     with: "sk-ant-[API_KEY]")
-        s = replace(s, pattern: "sk-[A-Za-z0-9]{20,}",              with: "sk-[API_KEY]")
-        s = replace(s, pattern: "ghp_[A-Za-z0-9]{20,}",             with: "ghp_[API_KEY]")
-        s = replace(s, pattern: "xoxb-[A-Za-z0-9\\-]{20,}",         with: "xoxb-[API_KEY]")
-        s = replace(s, pattern: "xoxp-[A-Za-z0-9\\-]{20,}",         with: "xoxp-[API_KEY]")
-        s = replace(s, pattern: "AIza[A-Za-z0-9\\-_]{20,}",         with: "AIza[API_KEY]")
+        // Anthropic first (most specific), then the generalized sk- form, which now admits
+        // hyphens/underscores so sk-proj-/sk-live-/sk-or- all match. It cannot re-match the
+        // replaced "sk-ant-[API_KEY]" because "[" terminates the character class.
+        s = replace(s, pattern: "\\bsk-ant-[A-Za-z0-9\\-_]{20,}",   with: "sk-ant-[API_KEY]")
+        s = replace(s, pattern: "\\bsk-[A-Za-z0-9\\-_]{20,}",       with: "sk-[API_KEY]")
+        // HuggingFace user access tokens (the Hub this app downloads models from).
+        s = replace(s, pattern: "\\bhf_[A-Za-z0-9]{20,}",           with: "hf_[API_KEY]")
+        // GitHub: fine-grained github_pat_ (allows underscores) before the short family —
+        // classic PAT ghp_, OAuth gho_, server/user-to-server ghs_/ghu_, refresh ghr_.
+        s = replace(s, pattern: "\\bgithub_pat_[A-Za-z0-9_]{20,}",  with: "github_pat_[API_KEY]")
+        s = replace(s, pattern: "\\bgh[posur]_[A-Za-z0-9]{20,}",    with: "gh_[API_KEY]")
+        // GitLab personal access tokens.
+        s = replace(s, pattern: "\\bglpat-[A-Za-z0-9\\-_]{20,}",    with: "glpat-[API_KEY]")
+        // AWS access key IDs (AKIA long-lived, ASIA temporary) — self-identifying 20 chars.
+        // The paired 40-char base64 SECRET is deliberately NOT pattern-matched bare: a naked
+        // [A-Za-z0-9/+=]{40} rule would eat ordinary base64 content (this codebase's
+        // recidivist defect class); it is covered contextually by sanitizeEnvVars
+        // (AWS_SECRET_ACCESS_KEY=…) and sanitizeJSONKeys ("secret": …).
+        s = replace(s, pattern: "\\b(?:AKIA|ASIA)[0-9A-Z]{16}\\b",  with: "AKIA[API_KEY]")
+        // Slack: the whole xox?- family (bot/user/app-config), plus app-level xapp- tokens —
+        // this app's SlackTransport / SlackSocketClient hold both kinds.
+        s = replace(s, pattern: "\\bxox[a-z]-[A-Za-z0-9\\-]{10,}",  with: "xox-[API_KEY]")
+        s = replace(s, pattern: "\\bxapp-[A-Za-z0-9\\-]{10,}",      with: "xapp-[API_KEY]")
+        // Telegram bot tokens (TelegramTransport): "123456789:AA…", 30+ chars after the colon.
+        s = replace(s, pattern: "\\b[0-9]{8,10}:AA[A-Za-z0-9_\\-]{30,}", with: "[TELEGRAM_TOKEN]")
+        // Discord bot tokens (DiscordTransport): three dot-joined base64url segments.
+        s = replace(s, pattern: "\\b[MNO][A-Za-z0-9_\\-]{22,}\\.[A-Za-z0-9_\\-]{6}\\.[A-Za-z0-9_\\-]{25,}", with: "[DISCORD_TOKEN]")
+        // Google API keys.
+        s = replace(s, pattern: "\\bAIza[A-Za-z0-9\\-_]{20,}",      with: "AIza[API_KEY]")
         // Long hex strings: common format for OpenAI org IDs, some API keys.
-        // Conservative — 40+ chars to avoid redacting legitimate IDs.
+        // Conservative — 40+ chars to avoid redacting legitimate IDs. (This also catches full
+        // git SHAs; the file's stated contract is over-redact rather than under-redact.)
         s = replace(s, pattern: "\\b[a-fA-F0-9]{40,}\\b",           with: "[API_KEY_HEX]")
         return s
     }
@@ -143,6 +193,16 @@ struct TelemetrySanitizer {
             s = replace(s,
                         pattern: "(\"\(escaped)\"\\s*:\\s*)\"[^\"]*\"",
                         with: "$1\"[REDACTED]\"",
+                        caseInsensitive: true)
+            // ⚠️ The ESCAPED form too: \"key\":\"value\". Not an edge case here — it is the
+            // exact shape of a JSON object serialized INSIDE a JSON string, which is what
+            // every LLM tool-call argument looks like in a logged payload
+            // ({"arguments": "{\"apiKey\":\"…\"}"}). The plain-form pattern above cannot see
+            // it because every quote is preceded by a backslash, so secrets inside tool
+            // arguments passed through unredacted (executed-test finding, 2026-08-23).
+            s = replace(s,
+                        pattern: "(\\\\\"\(escaped)\\\\\"\\s*:\\s*\\\\\")[^\"\\\\]*(\\\\\")",
+                        with: "$1[REDACTED]$2",
                         caseInsensitive: true)
         }
         return s

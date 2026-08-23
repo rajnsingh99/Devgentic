@@ -37,19 +37,52 @@ final class TraceStore: Sendable {
     /// can also stat the `-wal`/`-shm` sidecars. Points at the standard Application
     /// Support location for the production store, or a unique temp file for `inMemory`.
     private let dbPath: String
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "TraceStore")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "TraceStore")
 
     // MARK: - Initialization
     
-    /// Opens (or creates) the trace database at the standard Application Support location.
+    /// Environment variable that redirects the trace store away from Application Support.
+    ///
+    /// ⚠️ DEBUG BUILDS ONLY — mirrors `DevgenticSchema.storeURLOverrideEnvKey` and exists for the
+    /// same reason: `TEST_HOST` for `devgenticTests` is `devgentic.app`, so running ANY test
+    /// launches the real app, whose AppDelegate launch sweep purges/reconciles whatever store
+    /// `TraceStore.shared` opened. Without a redirect that is the developer's REAL traces.sqlite.
+    static let storePathOverrideEnvKey = "DEVGENTIC_TRACE_STORE_PATH"
+
+    /// Resolves where `init()` opens the store.
+    ///
+    /// DEBUG order: explicit env override → XCTest-detected temp path → Application Support.
+    /// The XCTest fallback is a safety net, not a convenience: it fires even when a test run
+    /// forgot to set the env var, so a test host can never mutate the real trace DB. Release
+    /// builds always resolve Application Support (the `#if` compiles the overrides out, so a
+    /// shipped app cannot be pointed elsewhere by its environment).
+    static func resolveStoreDirectoryAndPath() throws -> (directory: URL, path: String) {
+        #if DEBUG
+        if let override = ProcessInfo.processInfo.environment[storePathOverrideEnvKey], !override.isEmpty {
+            let url = URL(fileURLWithPath: override)
+            return (url.deletingLastPathComponent(), url.path)
+        }
+        if NSClassFromString("XCTestCase") != nil {
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("devgentic-tracestore-testhost", isDirectory: true)
+            // One path per PROCESS, not per call: TraceStore.shared and any directly-constructed
+            // store in the same test process see the same file, matching production topology.
+            let path = dir.appendingPathComponent("traces-\(ProcessInfo.processInfo.processIdentifier).sqlite").path
+            return (dir, path)
+        }
+        #endif
+        let appSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = appSupportURL.appendingPathComponent("Devgentic", isDirectory: true)
+        return (dir, dir.appendingPathComponent("traces.sqlite").path)
+    }
+
+    /// Opens (or creates) the trace database at the standard Application Support location
+    /// (or the DEBUG-only test redirect — see `resolveStoreDirectoryAndPath`).
     init() throws {
         let fileManager = FileManager.default
-        let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dbDirectory = appSupportURL.appendingPathComponent("Devgentic", isDirectory: true)
-        
+        let (dbDirectory, dbPath) = try Self.resolveStoreDirectoryAndPath()
+
         try fileManager.createDirectory(at: dbDirectory, withIntermediateDirectories: true)
-        
-        let dbPath = dbDirectory.appendingPathComponent("traces.sqlite").path
         
         var config = Configuration()
         config.prepareDatabase { db in
@@ -65,6 +98,51 @@ final class TraceStore: Sendable {
         try migrator.migrate(dbPool)
 
         logger.info("TraceStore initialized at: \(dbPath)")
+        #if DEBUG
+        if NSClassFromString("XCTestCase") != nil,
+           ProcessInfo.processInfo.environment[Self.storePathOverrideEnvKey] == nil {
+            // CONSEQUENCE of the redirect: this process records real telemetry into a throwaway
+            // file, and the launch sweep prunes THAT file — the developer's traces.sqlite is
+            // untouched by test runs from this build forward.
+            logger.info("[TRACESTORE] XCTest detected with no explicit override — store redirected to \(dbPath); the real Application Support traces.sqlite is untouched by this process.")
+        }
+        #endif
+    }
+
+    /// Absolute path of the SQLite file this store opened. Read-only; exists so tests can
+    /// assert the DEBUG redirect actually fired and Settings can surface the location.
+    var storagePath: String { dbPath }
+
+    // MARK: - Live observation (Run-Report Phase 4)
+
+    /// A compact fingerprint of everything the Run Report renders for one trace.
+    /// Any write that should repaint the report changes this string; the observation
+    /// below emits only when it changes.
+    struct RunFingerprint: Equatable, Sendable {
+        let eventCount: Int
+        let spanCount: Int
+        let closedSpanCount: Int
+        let traceStatus: String?
+    }
+
+    /// GRDB `ValueObservation` stream for the Run Report's live view — the panel
+    /// consumes it with `for try await` and reloads on each emission. Zero change to
+    /// the write path: the observation watches the same tables the writers already
+    /// touch. `removeDuplicates` keeps unrelated-trace writes from repainting (the
+    /// tracked region is table-level, so another run's insert still wakes the
+    /// observation — the fingerprint filters it back out).
+    func observeRun(traceID: String) -> AsyncValueObservation<RunFingerprint> {
+        ValueObservation
+            .tracking { db -> RunFingerprint in
+                RunFingerprint(
+                    eventCount: try SpanEvent.filter(SpanEvent.Columns.traceID == traceID).fetchCount(db),
+                    spanCount: try Span.filter(Span.Columns.traceID == traceID).fetchCount(db),
+                    closedSpanCount: try Span.filter(Span.Columns.traceID == traceID && Span.Columns.endedAt != nil).fetchCount(db),
+                    traceStatus: try String.fetchOne(db, sql: "SELECT status FROM traces WHERE traceID = ?", arguments: [traceID])
+                )
+            }
+            .removeDuplicates()
+            .values(in: dbPool)
     }
     
     /// For unit testing: create an ephemeral, isolated database.
@@ -332,6 +410,20 @@ final class TraceStore: Sendable {
             try db.create(index: "idx_hitl_audit_raisedAt", on: "hitl_audit", columns: ["raisedAt"])
         }
 
+        // v8 (Run-Report Phase 5): join keys from an approval back to its run. Nullable and
+        // deliberately STILL not foreign keys — the v7 design (rows survive trace purge and
+        // process death for the launch reconcile) is load-bearing and unchanged; these columns
+        // only let the Run Report match an approval to its trace EXACTLY instead of guessing by
+        // conversation + time window. Old rows stay nil and keep using the window heuristic.
+        migrator.registerMigration("v8_hitl_trace_join") { db in
+            try db.alter(table: "hitl_audit") { t in
+                t.add(column: "traceID", .text)
+                t.add(column: "spanID", .text)
+            }
+            try db.create(index: "idx_hitl_audit_trace", on: "hitl_audit", columns: ["traceID"],
+                          condition: Column("traceID") != nil)
+        }
+
         return migrator
     }
 
@@ -484,10 +576,17 @@ final class TraceStore: Sendable {
                 let allowed = LogLevel.allCases.filter { $0 >= minLevel }.map(\.rawValue)
                 query = query.filter(allowed.contains(LogEntry.Columns.level))
             }
+            // ⚠️ DESC + limit, then reversed — NOT `.asc.limit()`. Ordering ascending and
+            // capping returns the OLDEST `limit` rows and silently discards everything newer, so
+            // a window holding more than the cap gave you the START of the period and dropped
+            // exactly the entries around whatever you were investigating. The cap has to bite at
+            // the far end from the question being asked. The reverse restores this method's
+            // documented contract (oldest first) for its callers.
             return try query
-                .order(LogEntry.Columns.timestamp.asc)
+                .order(LogEntry.Columns.timestamp.desc)
                 .limit(limit)
                 .fetchAll(db)
+                .reversed()
         }
     }
 
@@ -528,9 +627,23 @@ final class TraceStore: Sendable {
             if let profileType { baseArgs.append(profileType) }
 
             // 1. Per-tool aggregate counts + avg duration.
+            //
+            // ⚠️ Grouped by the STRUCTURED tool name, never by `content`. `emitToolResult` writes
+            // content as "\(name): success" / "\(name): failed" — a DISPLAY string with the
+            // outcome baked in — so `GROUP BY content` split every tool into two groups and the
+            // dashboard showed each tool TWICE: one row at 100% success, one at 0%, and the
+            // tool's actual reliability rate nowhere on screen. The whole feature reported the
+            // opposite of its purpose.
+            //
+            // `tool_name` is written at the top level of detailJSON by the ONLY emitter of
+            // `eventType = 'toolResult'`, so the extract is reliable; the COALESCE is a cheap
+            // floor for any row whose detailJSON is missing, which then keeps the OLD split
+            // behaviour rather than vanishing into a NULL group. Deliberately not "strip the
+            // suffix from content" — deriving structure by matching English out of a display
+            // string is this codebase's recidivist defect.
             let rows = try Row.fetchAll(db, sql: """
                 SELECT
-                    content AS tool_name,
+                    COALESCE(json_extract(detailJSON, '$.tool_name'), content) AS tool_name,
                     COUNT(*) AS total,
                     SUM(CASE WHEN severity = 'info' THEN 1 ELSE 0 END) AS success_count,
                     SUM(CASE WHEN severity = 'warning' THEN 1 ELSE 0 END) AS failure_count,
@@ -539,7 +652,7 @@ final class TraceStore: Sendable {
                 WHERE eventType = 'toolResult'
                   AND timestamp >= ? AND timestamp <= ?
                   \(typeFilter)
-                GROUP BY content
+                GROUP BY tool_name
                 ORDER BY total DESC
                 """, arguments: StatementArguments(baseArgs))
 
@@ -560,7 +673,7 @@ final class TraceStore: Sendable {
                     SELECT durationMs
                     FROM span_events
                     WHERE eventType = 'toolResult'
-                      AND content = ?
+                      AND COALESCE(json_extract(detailJSON, '$.tool_name'), content) = ?
                       AND durationMs IS NOT NULL
                       AND timestamp >= ? AND timestamp <= ?
                       \(typeFilter)
@@ -576,7 +689,7 @@ final class TraceStore: Sendable {
                     SELECT errorCategory, COUNT(*) AS cnt
                     FROM span_events
                     WHERE eventType = 'toolResult'
-                      AND content = ?
+                      AND COALESCE(json_extract(detailJSON, '$.tool_name'), content) = ?
                       AND severity = 'warning'
                       AND errorCategory IS NOT NULL
                       AND timestamp >= ? AND timestamp <= ?
@@ -917,14 +1030,23 @@ final class TraceStore: Sendable {
         }
     }
     
-    /// Updates an existing span (e.g., setting endedAt, status). Only-if-open: spans end
-    /// exactly once — late fire-and-forget `endSpan` tasks (defer blocks) must not re-stamp
-    /// a span that `closeOpenSpans` already closed at trace end (audit #10).
-    func updateSpan(spanID: String, endedAt: Date, status: SpanStatus) throws {
+    /// Updates an existing span (e.g., setting endedAt, status). EARLIEST end wins: the open
+    /// case (`endedAt IS NULL`) always writes, and a row already closed is overwritten only by
+    /// a STRICTLY EARLIER end time. Rationale: executors capture the real end at their `defer`
+    /// but deliver it through a fire-and-forget Task that can lose the race against endTrace's
+    /// `closeOpenSpans` clamp (which stamps every open span with the TRACE end). Under
+    /// only-if-open (audit #10), a lost race froze the clamp forever — the LAST iteration of a
+    /// run rendered as spanning the whole run. Earliest-wins lets the real, earlier end correct
+    /// the clamp in either arrival order, while a duplicate endSpan replay (same time — not
+    /// strictly earlier) and a later clamp both stay no-ops, so a span still ends exactly once.
+    /// `metadataJSON` (when non-nil) rides the same guarded write — COALESCE keeps an
+    /// existing blob when the closer has nothing to add, so a clamp can never blank
+    /// metadata a real end already wrote.
+    func updateSpan(spanID: String, endedAt: Date, status: SpanStatus, metadataJSON: String? = nil) throws {
         try dbPool.write { db in
             try db.execute(
-                sql: "UPDATE spans SET endedAt = ?, status = ? WHERE spanID = ? AND endedAt IS NULL",
-                arguments: [endedAt.timeIntervalSince1970, status.rawValue, spanID]
+                sql: "UPDATE spans SET endedAt = ?, status = ?, metadataJSON = COALESCE(?, metadataJSON) WHERE spanID = ? AND (endedAt IS NULL OR endedAt > ?)",
+                arguments: [endedAt.timeIntervalSince1970, status.rawValue, metadataJSON, spanID, endedAt.timeIntervalSince1970]
             )
         }
     }
@@ -959,11 +1081,15 @@ final class TraceStore: Sendable {
         }
     }
     
-    /// Fetches the trace record associated with a specific message.
+    /// Fetches the trace record associated with a specific message. A regenerated (Redo) or
+    /// resumed message can own several traces; without an ORDER BY, SQLite returns an
+    /// ARBITRARY attempt — newest-first makes this deterministic and correct for "show me
+    /// this message's run".
     func fetchTrace(forMessageID messageID: String) throws -> TraceRecord? {
         try dbPool.read { db in
             try TraceRecord
                 .filter(TraceRecord.Columns.messageID == messageID)
+                .order(TraceRecord.Columns.startedAt.desc)
                 .fetchOne(db)
         }
     }
@@ -1117,6 +1243,11 @@ final class TraceStore: Sendable {
                 arguments: [conversationID]
             )
             try db.execute(sql: "DELETE FROM traces WHERE conversationID = ?", arguments: [conversationID])
+            // hitl_audit carries its own conversationID and no FK (by design — it must
+            // survive trace PURGE), but a user deleting a CONVERSATION means "forget
+            // this" — its approval history goes with it. Before this line those rows
+            // outlived the conversation by up to 30 days.
+            try db.execute(sql: "DELETE FROM hitl_audit WHERE conversationID = ?", arguments: [conversationID])
         }
     }
 

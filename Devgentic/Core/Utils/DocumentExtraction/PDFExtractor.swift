@@ -15,7 +15,7 @@ struct PDFExtractor: DocumentExtractor {
     var supportedTypes: [UTType] { [.pdf] }
     var supportedExtensions: Set<String> { ["pdf"] }
 
-    private let logger = Logger(subsystem: "com.devgentic", category: "PDFExtractor")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "PDFExtractor")
 
     func extract(from url: URL, maxSize: Int) async throws -> ExtractionResult {
         logger.info("Starting PDF extraction: \(url.lastPathComponent)")

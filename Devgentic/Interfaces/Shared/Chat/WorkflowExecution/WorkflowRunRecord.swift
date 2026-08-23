@@ -58,6 +58,10 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
     var status: RunStatus
     var duration: TimeInterval
     var error: String?
+    /// The observability trace this run recorded into (Run-Report Phase 5) — the join
+    /// key between the run-history UI and traces.sqlite. Optional + synthesized-Codable,
+    /// so records persisted before the column existed decode with nil.
+    var traceID: String? = nil
 
     // MARK: - Run Status
 
@@ -132,6 +136,14 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
         /// Degraded success (completed on a best-effort answer after an early stop).
         /// Optional → old records decode as nil (= no warnings).
         let hasWarnings: Bool?
+        /// For a `.skipped` node: did it BEGIN EXECUTING before the skip settled?
+        ///
+        /// ⚠️ OPTIONAL, and decoded with `decodeIfPresent`. A non-optional (even with a default)
+        /// would throw on every already-persisted record, and the resilient tier answers a failed
+        /// snapshot by DROPPING THE WHOLE NODE — status, duration and up to 400 persisted timeline
+        /// events. nil means "written before this build" and the display falls back to a legacy
+        /// heuristic rather than to a confident wrong answer.
+        let ranBeforeSkip: Bool?
 
         /// The node never ran.
         ///
@@ -246,9 +258,10 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
                 )
             }
             hasWarnings = try c.decodeIfPresent(Bool.self, forKey: .hasWarnings)
+            ranBeforeSkip = try c.decodeIfPresent(Bool.self, forKey: .ranBeforeSkip)
         }
 
-        init(id: UUID, nodeID: UUID, profileName: String, status: NodeStatus, detail: String, duration: TimeInterval, input: String? = nil, inputSourceLabel: String? = nil, nodeTimeline: [TimelineEvent]? = nil, hasWarnings: Bool? = nil) {
+        init(id: UUID, nodeID: UUID, profileName: String, status: NodeStatus, detail: String, duration: TimeInterval, input: String? = nil, inputSourceLabel: String? = nil, nodeTimeline: [TimelineEvent]? = nil, hasWarnings: Bool? = nil, ranBeforeSkip: Bool? = nil) {
             self.id = id
             self.nodeID = nodeID
             self.profileName = profileName
@@ -259,6 +272,7 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
             self.inputSourceLabel = inputSourceLabel
             self.nodeTimeline = nodeTimeline
             self.hasWarnings = hasWarnings
+            self.ranBeforeSkip = ranBeforeSkip
         }
     }
 
@@ -300,8 +314,17 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
             switch result.status {
             case .running:
                 unsettledNodes += 1
-                snapshotStatus = .failed
-                let note = "Interrupted before the node finished."
+                // ⚠️ NOT unconditionally `.failed`. A run the user STOPPED did not fail, and its
+                // in-flight node did not fail either — `isGenuineFailure` would then count it,
+                // rolling the whole run up `.failed` (this backstop was the second half of the
+                // Stop-shows-Failed defect). `wasCancelled` is latched before freeze on every
+                // cancel path, so this gate can tell the two apart. Wording mirrors
+                // `WorkflowExecutionState.settleInFlightWork`, which is the primary repair —
+                // reaching here at all means that one did not run.
+                snapshotStatus = state.wasCancelled ? .cancelled : .failed
+                let note = state.wasCancelled
+                    ? "Cancelled before the node finished."
+                    : "Interrupted before the node finished."
                 snapshotDetail = snapshotDetail.isEmpty ? note : "\(snapshotDetail)\n\(note)"
             case .completed: snapshotStatus = .completed
             case .failed:    snapshotStatus = .failed
@@ -327,7 +350,10 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
                     closedToolRows += DanglingToolRowCloser.close(&events, outcome: .failed)
                     return Array(events.suffix(400))
                 }(),
-                hasWarnings: result.hasWarnings ? true : nil
+                hasWarnings: result.hasWarnings ? true : nil,
+                // Explicit, never defaulted: freeze REPLACES the whole struct, so an omitted
+                // argument here silently persists the wrong answer for every historical run.
+                ranBeforeSkip: result.ranBeforeSkip
             )
         }
 
@@ -375,7 +401,8 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
             variables: state.variables,
             status: status,
             duration: totalDuration,
-            error: state.workflowError
+            error: state.workflowError,
+            traceID: state.traceID
         )
     }
 }

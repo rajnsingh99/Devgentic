@@ -2,14 +2,31 @@
 //  DurationFormat.swift
 //  Devgentic
 //
-//  Chat + workflow duration helpers, added to the app-wide `DurationFormat`
-//  (declared in Report/SpanTreeView.swift). Previously this logic was copy-pasted
-//  ~7 times across the chat/workflow views and had drifted — some guarded ≤0, some
-//  didn't, and the timeline's ms formatter lacked minute rollover ("90.0s" instead
-//  of "1m 30s"). These live as an extension so every caller shares one vocabulary.
+//  Chat + workflow duration helpers on the app-wide `DurationFormat`. The base enum
+//  moved HERE 2026-08-22 when its former host (Report/SpanTreeView.swift) was deleted
+//  with the old report fork. Previously this logic was copy-pasted ~7 times across
+//  the chat/workflow views and had drifted — some guarded ≤0, some didn't, and the
+//  timeline's ms formatter lacked minute rollover ("90.0s" instead of "1m 30s").
+//  These live together so every caller shares one vocabulary.
 //
 
 import Foundation
+
+/// App-wide duration rendering. One vocabulary for every ms → label conversion.
+enum DurationFormat {
+    static func format(ms: Int) -> String {
+        if ms < 1000 {
+            return "\(ms)ms"
+        } else if ms < 60_000 {
+            let seconds = Double(ms) / 1000.0
+            return String(format: "%.1fs", seconds)
+        } else {
+            let minutes = ms / 60_000
+            let remainingSeconds = (ms % 60_000) / 1000
+            return "\(minutes)m \(remainingSeconds)s"
+        }
+    }
+}
 
 extension DurationFormat {
 

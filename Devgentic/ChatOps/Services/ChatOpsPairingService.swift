@@ -20,7 +20,7 @@ import os
 @Observable @MainActor
 final class ChatOpsPairingService {
 
-    private let logger = Logger(subsystem: "com.devgentic", category: "ChatOpsPairing")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "ChatOpsPairing")
     private let config = ChatOpsConfigManager.shared
 
     /// Called after pairing succeeds so the caller can start the ChatOps bridge.

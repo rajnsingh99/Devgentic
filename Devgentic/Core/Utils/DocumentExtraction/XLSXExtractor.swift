@@ -16,7 +16,7 @@ struct XLSXExtractor: DocumentExtractor {
     }
     var supportedExtensions: Set<String> { ["xlsx", "xls"] }
 
-    private let logger = Logger(subsystem: "com.devgentic", category: "XLSXExtractor")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "XLSXExtractor")
 
     func extract(from url: URL, maxSize: Int) async throws -> ExtractionResult {
         logger.info("Starting XLSX extraction: \(url.lastPathComponent)")

@@ -20,7 +20,7 @@ import os
 @Observable @MainActor
 final class ChatOpsBridge {
 
-    private let logger = Logger(subsystem: "com.devgentic", category: "ChatOpsBridge")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "ChatOpsBridge")
 
     // MARK: - Dependencies
 

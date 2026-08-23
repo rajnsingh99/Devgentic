@@ -32,7 +32,7 @@ actor LogRecorder {
 
     static let shared = LogRecorder()
 
-    private let osLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic",
+    private let osLogger = Logger(subsystem: DGLogger.subsystem,
                                    category: "LogRecorder")
 
     // MARK: - Configuration

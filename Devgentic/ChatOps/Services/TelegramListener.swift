@@ -13,7 +13,7 @@ import os
 actor TelegramListener {
 
     private let apiClient: TelegramAPIClient
-    private let logger = Logger(subsystem: "com.devgentic", category: "TelegramListener")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "TelegramListener")
 
     private var pollingTask: Task<Void, Never>?
     private var lastUpdateID: Int = 0

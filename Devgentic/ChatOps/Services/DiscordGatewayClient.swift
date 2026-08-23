@@ -22,7 +22,7 @@ actor DiscordGatewayClient {
     private let botToken: String
     private let session: URLSession
     private var webSocket: URLSessionWebSocketTask?
-    private let logger = Logger(subsystem: "com.devgentic", category: "DiscordGateway")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "DiscordGateway")
 
     // MARK: - Gateway State
 

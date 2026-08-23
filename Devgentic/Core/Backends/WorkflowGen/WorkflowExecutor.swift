@@ -452,9 +452,21 @@ actor WorkflowExecutor: Executor {
                                     category: .wfNodeSkipped,
                                     origin: "WorkflowExecutor.dispatch.upstreamSkip",
                                     message: skipReason,
-                                    context: ["node_name": node.displayName, "node_id": nodeID.uuidString]
+                                    // The Run Report reads these to say WHICH kind of skip this was
+                                    // instead of hedging "by you, or by routing" at every skip.
+                                    context: ["node_name": node.displayName, "node_id": nodeID.uuidString,
+                                              "skip_reason": skipCause.rawValue, "ran_before_skip": "false"]
                                 )
-                                await TraceRecorder.shared.emitAgentError(span: traceContext, error: classified, iteration: nil)
+                                // Phase 5: a pre-dispatch skip gets a REAL span (begun and
+                                // immediately closed `.skipped`) instead of vanishing — the node
+                                // used to have no row at all, so the report's tree showed a
+                                // 5-node run with 3 nodes and no explanation. The skip event
+                                // attaches to THAT span rather than floating at the root.
+                                let skipInstant = Date()
+                                let skipSpan = traceContext.newSpan()
+                                await TraceRecorder.shared.beginSpan(context: skipSpan, name: "node:\(node.displayName)", kind: .workflowNode, at: skipInstant)
+                                await TraceRecorder.shared.emitAgentError(span: skipSpan, error: classified, iteration: nil, at: skipInstant)
+                                await TraceRecorder.shared.endSpan(spanID: skipSpan.spanID, status: .skipped, at: skipInstant)
                                 // P0-6: a skipped node activates the `"error"` port so a recovery
                                 // chain does not dead-end — branches wired exclusively to `error`
                                 // would otherwise hang waiting for an activation that never comes.
@@ -482,7 +494,7 @@ actor WorkflowExecutor: Executor {
                                 // what forced every consumer to string-match its way back to the
                                 // truth, and what made `.skipped` unreachable in both the live and
                                 // the persisted status enums.
-                                continuation.yield(.workflowNodeSkipped(nodeID: nodeID, profileName: node.displayName, reason: skipCause))
+                                continuation.yield(.workflowNodeSkipped(nodeID: nodeID, profileName: node.displayName, reason: skipCause, ranBeforeSkip: false))
                                 completedCount += 1
                                 continuation.yield(.workflowProgress(completed: completedCount, total: totalNodes))
                                 continue
@@ -544,10 +556,18 @@ actor WorkflowExecutor: Executor {
                                         category: .wfNodeSkipped,
                                         origin: "WorkflowExecutor.dispatch.userSkip",
                                         message: NodeSkipReason.byUser.displayText,
-                                        context: ["node_name": node.displayName, "node_id": nodeID.uuidString]
+                                        context: ["node_name": node.displayName, "node_id": nodeID.uuidString,
+                                                  "skip_reason": NodeSkipReason.byUser.rawValue, "ran_before_skip": "false"]
                                     )
-                                    await TraceRecorder.shared.emitAgentError(span: traceContext, error: classified, iteration: nil)
-                                    continuation.yield(.workflowNodeSkipped(nodeID: nodeID, profileName: node.displayName, reason: .byUser))
+                                    // Phase 5: same real-span treatment as the upstream-skip arm
+                                    // above — a user-skipped node appears in the tree as
+                                    // `.skipped`, and its event attaches to it, not the root.
+                                    let skipInstant = Date()
+                                    let skipSpan = traceContext.newSpan()
+                                    await TraceRecorder.shared.beginSpan(context: skipSpan, name: "node:\(node.displayName)", kind: .workflowNode, at: skipInstant)
+                                    await TraceRecorder.shared.emitAgentError(span: skipSpan, error: classified, iteration: nil, at: skipInstant)
+                                    await TraceRecorder.shared.endSpan(spanID: skipSpan.spanID, status: .skipped, at: skipInstant)
+                                    continuation.yield(.workflowNodeSkipped(nodeID: nodeID, profileName: node.displayName, reason: .byUser, ranBeforeSkip: false))
                                     completedCount += 1
                                     continuation.yield(.workflowProgress(completed: completedCount, total: totalNodes))
                                     continue
@@ -1660,11 +1680,15 @@ actor WorkflowExecutor: Executor {
                 category: .wfNodeSkipped,
                 origin: "WorkflowExecutor.executeNode.skipped",
                 message: reason.displayText,
-                context: ["node_name": displayName, "node_id": nodeID.uuidString]
+                context: ["node_name": displayName, "node_id": nodeID.uuidString,
+                          "skip_reason": reason.rawValue, "ran_before_skip": "true"]
             )
             await TraceRecorder.shared.emitAgentError(span: nodeSpan, error: classified, iteration: nil)
-            await TraceRecorder.shared.endSpan(spanID: nodeSpan.spanID, status: .completed)
-            continuation.yield(.workflowNodeSkipped(nodeID: nodeID, profileName: displayName, reason: reason))
+            // `.skipped`, not `.completed` (Phase 5): this arm used to close the span
+            // GREEN while yielding `.workflowNodeSkipped` — the report showed a node
+            // that "ran clean" next to a stream event saying it didn't run at all.
+            await TraceRecorder.shared.endSpan(spanID: nodeSpan.spanID, status: .skipped)
+            continuation.yield(.workflowNodeSkipped(nodeID: nodeID, profileName: displayName, reason: reason, ranBeforeSkip: true))
         }
 
         return result
@@ -2329,7 +2353,7 @@ actor WorkflowExecutor: Executor {
         case .canceled:
             continuation.yield(.workflowNodeCancelled(nodeID: node.id, profileName: node.displayName))
         case .skipped(let reason):
-            continuation.yield(.workflowNodeSkipped(nodeID: node.id, profileName: node.displayName, reason: reason))
+            continuation.yield(.workflowNodeSkipped(nodeID: node.id, profileName: node.displayName, reason: reason, ranBeforeSkip: true))
         }
     }
 
@@ -2388,8 +2412,9 @@ actor WorkflowExecutor: Executor {
         let structSpan = traceContext.newSpan()
         await TraceRecorder.shared.beginSpan(context: structSpan, name: "node:\(displayName)", kind: .workflowNode)
         defer {
+            let endedAt = Date() // real end, captured before the hop (earliest-wins)
             let spanStatus: SpanStatus = { if case .completed = status { return .completed } else { return .error } }()
-            Task { await TraceRecorder.shared.endSpan(spanID: structSpan.spanID, status: spanStatus) }
+            Task { await TraceRecorder.shared.endSpan(spanID: structSpan.spanID, status: spanStatus, at: endedAt) }
         }
 
         let upstreamNames = upstreamResults.map(\.profileName).joined(separator: ", ")
@@ -2432,7 +2457,11 @@ actor WorkflowExecutor: Executor {
             // `WorkflowDepth` TaskLocal itself and refuses past `maxDepth`, and TaskLocals
             // propagate into the child's task.
             let childExecutor = WorkflowExecutor(workflowProfileID: profileID)
-            let childTrace = traceContext.newSpan()
+            // Derive from the NODE's span, not the workflow-run context: `traceContext` here is
+            // the run root, so the child workflow's whole tree used to hang off the GRANDPARENT
+            // as a sibling of this node — the report showed the sub-workflow beside the node
+            // that ran it instead of inside it. Same traceID either way (one run, one trace).
+            let childTrace = structSpan.newSpan()
             let childStream = childExecutor.executeWorkflow(
                 userInput: upstreamText,
                 chatHistory: [],
@@ -2775,7 +2804,10 @@ actor WorkflowExecutor: Executor {
                         displayName: displayName,
                         nodeID: nodeID,
                         continuation: continuation,
-                        traceContext: traceContext
+                        // The node's span, not the run root: the classifier's llmCall span
+                        // (`classifier:<name>`) parents under the Router node that invoked it
+                        // instead of floating beside it at trace root level.
+                        traceContext: structSpan
                     )
                 } catch is CancellationError {
                     // ⚠️ WF-CC13, fixed alongside WF-CC10 because it cannot wait. This was a BARE
@@ -4000,7 +4032,11 @@ actor WorkflowExecutor: Executor {
             preview: response.trimmingCharacters(in: .whitespacesAndNewlines)
         )
         await TraceRecorder.shared.emitMetric(span: classifierSpan, key: "classifier_latency", valueMs: durationMs)
-        await TraceRecorder.shared.endSpan(spanID: classifierSpan.spanID, status: .completed)
+        // Declared so the Run Report's Model lane counts the classifier as the real model time
+        // it is (see RunReportProjection.declaredModelMs) — it was silently unattributed before.
+        await TraceRecorder.shared.endSpan(
+            spanID: classifierSpan.spanID, status: .completed,
+            metadata: ["model": model.modelName, "duration_ms": "\(durationMs)"])
 
         logger.debug("AI Classifier '\(displayName)' raw response: \"\(response)\"")
 

@@ -14,8 +14,14 @@ class MetricsManager {
     private init() {}
 
     /// Records a performance metric using the detailed information from the TraceContext.
+    ///
+    /// ⚠️ Every emit below captures `at` BEFORE its `Task {}` hop. The recorder stamps events
+    /// with the caller's clock (call-site-evaluated default parameter), but a default evaluated
+    /// INSIDE an unstructured Task is the Task's start time — under MainActor load that skew
+    /// landed tool events visibly late and scrambled the timeline's segment placement.
     func record(duration: TimeInterval, for key: String, context: TraceContext) {
-        Task { await TraceRecorder.shared.emitMetric(span: context, key: key, valueMs: Int(duration * 1000)) }
+        let at = Date()
+        Task { await TraceRecorder.shared.emitMetric(span: context, key: key, valueMs: Int(duration * 1000), at: at) }
         logMetric(key: key, value: String(format: "%.4fs", duration), context: context)
     }
     
@@ -25,7 +31,8 @@ class MetricsManager {
         meta["ambiguous"] = String(isAmbiguous)
         meta["outcome"] = success ? "success" : "failure"
         
-        Task { await TraceRecorder.shared.emitMetric(span: context, key: "plan_outcome", valueMs: success ? 1 : 0) }
+        let at = Date()
+        Task { await TraceRecorder.shared.emitMetric(span: context, key: "plan_outcome", valueMs: success ? 1 : 0, at: at) }
         logMetric(key: "plan_outcome", value: success ? "1" : "0", context: context, extraMeta: meta)
     }
     
@@ -42,8 +49,9 @@ class MetricsManager {
             meta["error_signature"] = TelemetrySanitizer.sanitize(error)
         }
         
+        let at = Date()
         Task {
-            await TraceRecorder.shared.emitToolResult(span: context, name: toolName, success: isSuccess, output: errorType ?? "success", durationMs: durationMs)
+            await TraceRecorder.shared.emitToolResult(span: context, name: toolName, success: isSuccess, output: errorType ?? "success", durationMs: durationMs, at: at)
         }
         logMetric(key: "tool_execution", value: isSuccess ? "1" : "0", context: context, extraMeta: meta)
     }
@@ -53,7 +61,8 @@ class MetricsManager {
         var meta = context.metadata
         meta["hallucinated_tool"] = toolName
         
-        Task { await TraceRecorder.shared.emitError(span: context, error: "Hallucinated tool: \(toolName)", isRecoverable: true) }
+        let at = Date()
+        Task { await TraceRecorder.shared.emitError(span: context, error: "Hallucinated tool: \(toolName)", isRecoverable: true, at: at) }
         logMetric(key: "agent_hallucination", value: "1", context: context, extraMeta: meta)
     }
 

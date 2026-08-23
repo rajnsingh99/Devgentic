@@ -40,6 +40,11 @@ struct WorkflowCanvasRunOverlay: Equatable {
     /// (never reached), which reads as `.undetermined` rather than as anything having gone wrong.
     private let nodeStatus: [UUID: NodeStatus]
 
+    /// Why each skipped node did not run. Absent for every node that is not `.skipped`, and for
+    /// records written before the reason reached the display layer — both read as "dead branch",
+    /// which is the pre-existing behaviour and the safe direction.
+    private let skipReason: [UUID: NodeSkipReason]
+
     /// True while the run is still executing — drives the pulsing treatment on the running node.
     let isLive: Bool
 
@@ -54,10 +59,30 @@ struct WorkflowCanvasRunOverlay: Equatable {
             displayData.nodeResults.map { ($0.nodeID, $0.status) },
             uniquingKeysWith: { first, _ in first }
         )
+        // The flat `NodeStatus` cannot say WHY a node was skipped, and one reason behaves the
+        // opposite of the rest — see `carriedTheRun`.
+        self.skipReason = Dictionary(
+            displayData.nodeResults.compactMap { row in row.skipReason.map { (row.nodeID, $0) } },
+            uniquingKeysWith: { first, _ in first }
+        )
         self.isLive = displayData.isRunning
     }
 
     func status(for nodeID: UUID) -> NodeStatus? { nodeStatus[nodeID] }
+
+    /// Did the run flow THROUGH this node, whether or not the node itself executed?
+    ///
+    /// ⚠️ A user skip is a PASS-THROUGH, not a dead branch: it is the one skip reason whose
+    /// downstream still runs — the node's input is forwarded as its output and every default edge
+    /// below it stays live (`NodeSkipReason.keepsDownstreamAlive`, and that type's own doc comment
+    /// warns that matchers assuming "skipped ⇒ downstream never ran" must handle it separately).
+    /// Three engine sites already did; this overlay did not, so skipping a node mid-pipeline drew
+    /// BOTH its edges dead even though the node below it ran on this node's input.
+    private func carriedTheRun(_ nodeID: UUID) -> Bool {
+        guard let status = nodeStatus[nodeID] else { return false }
+        if status == .skipped { return skipReason[nodeID]?.keepsDownstreamAlive ?? false }
+        return status.didRun
+    }
 
     /// Whether this edge carried the run.
     ///
@@ -76,8 +101,12 @@ struct WorkflowCanvasRunOverlay: Equatable {
         guard let source = nodeStatus[sourceID], let target = nodeStatus[targetID] else {
             return .undetermined
         }
-        if source == .skipped || target == .skipped { return .notTaken }
-        if source.didRun && target.didRun { return .fired }
+        // A skip only kills the edge when the branch below it is genuinely dead.
+        if (source == .skipped && !carriedTheRun(sourceID))
+            || (target == .skipped && !carriedTheRun(targetID)) { return .notTaken }
+        // `.undetermined` is still reachable and still important: a target that has not started
+        // yet (`.pending`) must stay neutral during a live run rather than claim the edge fired.
+        if carriedTheRun(sourceID) && carriedTheRun(targetID) { return .fired }
         return .undetermined
     }
 }

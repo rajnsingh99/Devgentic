@@ -15,7 +15,7 @@ final class DocumentExtractionRegistry: Sendable {
     static let shared = DocumentExtractionRegistry()
 
     private let extractors: [any DocumentExtractor]
-    private let logger = Logger(subsystem: "com.devgentic", category: "DocumentExtraction")
+    private let logger = Logger(subsystem: DGLogger.subsystem, category: "DocumentExtraction")
 
     private init() {
         self.extractors = [
