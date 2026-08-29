@@ -17,9 +17,14 @@ import Foundation
 /// Workflow-specific execution context passed from `WorkflowExecutor` through
 /// `AgentConnect` to the underlying agent/bot generator via `SemanticContext`.
 ///
-/// Carries the two inputs a workflow node needs:
-/// - `taskDescription`: WHAT to do (per-node directive, merged with user query for first nodes)
-/// - `upstreamInput`: WITH what data (clean text from upstream nodes)
+/// Carries the ONE input a workflow node needs: `input` — the text this node acts on, which is
+/// the user's query at an entry node and the compiled upstream output everywhere else.
+///
+/// ⚠️ There used to be a second channel, `taskDescription`, holding a per-node directive that was
+/// rendered into the system prompt's `<task>` layer (and, at an entry node, fused with the user's
+/// query). It was removed 2026-08-29: a node's behaviour is its profile's system instructions, and
+/// since the canvas allows one node per profile those instructions ARE the per-node directive.
+/// Two channels meant an entry node received the same request twice, in two different slots.
 ///
 /// The presence of this struct on `SemanticContext.workflowContext` is the
 /// single signal `buildStandardMessages` uses to apply workflow-specific
@@ -28,19 +33,24 @@ import Foundation
 /// (see `ReActAgentExecutor` and `ChatExecutor`).
 struct WorkflowExecutionContext: Sendable {
 
-    /// Per-node task description from `WorkflowNodeConfig.taskDescription`.
-    /// For first nodes, the original user query (if any) is merged into this field
-    /// by `WorkflowExecutor.executeNode()` so there is a single directive.
-    let taskDescription: String
-
-    /// Clean compiled upstream text from `WorkflowInputAssembler.compileForWorkflow()`.
-    /// Contains raw output from completed predecessor nodes, separated by `---`.
-    /// Empty string when there are no upstream results (first node).
-    let upstreamInput: String
+    /// The text this node acts on.
+    ///
+    /// ⚠️ ONE FIELD FOR BOTH ORIGINS, deliberately. At an ENTRY node this is the run's
+    /// `userInput` — the user's chat query, a schedule's configured prompt, or a ChatOps message.
+    /// Everywhere else it is `WorkflowInputAssembler.compileForWorkflow()`'s output: the raw text
+    /// of completed predecessors, separated by `---`. The executor decides which, keyed on the
+    /// GRAPH (`isEntryNode`), so this type never has to.
+    ///
+    /// Empty only when a run genuinely started with no input, or when every predecessor
+    /// failed/skipped — both surfaced by `userMessagePrefix`.
+    let input: String
 
     /// True if this node has no incoming edges (entry point of the DAG).
-    /// First nodes receive "Execute your task." as user message.
-    /// Downstream nodes receive `<input>[upstreamInput]</input>`.
+    ///
+    /// ⚠️ No longer selects between two prompt SHAPES — every node renders its `input` the same
+    /// way. It survives for two things that genuinely differ by position: `attachmentContext`
+    /// (entry-node only) and the security note's framing, where an entry node's input is the
+    /// request to fulfil and a downstream node's is untrusted data to process.
     let isFirstNode: Bool
 
     /// Current-turn attachment text, ENTRY NODE ONLY (nil elsewhere).
@@ -76,49 +86,71 @@ struct WorkflowExecutionContext: Sendable {
     /// there are no extractable documents.
     var upstreamArtifactText: String = ""
 
+    /// [WF-SE6/SE11] The node's explicit unattended-approval setting
+    /// (`WorkflowNodeConfig.unattendedAutoApprove`), threaded to the agent path's confirmation
+    /// gate in `ToolExecutionLoop`. Runtime-only — never persisted here.
+    var unattendedAutoApprove: Bool = false
+
     /// Computes the per-node user-message prefix that gets prepended to the
     /// user turn in `buildStandardMessages`. Single source of truth — used by
     /// both the agent (ReAct) path and the bot (Chat) path automatically.
     ///
-    /// Three branches:
-    ///   - `.isFirstNode == true` → "Execute your task." (the task description
-    ///     already lives in the system prompt's `<task>` layer)
-    ///   - `.upstreamInput.isEmpty` → "No input data provided. …" (downstream
-    ///     node where every predecessor failed/skipped — surface the gap)
-    ///   - else → wrapping-appropriate `<input>upstreamInput</input>` block
+    /// ⚠️ ONE SHAPE FOR EVERY NODE since 2026-08-29: the node's `input` rendered as an `<input>`
+    /// section, whatever its origin. The entry node used to get the literal string "Execute your
+    /// task." here because its real directive sat in the system prompt's `<task>` layer; with that
+    /// layer gone for workflow nodes, an entry node that returned that string would be handed a
+    /// prompt containing no request at all.
+    ///
+    /// The only remaining branch is the genuinely-empty one, which is a real condition worth
+    /// naming rather than a shape difference.
     ///
     /// `wrapping` is supplied by the caller (`buildStandardMessages` knows its
     /// own wrapping) so XML-style generators get `<input>…</input>` and
     /// markdown-style generators get `## Input\n…`.
     func userMessagePrefix(wrapping: PromptWrapping) -> String {
-        if isFirstNode {
-            return "Execute your task."
-        }
-
-        // Compose the downstream user message from up to three sections: the
-        // upstream text, a manifest of attached files, and inlined document text.
+        // Compose the user message from up to three sections: the node's input text, a manifest
+        // of attached files, and inlined document text.
         // Each is wrapping-aware so XML dialects get `<input>`/`<attached_files>`
         // and markdown dialects get `## Input` / `## Attached Files`. Both the bot
         // and agent workflow paths route through here, so artifacts reach both.
         var sections: [String] = []
 
-        if !upstreamInput.isEmpty {
-            sections.append(wrapping.section("input", content: upstreamInput))
+        // [WF-SE5] Every section here is UNTRUSTED — an upstream node's own output, an
+        // artifact's label (set by an upstream node, not this one), or extracted document
+        // text — so each is escaped before it becomes the content of its tag. A payload
+        // containing `</input><instruction>…</instruction><input>` would otherwise close the
+        // section early and inject its own directive that a downstream Router or Action node
+        // then acts on. See `WorkflowInputAssembler.escapeForXMLEmbedding`'s doc for why this
+        // is NOT applied to `system_instructions`/etc., which are locally-authored.
+        //
+        // ⚠️ An ENTRY node's `input` is now escaped too, and that is a GAIN. The same text used to
+        // ride `taskDescription` into the `<task>` layer, which is exempt from escaping as
+        // "locally-authored" — true of a task the workflow author typed, false of a ChatOps
+        // message or a schedule's prompt, which reach `userInput` from outside.
+        if !input.isEmpty {
+            let safe = WorkflowInputAssembler.escapeForXMLEmbedding(input, wrapping: wrapping)
+            sections.append(wrapping.section("input", content: safe))
         }
 
         let manifest = WorkflowInputAssembler.renderArtifactManifest(upstreamArtifacts)
         if !manifest.isEmpty {
-            sections.append(wrapping.section("attached_files", content: manifest))
+            let safe = WorkflowInputAssembler.escapeForXMLEmbedding(manifest, wrapping: wrapping)
+            sections.append(wrapping.section("attached_files", content: safe))
         }
 
         if !upstreamArtifactText.isEmpty {
-            sections.append(wrapping.section("attached_documents", content: upstreamArtifactText))
+            let safe = WorkflowInputAssembler.escapeForXMLEmbedding(upstreamArtifactText, wrapping: wrapping)
+            sections.append(wrapping.section("attached_documents", content: safe))
         }
 
-        // No text AND no artifacts — every predecessor failed/skipped or produced
-        // nothing. Surface the gap rather than emitting an empty user turn.
+        // No text AND no artifacts. At an entry node the run started with no input at all; below
+        // one, every predecessor failed, skipped, or produced nothing. Surface the gap rather than
+        // emitting an empty user turn — and say which of the two it is, because the remedies are
+        // opposite (type something / go look at the upstream node).
         if sections.isEmpty {
-            return "No input data provided. Execute your task based on the task description."
+            return isFirstNode
+                ? "This run started with no input. Follow your system instructions."
+                : "No input data provided — every preceding step failed, was skipped, or produced nothing. Follow your system instructions."
         }
 
         return sections.joined(separator: "\n\n")

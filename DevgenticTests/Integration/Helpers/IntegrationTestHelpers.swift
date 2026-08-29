@@ -144,7 +144,10 @@ enum TestAgentInputFactory {
         errorRecovery: ErrorRecovery = ErrorRecovery(),
         retryPolicy: RetryPolicy = RetryPolicy(),
         instructions: String? = nil,
-        generatorStrategy: (any CognitiveGenerator)? = nil
+        generatorStrategy: (any CognitiveGenerator)? = nil,
+        /// [WF-SE6] Lets a test drive the WORKFLOW-NODE agent path — the plumbing that carries
+        /// `unattendedAutoApprove` into `ToolExecutionLoop`.
+        workflowContext: WorkflowExecutionContext? = nil
     ) -> AgentInput {
         let memory = workingMemory ?? WindowedLinearMemory(
             config: MemoryBudgetConfig.derive(contextWindow: 8192, tier: .small)
@@ -163,6 +166,7 @@ enum TestAgentInputFactory {
             instructions: instructions,
             retryPolicy: retryPolicy,
             errorRecovery: errorRecovery,
+            workflowContext: workflowContext,
             traceContext: TestTraceContext.make()
         )
     }

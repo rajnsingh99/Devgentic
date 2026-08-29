@@ -393,6 +393,10 @@ final class ActiveStreamManager {
                 var lastUpdateTime = Date()
                 var tokensReceivedInWindow = 0
                 var adaptiveInterval: TimeInterval = 0.1 // Start with default
+                // [WF-RU1] The last `.error` event's message — the richest failure text the
+                // stream produced. Consulted ONLY at stream end, and only when the engine's
+                // terminal outcome is `.failed` (see the workflow settle there).
+                var lastErrorEventMessage: String?
 
                 for try await event in stream {
                     try Task.checkCancellation()
@@ -453,14 +457,19 @@ final class ActiveStreamManager {
                         // restart case. Resume (Piece 2) re-raises the HITL from this persisted opID.
                         agentMessage.lifecycleState = .parkedHITL(operationID: operationID)
                         await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
+                        // [WF-SE3] Provenance-aware tier: native names use the native map, MCP
+                        // tools use their server-declared annotations (labelled as such), and a
+                        // name collision floors at .moderate — see ToolRiskResolver.
+                        let riskResolution = ToolRiskResolver.resolve(toolName: toolName)
                         self.enqueueHITL(
                             operationID: operationID,
                             kind: .toolConfirmation(PendingToolConfirmation(
                                 id: operationID,
                                 toolName: toolName,
                                 params: params,
-                                risk: HITLRiskTier.classify(toolName: toolName),
-                                arguments: JSONValue.parseStructured(params)
+                                risk: riskResolution.risk,
+                                arguments: JSONValue.parseStructured(params),
+                                riskIsServerDeclared: riskResolution.serverDeclared
                             )),
                             conversationID: conversationID,
                             profileType: config.profile.profileType,
@@ -601,6 +610,10 @@ final class ActiveStreamManager {
                         }
                         
                     case .error(let structuredError):
+                        // [WF-RU1] Remember the richest failure text for the workflow settle at
+                        // stream end. Only USED when the engine's terminal outcome is `.failed` —
+                        // an inner-node error a recovery branch survives never reaches it.
+                        lastErrorEventMessage = structuredError.message
                         // Surface the failure as a distinct error card in the bubble
                         // instead of leaving it buried in streaming prose. Without this,
                         // capability/system failures render as plain text that mimics
@@ -666,6 +679,13 @@ final class ActiveStreamManager {
                     case .workflowProgress(let completed, let total):
                         logger.info("[WF_EVENT] Progress: \(completed)/\(total)")
                         workflowExecutionState?.handleProgress(completed: completed, total: total)
+
+                    case .workflowRunFinished(let hadGenuineFailure):
+                        // [WF-RU4] See the case's own doc for why this is separate from
+                        // `agentMessage.terminalOutcome` — that one drives the chat bubble and
+                        // must not change here.
+                        logger.info("[WF_EVENT] RunFinished: hadGenuineFailure=\(hadGenuineFailure)")
+                        workflowExecutionState?.completedDespiteNodeFailure = hadGenuineFailure
 
                     // MARK: Capability Events (Planning, Self-Reflection, Delegation)
 
@@ -884,6 +904,21 @@ final class ActiveStreamManager {
                     let stopped = Task.isCancelled
                     logger.info("[WF_EVENT] StreamEnd: cancelled=\(stopped), \(finalText.count) chars, nodeTimelines=\(wfState.nodeTimelines.count) nodes tracked")
                     logger.debug("[WF_EVENT] FinalOutput preview: \(String(finalText.prefix(300)))")
+                    // [WF-RU1] An engine-declared run FAILURE must reach the workflow state as an
+                    // ERROR, not be laundered into `finalOutput` as the run's answer. The `.error`
+                    // arm only rewrites the MESSAGE; nothing called `handleError`, so
+                    // `record.error` froze as nil, the Final Outcome panel rendered the failure
+                    // text as ordinary markdown with a Copy chip, VoiceOver spoke it as
+                    // "Output: …", and — because `handleError` is what runs `settleInFlightWork`
+                    // — dangling tool rows spun for the rest of the session. Keyed off the
+                    // engine's own `.executionFinished(.failed)` (stamped on the message by its
+                    // arm above), NOT off `.error` events, which inner nodes also emit on runs a
+                    // recovery branch then completes.
+                    if !stopped, agentMessage.terminalOutcome == .failed, wfState.workflowError == nil {
+                        let reason = lastErrorEventMessage ?? agentMessage.terminalReason ?? String(localized: "The workflow failed.")
+                        wfState.handleError(reason)
+                        logger.info("[WF_EVENT] Run FAILED per the engine's terminal outcome — settled workflowError (\(reason.count) chars) before StreamEnd. CONSEQUENCE: the record freezes .failed with record.error set, the UI renders the failure as an error rather than as the run's answer, and in-flight node/tool rows are settled instead of spinning forever.")
+                    }
                     wfState.handleStreamEnd(finalText: finalText, cancelled: stopped)
                     if stopped {
                         logger.info("[WF_EVENT] Run STOPPED by user — state latched wasCancelled. CONSEQUENCE: the frozen record persists .cancelled with its in-flight node settled .cancelled, instead of a red 'Failed' reporting the user's own action back as an error.")

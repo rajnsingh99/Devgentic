@@ -126,4 +126,118 @@ final class WorkflowCanvasStateLifetimeTests: XCTestCase {
         XCTAssertTrue(state.hasUnsavedChanges,
                       "…and the canvas must stay dirty, so the edits are still offered at the next exit point")
     }
+
+    // MARK: - WF-CU4: the newer-version notice is scoped to the profile that produced it
+    //
+    // Same failure CLASS as WF9 above, one layer up: this host re-renders IN PLACE on a profile
+    // switch (no `.id()` at the mount site), so view `@State` outlives the workflow it describes.
+    // `newerVersionNotice` had exactly one writer and no path back to nil, so after one refused
+    // save the "read-only — update Devgentic" banner followed the user onto every workflow they
+    // opened next, for the rest of the session.
+
+    private let noticeText = "This workflow was saved by a newer version of Devgentic."
+
+    /// ⚠️ THE FILED BUG. A notice produced by workflow A must not render while workflow B is on
+    /// screen — B is perfectly writable, and the banner claims otherwise.
+    func testNoticeFromAnotherProfileIsNotRendered() {
+        let workflowA = UUID(), workflowB = UUID()
+        let stored = WorkflowCanvasView.ProfileScopedNotice(profileID: workflowA, message: noticeText)
+
+        XCTAssertNil(
+            WorkflowCanvasView.ProfileScopedNotice.message(for: stored, displayedProfileID: workflowB),
+            "a notice belonging to workflow A must not appear over workflow B"
+        )
+    }
+
+    /// The control that keeps the fix honest: on its OWN workflow the notice must still show.
+    /// Scoping that suppressed everything would "fix" the lie by deleting a true warning — the
+    /// user would edit a read-only workflow with no idea their saves are being refused.
+    func testNoticeStillRendersOnTheProfileThatProducedIt() {
+        let workflowA = UUID()
+        let stored = WorkflowCanvasView.ProfileScopedNotice(profileID: workflowA, message: noticeText)
+
+        XCTAssertEqual(
+            WorkflowCanvasView.ProfileScopedNotice.message(for: stored, displayedProfileID: workflowA),
+            noticeText
+        )
+    }
+
+    /// No notice stored → nothing rendered, on any profile.
+    func testNoNoticeRendersNothing() {
+        XCTAssertNil(
+            WorkflowCanvasView.ProfileScopedNotice.message(for: nil, displayedProfileID: UUID())
+        )
+    }
+
+    /// ⚠️ Returning to the ORIGINAL workflow must bring the notice back. This is what distinguishes
+    /// profile-SCOPING from clearing-on-switch: a clear would have destroyed the notice on the way
+    /// out, so coming back to a workflow that is still read-only would show nothing until the user
+    /// attempted another save and watched it fail.
+    func testNoticeReappearsWhenReturningToItsOwnProfile() {
+        let workflowA = UUID(), workflowB = UUID()
+        let stored = WorkflowCanvasView.ProfileScopedNotice(profileID: workflowA, message: noticeText)
+
+        // A → B → A, the stored value untouched throughout.
+        XCTAssertEqual(WorkflowCanvasView.ProfileScopedNotice.message(for: stored, displayedProfileID: workflowA), noticeText)
+        XCTAssertNil(WorkflowCanvasView.ProfileScopedNotice.message(for: stored, displayedProfileID: workflowB))
+        XCTAssertEqual(WorkflowCanvasView.ProfileScopedNotice.message(for: stored, displayedProfileID: workflowA), noticeText,
+                       "the notice must survive the round trip — it describes A, and A is still read-only")
+    }
+
+    // MARK: - The unreadable-canvas overlay is scoped the same way
+    //
+    // Same class again, and the most dangerous instance of it: this overlay carries the one control
+    // in the app that deliberately destroys a graph, and that control acts on the DISPLAYED profile.
+    // The overlay was left unscoped on the argument that `loadLayout()` recomputes it — untrue on
+    // the `acceptsDiskReload` early-return path, so opening an unreadable workflow A and then
+    // switching to a workflow B holding unsaved edits kept A's overlay, and its "Discard and Start
+    // Over" button pointed at B.
+
+    private func unreadableInfo(_ profileID: UUID) -> WorkflowCanvasView.UnreadableLayoutInfo {
+        WorkflowCanvasView.UnreadableLayoutInfo(
+            profileID: profileID, nodeCount: 7, edgeCount: 6, annotationCount: 1
+        )
+    }
+
+    /// ⚠️ THE FILED BUG. An overlay describing workflow A must not render over workflow B — B is
+    /// readable, and the Discard button under that overlay would wipe B's saved graph.
+    func testUnreadableOverlayFromAnotherProfileIsNotRendered() {
+        let workflowA = UUID(), workflowB = UUID()
+
+        XCTAssertNil(
+            WorkflowCanvasView.UnreadableLayoutInfo.active(unreadableInfo(workflowA), displayedProfileID: workflowB),
+            "an overlay belonging to workflow A must not appear over workflow B — its Discard button targets whatever is displayed"
+        )
+    }
+
+    /// The control that keeps the fix honest: on its OWN workflow the overlay must still show.
+    /// Suppressing it everywhere would hide a real read failure and hand the user the empty-canvas
+    /// invitation instead, inviting them to rebuild a graph whose every save is refused.
+    func testUnreadableOverlayStillRendersOnTheProfileThatProducedIt() {
+        let workflowA = UUID()
+
+        let active = WorkflowCanvasView.UnreadableLayoutInfo.active(unreadableInfo(workflowA), displayedProfileID: workflowA)
+        XCTAssertEqual(active, unreadableInfo(workflowA))
+        XCTAssertTrue(active?.heldContent == true, "the out-of-blob counts still describe what was lost")
+    }
+
+    /// No overlay stored → nothing rendered, on any profile.
+    func testNoUnreadableOverlayRendersNothing() {
+        XCTAssertNil(
+            WorkflowCanvasView.UnreadableLayoutInfo.active(nil, displayedProfileID: UUID())
+        )
+    }
+
+    /// Returning to the unreadable workflow must bring the overlay back — scoping, not clearing.
+    /// A clear-on-switch would leave the user on a genuinely unreadable canvas with no explanation
+    /// and no way to repair it.
+    func testUnreadableOverlayReappearsWhenReturningToItsOwnProfile() {
+        let workflowA = UUID(), workflowB = UUID()
+        let stored = unreadableInfo(workflowA)
+
+        XCTAssertNotNil(WorkflowCanvasView.UnreadableLayoutInfo.active(stored, displayedProfileID: workflowA))
+        XCTAssertNil(WorkflowCanvasView.UnreadableLayoutInfo.active(stored, displayedProfileID: workflowB))
+        XCTAssertNotNil(WorkflowCanvasView.UnreadableLayoutInfo.active(stored, displayedProfileID: workflowA),
+                        "the overlay must survive the round trip — A's stored layout is still undecodable")
+    }
 }

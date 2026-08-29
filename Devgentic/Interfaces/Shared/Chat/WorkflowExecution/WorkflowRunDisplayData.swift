@@ -40,6 +40,15 @@ struct WorkflowRunDisplayData {
     /// renders its own "never recorded" explanation for those, so the button does
     /// not need to guess.
     var traceID: String? = nil
+    /// [WF-CS4] This run executed the last-saved graph while the canvas held unsaved edits. Drives
+    /// the disclosure row in the run header — see `WorkflowRunEditDisclosure`.
+    ///
+    /// ⚠️ LIVE RUNS ONLY, by owner decision (2026-08-24). `from(record:)` leaves this false and
+    /// cannot do otherwise: `WorkflowRunRecord` is rebuilt from promoted SwiftData columns and has
+    /// no column for it, so persisting the disclosure needs a schema version bump nobody has taken
+    /// on yet. Do NOT "fix" this by adding the field to `WorkflowRunRecord` alone — it would be
+    /// dropped at `decodeRecord` and this comment would become a lie. See the note in that file.
+    var ranWithUnsavedCanvasEdits: Bool = false
     /// The run's record identity (live: `state.runRecordID`, historical: `record.id`),
     /// passed as the report panel's stable id. Not a chat message id.
     var runID: UUID? = nil
@@ -197,9 +206,17 @@ struct WorkflowRunDisplayData {
             // so every heuristic downstream reads "failed" and the user's own Stop came back as a
             // red "Failed" pill for the whole window between stopping and the record freezing.
             // The run genuinely is cancelled at this point, live or not.
-            status: state.wasCancelled ? .cancelled : nil,
+            //
+            // [WF-RU4] `completedDespiteNodeFailure` is the SAME kind of exception: the derived
+            // `hasGenuineFailure` heuristic (used when this is nil) has no way to know a
+            // successful terminal exists, so without this a run whose error handling worked
+            // exactly as designed would flash red "Failed" for the same live-window gap.
+            status: state.wasCancelled ? .cancelled
+                : state.completedDespiteNodeFailure ? .completedWithWarnings
+                : nil,
             duration: elapsed,
             traceID: state.traceID,
+            ranWithUnsavedCanvasEdits: state.ranWithUnsavedCanvasEdits,
             runID: state.runRecordID
         )
     }
@@ -395,6 +412,8 @@ struct WorkflowRunDisplayData {
             status: record.status,
             duration: record.duration,
             traceID: record.traceID,
+            // [WF-CS4] Deliberately NOT set: the disclosure is live-only and the record has nowhere
+            // to carry it. Left at its `false` default rather than faked from anything else.
             runID: record.id
         )
     }
@@ -418,6 +437,9 @@ struct WorkflowRunDisplayData {
         case .condition, .code, .gate, .trigger:
             // Genuinely nothing to show: these evaluate a rule or a template in-process and emit
             // no tool, artifact or agent events.
+            return false
+        case .unsupported:
+            // [WF-PE4] A placeholder never runs, so it can have no timeline.
             return false
         }
     }
@@ -566,7 +588,7 @@ extension WorkflowRunDisplayData {
     /// The header pill's verdict. ⚠️ The PERSISTED status wins over the derived heuristics — a
     /// `.running` orphan stub must say "Running", and `.other` must say "Unknown", never a
     /// derived "Completed" (see the regression history on the view).
-    enum PillVerdict { case running, cancelled, failed, unknown, completed }
+    enum PillVerdict { case running, cancelled, failed, unknown, completed, completedWithWarnings }
 
     var pillVerdict: PillVerdict {
         if let status {
@@ -575,8 +597,14 @@ extension WorkflowRunDisplayData {
             case .cancelled: return .cancelled
             case .failed:    return .failed
             case .other:     return .unknown
+            // [WF-RU4] Trusted directly — `freeze()` only ever writes this when the ENGINE
+            // (which alone knows whether an answering terminal exists) said so.
+            case .completedWithWarnings: return .completedWithWarnings
             // A record marked completed that nonetheless carries a failed node is reported as
-            // failed — the nodes are the evidence, the roll-up is a summary of them.
+            // failed — the nodes are the evidence, the roll-up is a summary of them. Unreachable
+            // for anything `freeze()` writes today (it never persists `.completed` alongside a
+            // genuine failure — that combination is exactly what `.completedWithWarnings` is
+            // for); kept as a defensive fallback for a pre-fix historical record.
             case .completed: return hasGenuineFailure ? .failed : .completed
             }
         }
@@ -588,11 +616,12 @@ extension WorkflowRunDisplayData {
 
     var pillLabel: String {
         switch pillVerdict {
-        case .running:   return String(localized: "Running")
-        case .cancelled: return String(localized: "Cancelled")
-        case .failed:    return String(localized: "Failed")
-        case .unknown:   return String(localized: "Unknown")
-        case .completed: return String(localized: "Completed")
+        case .running:               return String(localized: "Running")
+        case .cancelled:             return String(localized: "Cancelled")
+        case .failed:                return String(localized: "Failed")
+        case .unknown:               return String(localized: "Unknown")
+        case .completed:             return String(localized: "Completed")
+        case .completedWithWarnings: return String(localized: "Completed with warnings")
         }
     }
 
@@ -609,7 +638,10 @@ extension WorkflowRunDisplayData {
         if isCancelledRun {
             return String(localized: "stopped\(suffix)")
         }
-        if hasGenuineFailure {
+        // [WF-RU4] `hasGenuineFailure` is ALSO true for `.completedWithWarnings` (a node really did
+        // fail) — gate on `pillVerdict`, not the raw flag, or this run's step counter would say
+        // "failed at step 1 of 3" one line under a pill that just said "Completed with warnings".
+        if pillVerdict == .failed {
             // First genuinely-failed node (skip the not-run cascade) = where it broke.
             let failedIndex = nodeResults.firstIndex { $0.status == .failed && !nodeDidNotRun($0) }
                 ?? nodeResults.firstIndex { $0.status == .failed }
@@ -617,6 +649,13 @@ extension WorkflowRunDisplayData {
                 return String(localized: "failed at step \(failedIndex + 1) of \(total)\(suffix)")
             }
             return String(localized: "failed\(suffix)")
+        }
+        if pillVerdict == .completedWithWarnings {
+            // Deliberately NOT "failed at step X" — the run reached its natural conclusion with a
+            // real answer, so naming the exact step would frame a survived failure as where the
+            // run stopped. Just the count: honest without re-alarming what the pill already softened.
+            let failedCount = nodeResults.filter { $0.status == .failed && !nodeDidNotRun($0) }.count
+            return String(localized: "\(total) step\(total == 1 ? "" : "s") · \(failedCount) failed\(suffix)")
         }
         return "\(total) step\(total == 1 ? "" : "s")\(suffix)"
     }
@@ -634,33 +673,38 @@ extension WorkflowRunRecord.RunStatus {
     /// old `?? .completed` made, just moved one layer up.
     var icon: String {
         switch self {
-        case .running:   return "circle.fill"
-        case .completed: return "checkmark.circle.fill"
-        case .failed:    return "xmark.circle.fill"
-        case .cancelled: return "stop.circle.fill"
-        case .other:     return "questionmark.circle.fill"
+        case .running:               return "circle.fill"
+        case .completed:             return "checkmark.circle.fill"
+        // [WF-RU4] A distinct icon from both plain success and cancellation — a failure genuinely
+        // occurred, it just did not stop the run from producing a real answer.
+        case .completedWithWarnings: return "exclamationmark.triangle.fill"
+        case .failed:                return "xmark.circle.fill"
+        case .cancelled:             return "stop.circle.fill"
+        case .other:                 return "questionmark.circle.fill"
         }
     }
 
     func color(_ theme: any Theme) -> Color {
         switch self {
-        case .completed: return theme.successColor
-        case .failed:    return theme.errorColor
-        case .cancelled: return theme.warningColor
-        case .running:   return theme.accentColor
-        case .other:     return theme.secondaryText
+        case .completed:             return theme.successColor
+        case .completedWithWarnings: return theme.warningColor
+        case .failed:                return theme.errorColor
+        case .cancelled:             return theme.warningColor
+        case .running:               return theme.accentColor
+        case .other:                 return theme.secondaryText
         }
     }
 
     var label: String {
         switch self {
-        case .running:   return String(localized: "Running")
-        case .completed: return String(localized: "Completed")
-        case .failed:    return String(localized: "Failed")
-        case .cancelled: return String(localized: "Cancelled")
+        case .running:               return String(localized: "Running")
+        case .completed:             return String(localized: "Completed")
+        case .completedWithWarnings: return String(localized: "Completed with warnings")
+        case .failed:                return String(localized: "Failed")
+        case .cancelled:             return String(localized: "Cancelled")
         // Not localized with the rawValue interpolated: the rawValue is a wire token from a newer
         // build, and putting it in front of the user unexplained is worse than saying "Unknown".
-        case .other:     return String(localized: "Unknown")
+        case .other:                 return String(localized: "Unknown")
         }
     }
 }

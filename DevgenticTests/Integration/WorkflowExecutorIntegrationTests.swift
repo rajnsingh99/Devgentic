@@ -92,11 +92,21 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
     }
 
     /// Creates a workflow stream (without consuming it) for cancellation tests.
+    ///
+    /// - Parameter workflowProfileID: defaults to a fresh, unregistered UUID (existing behavior —
+    ///   `executeWorkflow` logs "no workflow profile resolved" and falls back to a hard-coded 120s
+    ///   node timeout). Pass one that IS registered in `scenario.profileMap` (e.g. with
+    ///   `WorkflowConfig(agentProfileIDs: [], nodeTimeoutEnabled: false)`) when a test needs the
+    ///   Action-node tool path to skip `runToolWithTimeout`'s sentinel race entirely (WF-CC4) —
+    ///   otherwise every node timeout, including "disabled," resolves to SOME finite value and every
+    ///   tool call races a timeout sentinel that can itself intercept a post-cancellation retry
+    ///   before it ever reaches the mocked tool, masking whatever the retry loop itself does.
     private func makeStream(
         _ scenario: WorkflowTestScenario,
-        userInput: String = "Test input"
+        userInput: String = "Test input",
+        workflowProfileID: UUID = UUID()
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
-        let executor = WorkflowExecutor(workflowProfileID: UUID())
+        let executor = WorkflowExecutor(workflowProfileID: workflowProfileID)
         return executor.executeWorkflow(
             userInput: userInput,
             chatHistory: [],
@@ -625,8 +635,8 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         guard let invocation = mockProvider.workflowInvocations.first(where: {
             $0.profileID == scenario.profileID(for: handler)
         }) else { return XCTFail("handler never invoked") }
-        XCTAssertTrue(invocation.context.upstreamInput.contains("[Upstream node \"Failing Bot\" failed:"),
-                      "…and must receive the annotated failure, got: \(invocation.context.upstreamInput.prefix(160))")
+        XCTAssertTrue(invocation.context.input.contains("[Upstream node \"Failing Bot\" failed:"),
+                      "…and must receive the annotated failure, got: \(invocation.context.input.prefix(160))")
     }
 
 
@@ -1593,6 +1603,20 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let gates = WorkflowStreamCollector.gateRequests(from: collectedEvents)
         XCTAssertTrue(gates.count <= 1, "Gate request should have been emitted (or not if cancel was too fast)")
     }
+
+    // [WF-CC1] No dedicated regression test for the Gate/sub-workflow `Task.isCancelled` fix: the
+    // observable difference it makes (`.workflowNodeCancelled` vs `.workflowNodeFailed`) is a
+    // STREAM EVENT emitted from inside the same cancellation arm the Group 29 header comment above
+    // documents as unobservable through this harness — cancelling the task that consumes the stream
+    // races the event's own delivery, and the race always loses (`onTermination` fires because the
+    // consumer tore the stream down, so by the time the arm runs and yields, the stream is already
+    // terminal). An earlier draft of this test asserted on those events directly and failed with
+    // BOTH the cancelled and failed arrays empty — not because the fix is wrong, but because the
+    // assertion was reaching for something this seam structurally cannot deliver, confirmed by the
+    // engine's own internal log line recording the correct `status=canceled` for the exact same run.
+    // `ExecutionSuspensionService`'s drain state (Group 29's proxy) doesn't help either: draining
+    // was already true before this fix — only the STATUS value changed, not whether it drains.
+    // Verified instead by code review and the internal log evidence above.
 
     func testCancel_DoesNotInvokeDownstreamNodes() async throws {
         // 5-node chain: cancel after node 2 starts
@@ -2779,7 +2803,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         // ⚠️ And it sees ONLY the taken arm. The derived join widens the RUN condition; it never
         // widens the input. A skipped branch contributes nothing.
         let mergeInput = mockProvider.workflowInvocations
-            .first { $0.profileID == scenario.profileID(for: merge)! }?.context.upstreamInput ?? ""
+            .first { $0.profileID == scenario.profileID(for: merge)! }?.context.input ?? ""
         XCTAssertTrue(mergeInput.contains("urgent output"), "got: \(mergeInput)")
         XCTAssertFalse(mergeInput.contains("routine output"), "the skipped arm must not leak — got: \(mergeInput)")
     }
@@ -2910,7 +2934,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
 
         XCTAssertTrue(started.contains(merge), "exclusive pair OR-satisfies; independent branch is live")
         let input = mockProvider.workflowInvocations
-            .first { $0.profileID == scenario.profileID(for: merge)! }?.context.upstreamInput ?? ""
+            .first { $0.profileID == scenario.profileID(for: merge)! }?.context.input ?? ""
         XCTAssertTrue(input.contains("arm A out"), "got: \(input)")
         XCTAssertTrue(input.contains("context out"), "the independent branch must contribute — got: \(input)")
         XCTAssertFalse(input.contains("arm B out"), "the unchosen arm must not leak — got: \(input)")
@@ -3156,7 +3180,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         _ = try await execute(scenario)
 
         let sinkInput = mockProvider.workflowInvocations
-            .first { $0.profileID == scenario.profileID(for: sink)! }?.context.upstreamInput ?? ""
+            .first { $0.profileID == scenario.profileID(for: sink)! }?.context.input ?? ""
         XCTAssertTrue(sinkInput.contains("the real payload"), "content must flow — got: \(sinkInput)")
         XCTAssertFalse(sinkInput.contains("route \u{2192}"), "the retired routing-label string must be gone")
     }
@@ -4266,22 +4290,21 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
                        + "with several nodes in flight")
     }
 
-    /// ⚠️ THE ENTRY-NODE TASK SHAPE — the fix for the field report where a single-node workflow
-    /// failed while the SAME agent profile answered fine in chat.
+    /// ⚠️ THE ENTRY-NODE INPUT SHAPE. An entry node's input IS the run's query — nothing is fused
+    /// into it, and there is no second directive channel.
     ///
-    /// `<task>` is the first and most heavily attended section of the system prompt. It used to be
-    /// built as `nodeTask + "\n\n---\nUser Query: " + userInput`, and `AgentConnect` prepended the
-    /// knowledge/attachment payloads onto `userInput` because a node had no other route to them —
-    /// so the section opened with "User Query: ### MCP server guidance", carried ~2,000 chars of
-    /// instructions for tools the node did not have, and buried the real 61-char question at the
-    /// very end. A 3B model derailed on it identically five times and the run aborted on
-    /// consecutive parse failures.
-    ///
-    /// Owner decision 2026-08-20: user query FIRST, node task second, NO inline label.
-    func testEntryNodeTask_IsUserQueryFirstThenNodeTask_WithNoLabel() async throws {
+    /// This replaces `testEntryNodeTask_IsUserQueryFirstThenNodeTask_WithNoLabel`, which pinned the
+    /// two-channel model: a per-node `taskDescription` rendered into `<task>`, with the user's query
+    /// prepended to it at the entry node. Both are gone (2026-08-29) — a node's behaviour is its
+    /// profile's system instructions, and everything it acts on arrives as `<input>`. The history is
+    /// worth keeping because the fusion caused a real field failure: `<task>` opened with
+    /// "User Query: ### MCP server guidance", carried ~2,000 chars of instructions for tools the node
+    /// did not have, and buried the real 61-char question at the end, derailing a 3B model five times.
+    func testEntryNodeInput_IsTheUserQueryVerbatim() async throws {
         let scenario = WorkflowTestScenario()
         let entry = scenario.addBotNode(name: "Entry")
 
+        // A stored task from before the field was retired must have NO effect on the run.
         var cfg = WorkflowNodeConfig()
         cfg.taskDescription = "Summarise the input"
         scenario.setNodeConfig(cfg, for: entry)
@@ -4289,17 +4312,126 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         mockProvider.scriptStream(for: scenario.profileID(for: entry)!, events: [.content("ok")])
         _ = try await execute(scenario, userInput: "List all the files in Acme")
 
-        let ctx = mockProvider.workflowInvocations.first(where: { $0.context.nodeID == entry })?.context
-        let task = try XCTUnwrap(ctx?.taskDescription)
+        let ctx = try XCTUnwrap(mockProvider.workflowInvocations.first(where: { $0.context.nodeID == entry })?.context)
 
-        XCTAssertEqual(task, "List all the files in Acme\n\nSummarise the input",
-                       "entry task must be query first, node task second, joined by a blank line")
+        XCTAssertEqual(ctx.input, "List all the files in Acme",
+                       "the entry node's input is the user's query, verbatim and alone")
+        XCTAssertTrue(ctx.isFirstNode, "precondition: the node under test is the entry node")
 
         // The specific regressions, asserted by name so a re-fusion is caught explicitly.
-        XCTAssertFalse(task.contains("User Query:"), "the inline label must not come back")
-        XCTAssertFalse(task.contains("---"), "the separator line must not come back")
-        XCTAssertTrue(task.hasPrefix("List all the files"),
-                      "the user's question must be the FIRST thing in <task>, not the last")
+        XCTAssertFalse(ctx.input.contains("Summarise the input"),
+                       "a retired stored task must not be fused into the input — that is the two-channel model returning")
+        XCTAssertFalse(ctx.input.contains("User Query:"), "the inline label must not come back")
+        XCTAssertFalse(ctx.input.contains("---"), "the separator line must not come back")
+    }
+
+    // MARK: - Structural entry nodes receive the run's query (EXA-1)
+    //
+    // `executeStructuralNode` took no `userInput` at all, so a workflow whose ENTRY node was a
+    // Trigger, Router, Code, Gate, Action or sub-workflow silently discarded the user's question:
+    // the entry node ran on "", and every node behind it has an incoming edge — so `isEntryNode`
+    // is false there and none of them could receive the query either. The run answered a question
+    // it was never given and reported success.
+
+    /// ⚠️ THE FILED BUG, in the shape the app's own guidance recommends: the Trigger is documented
+    /// as "an entry-point marker only", so wiring `Trigger → Agent` is the advertised way to make a
+    /// starting point explicit — and it was the way to lose the user's query entirely.
+    func testTriggerEntryNode_ForwardsTheUserQueryDownstream() async throws {
+        let scenario = WorkflowTestScenario()
+        let trigger = scenario.addTriggerNode(name: "Start")
+        let worker = scenario.addBotNode(name: "Worker")
+        scenario.connect(from: trigger, to: worker)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: worker)!, events: [.content("done")])
+        _ = try await execute(scenario, userInput: "Summarize the Q3 report")
+
+        let ctx = try XCTUnwrap(mockProvider.workflowInvocations.first(where: { $0.context.nodeID == worker })?.context)
+        XCTAssertEqual(ctx.input, "Summarize the Q3 report",
+                       "the Trigger must forward the query — it is the ONLY route the query has into the graph")
+        XCTAssertFalse(ctx.isFirstNode,
+                       "precondition: the worker is NOT an entry node, so it cannot receive the query directly")
+    }
+
+    /// A Router as the entry node must route on the QUERY. This one failed silently rather than
+    /// loudly: "" MATCHES the stock `isEmpty` rule, so such a Router routed down its empty-branch
+    /// on every run and nothing reported a problem.
+    func testRouterEntryNode_RoutesOnTheUserQuery() async throws {
+        let scenario = WorkflowTestScenario()
+        let router = scenario.addConditionNode(name: "Router")
+        let onNotEmpty = scenario.addBotNode(name: "HasText")
+        let onEmpty = scenario.addBotNode(name: "NoText")
+        scenario.connect(from: router, to: onNotEmpty, portLabel: "True")
+        scenario.connect(from: router, to: onEmpty, portLabel: "False")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: onNotEmpty)!, events: [.content("ok")])
+        mockProvider.scriptStream(for: scenario.profileID(for: onEmpty)!, events: [.content("ok")])
+        _ = try await execute(scenario, userInput: "a real question")
+
+        let invoked = Set(mockProvider.workflowInvocations.map(\.context.nodeID))
+        XCTAssertTrue(invoked.contains(onNotEmpty),
+                      "a non-empty query must take the isNotEmpty branch; routing on \"\" took the other one silently")
+        XCTAssertFalse(invoked.contains(onEmpty), "the empty branch must not fire for a non-empty query")
+
+        let ctx = try XCTUnwrap(mockProvider.workflowInvocations.first(where: { $0.context.nodeID == onNotEmpty })?.context)
+        XCTAssertEqual(ctx.input, "a real question", "the Router passes its input through to the chosen branch")
+    }
+
+    /// An entry Code node renders `{{ input }}` from the query.
+    func testCodeEntryNode_RendersTheUserQuery() async throws {
+        let scenario = WorkflowTestScenario()
+        let code = scenario.addCodeNode(name: "Shape", template: "PREFIX: {{ input }}")
+        let worker = scenario.addBotNode(name: "Worker")
+        scenario.connect(from: code, to: worker)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: worker)!, events: [.content("done")])
+        _ = try await execute(scenario, userInput: "hello world")
+
+        let ctx = try XCTUnwrap(mockProvider.workflowInvocations.first(where: { $0.context.nodeID == worker })?.context)
+        XCTAssertEqual(ctx.input, "PREFIX: hello world",
+                       "an entry Code node's {{ input }} is the run's query; it used to render empty")
+    }
+
+    /// ⚠️ THE OVER-CORRECTION GUARD, and the more dangerous direction. A mid-graph structural node
+    /// must NEVER see the run's query — injecting it deep in a graph fabricates input that the
+    /// author never wired, which is worse than the starvation being fixed. This is WF13's shape,
+    /// which is why entry-ness is derived from the GRAPH and never from empty upstream data.
+    func testMidGraphStructuralNode_NeverReceivesTheUserQuery() async throws {
+        let scenario = WorkflowTestScenario()
+        let entry = scenario.addBotNode(name: "Entry")
+        let code = scenario.addCodeNode(name: "Passthrough", template: "{{ input }}")
+        let sink = scenario.addBotNode(name: "Sink")
+        scenario.connect(from: entry, to: code)
+        scenario.connect(from: code, to: sink)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: entry)!, events: [.content("UPSTREAM OUTPUT")])
+        mockProvider.scriptStream(for: scenario.profileID(for: sink)!, events: [.content("done")])
+        _ = try await execute(scenario, userInput: "the user question")
+
+        let ctx = try XCTUnwrap(mockProvider.workflowInvocations.first(where: { $0.context.nodeID == sink })?.context)
+        XCTAssertEqual(ctx.input, "UPSTREAM OUTPUT",
+                       "the mid-graph Code node must pass its UPSTREAM through, not the run's query")
+        XCTAssertFalse(ctx.input.contains("the user question"),
+                       "the query must not reach a node the author wired behind another node")
+    }
+
+    /// A Trigger wired MID-GRAPH must forward its upstream. Nothing on the canvas prevents this
+    /// shape, and the node used to emit "" in every position — so a Trigger dropped in mid-graph
+    /// black-holed the branch it sat on.
+    func testMidGraphTrigger_ForwardsItsUpstreamInsteadOfBlackHolingIt() async throws {
+        let scenario = WorkflowTestScenario()
+        let entry = scenario.addBotNode(name: "Entry")
+        let trigger = scenario.addTriggerNode(name: "Marker")
+        let sink = scenario.addBotNode(name: "Sink")
+        scenario.connect(from: entry, to: trigger)
+        scenario.connect(from: trigger, to: sink)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: entry)!, events: [.content("REAL CONTENT")])
+        mockProvider.scriptStream(for: scenario.profileID(for: sink)!, events: [.content("done")])
+        _ = try await execute(scenario, userInput: "q")
+
+        let ctx = try XCTUnwrap(mockProvider.workflowInvocations.first(where: { $0.context.nodeID == sink })?.context)
+        XCTAssertEqual(ctx.input, "REAL CONTENT",
+                       "a mid-graph Trigger is transparent; it used to emit \"\" and drop the branch's content")
     }
 
     /// A sub-workflow node with no task description must not block the run.
@@ -4359,6 +4491,13 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertFalse(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains(where: { $0.nodeID == consumer }),
                        "Dependents must skip rather than run on the failed node's empty output")
     }
+
+    // [WF-CC1] The sub-workflow half of this fix (`childOutcome == nil` at the point a cancelled
+    // child `executeWorkflow` stream finishes via plain `continuation.finish()`, split into
+    // `case nil where Task.isCancelled:` vs the pre-existing `case nil:`) has no dedicated
+    // regression test either, for the identical structural reason noted above this file's Group 29
+    // header comment and the consolidated note near `testCancel_DoesNotInvokeDownstreamNodes`: the
+    // resulting stream event cannot cross the cancelled-consumer boundary. Verified by code review.
 
     /// WF5 — an inner stream that reports an error and then finishes with no terminal event must
     /// FAIL the node, not report an empty success.
@@ -4506,6 +4645,97 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
                       "A tool that opted out of content sniffing must not be failed on its own output")
         XCTAssertTrue(WorkflowStreamCollector.nodeCompletedEvents(from: events).contains { $0.nodeID == next })
     }
+
+    // MARK: - WF-CC4: Action-node tool retry loop cancellation (2026-08-26)
+    //
+    // Before this fix, the loop had no `Task.isCancelled` check anywhere and swallowed a cancelled
+    // retry-delay sleep via `try?` — a Stop pressed mid-retry could let the tool run again for real.
+    // Regression coverage for the ordinary (non-cancelled) retry path is included too: before this
+    // fix touched the loop, `scriptThrowingTool` had never been exercised by a single test in this
+    // file, so the retry-then-fail flow itself had zero test coverage of any kind.
+
+    /// ⚠️ `nodeTimeoutEnabled: false` on the workflow profile is load-bearing, not incidental. With
+    /// ANY finite node timeout (including this test's own prior attempt at a very large one),
+    /// `runToolWithTimeout` always races `tool.run` against a `Task.sleep` sentinel — and once the
+    /// ambient Task is cancelled, that sentinel's `Task.sleep` throws `CancellationError` almost
+    /// instantly, regardless of how long the configured timeout was, which can win the race and
+    /// abort a retried attempt BEFORE it ever reaches the mocked tool. That masks this exact fix:
+    /// mutation-testing this test with the retry loop fully reverted to its pre-fix shape still
+    /// passed, because the timeout sentinel — not the loop's own retry/cancellation handling — was
+    /// what stopped the second invocation. Only with the node timeout genuinely OFF does
+    /// `runToolWithTimeout` take the direct `tool.run(args)` path with no race at all, making the
+    /// retry loop's OWN cancellation handling the only thing that can prevent a second invocation.
+    ///
+    /// A multi-second `retryDelay` gives the test a wide, deterministic window: after the tool's
+    /// first attempt fails and the loop decides to retry, it blocks on `Task.sleep`. Cancelling
+    /// during that sleep (not a coin-flip — the window is seconds, the cancel lands in microseconds)
+    /// must NOT let the tool run a second time.
+    func testActionNode_CancelDuringRetryDelay_DoesNotInvokeToolAgain() async throws {
+        let scenario = WorkflowTestScenario()
+        let action = scenario.addActionNode(name: "Flaky Call", toolName: "flaky_tool")
+        scenario.setNodeConfig(WorkflowNodeConfig(maxNodeRetries: 2, retryDelay: 5), for: action)
+
+        let workflowProfileID = UUID()
+        scenario.profileMap[workflowProfileID] = BackendProfileSnapshot(
+            id: workflowProfileID,
+            displayName: "Host Workflow",
+            details: .workflow(WorkflowConfig(agentProfileIDs: [], nodeTimeoutEnabled: false))
+        )
+
+        let reached = expectation(description: "tool invoked once")
+        reached.assertForOverFulfill = false
+        mockProvider.scriptThrowingToolWithBarrier(name: "flaky_tool", error: URLError(.networkConnectionLost)) { count in
+            if count == 1 { reached.fulfill() }
+        }
+
+        let stream = makeStream(scenario, workflowProfileID: workflowProfileID)
+        let task = Task { try await StreamCollector.collect(from: stream) }
+
+        await fulfillment(of: [reached], timeout: 10)
+        task.cancel()
+        _ = try? await task.value
+
+        // ⚠️ `task.value` only settles the STREAM-CONSUMING task, not the workflow's own inner Task
+        // (the one `executeWorkflow`'s `AsyncThrowingStream` closure creates internally) — cancelling
+        // the consumer merely REQUESTS the inner task's cancellation via `continuation.onTermination`,
+        // it does not wait for it. Asserting immediately after `task.value` races ahead of the inner
+        // task's own unwind and can read the count before a real regression's second/third invocation
+        // has happened yet — mirroring the same async-teardown caveat `testCancel_TearsDownTheInFlightNodeStream`
+        // above documents and polls around. Poll for a short bounded window so a real second
+        // invocation has time to land before the assertion below runs.
+        //
+        // ⚠️ 100×20ms (2000ms), matching `testCancel_TearsDownTheInFlightNodeStream` and
+        // `testCancel_DuringGate_GateWasActuallyRequested` above — this is a NEGATIVE assertion
+        // ("nothing else happened"), so a too-short window fails safe in the wrong direction: it
+        // cannot produce a spurious failure, only a spurious PASS that hides a real regression on a
+        // loaded machine. Give it the same margin those two established sibling tests give the
+        // identical outer-task-cancel-to-inner-task-settled race, not a smaller one with no stated reason.
+        var invocationCount = mockProvider.toolInvocationCount(for: "flaky_tool")
+        for _ in 0..<100 {
+            try await Task.sleep(for: .milliseconds(20))
+            invocationCount = mockProvider.toolInvocationCount(for: "flaky_tool")
+        }
+
+        XCTAssertEqual(invocationCount, 1,
+                       "a retry must never fire once Stop has been pressed, however the cancellation surfaced")
+    }
+
+    /// Regression guard: the ordinary, non-cancelled retry path must still retry up to the
+    /// configured cap and then fail — this loop's restructuring must not change that.
+    func testActionNode_RetriesTransientFailureUpToCapThenFails() async throws {
+        let scenario = WorkflowTestScenario()
+        let action = scenario.addActionNode(name: "Flaky Call", toolName: "flaky_tool")
+        scenario.setNodeConfig(WorkflowNodeConfig(maxNodeRetries: 2, retryDelay: 0), for: action)
+
+        mockProvider.scriptThrowingTool(name: "flaky_tool", error: URLError(.networkConnectionLost))
+
+        let events = try await execute(scenario)
+
+        XCTAssertEqual(mockProvider.toolInvocationCount(for: "flaky_tool"), 3,
+                       "maxNodeRetries: 2 means 3 total attempts (1 initial + 2 retries)")
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == action })
+    }
+
     // MARK: - Group 31: Router no-match behaviour + unattended arbitration (2026-08-16)
     //
     // The `always` catch-all idiom was hard-deleted for amplifying ambiguity arbitration (any
@@ -4675,6 +4905,64 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         config.llmPrompt = ""                    // <- the throw
         config.llmModelName = "never-loaded"     // non-empty so pre-flight passes
         return config
+    }
+
+    /// [WF-EX10] The classifier's 4000-char input budget must be LOUD when it bites: the routing
+    /// decision is made on the truncated text, and before this a Router downstream of a long
+    /// document took the wrong branch with a clean-looking trace. The warning is emitted at
+    /// classifier entry (before the config guards), so the hermetic throwing config observes it.
+    func testClassifierInputTruncation_IsSurfacedAsANodeWarning() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let config = makeThrowingClassifierConfig(rules: [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "NEVERMATCHES-A"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "NEVERMATCHES-B")
+        ])
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let arm = scenario.addBotNode(name: "Arm")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: arm, portLabel: "Urgent")
+
+        // 4500 chars, no rule match → the classifier is entered with an oversized input.
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!,
+                                  events: [.content(String(repeating: "x", count: 4500))])
+        mockProvider.scriptStream(for: scenario.profileID(for: arm)!, events: [.content("unused")])
+
+        let events = try await execute(scenario)
+
+        let truncationWarnings = events.compactMap { event -> UUID? in
+            if case .warning(let category, let message, _, let sourceNodeID) = event,
+               category == .contextPressure, message.contains("4,000") { return sourceNodeID }
+            return nil
+        }
+        XCTAssertEqual(truncationWarnings, [router],
+                       "an input past the classifier budget must surface a warning ON THE ROUTER's timeline — silently routing on a fraction of the text was the defect")
+    }
+
+    /// …and the warning must NOT cry wolf on inputs within the budget.
+    func testClassifierInputWithinBudget_EmitsNoTruncationWarning() async throws {
+        let scenario = WorkflowTestScenario()
+        let source = scenario.addBotNode(name: "Source")
+        let config = makeThrowingClassifierConfig(rules: [
+            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "NEVERMATCHES-A"),
+            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "NEVERMATCHES-B")
+        ])
+        let router = scenario.addConditionNode(name: "Router", config: config)
+        let arm = scenario.addBotNode(name: "Arm")
+        scenario.connect(from: source, to: router)
+        scenario.connect(from: router, to: arm, portLabel: "Urgent")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("short input")])
+        mockProvider.scriptStream(for: scenario.profileID(for: arm)!, events: [.content("unused")])
+
+        let events = try await execute(scenario)
+
+        let truncationWarnings = events.filter { event in
+            if case .warning(let category, let message, _, _) = event,
+               category == .contextPressure, message.contains("4,000") { return true }
+            return false
+        }
+        XCTAssertTrue(truncationWarnings.isEmpty, "no truncation happened — no warning")
     }
 
     /// A classifier failure must FAIL the node (default `.failNode`) with a reason that NAMES the

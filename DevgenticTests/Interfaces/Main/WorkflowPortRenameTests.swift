@@ -2,7 +2,7 @@
 //  WorkflowPortRenameTests.swift
 //  DevgenticTests
 //
-//  Regression cover for Workflow_Production_Readiness.md row WF10.
+//  Regression cover for Workflow_Production_Readiness.md rows WF10, WF-CS1, WF-CS2, WF-CS12.
 //
 //  Edges address their source port by LABEL. Renaming a Condition rule or a Gate option used to
 //  strand every edge wired to it: the run skipped the whole downstream branch, while the canvas
@@ -122,6 +122,463 @@ final class WorkflowPortRenameTests: XCTestCase {
         state.replaceNode(id: gate.id, with: renamed)
 
         XCTAssertEqual(state.edges.first?.sourcePortLabel, "Ship it")
+    }
+
+    // MARK: - WF-CS1 / WF-CS12: combined edits on a Router
+
+    /// [WF-CS1] A shift-rename permutation in ONE Save: Low→High while High→Critical. The old
+    /// filter dropped any entry whose OLD label survives on the new node, so only Low→High was
+    /// applied — High's edge silently started firing on the renamed Low rule, and Critical's port
+    /// lost its edge. The map is applied simultaneously, so both halves must track.
+    func testShiftRenamePermutationRepointsBothEdges() {
+        let ruleLow = ConditionRule(label: "Low", field: .upstreamOutput, op: .contains, value: "low")
+        let ruleHigh = ConditionRule(label: "High", field: .upstreamOutput, op: .contains, value: "high")
+        let condition = conditionNode(rules: [ruleLow, ruleHigh], fallback: "")
+        let nodeA = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "A")
+        let nodeB = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "B")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [condition, nodeA, nodeB],
+            edges: [WorkflowEdge(sourceNodeID: condition.id, targetNodeID: nodeA.id, sourcePortLabel: "Low"),
+                    WorkflowEdge(sourceNodeID: condition.id, targetNodeID: nodeB.id, sourcePortLabel: "High")],
+            annotations: []
+        ))
+
+        var renamedLow = ruleLow; renamedLow.label = "High"
+        var renamedHigh = ruleHigh; renamedHigh.label = "Critical"
+        state.replaceNode(id: condition.id, with: rename(condition, rules: [renamedLow, renamedHigh], fallback: ""))
+
+        let byTarget = Dictionary(uniqueKeysWithValues: state.edges.map { ($0.targetNodeID, $0.sourcePortLabel) })
+        XCTAssertEqual(byTarget[nodeA.id], "High",
+                       "the Low rule's edge must follow its rule to 'High'")
+        XCTAssertEqual(byTarget[nodeB.id], "Critical",
+                       "the High rule's edge must follow its rule to 'Critical' — leaving it on 'High' runs it on the WRONG rule")
+    }
+
+    /// [WF-CS1] The degenerate permutation: a straight swap A↔B. The old filter dropped BOTH
+    /// entries, leaving both edges silently on the wrong branches.
+    func testSwapRenameRepointsBothEdges() {
+        let ruleA = ConditionRule(label: "A", field: .upstreamOutput, op: .contains, value: "a")
+        let ruleB = ConditionRule(label: "B", field: .upstreamOutput, op: .contains, value: "b")
+        let condition = conditionNode(rules: [ruleA, ruleB], fallback: "")
+        let nodeA = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "A")
+        let nodeB = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "B")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [condition, nodeA, nodeB],
+            edges: [WorkflowEdge(sourceNodeID: condition.id, targetNodeID: nodeA.id, sourcePortLabel: "A"),
+                    WorkflowEdge(sourceNodeID: condition.id, targetNodeID: nodeB.id, sourcePortLabel: "B")],
+            annotations: []
+        ))
+
+        var swappedA = ruleA; swappedA.label = "B"
+        var swappedB = ruleB; swappedB.label = "A"
+        state.replaceNode(id: condition.id, with: rename(condition, rules: [swappedA, swappedB], fallback: ""))
+
+        let byTarget = Dictionary(uniqueKeysWithValues: state.edges.map { ($0.targetNodeID, $0.sourcePortLabel) })
+        XCTAssertEqual(byTarget[nodeA.id], "B")
+        XCTAssertEqual(byTarget[nodeB.id], "A")
+    }
+
+    /// [WF-CS12] The Router inspector clears a legacy catch-all on EVERY Save. When the user also
+    /// renames the rule the catch-all names — decode guarantees it names a real rule — the old
+    /// fallback arm ran after the rules loop and clobbered that rule's rename entry with
+    /// `map["B"] = ""`, re-pointing its edges to a nonexistent empty port.
+    func testClearingLegacyCatchAllDoesNotClobberARuleRename() {
+        let ruleA = ConditionRule(label: "A", field: .upstreamOutput, op: .contains, value: "a")
+        let ruleB = ConditionRule(label: "B", field: .upstreamOutput, op: .contains, value: "b")
+        let condition = conditionNode(rules: [ruleA, ruleB], fallback: "B")
+        let downstream = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Next")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [condition, downstream],
+            edges: [WorkflowEdge(sourceNodeID: condition.id, targetNodeID: downstream.id, sourcePortLabel: "B")],
+            annotations: []
+        ))
+
+        // One Save: rule B renamed to "C", catch-all cleared (what the inspector always does now).
+        var renamedB = ruleB; renamedB.label = "C"
+        state.replaceNode(id: condition.id, with: rename(condition, rules: [ruleA, renamedB], fallback: ""))
+
+        XCTAssertEqual(state.edges.first?.sourcePortLabel, "C",
+                       "the renamed rule's edge must follow the rename — '' points at no port and kills the branch")
+    }
+
+    /// [WF-CS12] The control: clearing the catch-all WITHOUT renaming anything must leave edges
+    /// alone — the port lives on under the rule's own label.
+    func testClearingLegacyCatchAllAloneLeavesEdgesUntouched() {
+        let ruleA = ConditionRule(label: "A", field: .upstreamOutput, op: .contains, value: "a")
+        let ruleB = ConditionRule(label: "B", field: .upstreamOutput, op: .contains, value: "b")
+        let condition = conditionNode(rules: [ruleA, ruleB], fallback: "B")
+        let downstream = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Next")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [condition, downstream],
+            edges: [WorkflowEdge(sourceNodeID: condition.id, targetNodeID: downstream.id, sourcePortLabel: "B")],
+            annotations: []
+        ))
+
+        state.replaceNode(id: condition.id, with: rename(condition, rules: [ruleA, ruleB], fallback: ""))
+
+        XCTAssertEqual(state.edges.first?.sourcePortLabel, "B")
+    }
+
+    /// A PHANTOM catch-all (names no rule — possible in memory pre-normalization) is its own port,
+    /// so renaming it is still a tracked rename. Pins the one legitimate case the old fallback arm
+    /// handled, so the CS12 fix cannot pass by simply never mapping the fallback.
+    func testPhantomCatchAllRenameStillRepoints() {
+        let ruleA = ConditionRule(label: "A", field: .upstreamOutput, op: .contains, value: "a")
+        let condition = conditionNode(rules: [ruleA], fallback: "Legacy")
+        let downstream = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Next")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [condition, downstream],
+            edges: [WorkflowEdge(sourceNodeID: condition.id, targetNodeID: downstream.id, sourcePortLabel: "Legacy")],
+            annotations: []
+        ))
+
+        state.replaceNode(id: condition.id, with: rename(condition, rules: [ruleA], fallback: "Default"))
+
+        XCTAssertEqual(state.edges.first?.sourcePortLabel, "Default")
+    }
+
+    // MARK: - WF-CS2: Gate renames combined with count changes
+
+    private func gateNode(options: [String]) -> WorkflowNode {
+        var config = GateNodeConfig()
+        config.options = options
+        return WorkflowNode(kind: .gate(config), position: .zero, displayName: "Sign-off")
+    }
+
+    private func regated(_ node: WorkflowNode, options: [String]) -> WorkflowNode {
+        var renamed = node
+        var config = GateNodeConfig()
+        config.options = options
+        renamed.kind = .gate(config)
+        return renamed
+    }
+
+    /// [WF-CS2] The canonical failure: rename "Approve"→"Ship it" AND click Add Option in one
+    /// Save. The old `guard count == count` abandoned the whole map, stranding the edge on
+    /// "Approve" — a port that no longer exists — while the canvas kept drawing it connected.
+    func testGateRenameWithAddOptionRepointsTheEdge() {
+        let gate = gateNode(options: ["Approve", "Reject"])
+        let deploy = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Deploy")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [gate, deploy],
+            edges: [WorkflowEdge(sourceNodeID: gate.id, targetNodeID: deploy.id, sourcePortLabel: "Approve")],
+            annotations: []
+        ))
+
+        state.replaceNode(id: gate.id, with: regated(gate, options: ["Ship it", "Reject", "Hold"]))
+
+        XCTAssertEqual(state.edges.first?.sourcePortLabel, "Ship it",
+                       "the rename must track through the Add Option — or the deploy branch silently never runs")
+    }
+
+    /// A pure delete must NOT invent a rename: the removed option's edge dangles for the
+    /// validator, and the survivors' edges stay put.
+    func testGateDeleteAloneLeavesEdgesAlone() {
+        let gate = gateNode(options: ["A", "B", "C"])
+        let nodeB = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "B")
+        let nodeC = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "C")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [gate, nodeB, nodeC],
+            edges: [WorkflowEdge(sourceNodeID: gate.id, targetNodeID: nodeB.id, sourcePortLabel: "B"),
+                    WorkflowEdge(sourceNodeID: gate.id, targetNodeID: nodeC.id, sourcePortLabel: "C")],
+            annotations: []
+        ))
+
+        state.replaceNode(id: gate.id, with: regated(gate, options: ["A", "C"]))
+
+        let byTarget = Dictionary(uniqueKeysWithValues: state.edges.map { ($0.targetNodeID, $0.sourcePortLabel) })
+        XCTAssertEqual(byTarget[nodeB.id], "B", "a deleted option's edge dangles — it must not be re-pointed anywhere")
+        XCTAssertEqual(byTarget[nodeC.id], "C", "a surviving option's edge must not move")
+    }
+
+    /// ⚠️ A Save whose count DECREASED is ambiguous by construction — deleting row B then renaming
+    /// row C is byte-identical to renaming row B then deleting row C — and guessing wrong would
+    /// re-point an edge onto a live WRONG branch. Conservative: no re-pointing, validator reports.
+    func testGateCountDecreaseWithRenameStaysConservative() {
+        let gate = gateNode(options: ["A", "B", "C"])
+        let downstream = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Next")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [gate, downstream],
+            edges: [WorkflowEdge(sourceNodeID: gate.id, targetNodeID: downstream.id, sourcePortLabel: "A")],
+            annotations: []
+        ))
+
+        // Could be: rename A→X + delete B, or delete A + rename B→X. No way to tell.
+        state.replaceNode(id: gate.id, with: regated(gate, options: ["X", "C"]))
+
+        XCTAssertEqual(state.edges.first?.sourcePortLabel, "A",
+                       "an ambiguous shrink must leave the edge dangling for the validator, never guess a live branch")
+    }
+
+    /// A rename candidate must be text that is genuinely NEW — a surviving option that merely
+    /// shifted into the vanished option's index must not capture its edge.
+    func testGateRenameDoesNotGrabAShiftedSurvivor() {
+        let gate = gateNode(options: ["A", "B", "C"])
+        let nodeB = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "B")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [gate, nodeB],
+            edges: [WorkflowEdge(sourceNodeID: gate.id, targetNodeID: nodeB.id, sourcePortLabel: "B")],
+            annotations: []
+        ))
+
+        // B deleted, C shifted into its index, two options added — count grew, but index 1 now
+        // holding "C" (a survivor) must not read as B→C.
+        state.replaceNode(id: gate.id, with: regated(gate, options: ["A", "C", "D", "E"]))
+
+        XCTAssertEqual(state.edges.first?.sourcePortLabel, "B",
+                       "'C' is a shifted survivor, not B's new name — re-pointing would fire B's branch on C's choice")
+    }
+
+    // MARK: - Adversarial-review hardening: masked deletes, collisions, the reserved label
+
+    /// ⚠️ [Found on adversarial review] "Count didn't shrink" is NOT "nothing was deleted": deleting
+    /// the LAST row and clicking Add Option grows the count while producing the byte-identical
+    /// shape of a rename. Guessing rename re-points the deleted option's edge onto a brand-new
+    /// option — silent wrong-branch routing where the old code left a validator-visible dangle.
+    func testGateSuffixDeleteWithAddsDoesNotInventARename() {
+        let gate = gateNode(options: ["A", "B", "C"])
+        let cleanup = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Cleanup")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [gate, cleanup],
+            edges: [WorkflowEdge(sourceNodeID: gate.id, targetNodeID: cleanup.id, sourcePortLabel: "C")],
+            annotations: []
+        ))
+
+        // Delete row C, Add Option twice: count 3 → 4, "Option 3" lands at C's old index.
+        state.replaceNode(id: gate.id, with: regated(gate, options: ["A", "B", "Option 3", "Option 4"]))
+
+        XCTAssertEqual(state.edges.first?.sourcePortLabel, "C",
+                       "a suffix delete masked by adds must dangle, not wire the deleted branch to a fresh option")
+    }
+
+    /// The compound form: delete an interior row AND rename the last row AND add, in one Save.
+    /// The displaced survivor proves the delete, which must refuse the WHOLE map.
+    func testGateCompoundDeleteRenameAddsRefusesTheWholeMap() {
+        let gate = gateNode(options: ["Approve", "Reject", "Escalate"])
+        let rollback = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Rollback")
+        let page = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Page")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [gate, rollback, page],
+            edges: [WorkflowEdge(sourceNodeID: gate.id, targetNodeID: rollback.id, sourcePortLabel: "Reject"),
+                    WorkflowEdge(sourceNodeID: gate.id, targetNodeID: page.id, sourcePortLabel: "Escalate")],
+            annotations: []
+        ))
+
+        // Delete "Reject", rename "Escalate"→"Defer", Add Option — nothing here is provable.
+        state.replaceNode(id: gate.id, with: regated(gate, options: ["Approve", "Defer", "Option 3", "Option 4"]))
+
+        let byTarget = Dictionary(uniqueKeysWithValues: state.edges.map { ($0.targetNodeID, $0.sourcePortLabel) })
+        XCTAssertEqual(byTarget[rollback.id], "Reject",
+                       "the deleted option's edge must not fire on the renamed row's choice")
+        XCTAssertEqual(byTarget[page.id], "Escalate",
+                       "the renamed row cannot be told apart from a delete here — dangle, don't guess")
+    }
+
+    /// A displaced survivor proves a delete even at EQUAL count (delete + rename + add): the
+    /// vanished first row here was DELETED, not renamed — its old neighbour's shift is the tell.
+    func testGateDisplacedSurvivorRefusesEvenAtEqualCount() {
+        let gate = gateNode(options: ["A", "B", "C"])
+        let nodeA = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "A")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [gate, nodeA],
+            edges: [WorkflowEdge(sourceNodeID: gate.id, targetNodeID: nodeA.id, sourcePortLabel: "A")],
+            annotations: []
+        ))
+
+        // Delete A, rename B→X, add Y: [A,B,C] → [X,C,Y]. Count is EQUAL, but survivor C moved
+        // 3rd → 2nd — positional identity is broken for the whole edit.
+        state.replaceNode(id: gate.id, with: regated(gate, options: ["X", "C", "Y"]))
+
+        XCTAssertEqual(state.edges.first?.sourcePortLabel, "A",
+                       "A was deleted — mapping it onto X (really B's rename) fires the deleted branch on B's choice")
+    }
+
+    /// The boundary being kept: at EQUAL count a suffix rename still tracks — that is the
+    /// long-shipped zip semantics, ambiguity and all. Only count GROWTH refuses the suffix.
+    func testGateLastRowRenameAtEqualCountStillTracks() {
+        let gate = gateNode(options: ["A", "B"])
+        let downstream = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Next")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [gate, downstream],
+            edges: [WorkflowEdge(sourceNodeID: gate.id, targetNodeID: downstream.id, sourcePortLabel: "B")],
+            annotations: []
+        ))
+
+        state.replaceNode(id: gate.id, with: regated(gate, options: ["A", "X"]))
+
+        XCTAssertEqual(state.edges.first?.sourcePortLabel, "X")
+    }
+
+    /// ⚠️ [Found on adversarial review] The destination filter had ZERO discriminating coverage —
+    /// deleting it left the whole suite green. This pins it: two rows renamed to the SAME text
+    /// (the gate inspector never dedups) collapse onto one port, and re-pointing either edge
+    /// would fire both branches on that single choice.
+    func testGateDestinationCollisionRefusesBothRenames() {
+        let gate = gateNode(options: ["A", "B"])
+        let downstream = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Next")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [gate, downstream],
+            edges: [WorkflowEdge(sourceNodeID: gate.id, targetNodeID: downstream.id, sourcePortLabel: "B")],
+            annotations: []
+        ))
+
+        state.replaceNode(id: gate.id, with: regated(gate, options: ["X", "X"]))
+
+        XCTAssertEqual(state.edges.first?.sourcePortLabel, "B",
+                       "a rename onto a duplicated destination must dangle, not pick one of the collapsed ports")
+    }
+
+    /// [Found on adversarial review] A label shared with a rule that KEEPS it: the divergent-rename
+    /// check can't see a keeper (it never enters the map), so the renamed twin used to steal the
+    /// keeper's edges off a still-live port — silently, since nothing dangles.
+    func testConditionSharedLabelKeeperRetainsItsEdge() {
+        let keeper = ConditionRule(label: "Escalation", field: .upstreamOutput, op: .contains, value: "a")
+        let renamed = ConditionRule(label: "Escalation", field: .upstreamOutput, op: .contains, value: "b")
+        let condition = conditionNode(rules: [keeper, renamed], fallback: "")
+        let downstream = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Next")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [condition, downstream],
+            edges: [WorkflowEdge(sourceNodeID: condition.id, targetNodeID: downstream.id, sourcePortLabel: "Escalation")],
+            annotations: []
+        ))
+
+        var urgent = renamed; urgent.label = "Urgent"
+        state.replaceNode(id: condition.id, with: rename(condition, rules: [keeper, urgent], fallback: ""))
+
+        XCTAssertEqual(state.edges.first?.sourcePortLabel, "Escalation",
+                       "the keeper still owns this label — the edge must stay on the live port, not follow the twin")
+    }
+
+    /// Duplicated old labels renamed to DIFFERENT things have no single owner — refuse, don't
+    /// let the last writer win. One test per arm, so neither ambiguity block can be refactored away.
+    func testConditionDivergentDuplicateRenamesAreRefused() {
+        let r1 = ConditionRule(label: "Pending", field: .upstreamOutput, op: .contains, value: "a")
+        let r2 = ConditionRule(label: "Pending", field: .upstreamOutput, op: .contains, value: "b")
+        let condition = conditionNode(rules: [r1, r2], fallback: "")
+        let downstream = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Next")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [condition, downstream],
+            edges: [WorkflowEdge(sourceNodeID: condition.id, targetNodeID: downstream.id, sourcePortLabel: "Pending")],
+            annotations: []
+        ))
+
+        var retry = r1; retry.label = "Retry"
+        var abort = r2; abort.label = "Abort"
+        state.replaceNode(id: condition.id, with: rename(condition, rules: [retry, abort], fallback: ""))
+
+        XCTAssertEqual(state.edges.first?.sourcePortLabel, "Pending")
+    }
+
+    func testGateDivergentDuplicateRenamesAreRefused() {
+        let gate = gateNode(options: ["Pending", "Pending"])
+        let downstream = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Next")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [gate, downstream],
+            edges: [WorkflowEdge(sourceNodeID: gate.id, targetNodeID: downstream.id, sourcePortLabel: "Pending")],
+            annotations: []
+        ))
+
+        state.replaceNode(id: gate.id, with: regated(gate, options: ["Retry", "Abort"]))
+
+        XCTAssertEqual(state.edges.first?.sourcePortLabel, "Pending")
+    }
+
+    /// [Found on adversarial review] The reserved failure label is invisible to destination
+    /// counting (`withErrorPort` dedups it). Renaming AWAY from a rule named "error" must not
+    /// move the edge — the port survives, and the engine activates it on every failure.
+    func testRuleNamedErrorKeepsFailureRoutingOnRename() {
+        let ok = ConditionRule(label: "ok", field: .upstreamOutput, op: .isNotEmpty, value: "")
+        let err = ConditionRule(label: "error", field: .upstreamOutput, op: .isEmpty, value: "")
+        let condition = conditionNode(rules: [ok, err], fallback: "")
+        let recovery = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Recovery")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [condition, recovery],
+            edges: [WorkflowEdge(sourceNodeID: condition.id, targetNodeID: recovery.id, sourcePortLabel: WorkflowEdge.errorPortLabel)],
+            annotations: []
+        ))
+
+        var bad = err; bad.label = "bad"
+        state.replaceNode(id: condition.id, with: rename(condition, rules: [ok, bad], fallback: ""))
+
+        XCTAssertEqual(state.edges.first?.sourcePortLabel, WorkflowEdge.errorPortLabel,
+                       "the failure port outlives the rule that shared its name — moving the edge unwires failure recovery")
+    }
+
+    /// …and renaming INTO "error" must refuse too: the destination would also fire on every
+    /// failure and cascade skip, which no rename asked for.
+    func testRenamingIntoTheReservedErrorLabelIsRefused() {
+        let gate = gateNode(options: ["Approve", "Hold"])
+        let deploy = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Deploy")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [gate, deploy],
+            edges: [WorkflowEdge(sourceNodeID: gate.id, targetNodeID: deploy.id, sourcePortLabel: "Hold")],
+            annotations: []
+        ))
+
+        state.replaceNode(id: gate.id, with: regated(gate, options: ["Approve", WorkflowEdge.errorPortLabel]))
+
+        XCTAssertEqual(state.edges.first?.sourcePortLabel, "Hold")
+    }
+
+    /// [Found on adversarial review] Pins the CS12 guard's rule-membership clause, which nothing
+    /// else discriminates: a programmatic edit that changes the fallback to some OTHER non-empty
+    /// value while renaming the rule the old fallback names must not clobber the rule's rename.
+    func testFallbackChangeToAnotherLabelNeverClobbersARuleRename() {
+        let ruleA = ConditionRule(label: "A", field: .upstreamOutput, op: .contains, value: "a")
+        let ruleB = ConditionRule(label: "B", field: .upstreamOutput, op: .contains, value: "b")
+        let condition = conditionNode(rules: [ruleA, ruleB], fallback: "B")
+        let downstream = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Next")
+
+        let state = WorkflowCanvasState(profileID: UUID())
+        state.load(from: WorkflowLayout(
+            nodes: [condition, downstream],
+            edges: [WorkflowEdge(sourceNodeID: condition.id, targetNodeID: downstream.id, sourcePortLabel: "B")],
+            annotations: []
+        ))
+
+        var renamedB = ruleB; renamedB.label = "C"
+        state.replaceNode(id: condition.id, with: rename(condition, rules: [ruleA, renamedB], fallback: "X"))
+
+        XCTAssertEqual(state.edges.first?.sourcePortLabel, "C",
+                       "the old fallback names rule B — B's edges follow B's rename, never the fallback's new value")
     }
 
     // MARK: - Workflow Settings removal

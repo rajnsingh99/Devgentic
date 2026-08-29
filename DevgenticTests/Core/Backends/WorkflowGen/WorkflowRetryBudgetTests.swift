@@ -43,6 +43,15 @@ final class WorkflowRetryBudgetTests: XCTestCase {
         return node
     }
 
+    private func subWorkflowNode(timeout: TimeInterval?, retries: Int, delay: TimeInterval = 0) -> WorkflowNode {
+        var node = WorkflowNode(
+            id: UUID(), kind: .profile(profileID: UUID(), profileType: .workflow),
+            position: .zero, displayName: "Nested"
+        )
+        node.nodeConfig = WorkflowNodeConfig(maxNodeRetries: retries, retryDelay: delay, hardTimeout: timeout)
+        return node
+    }
+
     private let config = WorkflowConfig(agentProfileIDs: [])
 
     // MARK: - The defect
@@ -109,5 +118,69 @@ final class WorkflowRetryBudgetTests: XCTestCase {
 
         XCTAssertEqual(WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: config), 20,
                        "2 attempts × the node's own 10s, not the workflow default")
+    }
+
+    // MARK: - WF-EX3: a sub-workflow node's child canvas already bounds itself
+    //
+    // ⚠️ A sub-workflow node's child canvas is a fully independent `WorkflowExecutor` run — every
+    // inner node on it is already bounded by ITS OWN `outerTimeoutBudget`, computed from the
+    // CHILD's own config, recursively. The flat parent-level 120s default was an EXTRA,
+    // uncoordinated ceiling on top of that already-correct inner bounding, sized from the parent
+    // node's own guess with zero awareness of how much legitimate work the child canvas actually
+    // contains — a totally healthy, individually-compliant child could still be killed mid-flight,
+    // discarding everything it produced. `hardTimeout` remains the explicit opt-in escape hatch.
+
+    /// ⚠️ THE FIX. No explicit `hardTimeout` ⇒ no outer ceiling at all for a sub-workflow node —
+    /// unlike every other structural kind, which still gets the workflow's 120s default.
+    func testSubWorkflowWithNoExplicitTimeout_IsUnbounded() {
+        let node = subWorkflowNode(timeout: nil, retries: 0)
+        XCTAssertNil(WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: config),
+                     "a sub-workflow node with no explicit hardTimeout must not inherit the workflow's 120s default")
+    }
+
+    /// The escape hatch keeps working exactly as before — an author who wants a ceiling on the
+    /// whole nested run still gets one by setting `hardTimeout` deliberately, multiplied across
+    /// attempts exactly like any other structural node.
+    func testSubWorkflowWithExplicitHardTimeout_IsStillBounded() {
+        let node = subWorkflowNode(timeout: 300, retries: 2)
+        XCTAssertEqual(WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: config), 900,
+                       "3 attempts × the node's own 300s hardTimeout")
+    }
+
+    /// The workflow-level default must not leak into a sub-workflow node's fallback even when one
+    /// is explicitly configured on the workflow — the exemption is unconditional, not "whichever
+    /// default happens to be smaller."
+    func testSubWorkflowIgnoresTheWorkflowDefault_EvenWhenOneIsSet() {
+        var wideConfig = WorkflowConfig(agentProfileIDs: [])
+        wideConfig.defaultNodeTimeout = 45
+        let node = subWorkflowNode(timeout: nil, retries: 0)
+        XCTAssertNil(WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: wideConfig),
+                     "the workflow-level default must never become a sub-workflow node's fallback")
+    }
+
+    /// ⚠️ Adversarial-review gap: every other "unbounded" test above uses `retries: 0`. The nil
+    /// fallback (`outerTimeoutBudget:2277-2278`) short-circuits BEFORE `plannedAttempts`/the
+    /// multiplication is ever evaluated, so `limit` is nil BY CONSTRUCTION regardless of
+    /// `maxNodeRetries` — this pins that a configured retry count can't accidentally resurrect a
+    /// finite budget out of a nil per-attempt value.
+    func testSubWorkflowWithNoExplicitTimeout_StaysUnboundedWithRetriesConfigured() {
+        let node = subWorkflowNode(timeout: nil, retries: 2)
+        XCTAssertNil(WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: config),
+                     "an unbounded sub-workflow node must stay unbounded regardless of how many retries are configured")
+    }
+
+    /// ⚠️ THE TEST THAT PINS THE TERNARY'S DISCRIMINATION. Only `profileType == .workflow` gets
+    /// the unbounded fallback — a `.bot`-typed profile node (which never actually reaches
+    /// `outerTimeoutBudget` in production, since bot/agent nodes dispatch through `executeNode`'s
+    /// own independent timeout instead — but exercises the ternary directly here, in isolation)
+    /// must not be silently widened too by a careless generalization of the exemption.
+    func testNonWorkflowProfileTypeStillGetsTheWorkflowDefault() {
+        var node = WorkflowNode(
+            id: UUID(), kind: .profile(profileID: UUID(), profileType: .bot),
+            position: .zero, displayName: "Bot"
+        )
+        node.nodeConfig = WorkflowNodeConfig(maxNodeRetries: 0, hardTimeout: nil)
+        XCTAssertEqual(WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: config), 120,
+                       "only .workflow-typed profile nodes get the unbounded fallback")
     }
 }

@@ -623,18 +623,31 @@ private struct PermissionInteractionBanner: View {
         }
     }
 
+    /// [WF-SE3] The ONE string both the visible pill and VoiceOver read from — found on
+    /// adversarial audit that the accessibilityLabel below was hardcoded to `confirmation.risk.
+    /// label` alone, silently dropping the "(server-declared)" qualifier a sighted user sees. That
+    /// qualifier is not decorative: `ToolRiskResolver`'s own header says it must be "rendered
+    /// correctly on EVERY confirmation surface forever" because a `.destructive` server-declared
+    /// tier rests on an MCP server's UNVERIFIED self-report, not a native guarantee — a VoiceOver
+    /// user approving by ear deserves the same warning a sighted user sees.
+    private var riskLabelText: String {
+        confirmation.riskIsServerDeclared == true
+            ? "\(confirmation.risk.label) (server-declared)"
+            : confirmation.risk.label
+    }
+
     private var riskPill: some View {
         HStack(spacing: 3) {
             Image(systemName: confirmation.risk.icon)
                 .font(.system(size: 9, weight: .bold))
-            Text(confirmation.risk.label)
+            Text(riskLabelText)
                 .font(.system(size: 9, weight: .semibold))
         }
         .foregroundColor(riskColor)
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
         .background(Capsule().fill(riskColor.opacity(0.12)))
-        .accessibilityLabel("Risk: \(confirmation.risk.label)")
+        .accessibilityLabel("Risk: \(riskLabelText)")
     }
 
     private func decide(approved: Bool) {

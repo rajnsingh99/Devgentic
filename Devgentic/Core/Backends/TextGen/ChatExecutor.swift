@@ -446,7 +446,6 @@ actor ChatExecutor: Executor {
 
         let context = buildSemanticContext(
             from: input,
-            taskDescription: workflowContext.taskDescription,
             workflowContext: workflowContext
         )
 
@@ -464,7 +463,6 @@ actor ChatExecutor: Executor {
     /// per-node user-message prefix from it — no per-call-site duplication.
     nonisolated private func buildSemanticContext(
         from input: AgentInput,
-        taskDescription: String? = nil,
         workflowContext: WorkflowExecutionContext? = nil
     ) -> SemanticContext {
         let envFacts = EnvironmentFacts(
@@ -490,7 +488,6 @@ actor ChatExecutor: Executor {
             availableTools: [],
             userProfile: nil,
             skillManifests: nil,
-            taskDescription: taskDescription,
             promptLayerConfig: workflowContext != nil ? .workflow : .bot,
             workflowContext: workflowContext,
             attachmentContext: input.attachmentContext,

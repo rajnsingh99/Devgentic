@@ -122,14 +122,52 @@ struct WorkflowNodeStats: Sendable, Identifiable {
     let totalRuns: Int
     let completedCount: Int
     let failedCount: Int
+    /// Runs the user stopped mid-flight — not a verdict on the node, so excluded from the
+    /// success-rate denominator (WF-OB6). Before 2026-08-27 a cancelled span was persisted as
+    /// `.error`, so every Stop was counted as a node FAILURE: a user who stopped a 6-node
+    /// workflow three times while iterating on a prompt saw those nodes sitting at ~50% in the
+    /// Workflow Activity panel, which is precisely the signal that panel exists to surface.
+    let cancelledCount: Int
+    /// Runs skipped by routing or by the user — the node never ran, so it can be neither a
+    /// success nor a failure. Excluded from the denominator for the same reason as cancels.
+    let skippedCount: Int
+    /// Spans still open when the panel was queried — i.e. the node is executing RIGHT NOW.
+    /// Reachable simply by opening Workflow Activity during a run. Excluded from the denominator
+    /// because an unfinished run has not reached a verdict; counted in `totalRuns` because it is
+    /// genuinely a run in flight.
+    let runningCount: Int
     let avgDurationMs: Int?
     let p50DurationMs: Int?
     let p95DurationMs: Int?
 
     var id: String { nodeName }
-    var successRate: Double {
-        guard totalRuns > 0 else { return 0 }
-        return Double(completedCount) / Double(totalRuns)
+
+    /// Runs that actually reached a verdict: `completedCount + failedCount`. Everything else —
+    /// stopped, skipped, still running — is deliberately not a judgement on the node.
+    var attributableRuns: Int { totalRuns - cancelledCount - skippedCount - runningCount }
+
+    /// Successes over attributable runs, or `nil` when the node has no verdict to report yet.
+    ///
+    /// ⚠️ NIL, NOT ZERO, and that distinction is the whole point: a node the user has only ever
+    /// stopped has NO success rate, and returning `0` would render as a red "0%" — reproducing
+    /// this row's own defect (a Stop reading as brokenness) at a different number. Callers show
+    /// "—", exactly as they already do for an absent p50/p95.
+    ///
+    /// ⚠️ Re-tagging cancelled spans is NOT sufficient on its own: this denominator is what
+    /// actually decides whether a Stop dents the rate. Removing cancels from `failedCount` while
+    /// leaving them in the denominator would still push the rate down — the fix only works as a
+    /// pair, which is why the counts above exist rather than the SQL simply filtering them out.
+    ///
+    /// ⚠️ This DIVERGES from `ModelReliabilityStats.successRate` above, which subtracts only
+    /// `interruptedCount` and deliberately keeps cancels in its denominator (it is pinned to stay
+    /// "numerically identical" to pre-2026-07-19 dashboards). The divergence is intentional here
+    /// and NOT retrofitted there: changing that one is a behaviour change to a separate metric
+    /// with its own history. Consequence to know: in the same Trends view, a user who pressed Stop
+    /// three times now sees the workflow-node row corrected while the model row is still dented.
+    var successRate: Double? {
+        let attributable = attributableRuns
+        guard attributable > 0 else { return nil }
+        return Double(completedCount) / Double(attributable)
     }
 }
 

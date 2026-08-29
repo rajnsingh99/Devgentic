@@ -3,6 +3,8 @@
 //  DevgenticTests
 //
 //  Register WF-UI5 (and the WF-UI1/WF-UI3 fixes) — the run-level verdict the user actually READS.
+//  Also WF-RU3 — the same verdict the user actually HEARS, which used to be a second, divergent
+//  computation.
 //
 //  ⚠️ These were private computed properties on `WorkflowExecutionTimelineView`: a second,
 //  independent implementation of "what happened to this run" with a five-comment regression
@@ -111,6 +113,17 @@ final class WorkflowRunRollupTests: XCTestCase {
         XCTAssertEqual(d.pillVerdict, .failed)
     }
 
+    // MARK: - WF-RU4: a genuine node failure the engine still routed to a successful terminal
+
+    /// The persisted `.completedWithWarnings` status is trusted directly — `freeze()` already did
+    /// the work of confirming a genuine failure was present AND the engine still reached a
+    /// successful terminal, so the display layer does not re-derive it.
+    func testCompletedWithWarningsRecordShowsCompletedWithWarningsPill() {
+        let d = record(.completedWithWarnings, nodes: [node(.completed), node(.failed, detail: "boom")])
+        XCTAssertEqual(d.pillVerdict, .completedWithWarnings)
+        XCTAssertEqual(d.pillLabel, "Completed with warnings")
+    }
+
     // MARK: - Genuine failure vs routing
 
     /// A skipped node is ROUTING. Counting it as failure turned the pill red on every healthy
@@ -160,6 +173,19 @@ final class WorkflowRunRollupTests: XCTestCase {
         XCTAssertTrue(d.stepCounterDescription.hasPrefix("stopped"), "got: \(d.stepCounterDescription)")
     }
 
+    /// [WF-RU4] The wording is deliberately NOT "failed at step X of N" — that phrasing would
+    /// frame a survived failure as where the run stopped, one line under a pill that just said
+    /// "Completed with warnings". Just the count.
+    func testStepCounterOnCompletedWithWarningsRunNamesFailedCountNotStep() {
+        let d = record(.completedWithWarnings, nodes: [
+            node(.completed), node(.failed, detail: "boom"), node(.completed)
+        ])
+        XCTAssertFalse(d.stepCounterDescription.contains("failed at step"),
+                       "must not read like a hard failure — got: \(d.stepCounterDescription)")
+        XCTAssertTrue(d.stepCounterDescription.hasPrefix("3 steps · 1 failed"),
+                      "got: \(d.stepCounterDescription)")
+    }
+
     // MARK: - Unknown NODE status (WF-UI3)
 
     /// A node stamped by a newer build is a FINISHED node: it must land in the display vocabulary
@@ -204,5 +230,86 @@ final class WorkflowRunRollupTests: XCTestCase {
         XCTAssertNotNil(orphan, "the executing orphan must stay visible — evidence is never hidden")
         XCTAssertEqual(orphan?.status, .running)
         XCTAssertEqual(orphan?.profileName, "Deleted Mid-Run")
+    }
+
+    // MARK: - Final Outcome row: what it TAGS must be what it SPEAKS (WF-RU3)
+
+    /// ⚠️ Before this fix, `.accessibilityLabel` read the raw `status.label` while the visible tag
+    /// read this same override chain — VoiceOver announced "Failed" on a run the screen correctly
+    /// tagged "Cancelled". `finalOutcomeTagLabel` is now the ONE computation both consumers call,
+    /// so this suite doubles as the accessibility pin `ChatAccessibilitySemanticsTests`'s header
+    /// note says is the only reachable way to test a `.accessibilityLabel` value.
+    func testCancelledRunTagsAndSpeaksCancelledNotFailed() {
+        let label = WorkflowExecutionTimelineView.finalOutcomeTagLabel(
+            status: .failed, isCancelled: true, isUnknown: false,
+            isRunning: false, settledCount: 2, totalNodeCount: 3)
+        XCTAssertEqual(label, "Cancelled",
+                       "a cancelled run's raw rollup status is .failed — the row must not say so")
+    }
+
+    /// The UNKNOWN twin of the same bug (WF-UI1's override): a record from a newer build must not
+    /// assert "Completed" when the header pill honestly says "Unknown".
+    func testUnknownPersistedStatusTagsAndSpeaksUnknownNotCompleted() {
+        let label = WorkflowExecutionTimelineView.finalOutcomeTagLabel(
+            status: .completed, isCancelled: false, isUnknown: true,
+            isRunning: false, settledCount: 3, totalNodeCount: 3)
+        XCTAssertEqual(label, "Unknown")
+    }
+
+    /// ⚠️ The THIRD divergence the 2026-08-23 revalidation found and the original filing missed:
+    /// a still-running, still-pending run must announce its live progress, not a bare "Waiting"
+    /// that drops the step count the visible tag has always shown.
+    func testPendingAndRunningTagsAndSpeaksLiveProgressNotBareWaiting() {
+        let label = WorkflowExecutionTimelineView.finalOutcomeTagLabel(
+            status: .pending, isCancelled: false, isUnknown: false,
+            isRunning: true, settledCount: 2, totalNodeCount: 5)
+        XCTAssertEqual(label, "Awaiting inputs · 2/5")
+    }
+
+    /// Pending but NOT running (a persisted record that never got past its first node) must fall
+    /// through to the plain status label — "Waiting" is honest once the run isn't live.
+    func testPendingButNotRunningFallsBackToPlainStatusLabel() {
+        let label = WorkflowExecutionTimelineView.finalOutcomeTagLabel(
+            status: .pending, isCancelled: false, isUnknown: false,
+            isRunning: false, settledCount: 0, totalNodeCount: 3)
+        XCTAssertEqual(label, "Waiting")
+    }
+
+    /// The control: an ordinary completed run with none of the three overrides in play must
+    /// still read its plain status — the overrides must not swallow the normal case.
+    func testOrdinaryCompletedRunTagsAndSpeaksCompleted() {
+        let label = WorkflowExecutionTimelineView.finalOutcomeTagLabel(
+            status: .completed, isCancelled: false, isUnknown: false,
+            isRunning: false, settledCount: 3, totalNodeCount: 3)
+        XCTAssertEqual(label, "Completed")
+    }
+
+    /// [WF-RU4] The fourth override: `status` (a node-shaped vocabulary reused for this row) has
+    /// no value of its own for "a node failed but the run still reached a successful terminal" —
+    /// same shape as the cancelled/unknown overrides above.
+    func testCompletedWithWarningsTagsAndSpeaksCompletedWithWarnings() {
+        let label = WorkflowExecutionTimelineView.finalOutcomeTagLabel(
+            status: .completed, isCancelled: false, isUnknown: false,
+            isCompletedWithWarnings: true,
+            isRunning: false, settledCount: 3, totalNodeCount: 3)
+        XCTAssertEqual(label, "Completed with warnings")
+    }
+
+    /// Cancelled still outranks the new override — the precedence chain must not have shuffled.
+    func testCancelledOutranksCompletedWithWarnings() {
+        let label = WorkflowExecutionTimelineView.finalOutcomeTagLabel(
+            status: .failed, isCancelled: true, isUnknown: false,
+            isCompletedWithWarnings: true,
+            isRunning: false, settledCount: 2, totalNodeCount: 3)
+        XCTAssertEqual(label, "Cancelled")
+    }
+
+    /// The zero-node edge case the `max(totalNodeCount, 1)` guard exists for — must not divide
+    /// by, or announce, a "/0" denominator.
+    func testAwaitingProgressGuardsAgainstZeroTotalNodes() {
+        let label = WorkflowExecutionTimelineView.finalOutcomeTagLabel(
+            status: .pending, isCancelled: false, isUnknown: false,
+            isRunning: true, settledCount: 0, totalNodeCount: 0)
+        XCTAssertEqual(label, "Awaiting inputs · 0/1")
     }
 }

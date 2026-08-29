@@ -45,6 +45,37 @@ struct WorkflowExecutionTimelineView: View {
     /// Anchor id for the Final Outcome row inside the ScrollViewReader.
     private static let finalOutcomeAnchor = "timeline-final-outcome"
 
+    /// [WF-RU3] The Final Outcome row's ONE source for what it tags and what it speaks.
+    ///
+    /// `nonisolated static` and pure (no theme/view state) so it is testable directly — a SwiftUI
+    /// `.accessibilityLabel` cannot be read back from a hosted view (see
+    /// `ChatAccessibilitySemanticsTests`'s header note), so pulling the logic out from under the
+    /// view is the only way to pin it. Before this, the visible tag read this same override chain
+    /// while `.accessibilityLabel` read the raw, un-overridden `status.label` three lines below —
+    /// VoiceOver announced "Failed" on a run the screen correctly tagged "Cancelled", "Completed"
+    /// on one tagged "Unknown", and "Waiting" with no progress on a run counting down live inputs.
+    nonisolated static func finalOutcomeTagLabel(
+        status: WorkflowRunDisplayData.NodeDisplayData.NodeStatus,
+        isCancelled: Bool,
+        isUnknown: Bool,
+        isCompletedWithWarnings: Bool = false,
+        isRunning: Bool,
+        settledCount: Int,
+        totalNodeCount: Int
+    ) -> String {
+        if status == .pending, isRunning {
+            return "Awaiting inputs · \(settledCount)/\(max(totalNodeCount, 1))"
+        }
+        if isCancelled { return String(localized: "Cancelled") }
+        if isUnknown { return String(localized: "Unknown") }
+        // [WF-RU4] Same override shape as `isCancelled`/`isUnknown` above: `status`
+        // (`finalOutcomeStatus`/`rollupOutcome`) has no third value of its own — it is a NODE-level
+        // vocabulary reused for this row — so the run-level nuance is applied here, at the label,
+        // exactly like the other two run-level exceptions to a node-shaped status.
+        if isCompletedWithWarnings { return String(localized: "Completed with warnings") }
+        return status.label
+    }
+
     /// Readable measure for prose inside expanded panels — full-width error/output
     /// paragraphs at ~1000pt are hard to scan.
     private static let proseMaxWidth: CGFloat = 760
@@ -105,11 +136,12 @@ struct WorkflowExecutionTimelineView: View {
 
     private var runPillColor: Color {
         switch displayData.pillVerdict {
-        case .running:   return theme.accentColor
-        case .cancelled: return theme.warningColor
-        case .failed:    return theme.errorColor
-        case .unknown:   return theme.secondaryText
-        case .completed: return theme.successColor
+        case .running:               return theme.accentColor
+        case .cancelled:             return theme.warningColor
+        case .failed:                return theme.errorColor
+        case .unknown:               return theme.secondaryText
+        case .completed:             return theme.successColor
+        case .completedWithWarnings: return theme.warningColor
         }
     }
 
@@ -120,6 +152,7 @@ struct WorkflowExecutionTimelineView: View {
     var body: some View {
         VStack(spacing: 0) {
             runHeader
+            unsavedEditsDisclosure
             Divider().opacity(0.4)
 
             ScrollViewReader { proxy in
@@ -218,6 +251,37 @@ struct WorkflowExecutionTimelineView: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
+    }
+
+    /// [WF-CS4] The run executed the last-SAVED graph while the canvas held unsaved edits.
+    ///
+    /// ⚠️ INFORMATIONAL, not an error: amber, no icon-as-alarm, and it never suppresses or recolours
+    /// the status pill above it — the run itself may have succeeded perfectly, it simply ran a
+    /// different graph than the one on screen.
+    ///
+    /// ⚠️ LIVE RUNS ONLY (owner decision, 2026-08-24) — `WorkflowRunDisplayData.from(record:)` leaves
+    /// the flag false because the persisted record has no column for it. The wording below is
+    /// therefore safe to phrase as a present-tense instruction ("save the canvas and run again"),
+    /// which would read wrong on a run that finished days ago. If this is ever persisted, that copy
+    /// must be split live/historical in the SAME change.
+    @ViewBuilder
+    private var unsavedEditsDisclosure: some View {
+        if displayData.ranWithUnsavedCanvasEdits {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(theme.warningColor)
+                Text(WorkflowRunEditDisclosure.userFacingReason)
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 10)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(Text(WorkflowRunEditDisclosure.userFacingReason))
+        }
     }
 
     /// Mid-flight: "step X of N · time". Terminal runs phrase the outcome instead — a completed
@@ -404,12 +468,21 @@ struct WorkflowExecutionTimelineView: View {
         // `.completed` from its settled nodes, so the row asserted a green "Completed" one line
         // under a pill honestly saying "Unknown". The spine/awaiting logic still read `status`.
         let isUnknown = displayData.hasUnknownPersistedStatus
+        // [WF-RU4] Same override pattern again: `status` (`finalOutcomeStatus`) still reads
+        // `.failed` for this run underneath (unchanged — the node evidence is real), so the run's
+        // own softened verdict is layered on here rather than in `finalOutcomeStatus` itself.
+        let isCompletedWithWarnings = displayData.pillVerdict == .completedWithWarnings
         let statusColor = isCancelled ? theme.warningColor
             : isUnknown ? theme.secondaryText
+            : isCompletedWithWarnings ? theme.warningColor
             : status.color(theme)
-        let statusLabel = isCancelled ? String(localized: "Cancelled")
-            : isUnknown ? String(localized: "Unknown")
-            : status.label
+        // ⚠️ [WF-RU3] One shared computation drives both the visible tag and what VoiceOver
+        // speaks — see `finalOutcomeTagLabel`'s doc for what used to diverge.
+        let visibleTagLabel = Self.finalOutcomeTagLabel(
+            status: status, isCancelled: isCancelled, isUnknown: isUnknown,
+            isCompletedWithWarnings: isCompletedWithWarnings,
+            isRunning: displayData.isRunning, settledCount: settledCount,
+            totalNodeCount: displayData.nodeResults.count)
         let isHovered = hoveredRowKey == AnyHashable(Self.finalOutcomeAnchor)
 
         HStack(alignment: .top, spacing: 14) {
@@ -422,9 +495,7 @@ struct WorkflowExecutionTimelineView: View {
                 stepHeaderRow(
                     name: "Final Outcome",
                     nameColor: status == .pending ? theme.secondaryText : theme.primaryText,
-                    tagLabel: status == .pending && displayData.isRunning
-                        ? "Awaiting inputs · \(settledCount)/\(max(displayData.nodeResults.count, 1))"
-                        : statusLabel,
+                    tagLabel: visibleTagLabel,
                     tagColor: status == .pending ? theme.secondaryText : statusColor,
                     tagIcon: nil,
                     tagAction: nil,
@@ -454,7 +525,7 @@ struct WorkflowExecutionTimelineView: View {
         }
         .onTapGesture { selectedNodeID = nil }
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel("Final Outcome, \(status.label)")
+        .accessibilityLabel("Final Outcome, \(visibleTagLabel)")
         .accessibilityHint(isSelected ? "Selected" : "Show final output")
         .accessibilityAction { selectedNodeID = nil }
     }

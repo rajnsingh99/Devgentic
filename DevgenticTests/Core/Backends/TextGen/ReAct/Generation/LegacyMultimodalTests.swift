@@ -39,7 +39,6 @@ final class LegacyMultimodalTests: XCTestCase {
             availableTools: [],
             userProfile: nil,
             skillManifests: nil,
-            taskDescription: nil,
             promptLayerConfig: .agent,
             workflowContext: nil,
             attachmentContext: nil,

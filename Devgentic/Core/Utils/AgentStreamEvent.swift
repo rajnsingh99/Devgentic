@@ -152,6 +152,19 @@ enum AgentStreamEvent: Sendable {
     /// Overall workflow progress update.
     case workflowProgress(completed: Int, total: Int)
 
+    /// [WF-RU4] The RUN-LEVEL verdict on whether any node genuinely failed — distinct from
+    /// `.executionFinished`'s `outcome`, which drives the CHAT BUBBLE's chip and must NOT change
+    /// for this case. An error-handled run (or one where an unrelated parallel branch delivered
+    /// the answer) legitimately shows a plain green completed chip in chat: the DELIVERED answer
+    /// is exactly as complete as a clean run's. This tells the WORKFLOW-SPECIFIC surfaces (the
+    /// persisted run record, the Execution view's pill/step-counter) that a node failed anyway,
+    /// so THEY can say so honestly without touching what the chat bubble shows. Yielded once,
+    /// alongside `.executionFinished(outcome: .completed)`, at the exact point the engine already
+    /// computes `successfulTerminals`/`failedNodes` — `freeze()` has no live graph topology of its
+    /// own to determine "is there an answering terminal", so it cannot derive this independently
+    /// without duplicating the engine's own edge-liveness logic.
+    case workflowRunFinished(hadGenuineFailure: Bool)
+
     // MARK: - Capability Events (Planning, Self-Reflection, Delegation)
 
     /// Planning capability: a plan has been generated. Carries the full structured plan
@@ -581,9 +594,10 @@ enum HITLRiskTier: String, Sendable, Codable, Equatable, CaseIterable {
         }
     }
 
-    /// Best-effort classification by tool name. Native tools are mapped explicitly; unknown / MCP
-    /// tools default to `.moderate`. (MCP annotation-driven refinement — `readOnlyHint` /
-    /// `destructiveHint` from `ToolAnnotations` — is a follow-on.)
+    /// The NATIVE tool name map. [WF-SE3] Callers must not feed it non-native names — the HITL
+    /// enqueue path goes through `ToolRiskResolver.resolve`, which consults `NativeToolCatalog`
+    /// membership first and MCP `ToolAnnotations` for server tools; this map used alone gave a
+    /// third-party tool named `read_file` the native green badge.
     ///
     /// The arbitrary-code tools are asked, not listed. This case used to name `execute_shell`
     /// and `run_applescript` but not `batch_command` — the same `/bin/zsh -c` under another
@@ -620,19 +634,26 @@ struct PendingToolConfirmation: Sendable, Identifiable, Codable, Equatable {
     let risk: HITLRiskTier
     /// A1: structured arguments for an expandable, pretty-printed view (nil if `params` wasn't JSON).
     let arguments: JSONValue?
+    /// [WF-SE3] True when `risk` rests on the MCP server's own `ToolAnnotations` claims — the
+    /// banner appends "(server-declared)" so a third-party assertion never renders
+    /// indistinguishably from a native guarantee. Optional so pre-SE3 persisted confirmations
+    /// (G1 park/resume) decode as nil.
+    var riskIsServerDeclared: Bool?
 
     init(
         id: UUID = UUID(),
         toolName: String,
         params: String,
         risk: HITLRiskTier = .moderate,
-        arguments: JSONValue? = nil
+        arguments: JSONValue? = nil,
+        riskIsServerDeclared: Bool? = nil
     ) {
         self.id = id
         self.toolName = toolName
         self.params = params
         self.risk = risk
         self.arguments = arguments
+        self.riskIsServerDeclared = riskIsServerDeclared
     }
 }
 

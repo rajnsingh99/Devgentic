@@ -90,10 +90,66 @@ struct WorkflowCanvasView: View {
 
     /// Set when a save is refused because the stored layout was written by a NEWER build (WF-PE2).
     /// A notice, not the corruption overlay: the graph is intact and runnable, just read-only here.
-    @State private var newerVersionNotice: String?
+    ///
+    /// ⚠️ [WF-CU4] SCOPED TO THE PROFILE THAT PRODUCED IT, and rendered only while that profile is
+    /// the one on screen. It was a bare `String?` with exactly one writer and no path back to nil,
+    /// so after a refused save the "read-only — update Devgentic" banner followed the user onto
+    /// every workflow they opened next, for the rest of the session — telling them a perfectly
+    /// writable workflow could not be edited. This host re-renders IN PLACE on a profile switch, so
+    /// nothing rebuilt the view to clear it.
+    ///
+    /// Carrying the id rather than clearing on a transition is deliberate: a clear-on-switch can be
+    /// missed by any future path that changes the displayed profile without going through the one
+    /// hook that does the clearing, and the failure is silent and long-lived. Pairing the id with
+    /// the text makes a stale banner unrenderable by construction. Compare `lastEdgeRefusal`, which
+    /// self-clears via `.task(id:)`.
+    ///
+    /// ⚠️ `unreadableLayout` is now scoped the SAME way, and this comment used to say it was safe
+    /// because it "is manually recomputed in `loadLayout()`". That was untrue on the
+    /// `acceptsDiskReload` early-return path, where the recompute was skipped entirely — and unlike
+    /// this banner, that one carries a button that destroys the displayed workflow's graph. Both
+    /// notices now carry their profile id; neither can be rendered against a workflow it does not
+    /// describe.
+    @State private var newerVersionNotice: ProfileScopedNotice?
+
+    struct ProfileScopedNotice: Equatable {
+        let profileID: UUID
+        let message: String
+
+        /// The notice to render for `displayedProfileID`, or nil when the stored notice belongs to
+        /// a different workflow.
+        ///
+        /// `nonisolated static` and pure so the scoping rule is testable directly — a SwiftUI
+        /// view's private computed property is not reachable from a test (the same reason
+        /// `WorkflowExecutionTimelineView.finalOutcomeTagLabel` and
+        /// `WorkflowExecutor.classifierUserPrompt` were extracted), and this rule IS the fix.
+        nonisolated static func message(
+            for stored: ProfileScopedNotice?,
+            displayedProfileID: UUID
+        ) -> String? {
+            guard let stored, stored.profileID == displayedProfileID else { return nil }
+            return stored.message
+        }
+    }
+
+    /// The notice to render, or nil when the stored one belongs to a different workflow.
+    private var activeNewerVersionNotice: String? {
+        ProfileScopedNotice.message(for: newerVersionNotice, displayedProfileID: profile.id)
+    }
     @State private var showingDiscardUnreadableAlert = false
 
     struct UnreadableLayoutInfo: Equatable {
+        /// ⚠️ SCOPED TO THE PROFILE IT DESCRIBES, for the reason `ProfileScopedNotice` above is:
+        /// this host re-renders IN PLACE on a profile switch, so nothing rebuilds the view to clear
+        /// a `@State` notice. It used to be unscoped on the argument that `loadLayout()` recomputes
+        /// it — which is false on the `acceptsDiskReload` early-return path, so switching onto a
+        /// workflow holding unsaved edits kept the PREVIOUS workflow's overlay on screen. That
+        /// overlay's Discard button targets the DISPLAYED profile, so the one control in the app
+        /// that deliberately destroys data was aimed at a perfectly readable graph.
+        ///
+        /// Pairing the id with the counts makes a stale overlay unrenderable by construction rather
+        /// than relying on every future path that changes the displayed profile to clear it.
+        let profileID: UUID
         let nodeCount: Int
         let edgeCount: Int
         let annotationCount: Int
@@ -109,6 +165,27 @@ struct WorkflowCanvasView: View {
             if annotationCount > 0 { parts.append("\(annotationCount) note\(annotationCount == 1 ? "" : "s")") }
             return parts.joined(separator: ", ")
         }
+
+        /// The info to render for `displayedProfileID`, or nil when the stored one belongs to a
+        /// different workflow.
+        ///
+        /// `nonisolated static` and pure for the same reason `ProfileScopedNotice.message` is: a
+        /// SwiftUI view's private computed property is unreachable from a test, and this rule IS
+        /// the fix.
+        nonisolated static func active(
+            _ stored: UnreadableLayoutInfo?,
+            displayedProfileID: UUID
+        ) -> UnreadableLayoutInfo? {
+            guard let stored, stored.profileID == displayedProfileID else { return nil }
+            return stored
+        }
+    }
+
+    /// The unreadable-canvas overlay to render, or nil when the stored one belongs to another
+    /// workflow. ⚠️ Read through this, NEVER `unreadableLayout` directly — the raw value can
+    /// describe a workflow that is not on screen.
+    private var activeUnreadableLayout: UnreadableLayoutInfo? {
+        UnreadableLayoutInfo.active(unreadableLayout, displayedProfileID: profile.id)
     }
 
     #if canImport(AppKit) && !targetEnvironment(macCatalyst)
@@ -190,8 +267,8 @@ struct WorkflowCanvasView: View {
             // without this branch it got the identical "Workflow Canvas / Add profiles to build your
             // workflow pipeline" invitation a brand-new workflow gets — byte-for-byte the same view,
             // inviting the user to rebuild a canvas whose every save is being refused.
-            if let unreadableLayout {
-                unreadableLayoutOverlay(unreadableLayout)
+            if let activeUnreadableLayout {
+                unreadableLayoutOverlay(activeUnreadableLayout)
             } else if canvasState.nodes.isEmpty {
                 emptyStateOverlay
             }
@@ -222,7 +299,10 @@ struct WorkflowCanvasView: View {
 
             // Newer-version read-only notice (WF-PE2). Persistent while set — unlike the edge
             // refusal it is not transient: every save will refuse until the app updates.
-            if let notice = newerVersionNotice {
+            // ⚠️ [WF-CU4] Read through `activeNewerVersionNotice`, NEVER `newerVersionNotice`
+            // directly — that accessor is what keeps a notice from rendering over the workflow it
+            // does not belong to.
+            if let notice = activeNewerVersionNotice {
                 VStack {
                     Label(notice, systemImage: "arrow.up.circle.fill")
                         .font(.system(size: 12, weight: .medium))
@@ -330,6 +410,26 @@ struct WorkflowCanvasView: View {
         .onChange(of: profile.id) {
             loadLayout()
             registerEditGuard()
+            // [WF-CU3] RE-ARM the scroll monitor. Its closure captured the `WorkflowCanvasState`
+            // that existed when it was installed, and this host re-renders IN PLACE on a profile
+            // switch (no `.id()` at the `WorkflowDedicatedView` mount site, unlike the profile
+            // editor) — so without this the monitor keeps acting on the PREVIOUS workflow's state,
+            // which `MainApplicationViewModel.workflowCanvasState(for:)` keeps alive in its cache.
+            // Two-finger trackpad panning then either does nothing (the old state's
+            // `isHoveringCanvas` is false) or silently pans the off-screen graph while swallowing
+            // the event, for the rest of the session.
+            //
+            // ⚠️ `.twoFingerPan` at the canvas ZStack is NOT a second path that could cover this —
+            // it is `self` on macOS (see the `#else` arm of its extension); this AppKit monitor is
+            // the only trackpad-pan implementation on this platform.
+            //
+            // Safe to read the NEW state here: `loadLayout()` above already depends on
+            // `canvasState` resolving to the incoming profile's state at this point, and it
+            // demonstrably does — the canvas has always reloaded the correct graph on a switch.
+            #if canImport(AppKit) && !targetEnvironment(macCatalyst)
+            removeScrollMonitor()
+            setupScrollMonitor()
+            #endif
         }
         // ⚠️ `.onDeleteCommand` NEEDS a focusable ancestor to fire, and before THIS LINE there was
         // none, so the Delete key was very likely dead for EVERY user, not only keyboard-only ones
@@ -380,8 +480,8 @@ struct WorkflowCanvasView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(
-                unreadableLayout?.heldContent == true
-                ? "The saved layout held \(unreadableLayout?.summary ?? "content") that this version cannot read. Discarding replaces it with an empty canvas and the original data is gone for good — a future version will no longer be able to recover it.\n\nIf you might want it back, quit instead and export a copy of the database first."
+                activeUnreadableLayout?.heldContent == true
+                ? "The saved layout held \(activeUnreadableLayout?.summary ?? "content") that this version cannot read. Discarding replaces it with an empty canvas and the original data is gone for good — a future version will no longer be able to recover it.\n\nIf you might want it back, quit instead and export a copy of the database first."
                 : "Discarding replaces the unreadable layout with an empty canvas. The original data is gone for good — a future version will no longer be able to recover it."
             )
         }
@@ -607,7 +707,23 @@ struct WorkflowCanvasView: View {
     
     #if canImport(AppKit) && !targetEnvironment(macCatalyst)
     private func setupScrollMonitor() {
+        // ⚠️ [WF-CU3] This capture is the whole reason the monitor must be re-armed whenever
+        // `canvasState` changes identity (i.e. on a profile switch — see `.onChange(of: profile.id)`).
+        // It is deliberately still a capture rather than a live lookup: the closure outlives any
+        // single render, and a SwiftUI `View` struct captured into it would be an equally stale
+        // snapshot of the same `let`, not a fix.
         let state = canvasState // Capture object reference safely
+        if scrollMonitor != nil {
+            // Re-arming without removing first would leak the previous monitor AND leave two live
+            // handlers, the older one still driving the previous workflow's canvas.
+            logger.error(
+                "[WF_CANVAS] Scroll monitor for profile \(profile.id) installed while one was ALREADY "
+                + "active — the previous monitor was not removed. CONSEQUENCE: two trackpad handlers "
+                + "are live, the stale one panning a different workflow's canvas, and the old monitor "
+                + "is leaked for the life of the app. Every install must be paired with a removal."
+            )
+        }
+        logger.debug("[WF_CANVAS] Trackpad scroll monitor armed for profile \(profile.id) (canvas state \(canvasState.profileID)).")
         scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak state] event in
             // Only capture trackpad events if the user is actively hovering over the canvas
             guard let state = state, state.isHoveringCanvas else { return event }
@@ -630,6 +746,7 @@ struct WorkflowCanvasView: View {
         if let monitor = scrollMonitor {
             NSEvent.removeMonitor(monitor)
             scrollMonitor = nil
+            logger.debug("[WF_CANVAS] Trackpad scroll monitor removed for profile \(profile.id).")
         }
     }
     #endif
@@ -770,6 +887,14 @@ struct WorkflowCanvasView: View {
         // the loss that keeping the state alive was meant to prevent.
         //
         // Correct for a freshly-created state too: it starts clean, so the first load runs.
+        // ⚠️ ABOVE the dirty guard, deliberately. Whether the STORED blob decodes is a property of
+        // the row on disk, not of the in-memory edits, and this is the only writer on the load path
+        // — so leaving it below the early return meant switching onto a workflow with unsaved edits
+        // never refreshed it, and the previous workflow's overlay (with its destructive Discard
+        // button, aimed at whatever is now displayed) stayed on screen. Profile-scoping the value
+        // makes that unrenderable; recomputing here makes it correct rather than merely hidden.
+        refreshUnreadableLayoutState()
+
         guard canvasState.acceptsDiskReload else {
             logger.info(
                 "[WF_CANVAS] Skipped reloading the layout for profile \(profile.id) — the canvas has "
@@ -778,17 +903,6 @@ struct WorkflowCanvasView: View {
             )
             registerEditGuardDirtyState()
             return
-        }
-
-        // Ask BEFORE loading — `load(for:)` returns `.empty` on failure and discards the reason, so
-        // by the time we hold the layout the two cases are indistinguishable.
-        if WorkflowLayoutStore.shared.isLayoutUnreadable(for: profile.id) {
-            let counts = WorkflowLayoutStore.shared.storedCounts(for: profile.id)
-            unreadableLayout = UnreadableLayoutInfo(
-                nodeCount: counts.nodes, edgeCount: counts.edges, annotationCount: counts.annotations
-            )
-        } else {
-            unreadableLayout = nil
         }
 
         let layout = WorkflowLayoutStore.shared.load(for: profile.id)
@@ -800,6 +914,27 @@ struct WorkflowCanvasView: View {
         canvasState.load(from: layout)
     }
 
+    /// Re-derives the unreadable-canvas overlay for the DISPLAYED profile.
+    ///
+    /// Ask BEFORE loading — `load(for:)` returns `.empty` on failure and discards the reason, so by
+    /// the time we hold the layout the two cases are indistinguishable.
+    ///
+    /// ⚠️ Called from `loadLayout()` only, never from `body`: `isLayoutUnreadable(for:)` runs a
+    /// SwiftData fetch and primes a JSON decode — see this property's declaration for the
+    /// regression that caused at streaming frequency.
+    private func refreshUnreadableLayoutState() {
+        if WorkflowLayoutStore.shared.isLayoutUnreadable(for: profile.id) {
+            let counts = WorkflowLayoutStore.shared.storedCounts(for: profile.id)
+            unreadableLayout = UnreadableLayoutInfo(
+                profileID: profile.id,
+                nodeCount: counts.nodes, edgeCount: counts.edges, annotationCount: counts.annotations
+            )
+        } else if unreadableLayout != nil {
+            logger.info("[WF_CANVAS] Cleared the unreadable-canvas overlay while showing profile \(profile.id) — the stored layout decodes. CONSEQUENCE: the canvas is editable and the destructive Discard control is withdrawn.")
+            unreadableLayout = nil
+        }
+    }
+
     /// Deliberately throws away an unreadable canvas so the profile becomes editable again.
     ///
     /// Routes through `repairUnreadableLayout(_:for:reason:)` rather than `save(_:for:)` — that is
@@ -807,6 +942,22 @@ struct WorkflowCanvasView: View {
     /// repair is the explicit, logged, user-authorized exception, and the `reason` it takes exists so
     /// the log records WHO authorized it rather than just that it happened.
     private func discardUnreadableLayout() {
+        // ⚠️ LAST LINE OF DEFENCE, and it must stay even though the overlay is now profile-scoped.
+        // This is the only control in the app that deliberately destroys a user's graph, and it acts
+        // on whatever profile is DISPLAYED. Scoping the overlay makes the stale-overlay route to it
+        // unrenderable; this makes repairing a healthy row unreachable regardless of how the call
+        // was arrived at — a cheaper guarantee than auditing every future path to the button.
+        guard WorkflowLayoutStore.shared.isLayoutUnreadable(for: profile.id) else {
+            logger.error(
+                "[PERSISTENCE] Discard REFUSED for profile \(profile.id) — its stored layout decodes "
+                + "fine, so there is nothing to repair. CONSEQUENCE: the graph is left untouched; "
+                + "reaching here means a Discard control was shown for a workflow that is not the one "
+                + "it describes."
+            )
+            unreadableLayout = nil
+            return
+        }
+
         let replacement = WorkflowLayout.empty
         let outcome = WorkflowLayoutStore.shared.repairUnreadableLayout(
             replacement, for: profile.id, reason: "user chose Discard and Start Over on the canvas"
@@ -887,7 +1038,10 @@ struct WorkflowCanvasView: View {
         // repair would invite exactly the loss the refusal prevents. Dirty stays lit; the notice
         // names the remedy (update the app).
         if case .refusedNewerVersion(let blobVersion, let appVersion) = outcome {
-            newerVersionNotice = String(localized: "This workflow was saved by a newer version of Devgentic (v\(blobVersion) format; this build writes v\(appVersion)). It's read-only here — update Devgentic to edit it.")
+            newerVersionNotice = ProfileScopedNotice(
+                profileID: profile.id,
+                message: String(localized: "This workflow was saved by a newer version of Devgentic (v\(blobVersion) format; this build writes v\(appVersion)). It's read-only here — update Devgentic to edit it.")
+            )
             logger.error(
                 "[PERSISTENCE] Canvas edit NOT saved for profile \(profile.id) — the stored layout is "
                 + "from a newer build, so the write was refused. CONSEQUENCE: the unsaved-changes "
@@ -899,7 +1053,7 @@ struct WorkflowCanvasView: View {
 
         if case .refusedUnreadable(let nodes, let edges, let annotations) = outcome {
             unreadableLayout = UnreadableLayoutInfo(
-                nodeCount: nodes, edgeCount: edges, annotationCount: annotations
+                profileID: profile.id, nodeCount: nodes, edgeCount: edges, annotationCount: annotations
             )
             logger.error(
                 "[PERSISTENCE] Canvas edit NOT saved for profile \(profile.id) — the stored layout is "
@@ -908,6 +1062,46 @@ struct WorkflowCanvasView: View {
                 + "updated either, so the profile does not describe a canvas that was never written."
             )
             return
+        }
+
+        // [WF-PE3] The remaining two non-persisting outcomes — `.failed` (the context save threw:
+        // disk full, SwiftData error) and `.notConfigured` (no container) — used to FALL THROUGH
+        // here: the profile was rewritten with `agentProfileIDs` recomputed from an in-memory
+        // graph that never reached disk, and the user saw no error at all — just the dirty
+        // indicator staying lit, indistinguishable from the app being slow. The store now
+        // guarantees `.failed` means "not on disk AND nothing left pending on the shared context"
+        // (see `WorkflowLayoutStore.save`'s rollback), so bailing here is sufficient: nothing
+        // below may run, and unlike the two refusals above this one gets a toast because no
+        // overlay or banner exists for it.
+        guard outcome.didPersist else {
+            let reason: String
+            if case .failed(let message) = outcome {
+                reason = message
+            } else {
+                reason = "the persistence store is not available"
+            }
+            logger.error(
+                "[PERSISTENCE] Canvas edit NOT saved for profile \(profile.id) — \(reason). "
+                + "CONSEQUENCE: the unsaved-changes indicator stays LIT, agentProfileIDs is not "
+                + "rewritten (the profile must not describe a graph that never reached disk), and "
+                + "the user sees an error toast. The edits remain in memory for another attempt."
+            )
+            toastManager.show(
+                String(localized: "Couldn't save the workflow — \(reason). Your edits are still here; try saving again."),
+                style: .error,
+                duration: 5.0
+            )
+            return
+        }
+
+        // [WF-CU4] The write was NOT refused, so this workflow is not read-only after all — clear
+        // any standing newer-version notice. Profile-scoping keeps a notice off OTHER workflows;
+        // this is the same-profile half (the stored blob was repaired or replaced since the
+        // refusal), where the banner would otherwise contradict a save the user just watched
+        // succeed.
+        if newerVersionNotice?.profileID == profile.id {
+            logger.info("[WF_CANVAS] Clearing the newer-version read-only notice for profile \(profile.id) — a save has now succeeded, so the stored layout is no longer from a newer build. CONSEQUENCE: the read-only banner is removed; it would otherwise contradict the successful save.")
+            newerVersionNotice = nil
         }
 
         // Sync the agents array in ProfileDetails while preserving execution config
@@ -931,12 +1125,42 @@ struct WorkflowCanvasView: View {
             // relaunch. No-ops when the canvas is hosted outside the editor.
             profileService.rebaseEditBuffer(to: profile)
         } catch {
-            // Workflow save failures are logged; the layout is already persisted locally
-            logger.error("Failed to save workflow profile: \(error.localizedDescription)")
+            // [WF-PE3 revalidation] This swallow used to hide BOTH arms. Split, because they are
+            // different sentences:
+            //  - An EMPTY `referencedIDs` (a canvas of only Router/Code/Gate nodes) is REFUSED by
+            //    `ProfileValidator`'s blocking empty-list rule on every update — routine for a
+            //    legitimate mid-construction canvas, so no toast: the layout DID persist, only the
+            //    agent-list sync is skipped, and it self-heals on the first save after a profile
+            //    node is added. (Whether the validator SHOULD block an empty list is register B36's
+            //    territory, not this fix's.)
+            //  - Anything else is a real failure worth telling the user about: the canvas is on
+            //    disk but the profile record now lags it.
+            if referencedIDs.isEmpty {
+                logger.notice(
+                    "[WF_CANVAS] Profile sync SKIPPED for workflow \(profile.id): the canvas "
+                    + "references no agent profiles and the validator blocks an empty "
+                    + "agentProfileIDs on update (\(error.localizedDescription)). CONSEQUENCE: the "
+                    + "LAYOUT is saved; the profile's agent list keeps its previous value until a "
+                    + "profile node is added and the next save syncs it."
+                )
+            } else {
+                logger.error(
+                    "[WF_CANVAS] Workflow profile record NOT updated for \(profile.id) after a "
+                    + "successful layout save: \(error.localizedDescription). CONSEQUENCE: the "
+                    + "canvas is on disk but agentProfileIDs still describes the previous graph "
+                    + "until a later save succeeds; the user is told via toast."
+                )
+                toastManager.show(
+                    String(localized: "The workflow canvas was saved, but its profile record couldn't be updated — \(error.localizedDescription)"),
+                    style: .warning,
+                    duration: 5.0
+                )
+            }
         }
 
-        // Only now — `markSaved()` is a claim, and it must only be made when the bytes are on disk.
-        guard outcome.didPersist else { return }
+        // Unconditional by construction: every non-persisting outcome returned above — the two
+        // refusal arms and the [WF-PE3] guard — so reaching here means the bytes are on disk,
+        // which is exactly what `markSaved()` claims.
         canvasState.markSaved()
     }
 }

@@ -15,6 +15,8 @@
 
 import Foundation
 
+private let logger = DGLogger(category: "WorkflowActionArgs")
+
 enum WorkflowActionArgs {
 
     /// Builds the JSON `Data` payload for a tool invocation.
@@ -45,7 +47,18 @@ enum WorkflowActionArgs {
             args[argName] = coerce(resolved, to: declaredType)
         }
 
-        return (try? JSONValue.object(args).toJSONData()) ?? Data("{}".utf8)
+        // [WF-EX8] A loud failure, never a silent `{}`. This was `(try? …) ?? Data("{}".utf8)`,
+        // which threw away EVERY correctly-resolved argument whenever any single value was
+        // unencodable — and the one reachable producer of that (a non-finite Double) is now
+        // refused in `coerce` below. Kept as a guarded catch for anything else: the tool then
+        // fails on missing arguments with the log naming why, instead of running on `{}` with
+        // no evidence anywhere.
+        do {
+            return try JSONValue.object(args).toJSONData()
+        } catch {
+            logger.error("[WF_EXEC] Action-node argument payload could not be serialized (\(error.localizedDescription)) — \(args.count) resolved argument(s) DROPPED, tool receives {}. CONSEQUENCE: the tool fails on missing/defaulted arguments; the cause is this serialization, not the bindings. Argument names: [\(args.keys.sorted().joined(separator: ", "))].")
+            return Data("{}".utf8)
+        }
     }
 
     /// Coerces a resolved string value into the JSON type the schema declares.
@@ -58,7 +71,13 @@ enum WorkflowActionArgs {
 
         case "number", "integer":
             let trimmed = value.trimmingCharacters(in: .whitespaces)
-            if let d = Double(trimmed) { return .number(d) }
+            // ⚠️ `isFinite` is load-bearing [WF-EX8]: `Double("nan")` and `Double("inf")` PARSE
+            // in Swift, and a non-finite `.number` throws at JSON serialization — which used to
+            // discard the ENTIRE argument payload (every other argument included) and invoke the
+            // tool with `{}`, silently. An upstream LLM emitting the literal "NaN" into a
+            // number-typed binding is the reachable path. Falling back to `.string` is this
+            // function's documented contract: the tool surfaces a precise validation error.
+            if let d = Double(trimmed), d.isFinite { return .number(d) }
             return .string(value)
 
         case "boolean":

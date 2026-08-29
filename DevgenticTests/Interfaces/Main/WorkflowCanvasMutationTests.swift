@@ -242,6 +242,173 @@ final class WorkflowCanvasMutationTests: XCTestCase {
         XCTAssertEqual(s.edges.count, 1)
     }
 
+    // MARK: - WF-CS3: replaceNode's undo snapshots coalesce per editing session
+    //
+    // `TextField("Node Name", text: $node.displayName)` in all five inspectors calls
+    // `replaceNode` once per KEYSTROKE. Pushing a whole-layout snapshot unconditionally meant 25
+    // characters of typing evicted the entire 25-deep undo history — including the accidental
+    // delete the stack exists to protect. `testATypingSessionCannotEvictAnEarlierDelete` is the
+    // one that pins the actual user-visible bug; the rest pin the properties that make it correct.
+
+    private func renamed(_ node: WorkflowNode, to name: String) -> WorkflowNode {
+        var copy = node
+        copy.displayName = name
+        return copy
+    }
+
+    /// Seeds `count` nodes via `load(from:)` rather than `addStructuralNode` — `load` leaves the
+    /// undo stack EMPTY (it's the same guarantee `state()` relies on), where each `addStructuralNode`
+    /// call pushes its own snapshot. These tests need a clean stack to assert exact step counts.
+    @discardableResult
+    private func loadedNodes(_ s: WorkflowCanvasState, _ count: Int) -> [WorkflowNode] {
+        let nodes = (0..<count).map { i in
+            WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "N\(i)")
+        }
+        s.load(from: WorkflowLayout(nodes: nodes, edges: [], annotations: []))
+        return nodes
+    }
+
+    /// One typing session (any run of edits to the SAME node) must collapse to ONE undo step —
+    /// not one per keystroke.
+    func testConsecutiveEditsToTheSameNodeCoalesceIntoOneUndoStep() {
+        let s = state()
+        let original = loadedNodes(s, 1)[0]
+
+        var typed = ""
+        for letter in "Summarize" {
+            typed.append(letter)
+            s.replaceNode(id: original.id, with: renamed(original, to: typed))
+        }
+        XCTAssertEqual(s.nodes[0].displayName, "Summarize")
+
+        s.undo()
+        XCTAssertEqual(s.nodes[0].displayName, original.displayName,
+                       "one undo must restore the PRE-typing name")
+        XCTAssertFalse(s.canUndo, "the whole typing session was ONE step — a second undo has nothing left")
+    }
+
+    /// Editing a DIFFERENT node must not join the same session — each node's edit is its own step.
+    func testEditingADifferentNodeStartsANewUndoStep() {
+        let s = state()
+        let seeded = loadedNodes(s, 2)
+        let a = seeded[0], b = seeded[1]
+
+        s.replaceNode(id: a.id, with: renamed(a, to: "Alpha"))
+        s.replaceNode(id: b.id, with: renamed(b, to: "Beta"))
+
+        s.undo()
+        XCTAssertEqual(s.nodes.first { $0.id == b.id }?.displayName, b.displayName,
+                       "the second edit (node B) must undo first — LIFO")
+        XCTAssertEqual(s.nodes.first { $0.id == a.id }?.displayName, "Alpha",
+                       "node A's edit must still be in place — it was a SEPARATE step")
+
+        s.undo()
+        XCTAssertEqual(s.nodes.first { $0.id == a.id }?.displayName, a.displayName,
+                       "the second undo restores node A's original name")
+        XCTAssertFalse(s.canUndo, "exactly two steps were pushed — a third undo has nothing left")
+    }
+
+    /// A write that changes nothing — a redundant Binding fire, re-saving with no edits — must not
+    /// consume an undo step, exactly like the pre-existing missing-node guard just above it.
+    func testReplaceNodeWithAnIdenticalValueDoesNotPushAnUndoStep() {
+        let s = state()
+        let unchanged = loadedNodes(s, 1)[0]
+
+        s.replaceNode(id: unchanged.id, with: unchanged)
+
+        XCTAssertFalse(s.canUndo, "an identical write must leave the stack untouched")
+    }
+
+    /// ⚠️ THE FILED BUG. Delete a node (one undo step), then simulate a 25-character typing
+    /// session on ANOTHER node in the same editing pass. Coalescing means that whole session is
+    /// still exactly ONE stack entry, so the earlier delete must survive and still be reachable.
+    func testATypingSessionCannotEvictAnEarlierDelete() {
+        let s = state()
+        let seeded = loadedNodes(s, 2)
+        let deletedID = seeded[0].id
+        let survivor = seeded[1]
+
+        s.removeNode(deletedID)
+        XCTAssertEqual(s.nodes.count, 1)
+
+        var typed = ""
+        for letter in "Summarize customer emails" {   // 26 keystrokes — past the old cap of 25
+            typed.append(letter)
+            s.replaceNode(id: survivor.id, with: renamed(survivor, to: typed))
+        }
+
+        s.undo()   // undoes the typing session (one coalesced step)
+        XCTAssertEqual(s.nodes.count, 1, "still just the survivor — the delete has not been touched yet")
+
+        s.undo()   // undoes the delete
+        XCTAssertEqual(s.nodes.count, 2, "the delete from BEFORE the typing session must still be reachable")
+        XCTAssertTrue(s.nodes.contains { $0.id == deletedID },
+                      "the deleted node must come back — this is the data loss the stack exists to prevent")
+    }
+
+    /// The coalescing window is bounded — leaving the inspector and coming back later for a
+    /// DELIBERATE second edit on the same node must get its own undo step, not silently merge
+    /// into the first. Uses the injectable clock so the test doesn't need a real sleep.
+    func testEditsSeparatedByTheCoalescingWindowGetSeparateUndoSteps() {
+        let s = state()
+        let original = loadedNodes(s, 1)[0]
+        var now = Date()
+        s.undoCoalescingClock = { now }
+
+        s.replaceNode(id: original.id, with: renamed(original, to: "First"))
+        now = now.addingTimeInterval(10)   // well past the 3s coalescing window
+        s.replaceNode(id: original.id, with: renamed(original, to: "Second"))
+
+        s.undo()
+        XCTAssertEqual(s.nodes[0].displayName, "First", "the second edit is its OWN step")
+        XCTAssertTrue(s.canUndo, "the first edit must still be on the stack")
+
+        s.undo()
+        XCTAssertEqual(s.nodes[0].displayName, original.displayName)
+        XCTAssertFalse(s.canUndo, "exactly two steps were pushed — a third undo has nothing left")
+    }
+
+    /// ⚠️ [Found while designing the CS3 fix] `undo()` pops the snapshot a coalescing session was
+    /// relying on. If the coalescing token survived the pop, the NEXT edit to that same node would
+    /// skip pushing a fresh snapshot onto the now-shorter stack — making that edit itself
+    /// unrecoverable instead of undoable.
+    func testEditAfterUndoIsItselfUndoable() {
+        let s = state()
+        let original = loadedNodes(s, 1)[0]
+
+        s.replaceNode(id: original.id, with: renamed(original, to: "First"))
+        s.undo()
+        XCTAssertEqual(s.nodes[0].displayName, original.displayName)
+        XCTAssertFalse(s.canUndo, "the stack is genuinely empty here — the next check must not be masked by leftover snapshots")
+
+        s.replaceNode(id: original.id, with: renamed(original, to: "Second"))
+        XCTAssertTrue(s.canUndo, "this edit must have pushed its own snapshot")
+
+        s.undo()
+        XCTAssertEqual(s.nodes[0].displayName, original.displayName,
+                       "the post-undo edit must itself be undoable, not silently unrecoverable")
+    }
+
+    /// The same invariant as above, for Revert (`load(from:)`): reloading THIS profile's own saved
+    /// layout very plausibly still has a node at the same id being coalesced.
+    func testEditAfterRevertIsItselfUndoable() {
+        let s = state()
+        let original = loadedNodes(s, 1)[0]
+
+        s.replaceNode(id: original.id, with: renamed(original, to: "Uncommitted"))
+        XCTAssertEqual(s.nodes[0].displayName, "Uncommitted")
+
+        s.load(from: WorkflowLayout(nodes: [original], edges: [], annotations: []))   // Revert
+        XCTAssertEqual(s.nodes[0].displayName, original.displayName)
+        XCTAssertFalse(s.canUndo, "load() clears the stack")
+
+        s.replaceNode(id: original.id, with: renamed(original, to: "AfterRevert"))
+        XCTAssertTrue(s.canUndo, "this edit must have pushed its own snapshot, not coalesced into nothing")
+
+        s.undo()
+        XCTAssertEqual(s.nodes[0].displayName, original.displayName)
+    }
+
     // MARK: - WF-CS6: moves are undoable
     //
     // ⚠️ Moves pushed NO undo snapshot, so ⌘Z after a drag popped the snapshot from before some

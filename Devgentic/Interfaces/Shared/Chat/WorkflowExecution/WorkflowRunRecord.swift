@@ -63,6 +63,15 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
     /// so records persisted before the column existed decode with nil.
     var traceID: String? = nil
 
+    // [WF-CS4] ⚠️ THERE IS DELIBERATELY NO `ranWithUnsavedCanvasEdits` HERE — the "this run used the
+    // last saved graph while your canvas was dirty" disclosure is LIVE-ONLY (owner decision,
+    // 2026-08-24). Adding it to this struct alone would NOT persist it: this record is not stored as
+    // a blob, it is rebuilt field-by-field from promoted columns on `WorkflowRunRecordSD`, so a new
+    // field needs its own column, its five seams (init / apply / RowSnapshot / rowSnapshot / both
+    // decoders) and a `DevgenticSchemaV3` lightweight stage — the traceID precedent. Until someone
+    // takes that on, a field here would be silently dropped at `decodeRecord` and every "the record
+    // persists it" comment would be false. The flag lives on `WorkflowExecutionState` only.
+
     // MARK: - Run Status
 
     /// ⚠️ Hand-written `RawRepresentable` so an unrecognised status is PRESERVED, not reinterpreted —
@@ -80,6 +89,13 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
     enum RunStatus: RawRepresentable, Codable, Sendable, Equatable {
         case running
         case completed
+        /// [WF-RU4] A genuine node failure occurred, but the run still reached a
+        /// successful/answering terminal — an error port absorbed it, or an unrelated parallel
+        /// branch delivered the answer. Distinct from `.failed` (nothing usable came out) and
+        /// from `.completed` (nothing went wrong): collapsing this into either one was the
+        /// original defect — the workflow's own roll-up disagreeing with the chat bubble, which
+        /// already correctly shows this run's answer as a `.completed` (no chip) success.
+        case completedWithWarnings
         case failed
         case cancelled
         /// A status written by a newer build, carried verbatim.
@@ -89,6 +105,7 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
             switch rawValue {
             case "running":   self = .running
             case "completed": self = .completed
+            case "completedWithWarnings": self = .completedWithWarnings
             case "failed":    self = .failed
             case "cancelled": self = .cancelled
             default:          self = .other(rawValue)
@@ -97,11 +114,12 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
 
         var rawValue: String {
             switch self {
-            case .running:        return "running"
-            case .completed:      return "completed"
-            case .failed:         return "failed"
-            case .cancelled:      return "cancelled"
-            case .other(let raw): return raw
+            case .running:                return "running"
+            case .completed:              return "completed"
+            case .completedWithWarnings:  return "completedWithWarnings"
+            case .failed:                 return "failed"
+            case .cancelled:              return "cancelled"
+            case .other(let raw):         return raw
             }
         }
 
@@ -110,8 +128,8 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
         /// state, and claiming it has settled is the same overreach as the old `?? .completed`.
         var isSettled: Bool {
             switch self {
-            case .completed, .failed, .cancelled: return true
-            case .running, .other:                return false
+            case .completed, .completedWithWarnings, .failed, .cancelled: return true
+            case .running, .other:                                        return false
             }
         }
     }
@@ -379,8 +397,17 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
             // "Cancelled" states built for it were dead code.
             if state.wasCancelled { return .cancelled }
             if let _ = state.workflowError { return .failed }
-            if nodeSnapshots.contains(where: { $0.isGenuineFailure }) { return .failed }
-            return .completed
+            guard nodeSnapshots.contains(where: { $0.isGenuineFailure }) else { return .completed }
+            // [WF-RU4] A node genuinely failed. `freeze()` has no live graph topology of its own
+            // to know whether the run still reached a successful/answering terminal — that needs
+            // the engine's edge-liveness logic, which lives only in `WorkflowState` (the live
+            // executor's internal type, not `WorkflowExecutionState`). `completedDespiteNodeFailure`
+            // carries the engine's own answer across the stream boundary (`.workflowRunFinished`).
+            // Trusted ONLY to upgrade `.failed` to the honest middle value, never to erase the
+            // failure to plain `.completed` — if the flag never arrived (nil-safe default `false`,
+            // e.g. an older code path), this falls back to today's existing, safe-but-harsh
+            // `.failed`, exactly as before this fix.
+            return state.completedDespiteNodeFailure ? .completedWithWarnings : .failed
         }()
 
         // Wall-clock duration (start→finish), matching the live display's computation

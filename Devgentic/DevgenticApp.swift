@@ -99,11 +99,24 @@ struct DevgenticApp: App {
                     startupLogger.notice(
                         "[STARTUP] Launch sweep DEFERRED — the schema changed since the last clean "
                         + "open (was \(previous?.prefix(12) ?? "never recorded"), now \(current.prefix(12))). "
-                        + "CONSEQUENCE: nothing is pruned, reconciled or purged this launch, so a "
-                        + "migration that silently degraded data can still be inspected and recovered. "
-                        + "Download history is not trimmed and interrupted downloads keep their "
-                        + "'running' status until the next launch, which will sweep normally."
+                        + "CONSEQUENCE: download history is not pruned or reconciled, so a migration "
+                        + "that silently degraded it can still be inspected and recovered; interrupted "
+                        + "downloads keep their 'running' status until the next launch, which will "
+                        + "sweep normally. Workflow-run orphans ARE reconciled below — see that line."
                     )
+                    // [WF-RU2] Unlike the download-history sweep above, this one carries none of the
+                    // degradation risk the gate exists to guard against: the predicate matches only
+                    // rows already stored as `.running`, and it writes back just `statusRaw` /
+                    // `errorMessage` — no lightweight migration can PRODUCE a `.running` row (that
+                    // only happens while a run is actually executing), so there is nothing here for
+                    // a botched migration to have silently degraded. Left un-reconciled instead, an
+                    // orphan from a force-quit or crash renders as a LIVE run for the rest of this
+                    // session and every session after, on any conversation the user opens, until a
+                    // launch happens to take the `.run` branch — the header pill shows "Running" and
+                    // the history card ticks a `TimelineView(.periodic(...))` counter climbing from
+                    // the original start time, for a run that has been dead for days.
+                    startupLogger.info("[STARTUP] Reconciling workflow-run orphans despite the deferral — see the note above for why this one is safe.")
+                    WorkflowRunHistoryStore.shared.reconcileOrphans()
 
                 case .skippedByEnvironment:
                     // CONSEQUENCE: download-history retention and workflow-run orphan

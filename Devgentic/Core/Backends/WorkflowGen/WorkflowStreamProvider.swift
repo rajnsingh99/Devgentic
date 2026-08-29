@@ -67,13 +67,12 @@ extension WorkflowStreamProvider {
         traceContext: TraceContext,
         onTraceUpdate: (@Sendable (AgentTraceLog) -> Void)?
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
-        // Compose userInput from workflow context (first node uses task, downstream uses upstream)
-        let composedInput = workflowContext.isFirstNode
-            ? workflowContext.taskDescription
-            : workflowContext.upstreamInput
+        // ⚠️ ONE CHANNEL (2026-08-29) — the node's input, whatever its origin. This used to branch
+        // on `isFirstNode` between a per-node task and the upstream text; the executor now settles
+        // that at the graph, so there is nothing to compose.
         return streamAgentResponse(
             for: profile,
-            userInput: composedInput,
+            userInput: workflowContext.input,
             chatHistory: [],
             conversationID: conversationID,
             ragContext: nil,

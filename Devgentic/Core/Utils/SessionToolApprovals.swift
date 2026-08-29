@@ -7,6 +7,8 @@
 
 import Foundation
 
+private let logger = DGLogger(category: "SessionToolApprovals")
+
 /// Allowlist of tools the user chose **"Allow for this chat"** for on a HITL banner.
 ///
 /// Scope is the conversation, and inside a workflow it narrows further to the **node** that asked.
@@ -90,8 +92,29 @@ actor SessionToolApprovals {
     ///
     /// Deliberately an exact scope match, with no fall back to the conversation-wide grant when a
     /// `nodeID` is supplied: falling back is precisely the leak this scope exists to close.
+    ///
+    /// ⚠️ REACHABLE-HUMAN RUNS ONLY [WF-SE6]. `WorkflowRunAttendance.canReachAHuman` is read off
+    /// TaskLocals, and this actor method runs on the CALLER's task, so the check reads the run
+    /// that is asking with no plumbing (an `await` hops executors but never leaves the task).
+    ///
+    /// Before this, a grant given on a live banner — labelled "Allow for this **chat**" — was
+    /// served to SCHEDULED runs too: a scheduled task reuses one conversationID and one canvas
+    /// nodeID on every fire, so a single click became a permanent unattended auto-approve with no
+    /// revocation short of deleting the conversation. Unattended approval is now an EXPLICIT
+    /// per-node configuration (`WorkflowNodeConfig.unattendedAutoApprove`), never a banner side
+    /// effect.
+    ///
+    /// ⚠️ A CHATOPS run still gets the grant, deliberately: it IS "this chat" with a human who
+    /// can be reached, and its confirmations are mirrored with working Approve/Deny. Only a run
+    /// nobody can answer is refused.
     func isAllowed(toolName: String, conversationID: UUID, nodeID: UUID? = nil) -> Bool {
-        allowed[Scope(conversationID: conversationID, nodeID: nodeID)]?.contains(toolName) ?? false
+        guard WorkflowRunAttendance.canReachAHuman else {
+            if allowed[Scope(conversationID: conversationID, nodeID: nodeID)]?.contains(toolName) == true {
+                logger.notice("[HITL] Interactive grant for '\(toolName)' NOT served to a run nobody can answer (conv \(conversationID.uuidString.prefix(8)), scheduled). CONSEQUENCE: the tool is not auto-approved by the banner grant; unattended approval requires the node's explicit 'unattended auto-approve' setting.")
+            }
+            return false
+        }
+        return allowed[Scope(conversationID: conversationID, nodeID: nodeID)]?.contains(toolName) ?? false
     }
 
     /// Drops all allowances for a conversation — every node scope within it included, since the

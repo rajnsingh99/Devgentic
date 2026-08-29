@@ -281,15 +281,30 @@ final class MainApplicationViewModel {
 
     /// What a bulk canvas drain actually did, per profile.
     ///
-    /// ⚠️ Two fields rather than just the failures, because an exit point needs BOTH questions
-    /// answered: "must I cancel the quit?" (`failed`) and "has this profile's row already been
-    /// written, so an on-screen `saveHook` for it would be a second write to the same row?"
-    /// (`persisted`). See WF-PE1.
+    /// ⚠️ Three fields, not two, because an exit point needs THREE questions answered: "must I
+    /// cancel the exit?" (`failed` — genuinely, plausibly-transiently failed, worth retrying); "is
+    /// this profile refused by design, so canceling-and-asking-to-retry would be asking for
+    /// something that can never happen?" (`refused`, [WF-PE2]); and "has this profile's row already
+    /// been written OR already conclusively resolved-without-writing, so an on-screen `saveHook` for
+    /// it would be a redundant/second write attempt?" (`persisted` — see WF-PE1; `refused` profiles
+    /// belong in that same "already handled" bucket for that specific question, since a refusal is
+    /// exactly as final as a write and a caller must not chase it a second time).
     struct CanvasDrainResult {
         /// Profiles whose layout reached disk.
         let persisted: [UUID]
-        /// Profiles whose layout could NOT be written — a non-empty value must block the exit.
+        /// [WF-PE2] Profiles refused BY DESIGN — `.refusedUnreadable`/`.refusedNewerVersion` — with
+        /// the outcome carried so a caller can build an accurate, per-reason message. A non-empty
+        /// value must NOT be treated the same as `failed`: retrying can never succeed for these.
+        let refused: [(id: UUID, outcome: WorkflowLayoutSaveOutcome)]
+        /// Profiles whose layout could NOT be written for a plausibly-transient reason — a non-empty
+        /// value must block the exit and invite a retry.
         let failed: [UUID]
+
+        init(persisted: [UUID], refused: [(id: UUID, outcome: WorkflowLayoutSaveOutcome)] = [], failed: [UUID]) {
+            self.persisted = persisted
+            self.refused = refused
+            self.failed = failed
+        }
     }
 
     /// Writes every dirty cached canvas to disk. Returns the profiles it could NOT persist.
@@ -302,16 +317,24 @@ final class MainApplicationViewModel {
     /// ⚠️ Callers at an exit point must treat a non-empty `failed` as a REFUSAL to continue. Quitting
     /// after a failed save destroys the very work the user asked to keep.
     ///
+    /// ⚠️ [WF-PE2] `refused` is NOT `failed`. A `.refusedUnreadable`/`.refusedNewerVersion` canvas
+    /// will refuse identically on every retry — cancelling the exit and telling the user to "save it
+    /// from the canvas" asks for something that can never happen. A caller must offer an explicit
+    /// choice for `refused` instead of the retry framing `failed` gets.
+    ///
     /// ⚠️ `persisted` is reported so an exit point can tell whether a canvas it is ALSO about to save
     /// through an on-screen `saveHook` has already been written here (WF-PE1). Both paths write the
     /// same `WorkflowLayoutSD` row and the store has no compare-and-swap, so "did the drain already
-    /// cover this profile?" has to be answerable rather than assumed.
+    /// cover this profile?" has to be answerable rather than assumed. A REFUSED profile belongs in
+    /// that same "already handled" question too — see the caller-side note in `saveOpenProfileEdits`
+    /// for why treating it as un-covered would fire a redundant, misleadingly-logged second attempt.
     @discardableResult
     func persistDirtyWorkflowCanvases(profileService: BackendProfileService) -> CanvasDrainResult {
         let dirty = workflowCanvasStates.filter { $0.value.hasUnsavedChanges }
         guard !dirty.isEmpty else { return CanvasDrainResult(persisted: [], failed: []) }
 
         var persisted: [UUID] = []
+        var refused: [(id: UUID, outcome: WorkflowLayoutSaveOutcome)] = []
         var failed: [UUID] = []
         for (profileID, state) in dirty {
             // Through the guarded accessor, not `currentLayout()`. The dictionary key and the
@@ -321,6 +344,31 @@ final class MainApplicationViewModel {
                 continue
             }
             let outcome = WorkflowLayoutStore.shared.save(layout, for: profileID)
+
+            // [WF-PE2] Refused-by-design is not a failure: it will refuse identically on every
+            // retry, so a caller that cancels an exit and asks the user to "save it from the
+            // canvas" would be asking for the one thing that can never happen. Bucketed separately
+            // from `failed`, which stays for the plausibly-transient cases — a caller must still
+            // block on THOSE.
+            //
+            // ⚠️ NO UNIT-TEST SEAM for this branch itself — `MainApplicationViewModel` cannot be
+            // constructed in a test (claims `HITLPresenter` globally; established by
+            // `EditBufferRebaseTests.swift`'s own disclosure and repeated by every VM-adjacent fix
+            // this session). What IS tested, exhaustively, is the classifier this branching decision
+            // is entirely DERIVED FROM — `WorkflowLayoutSaveOutcome.isRefusedByDesign`/`didPersist`
+            // in `BlobWriteRefusalTests.swift`'s WF-PE2 section — so the 3-way split below is proven
+            // correct at the decision level even though the loop that consumes it is reviewed, not
+            // directly tested.
+            if outcome.isRefusedByDesign {
+                refused.append((profileID, outcome))
+                logger.notice(
+                    "[WF_CANVAS] Exit-time save REFUSED (by design) for workflow \(profileID): \(String(describing: outcome)). "
+                    + "CONSEQUENCE: \(layout.nodes.count) node(s) and \(layout.edges.count) edge(s) stay "
+                    + "in-memory-only; this will refuse identically on retry, so the caller must offer "
+                    + "an explicit choice rather than cancel-and-ask-to-retry."
+                )
+                continue
+            }
 
             guard outcome.didPersist else {
                 failed.append(profileID)
@@ -375,7 +423,7 @@ final class MainApplicationViewModel {
                 + "(\(layout.nodes.count) node(s), \(layout.edges.count) edge(s))."
             )
         }
-        return CanvasDrainResult(persisted: persisted, failed: failed)
+        return CanvasDrainResult(persisted: persisted, refused: refused, failed: failed)
     }
 
     /// Drops the cached canvas state for a profile that no longer exists.

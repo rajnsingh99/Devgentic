@@ -99,6 +99,33 @@ final class WorkflowExecutionState {
     /// was dead code.
     var wasCancelled: Bool = false
 
+    /// [WF-RU4] True when at least one node genuinely failed, YET the run still reached a
+    /// successful/answering terminal — the engine's own root-level verdict, carried across the
+    /// stream boundary via `.workflowRunFinished` because `WorkflowRunRecord.freeze` has no live
+    /// graph topology of its own to determine "is there an answering terminal" (it would have to
+    /// duplicate the engine's edge-liveness logic to derive this independently).
+    ///
+    /// ⚠️ Deliberately NOT read by anything that drives the CHAT BUBBLE. An error-handled run (or
+    /// one where an unrelated parallel branch delivered the answer) legitimately shows a plain
+    /// green completed chip there — the delivered answer is exactly as complete as a clean run's.
+    /// This flag exists only for the WORKFLOW-SPECIFIC surfaces (`freeze`'s persisted `RunStatus`,
+    /// the Execution view's pill/step-counter), which — unlike the chat bubble — already show the
+    /// individual failed node in red on its own row, so their SUMMARY must not silently agree the
+    /// run was entirely clean.
+    var completedDespiteNodeFailure: Bool = false
+
+    /// [WF-CS4] True when this run started while its own canvas held unsaved edits — so the graph
+    /// that executed (loaded from disk) is not the graph the user was looking at.
+    ///
+    /// ⚠️ A DISCLOSURE, never a gate: nothing branches execution on this. The run proceeds exactly
+    /// as before; the flag only makes the existing, documented behaviour visible at the moment it
+    /// matters. See `WorkflowRunEditDisclosure` for why disclosing beats saving or prompting here.
+    ///
+    /// Decided ONCE at `WorkflowRunBootstrap.begin` and never recomputed: the user may save the
+    /// canvas while the run is in flight, and the answer must stay true of the graph that actually
+    /// ran — the same reasoning that makes `WorkflowRunTicket.layoutSnapshot` a start-time capture.
+    var ranWithUnsavedCanvasEdits: Bool = false
+
     /// Shared workflow variables (written by Code nodes).
     var variables: [String: String] = [:]
 
@@ -159,8 +186,29 @@ final class WorkflowExecutionState {
         totalNodes = total
         isRunning = true
 
-        // Add a running placeholder (avoid duplicates)
-        guard !nodeResults.contains(where: { $0.nodeID == nodeID }) else { return }
+        if let idx = nodeResults.firstIndex(where: { $0.nodeID == nodeID }) {
+            // [WF-RU12] A `started` for a node that already has a `.failed` row is a RETRY —
+            // the executor emits started/failed PER ATTEMPT (`executeProfileNodeWithRetry`,
+            // and the structural bounded path). This guard used to swallow the re-start
+            // entirely, which left the row red-and-finished while attempts 2…N burned tokens
+            // underneath it: both Skip buttons (gated on `.pending`/`.running`) vanished on
+            // exactly the runaway node they exist for, and `settleInFlightWork` (which only
+            // repairs `.running` rows) persisted a Stop mid-retry as a genuine failure.
+            // Reopen the row instead. `.failed` ONLY: retries never follow `.completed`,
+            // `.skipped` or `.cancelled` (`WorkflowRetryPolicy.stopsRetrying`), so a started
+            // event against any other status is out-of-order noise and keeps the old guard.
+            guard nodeResults[idx].status == .failed else { return }
+            nodeResults[idx] = WorkflowNodeResult(
+                id: nodeResults[idx].id, nodeID: nodeID, profileName: profileName,
+                status: .running, detail: String(localized: "Retrying..."),
+                // Original start survives, mirroring handleNodeCompleted — the row's duration
+                // is the node's total wall time across attempts, not the last attempt's.
+                startTime: nodeResults[idx].startTime
+            )
+            workflowLogger.info("[WF_EVENT] Node '\(profileName)' re-started after a failed attempt — row reopened as running. CONSEQUENCE: the timeline shows the retry instead of a finished red 'Failed', the Skip buttons stay reachable, and a Stop mid-retry settles the node cancelled rather than counting it as a genuine failure.")
+            return
+        }
+
         nodeResults.append(WorkflowNodeResult(
             id: UUID(), nodeID: nodeID, profileName: profileName,
             status: .running, detail: "Running...",
@@ -203,6 +251,24 @@ final class WorkflowExecutionState {
                 status: .failed, detail: detail,
                 startTime: Date(), endTime: Date()
             ))
+        }
+        // [WF-RU10] Mirrors `handleNodeSkipped`'s `.byUser` arm just below: THIS node's own
+        // failure is the one moment nothing else is guaranteed to close its dangling tool rows.
+        // `settleInFlightWork` (the run-level backstop) fires only from `handleError`, which a
+        // node failing into an activated `error` port never reaches — the run keeps going and can
+        // complete normally. `freeze()`'s own close acts on a value-type COPY of `nodeTimelines`
+        // and never writes back (Dictionary subscript-get returns a copy), so it repairs only the
+        // PERSISTED record — the LIVE `nodeTimelines` the Execution view reads while
+        // `executionState` is still attached stays open, and `AgentTimelineView` renders any row
+        // with `isExecuting == true` as an indefinite spinner. Closing here, at the node's own
+        // failure, fixes the view for the rest of THIS run instead of only the next time it's
+        // reopened from a fresh record.
+        if var events = nodeTimelines[nodeID], !events.isEmpty {
+            let closed = DanglingToolRowCloser.close(&events, outcome: .failed)
+            if closed > 0 {
+                nodeTimelines[nodeID] = events
+                workflowLogger.info("[WF_EVENT] Node '\(profileName)' failed with \(closed) tool row(s) still executing — closed with failure semantics. CONSEQUENCE: the rows settle as 'Interrupted before the tool finished.' instead of spinning for the rest of the run.")
+            }
         }
     }
 
@@ -292,6 +358,14 @@ final class WorkflowExecutionState {
     /// one run. Making the caller name the outcome removes the branch that can be forgotten.
     func handleStreamEnd(finalText: String, cancelled: Bool) {
         guard cancelled else {
+            // [WF-RU1] A run whose failure is already settled must not have that failure
+            // re-narrated as its ANSWER: on the failed path the message content was replaced by
+            // the `.error` card, so `finalText` here is the error text — feeding it to
+            // `handleFinalOutput` is exactly the laundering this row filed (`finalOutput` carried
+            // "Execution Failed: …" while `record.error` froze nil). `handleError` already
+            // stamped `isRunning`/`completedAt`; `finalOutput` stays whatever real output the
+            // run produced before failing (usually empty — a failed run has no answer).
+            guard workflowError == nil else { return }
             handleFinalOutput(finalText)
             return
         }

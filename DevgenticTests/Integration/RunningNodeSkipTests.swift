@@ -69,19 +69,20 @@ final class RunningNodeSkipTests: XCTestCase {
             )
         }
         let executor = WorkflowExecutor(workflowProfileID: workflowProfileID)
-        return WorkflowDepth.$current.withValue(1) {
-            executor.executeWorkflow(
-                userInput: userInput,
-                chatHistory: [],
-                conversationID: self.conversationID,
-                ragContext: nil,
-                traceContext: self.traceContext,
-                onTraceUpdate: { _ in },
-                layout: scenario.layout,
-                profileMap: profileMap,
-                streamProvider: self.mockProvider
-            )
-        }
+        // [WF-CC14] ROOT depth, deliberately: the run must `beginRun` so the store owns the
+        // conversation — a mid-run `requestRunningSkip` targets the ACTIVE run's token. (The old
+        // `withValue(1)` nested-depth wrap dodged the root start-clear, which no longer exists.)
+        return executor.executeWorkflow(
+            userInput: userInput,
+            chatHistory: [],
+            conversationID: self.conversationID,
+            ragContext: nil,
+            traceContext: self.traceContext,
+            onTraceUpdate: { _ in },
+            layout: scenario.layout,
+            profileMap: profileMap,
+            streamProvider: self.mockProvider
+        )
     }
 
     /// Collects the run with a hard deadline. On deadline the collection task is cancelled
@@ -546,10 +547,42 @@ final class UserSkipTeardownPolicyTests: XCTestCase {
 final class WorkflowNodeSkipStoreRunningChannelTests: XCTestCase {
 
     private let conv = UUID()
+    /// [WF-CC14] The store is run-token-keyed now; these unit tests declare a run scope the way
+    /// the executor does at run start.
+    private let token = UUID()
+
+    override func setUp() {
+        super.setUp()
+        WorkflowNodeSkipStore.shared.beginRun(conversationID: conv, runToken: token)
+    }
 
     override func tearDown() {
         WorkflowNodeSkipStore.shared.clear(conversationID: conv, reason: "test teardown")
         super.tearDown()
+    }
+
+    /// [Found on adversarial audit] `try await someTask.value` on a `CheckedContinuation`-backed
+    /// waiter has no bound: if a future regression in the exact run-token-keying logic under test
+    /// here (WF-CC14) ever fails to resume the right waiter, the raw `.value` await hangs the test
+    /// HOST rather than failing red — this session's other suites (`RunningNodeSkipTests`'s own
+    /// `executeWithDeadline`, `UnattendedApprovalTests`'s racer) already established this bounded
+    /// pattern for the same subsystem; this closes the one place it was missing.
+    private func awaitBounded<T: Sendable>(_ task: Task<T, Error>, seconds: TimeInterval = 5) async throws -> T {
+        try await withThrowingTaskGroup(of: T?.self) { group in
+            group.addTask { try await task.value }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(seconds))
+                return nil
+            }
+            guard let first = try await group.next(), let result = first else {
+                group.cancelAll()
+                task.cancel()
+                XCTFail("waiter did not resolve within \(seconds)s — the store failed to resume it")
+                throw CancellationError()
+            }
+            group.cancelAll()
+            return result
+        }
     }
 
     /// Request before any waiter: buffered, then consumed instantly at registration — the shape
@@ -559,8 +592,8 @@ final class WorkflowNodeSkipStoreRunningChannelTests: XCTestCase {
         WorkflowNodeSkipStore.shared.requestRunningSkip(nodeID: node, conversationID: conv)
         XCTAssertTrue(WorkflowNodeSkipStore.shared.runningSkipInFlight(nodeID: node, conversationID: conv))
 
-        try await WorkflowNodeSkipStore.shared.awaitRunningSkip(nodeID: node, conversationID: conv)
-        XCTAssertTrue(WorkflowNodeSkipStore.shared.runningSkipFired(nodeID: node, conversationID: conv),
+        try await WorkflowNodeSkipStore.shared.awaitRunningSkip(nodeID: node, conversationID: conv, runToken: token)
+        XCTAssertTrue(WorkflowNodeSkipStore.shared.runningSkipFired(nodeID: node, conversationID: conv, runToken: token),
                       "consumption must be recorded — the executor's verdict repair reads it")
     }
 
@@ -568,7 +601,7 @@ final class WorkflowNodeSkipStoreRunningChannelTests: XCTestCase {
     func testRequestResumesARegisteredWaiter() async throws {
         let node = UUID()
         let waiter = Task { @MainActor in
-            try await WorkflowNodeSkipStore.shared.awaitRunningSkip(nodeID: node, conversationID: conv)
+            try await WorkflowNodeSkipStore.shared.awaitRunningSkip(nodeID: node, conversationID: conv, runToken: token)
             return true
         }
         // Give the waiter a beat to register (registration and buffering both succeed — the
@@ -576,9 +609,9 @@ final class WorkflowNodeSkipStoreRunningChannelTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(50))
         WorkflowNodeSkipStore.shared.requestRunningSkip(nodeID: node, conversationID: conv)
 
-        let fired = try await waiter.value
+        let fired = try await awaitBounded(waiter)
         XCTAssertTrue(fired)
-        XCTAssertTrue(WorkflowNodeSkipStore.shared.runningSkipFired(nodeID: node, conversationID: conv))
+        XCTAssertTrue(WorkflowNodeSkipStore.shared.runningSkipFired(nodeID: node, conversationID: conv, runToken: token))
     }
 
     /// The node finished first: the group cancels the racer child, whose await must throw
@@ -586,7 +619,7 @@ final class WorkflowNodeSkipStoreRunningChannelTests: XCTestCase {
     func testCancelledWaiterThrowsAndRecordsNothing() async throws {
         let node = UUID()
         let waiter = Task { @MainActor in
-            try await WorkflowNodeSkipStore.shared.awaitRunningSkip(nodeID: node, conversationID: conv)
+            try await WorkflowNodeSkipStore.shared.awaitRunningSkip(nodeID: node, conversationID: conv, runToken: token)
         }
         try await Task.sleep(for: .milliseconds(50))
         waiter.cancel()
@@ -597,7 +630,7 @@ final class WorkflowNodeSkipStoreRunningChannelTests: XCTestCase {
         } catch is CancellationError {
             // expected
         }
-        XCTAssertFalse(WorkflowNodeSkipStore.shared.runningSkipFired(nodeID: node, conversationID: conv),
+        XCTAssertFalse(WorkflowNodeSkipStore.shared.runningSkipFired(nodeID: node, conversationID: conv, runToken: token),
                        "cancellation is not a firing — recording one would make the verdict repair claim a skip nobody asked for")
     }
 
@@ -608,9 +641,9 @@ final class WorkflowNodeSkipStoreRunningChannelTests: XCTestCase {
         let node = UUID()
         WorkflowNodeSkipStore.shared.toggle(nodeID: node, conversationID: conv)
 
-        try await WorkflowNodeSkipStore.shared.awaitRunningSkip(nodeID: node, conversationID: conv)
+        try await WorkflowNodeSkipStore.shared.awaitRunningSkip(nodeID: node, conversationID: conv, runToken: token)
 
-        XCTAssertTrue(WorkflowNodeSkipStore.shared.runningSkipFired(nodeID: node, conversationID: conv))
+        XCTAssertTrue(WorkflowNodeSkipStore.shared.runningSkipFired(nodeID: node, conversationID: conv, runToken: token))
         XCTAssertFalse(WorkflowNodeSkipStore.shared.isRequested(nodeID: node, conversationID: conv),
                        "the pending request must be CONSUMED — leaving it flips the row to a lying 'Undo skip'")
     }
@@ -620,6 +653,7 @@ final class WorkflowNodeSkipStoreRunningChannelTests: XCTestCase {
         let node = UUID()
         let otherConv = UUID()
         let otherNode = UUID()
+        WorkflowNodeSkipStore.shared.beginRun(conversationID: otherConv, runToken: UUID())
         WorkflowNodeSkipStore.shared.requestRunningSkip(nodeID: node, conversationID: conv)
         WorkflowNodeSkipStore.shared.requestRunningSkip(nodeID: otherNode, conversationID: otherConv)
 
@@ -638,11 +672,11 @@ final class WorkflowNodeSkipStoreRunningChannelTests: XCTestCase {
         WorkflowNodeSkipStore.shared.requestRunningSkip(nodeID: node, conversationID: conv)
         WorkflowNodeSkipStore.shared.requestRunningSkip(nodeID: node, conversationID: conv)
 
-        try await WorkflowNodeSkipStore.shared.awaitRunningSkip(nodeID: node, conversationID: conv)
+        try await WorkflowNodeSkipStore.shared.awaitRunningSkip(nodeID: node, conversationID: conv, runToken: token)
 
         // A second await must NOT find a second buffered request — it parks (and is cancelled).
         let secondWaiter = Task { @MainActor in
-            try await WorkflowNodeSkipStore.shared.awaitRunningSkip(nodeID: node, conversationID: conv)
+            try await WorkflowNodeSkipStore.shared.awaitRunningSkip(nodeID: node, conversationID: conv, runToken: token)
         }
         try await Task.sleep(for: .milliseconds(50))
         secondWaiter.cancel()

@@ -31,9 +31,9 @@ enum WorkflowNodeKind: Codable, Hashable, Sendable {
     ///
     /// ⚠️ THE SWIFT CASE NAME IS DELIBERATELY STILL `condition`, and must stay that way.
     /// `WorkflowNodeKind` uses Swift's SYNTHESIZED enum `Codable`, which writes the case name as the
-    /// discriminator into every persisted layout blob. Renaming the case would fail to decode every
-    /// workflow ever saved — and the blob has no per-element resilience (WF24), so that is not a
-    /// degraded node, it is a lost layout.
+    /// discriminator into every persisted layout blob. Renaming the case would turn every saved
+    /// Router into an `.unsupported` placeholder (per-element resilience, WF-PE4) — no longer a
+    /// lost layout, but still every workflow ever saved degrading to unrunnable in one rename.
     ///
     /// ⚠️ `ConditionRule` / `ConditionOp` / `ConditionField` also keep their names, and that is
     /// correct rather than merely safe: the NODE is a Router; the RULES are conditions. It routes
@@ -43,11 +43,12 @@ enum WorkflowNodeKind: Codable, Hashable, Sendable {
     // ⚠️ `case loop(LoopNodeConfig)` was RETIRED AND DELETED 2026-08-15 (user decision). The node
     // conflated retry (already served by per-node `maxNodeRetries`) with chained re-execution, and
     // its one legitimate pattern (evaluator–optimizer refinement) was judged not worth the node.
-    // DELIBERATELY no decode shim: a saved layout containing a Loop node now fails to decode, which
-    // lands on the unreadable-layout refusal machinery (`WorkflowLayoutSD.hasUnreadableLayout` →
-    // canvas overlay + repair) rather than silently dropping the node — accepted because the app is
-    // pre-release (user decision, same date). Do NOT reuse the name `loop` for a future case: an
-    // old blob's `{"loop":{...}}` would decode into it.
+    // DELIBERATELY no decode shim — a Loop node never becomes a runnable something-else. Since
+    // 2026-08-24 (WF-PE4) an old blob's `{"loop":{...}}` decodes as `.unsupported(raw:)`: the graph
+    // opens with a visible placeholder instead of the all-or-nothing unreadable-layout refusal the
+    // 2026-08-15 decision accepted, the RUN stays blocked, and the raw bytes survive re-save.
+    // Do NOT reuse the name `loop` for a future case: an old blob's `{"loop":{...}}` would decode
+    // into it instead of the placeholder.
 
     /// Code/transform — deterministic non-LLM processing (regex, JSON, format).
     case code(CodeNodeConfig)
@@ -60,6 +61,41 @@ enum WorkflowNodeKind: Codable, Hashable, Sendable {
 
     /// Action/integration — invokes a tool directly and deterministically (no LLM).
     case action(ActionNodeConfig)
+
+    /// A node this build cannot understand — preserved, never lost. [WF-PE4]
+    ///
+    /// Produced ONLY by `WorkflowNode.init(from:)` when the stored `kind` fails to decode (a case
+    /// name written by a different build: a rollback after a node-kind addition, or a deleted kind
+    /// like the retired Loop). `raw` is the kind's ORIGINAL JSON, and `WorkflowNode.encode(to:)`
+    /// writes it back verbatim — so re-saving the layout is lossless and the build that understands
+    /// the node reads it again untouched.
+    ///
+    /// Before this case existed, ONE unknown case name failed the whole `[WorkflowNode]` array
+    /// decode, which made the layout simultaneously unreadable (empty canvas + overlay), unrunnable
+    /// (executor refusal) and permanently unsaveable (the `WorkflowLayoutSD` setter refuses every
+    /// write while unreadable) — with the destructive `repairUnreadableLayout` as the only exit.
+    /// Now the graph opens with a visibly degraded placeholder card; everything else stays editable
+    /// and saveable, and only the RUN is refused (`WorkflowError.unsupportedNodes`, plus a blocking
+    /// validation issue) because an unknown node cannot be executed or honestly skipped.
+    ///
+    /// ⚠️ The case name `unsupported` is effectively reserved the same way `loop` is: a blob must
+    /// never legitimately contain `{"unsupported":{...}}`, because `WorkflowNode.encode` unwraps
+    /// this case to the RAW original — the wrapper itself is never persisted.
+    case unsupported(raw: JSONValue)
+
+    /// The persisted discriminator (case name) of every REAL, persistable case — i.e. every case
+    /// above except `.unsupported` itself, which is never written to a blob (its `encode(to:)`
+    /// unwraps to `raw` instead). [WF-PE4, corrected on audit] Used only to distinguish "this
+    /// build has never heard of this case name" (true version skew — preserve as a placeholder)
+    /// from "this build knows the case but its payload failed to decode" (real corruption of a
+    /// fully-understood node — must NOT be silently reclassified as version skew; see
+    /// `WorkflowNode.init(from:)`).
+    ///
+    /// ⚠️ MUST be updated whenever a case is added, renamed, or removed here — a name missing
+    /// from this set would misclassify a genuinely corrupted node of that kind as version skew.
+    fileprivate static let knownKindCaseNames: Set<String> = [
+        "profile", "condition", "code", "gate", "trigger", "action",
+    ]
 }
 
 // MARK: - Node Identity Colour (WF-CU10)
@@ -93,6 +129,8 @@ extension WorkflowNodeKind {
         case .gate:      return theme.nodeIdentityColor(for: .gate)
         case .trigger:   return theme.nodeIdentityColor(for: .trigger)
         case .action:    return theme.nodeIdentityColor(for: .action)
+        // [WF-PE4] Deliberately colourless — the placeholder must read as "not one of ours".
+        case .unsupported: return theme.secondaryText
         }
     }
 }
@@ -643,10 +681,39 @@ struct WorkflowNodeConfig: Codable, Hashable, Sendable {
     /// If nil, uses the agent's own `executionTimeout` or `ExecutionConstraints.default.maxDuration`.
     var hardTimeout: TimeInterval? = nil
 
-    /// Per-node task description for workflow execution.
-    /// Defines WHAT this node should do with upstream input — independent of the profile's persona.
-    /// Empty string = no explicit task; the node relies solely on its profile system instructions.
+    /// RETIRED 2026-08-29 — read and written by NOTHING. No UI edits it, no validation requires
+    /// it, and `WorkflowExecutor` no longer reads it: a node's behaviour is its profile's system
+    /// instructions, and its input is the run's query (entry node) or its upstream's output.
+    ///
+    /// ⚠️ THE PROPERTY AND ITS CODING KEY STAY, and must. `WorkflowNodeConfig` decodes out of the
+    /// persisted layout blob; every workflow saved before this date carries a `taskDescription`,
+    /// and while `decodeIfPresent` means dropping the key would not fail the decode, re-encoding
+    /// without it would strip those bytes from disk on the next save — silently discarding text
+    /// users wrote, with no UI left to show them what was lost. Keeping the field round-trips it
+    /// untouched, so a future build could surface or migrate it.
+    ///
+    /// ⚠️ Do NOT reintroduce a reader. If per-node direction is ever wanted again it should be a
+    /// new, deliberately-named field, not this one silently coming back to life with old content.
     var taskDescription: String = ""
+
+    /// [WF-SE6/SE11] EXPLICIT unattended approval: when true, tool confirmations raised by this
+    /// node during a run NOBODY CAN ANSWER (a scheduled fire) are auto-approved. This — never a
+    /// banner click — is the sanctioned way to let a scheduled workflow run a confirming tool:
+    /// interactive "Allow for this chat" grants are not served to such runs, and a confirmation
+    /// with no standing config is refused fast instead of parking to nobody until a deadline
+    /// kills the whole run.
+    ///
+    /// ⚠️ A CHATOPS run is NOT covered by this: a human is reachable there (the confirmation is
+    /// mirrored to Telegram/Slack/Discord with working Approve/Deny), so it still asks. See
+    /// `WorkflowRunAttendance.canReachAHuman`.
+    ///
+    /// ⚠️ Read only on the PROFILE-node path (via `WorkflowExecutionContext`) and the Action-node
+    /// arm. A sub-workflow node dispatches structurally and never reads it — the child graph's own
+    /// nodes carry their own settings, which is why the inspector hides the row there.
+    ///
+    /// nil = false; the field is additive, which is why `layoutBlobVersion` bumped 2 → 3 (the TS5
+    /// rule: an old build re-saving would silently strip it, so it must be refused the save).
+    var unattendedAutoApprove: Bool? = nil
 
     /// ⚠️ RETIRED 2026-08-13 — decode/encode-only, never read at runtime.
     ///
@@ -674,7 +741,7 @@ struct WorkflowNodeConfig: Codable, Hashable, Sendable {
 // is preserved; `encode(to:)` stays synthesized from these same keys.
 extension WorkflowNodeConfig {
     private enum CodingKeys: String, CodingKey {
-        case maxNodeRetries, retryDelay, onFailure, hardTimeout, taskDescription, joinMode
+        case maxNodeRetries, retryDelay, onFailure, hardTimeout, taskDescription, unattendedAutoApprove, joinMode
     }
 
     init(from decoder: Decoder) throws {
@@ -685,6 +752,7 @@ extension WorkflowNodeConfig {
             onFailure: try c.decodeIfPresent(NodeFailurePolicy.self, forKey: .onFailure) ?? .skipDependents,
             hardTimeout: try c.decodeIfPresent(TimeInterval.self, forKey: .hardTimeout),
             taskDescription: try c.decodeIfPresent(String.self, forKey: .taskDescription) ?? "",
+            unattendedAutoApprove: try c.decodeIfPresent(Bool.self, forKey: .unattendedAutoApprove),
             joinMode: try c.decodeIfPresent(JoinMode.self, forKey: .joinMode) ?? .all
         )
     }
@@ -846,10 +914,36 @@ struct WorkflowNode: Identifiable, Codable, Hashable {
         do {
             kind = try container.decode(WorkflowNodeKind.self, forKey: .kind)
         } catch let kindError {
-            guard container.contains(.profileID) else { throw kindError }
-            let legacyProfileID = try container.decode(UUID.self, forKey: .profileID)
-            let legacyProfileType = try container.decode(ProfileType.self, forKey: .profileType)
-            kind = .profile(profileID: legacyProfileID, profileType: legacyProfileType)
+            if container.contains(.profileID) {
+                let legacyProfileID = try container.decode(UUID.self, forKey: .profileID)
+                let legacyProfileType = try container.decode(ProfileType.self, forKey: .profileType)
+                kind = .profile(profileID: legacyProfileID, profileType: legacyProfileType)
+            } else if let raw = try? container.decode(JSONValue.self, forKey: .kind),
+                      case .object(let fields) = raw,
+                      let discriminator = fields.keys.first, fields.count == 1,
+                      !WorkflowNodeKind.knownKindCaseNames.contains(discriminator) {
+                // [WF-PE4] Per-element resilience: an UNRECOGNIZED case name (a build this old has
+                // never heard of — rollback, or a deleted kind like the retired Loop) becomes a
+                // PRESERVED placeholder instead of failing the whole [WorkflowNode] array — which
+                // used to make the layout unreadable, unrunnable AND permanently unsaveable in one
+                // throw. The raw JSON round-trips through encode(to:), so nothing is lost on re-save.
+                //
+                // ⚠️ Found on adversarial audit: the ORIGINAL version of this arm fired on ANY
+                // undecodable `kind`, which conflated true version skew (an unknown case name) with
+                // real CORRUPTION of a case this build fully understands — a node-kind config with
+                // a synthesized `Codable` and a non-optional field (e.g. `ActionNodeConfig.
+                // argumentBindings`) throws the identical `kindError` shape on a missing/malformed
+                // key as an unknown case name does. Silently reclassifying that as "saved by a
+                // different version, update Devgentic" is actively misleading — updating changes
+                // nothing, and the corruption is never surfaced. The discriminator-name check above
+                // is the fix: only a case name THIS BUILD DOES NOT KNOW is version skew.
+                kind = .unsupported(raw: raw)
+            } else {
+                // Either not valid JSON under the key, or the discriminator names a case this
+                // build DOES understand whose payload still failed to decode — real corruption,
+                // not version skew. The unreadable-layout machinery is the honest surface for it.
+                throw kindError
+            }
         }
 
         let x = try container.decode(CGFloat.self, forKey: .positionX)
@@ -862,7 +956,14 @@ struct WorkflowNode: Identifiable, Codable, Hashable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
-        try container.encode(kind, forKey: .kind)
+        // [WF-PE4] An unsupported node re-encodes its ORIGINAL kind JSON, not the placeholder
+        // wrapper — so the build that understands this node reads it back untouched, and the
+        // literal case name `unsupported` never reaches a persisted blob.
+        if case .unsupported(let raw) = kind {
+            try container.encode(raw, forKey: .kind)
+        } else {
+            try container.encode(kind, forKey: .kind)
+        }
         try container.encode(position.x, forKey: .positionX)
         try container.encode(position.y, forKey: .positionY)
         try container.encode(displayName, forKey: .displayName)
@@ -1027,6 +1128,13 @@ struct WorkflowLayout: Codable {
     var annotations: [StickyNote]
 
     static let empty = WorkflowLayout(nodes: [], edges: [], annotations: [])
+
+    /// Nodes this build cannot understand ([WF-PE4] placeholders). Non-empty blocks the RUN —
+    /// the executor's choke point and the validator both consult this — while the canvas stays
+    /// open, editable and saveable.
+    var unsupportedNodes: [WorkflowNode] {
+        nodes.filter { if case .unsupported = $0.kind { return true }; return false }
+    }
 
     // Backward-compatible decoding — old layouts have no annotations
     private enum CodingKeys: String, CodingKey {

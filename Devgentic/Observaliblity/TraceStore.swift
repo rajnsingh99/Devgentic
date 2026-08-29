@@ -922,10 +922,29 @@ final class TraceStore: Sendable {
                 SELECT
                     name,
                     COUNT(*) AS total,
-                    -- Spans share TraceStatus, so degraded-success nodes must land in
-                    -- the completed bucket here too or they vanish from node stats.
-                    SUM(CASE WHEN status IN ('completed', 'completedWithWarnings') THEN 1 ELSE 0 END) AS completed,
+                    -- [WF-OB6] The predicate here used to be
+                    -- `status IN ('completed', 'completedWithWarnings')`, under a comment claiming
+                    -- "spans share TraceStatus". They do not: this column is written only from
+                    -- `SpanStatus` (`status.rawValue`, TraceStore.updateSpan), and `SpanStatus` has
+                    -- no `completedWithWarnings` case — that value belongs to `TraceStatus`, on the
+                    -- `traces` table. The second arm could never match a single row. Removed rather
+                    -- than left as decoration, so the next reader does not infer a bucket that does
+                    -- not exist.
+                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
                     SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS failed,
+                    -- [WF-OB6] Counted so `successRate` can EXCLUDE them from its denominator.
+                    -- A Stop and a skip are not verdicts on the node: neither says it works or
+                    -- that it is broken, so scoring either one against it is a category error.
+                    SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled,
+                    SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) AS skipped,
+                    -- ⚠️ Counted for the same reason, and reachable the moment anyone opens the
+                    -- Workflow Activity panel WHILE a workflow is running: the in-flight node's
+                    -- span is still `running` and inside the window. `COUNT(*)` sweeps it into
+                    -- `total`, and it is in none of the buckets above — so without subtracting it
+                    -- too, a node currently executing scores exactly like one that failed. These
+                    -- four buckets plus `running` are the complete `SpanStatus` set; the denominator
+                    -- below is what makes that exhaustiveness matter.
+                    SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
                     AVG(CASE WHEN endedAt IS NOT NULL THEN (endedAt - startedAt) * 1000 END) AS avg_duration
                 FROM spans
                 WHERE kind = 'workflowNode'
@@ -941,6 +960,9 @@ final class TraceStore: Sendable {
                 let total: Int = row["total"] ?? 0
                 let completed: Int = row["completed"] ?? 0
                 let failed: Int = row["failed"] ?? 0
+                let cancelled: Int = row["cancelled"] ?? 0
+                let skipped: Int = row["skipped"] ?? 0
+                let running: Int = row["running"] ?? 0
                 let avgDuration: Double? = row["avg_duration"]
 
                 // 2. Per-node-name percentiles — same approach as toolReliabilityStats.
@@ -963,6 +985,9 @@ final class TraceStore: Sendable {
                     totalRuns: total,
                     completedCount: completed,
                     failedCount: failed,
+                    cancelledCount: cancelled,
+                    skippedCount: skipped,
+                    runningCount: running,
                     avgDurationMs: avgDuration.map { Int($0) },
                     p50DurationMs: percentile(durations, 0.50),
                     p95DurationMs: percentile(durations, 0.95)

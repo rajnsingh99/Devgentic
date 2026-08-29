@@ -111,6 +111,39 @@ enum WorkflowInputAssembler {
         return body
     }
 
+    // MARK: - Untrusted-content escaping [WF-SE2 / WF-SE5]
+
+    /// Escapes XML-significant characters so untrusted content — an upstream node's output, an
+    /// artifact label, extracted document text, a ChatOps-remote attachment — cannot close the
+    /// section it is embedded in and inject its own tags.
+    ///
+    /// ⚠️ `&` MUST run first: escaping `<`/`>` before it would double-escape the `&amp;` this
+    /// call just introduced.
+    ///
+    /// Scoped to the concrete, EVIDENCED vector — a payload containing `</input><instruction>…`
+    /// that hijacks the section it lands in — not a general sanitizer. Markdown wrapping has no
+    /// closing delimiter to break out of (`## Input` opens no tag a payload could prematurely
+    /// close), so this is a no-op there; escaping it anyway would just show literal `&lt;`/`&gt;`
+    /// entities to a LOCAL model reading, say, pasted HTML, for no security benefit.
+    ///
+    /// Deliberately NOT applied to every `PromptWrapping.section` call — `task`,
+    /// `system_instructions`, `knowledge_base`, `user_profile` and the rest are user- or
+    /// profile-authored content under this app's local-trust model (see
+    /// `Workflow_Production_Readiness.md`'s security-scoping note), and escaping angle brackets
+    /// there would corrupt a legitimate `<T>` in a task description or a pasted code snippet for
+    /// no one this fix is meant to defend against. Call this ONLY at a boundary where the content
+    /// can plausibly be upstream node output or third-party (ChatOps) input.
+    static func escapeForXMLEmbedding(_ text: String, wrapping: PromptWrapping) -> String {
+        switch wrapping {
+        case .markdown: return text
+        case .xml:
+            return text
+                .replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "<", with: "&lt;")
+                .replacingOccurrences(of: ">", with: "&gt;")
+        }
+    }
+
     // MARK: - Artifact Passing (Workflow media/file handoff)
 
     // ⚠️ `maxArtifactTextChars` (4000) and its per-document split were RETIRED 2026-08-15 (user

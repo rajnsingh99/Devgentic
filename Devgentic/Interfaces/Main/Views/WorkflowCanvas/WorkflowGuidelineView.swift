@@ -126,7 +126,7 @@ struct WorkflowGuidelineView: View {
     private var nodesSection: some View {
         section("The nodes", icon: "square.grid.2x2", expanded: true) {
             nodeDoc("Profile", color: ProfileType.bot.displayColor, icon: "person.crop.circle",
-                    "Runs a Bot or Agent profile. The card takes the profile's OWN colour — blue for a Bot, green for an Agent — so this swatch shows the Bot case. The Task Description is this node's standing instruction; the workflow's input message reaches entry nodes only, appended to their task. Supports per-node Retries and a Hard Timeout. An agent's tool confirmations pause the run just like a Gate.")
+                    "Runs a Bot or Agent profile. The card takes the profile's OWN colour — blue for a Bot, green for an Agent — so this swatch shows the Bot case. What it does is the profile's system instructions; what it acts on is its input — the message that started the run for entry nodes, upstream output below them. Supports per-node Retries and a Hard Timeout. An agent's tool confirmations pause the run just like a Gate.")
             nodeDoc("Sub-workflow", color: ProfileType.workflow.displayColor, icon: "point.3.connected.trianglepath.dotted",
                     "A Profile node bound to another Workflow profile — it runs that workflow's canvas as a child. Text-only handoff: the child gets this node's input as its message; variables and artifacts do not cross in (artifacts produced inside do flow out). Nesting is limited to 3 levels and cycles are blocked at design time. ⚠️ This node's Hard Timeout bounds the child's ENTIRE run — size it for the whole child, not one step.")
             nodeDoc("Router", color: theme.nodeIdentityColor(for: .router), icon: "arrow.triangle.branch",
@@ -138,7 +138,7 @@ struct WorkflowGuidelineView: View {
             nodeDoc("Action", color: theme.nodeIdentityColor(for: .action), icon: "bolt.horizontal.fill",
                     "Calls one tool directly — no AI, deterministic. Bind each argument to a literal or a placeholder. Supports Retries (a tool call that threw is retried; a tool that RETURNED an error is not, because its side effect may already have happened) and a per-attempt timeout. Tools marked as requiring confirmation pause the run for your approval.")
             nodeDoc("Trigger", color: theme.nodeIdentityColor(for: .trigger), icon: "bolt",
-                    "An entry-point marker only. It never executes, has no configuration and no error port — use it to make a workflow's starting point explicit.")
+                    "An entry-point marker. It has no configuration and no error port, and passes its input straight through — as the first node it hands the run's message to whatever follows, so use it to make a starting point explicit without changing what the next node receives.")
             nodeDoc("Sticky note", color: StickyNoteColor.yellow.swiftUIColor, icon: "note.text",
                     "Annotation only — invisible to execution. Document your graph for whoever opens it next.")
         }
@@ -156,10 +156,10 @@ struct WorkflowGuidelineView: View {
 
     private var timeoutsSection: some View {
         section("Timeouts and retries", icon: "clock.arrow.circlepath") {
-            bullet("Each node gets a compute budget (default 120 seconds). Time spent waiting for a human — a gate, a confirmation, a routing question — never counts against it.")
+            bullet("Each node gets a compute budget (default 120 seconds) — EXCEPT a Sub-workflow node, which has none by default (see below). Time spent waiting for a human — a gate, a confirmation, a routing question — never counts against it.")
             bullet("Profile and Action nodes expose a per-node Hard Timeout to raise or lower their own budget. On expiry the node fails onto its error port and any partial result is discarded.")
             bullet("Only Profile and Action nodes retry; Router, Code and Gate never do. ⚠️ Retrying a Profile node re-runs its whole agent turn — including tool side effects it already performed.")
-            bullet("A Sub-workflow node's single budget covers its child's entire run — raise its Hard Timeout for long children.")
+            bullet("A Sub-workflow node has NO outer budget by default — its child canvas is already bounded, node by node, on its own terms. Setting its Hard Timeout adds a ceiling over the child's ENTIRE run (not one step); with retries configured, every attempt shares that ONE ceiling rather than each getting its own.")
         }
     }
 
@@ -175,7 +175,7 @@ struct WorkflowGuidelineView: View {
     private var savingSection: some View {
         section("Saving and running", icon: "square.and.arrow.down") {
             bullet("⚠️ There is no autosave. Save writes the canvas; Revert returns to the last save. Unsaved edits survive switching screens and are offered for saving when you quit.")
-            bullet("⚠️ Run executes the last SAVED graph, not your unsaved edits — save before running.")
+            bullet("⚠️ Run executes the last SAVED graph, not your unsaved edits — save before running. If you run anyway, the run says so in its own timeline, so a result that doesn't match your canvas is never a mystery.")
             bullet("Undo covers the last 25 structural edits (add / delete / rewire). Node moves are not undoable.")
             bullet("The validation panel lists everything that would block a run — a graph with errors refuses to start before spending any tokens.")
         }

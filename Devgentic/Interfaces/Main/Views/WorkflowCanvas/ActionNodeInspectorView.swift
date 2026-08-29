@@ -32,6 +32,7 @@ struct ActionNodeInspectorView: View {
 
     // Execution config (per-node orchestration — written to node.nodeConfig).
     @State private var maxRetries: Int = 0
+    @State private var unattendedAutoApprove: Bool = false
     @State private var retryDelay: Double = 0
     @State private var hardTimeout: Double? = nil
 
@@ -414,6 +415,21 @@ struct ActionNodeInspectorView: View {
                     }
                 }
 
+                Divider().opacity(0.3)
+
+                // [WF-SE6/SE11] The EXPLICIT unattended approval — see ProfileNodeInspectorView's
+                // twin row. Without it, an unattended run refuses this tool's confirmation fast
+                // and the node fails onto its error port.
+                execRow(
+                    label: "Unattended Auto-Approve",
+                    explainer: "Scheduled runs auto-approve this tool's confirmation. Off: a run nobody can answer fails this node onto its error port immediately. (ChatOps runs still ask — the confirmation is mirrored to your chat app.)"
+                ) {
+                    Toggle("", isOn: $unattendedAutoApprove)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+
                 // Failure routing is not a setting — it is wiring. Connect this node's `error`
                 // port to handle a failure; leave it unwired and the branch stops. (The old
                 // "On Failure → Downstream" picker was retired 2026-08-12.)
@@ -569,6 +585,7 @@ struct ActionNodeInspectorView: View {
     private func loadFromNode() {
         // Execution config lives on the shared per-node config.
         maxRetries = node.nodeConfig?.maxNodeRetries ?? 0
+        unattendedAutoApprove = node.nodeConfig?.unattendedAutoApprove ?? false
         retryDelay = node.nodeConfig?.retryDelay ?? 0
         hardTimeout = node.nodeConfig?.hardTimeout
 
@@ -587,6 +604,8 @@ struct ActionNodeInspectorView: View {
         node.nodeConfig?.maxNodeRetries = maxRetries
         node.nodeConfig?.retryDelay = retryDelay
         node.nodeConfig?.hardTimeout = hardTimeout
+        // nil (not false) when off — the default costs no bytes in the blob. [WF-SE6/SE11]
+        node.nodeConfig?.unattendedAutoApprove = unattendedAutoApprove ? true : nil
 
         closeInspector()
     }

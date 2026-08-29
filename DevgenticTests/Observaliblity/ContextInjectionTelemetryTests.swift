@@ -40,7 +40,6 @@ final class ContextInjectionTelemetryTests: XCTestCase {
             availableTools: [],
             userProfile: nil,
             skillManifests: nil,
-            taskDescription: nil,
             promptLayerConfig: layerConfig,
             workflowContext: nil,
             attachmentContext: nil,

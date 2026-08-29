@@ -217,6 +217,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             return .terminateCancel
         }
 
+        // [WF-LC2] Second, independent gate — a run in flight is a different kind of at-risk work
+        // than a dirty canvas (it has no Save button of its own; the only way to keep it is to let
+        // it finish, or to freeze it here). Sequenced AFTER the canvas gate rather than merged with
+        // it: the two alerts describe unrelated risks with unrelated remedies, and this repo has no
+        // precedent for combining two dirty-source categories' button sets into one alert.
+        if case .cancel = handleInFlightWorkflowRunsBeforeQuit() {
+            Self.logger.info("[WF_RUN] Quit CANCELLED by the user at the in-flight-run prompt. "
+                             + "CONSEQUENCE: the app stays open; every in-flight run keeps running.")
+            return .terminateCancel
+        }
+
         Self.logger.info("Application requested to terminate — running async teardown.")
 
         // Synchronous, cheap teardown first: kill shell child processes.
@@ -338,6 +349,66 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
+    // MARK: - [WF-LC2] Quit-time in-flight-workflow-run guard
+
+    /// Warns when one or more workflow runs are still executing, and freezes each on proceed.
+    ///
+    /// ⚠️ Per-node output exists ONLY in the live `WorkflowExecutionState` until `finalize()` runs,
+    /// and until this guard, nothing ever called it at quit — the process just exited, and the
+    /// persisted row stayed the empty `.running` stub `WorkflowRunBootstrap.begin` wrote
+    /// (`nodeResults: []`), which the next launch's orphan-reconcile relabels "Cancelled —
+    /// Interrupted" with every already-completed node's output gone. Register row WF-LC2.
+    ///
+    /// ⚠️ READ-ONLY until "Quit Anyway": `WorkflowRunTicket.forceFinalizeActiveRuns` is called from
+    /// EXACTLY ONE place, the affirmative branch below, never speculatively — `didFinalize` is a
+    /// permanent guard, so freezing before the user has committed would strand a run that goes on
+    /// to finish normally seconds later (the user pressed Cancel here, or never saw this at all)
+    /// with no way for its own real completion to ever be persisted.
+    @MainActor
+    private func handleInFlightWorkflowRunsBeforeQuit() -> QuitDecision {
+        let count = WorkflowRunTicket.activeRunCount
+        guard count > 0 else { return .proceed }
+
+        Self.logger.notice(
+            "[WF_RUN] Quit requested with \(count) workflow run(s) still in flight. "
+            + "CONSEQUENCE: prompting before teardown; quit is blocked until the user answers."
+        )
+
+        let alert = NSAlert()
+        alert.messageText = count == 1
+            ? String(localized: "A workflow is still running")
+            : String(localized: "\(count) workflows are still running")
+        // Name what's running — a bare count leaves a QuickAccess or Jarvis run, which has no
+        // visible window of its own, impossible to identify from this alert alone. Caps at 4 names
+        // (a wall of titles stops being scannable) and falls back to the count above that.
+        let names = WorkflowRunTicket.activeRunNames
+        let namesLine = names.count <= 4
+            ? names.map { "• \($0)" }.joined(separator: "\n")
+            : nil
+        // Matches settleInFlightWork (WorkflowExecutionState.swift): only nodes still `.running`
+        // are touched (relabelled Cancelled, never discarded); anything already completed keeps
+        // its real result untouched.
+        let consequence = String(localized: "Completed steps keep their real result. Any step still in progress is marked Cancelled.")
+        alert.informativeText = namesLine.map { "\($0)\n\n\(consequence)" } ?? consequence
+        alert.alertStyle = .warning
+        // ⚠️ Cancel FIRST — every other destructive quit-time alert in this app puts the safe
+        // option on the Return-key/prominent-styling default (`handleUnsavedProfileEditsBeforeQuit`
+        // above puts "Save and Quit" first; `DevgenticApp.swift`'s reset alert puts "Cancel" first
+        // and gates its destructive action on `.alertSecondButtonReturn`). Adversarial review of
+        // this exact alert caught it defaulting Return to "Quit Anyway" — fixed to match.
+        alert.addButton(withTitle: String(localized: "Cancel"))
+        alert.addButton(withTitle: String(localized: "Quit Anyway"))
+
+        switch alert.runModal() {
+        case .alertSecondButtonReturn:
+            WorkflowRunTicket.forceFinalizeActiveRuns(reason: "Quit during run")
+            return .proceed
+
+        default:
+            return .cancel
+        }
+    }
+
     /// Persists whatever is dirty, and REFUSES to quit if any part of it fails.
     ///
     /// ⚠️ Quitting after a failed save would be the worst outcome available: the user explicitly
@@ -348,22 +419,73 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // Main Workflow interface canvases FIRST — this drains every cached dirty canvas, including
         // ones for workflows the user has since switched away from, which no on-screen hook covers.
         var drainedProfileIDs: Set<UUID> = []
+        // [WF-PE2] Tracked separately from `drainedProfileIDs`, which only answers "does the WF-PE1
+        // skip-check apply?" — this answers the DIFFERENT question the skip-check's own LOG TEXT
+        // needs: "was this specific id persisted, or refused?" Conflating the two produced a real
+        // bug, caught by adversarial review: the skip-check logged "already persisted... skipping
+        // avoids a second write" for a canvas that was never written at all.
+        var refusedProfileIDs: Set<UUID> = []
         // ⚠️ Distinct from "the drain covered nothing": a nil owner means the drain never RAN (it is
         // injected by `configureTerminationGuard`, and quit fails open before that). The fallback
         // warning below must not fire in that case — it would assert data loss that is not happening.
         let drainDidRun = workflowCanvasOwner != nil
         if let workflowCanvasOwner {
             let drain = workflowCanvasOwner.persistDirtyWorkflowCanvases(profileService: profileService)
-            drainedProfileIDs = Set(drain.persisted)
+            // [WF-PE2] A REFUSED profile belongs in "already handled by the drain" exactly like a
+            // persisted one — its outcome is just as final, only without a write. Leaving it out
+            // would make the WF-PE1 skip-check below treat it as un-covered and fire a REDUNDANT
+            // `saveHook()` for the on-screen canvas: a second refusal (harmless in itself — refusal
+            // is a pure read, nothing to corrupt) that would then wrongly log "layout persisted" for
+            // a canvas that was refused, and wrongly fire the "held a state the drain doesn't own"
+            // WF-PE1 violation warning for what is actually the SAME canvas the drain already
+            // resolved. Caught by adversarial review of this exact fix, not by the register.
+            drainedProfileIDs = Set(drain.persisted).union(drain.refused.map(\.id))
+            refusedProfileIDs = Set(drain.refused.map(\.id))
             if !drain.failed.isEmpty {
                 Self.logger.error(
                     "[WF_CANVAS] Quit-time save FAILED for \(drain.failed.count) workflow canvas(es): "
                     + "\(drain.failed.map(\.uuidString).joined(separator: ", ")). CONSEQUENCE: quit is "
                     + "CANCELLED rather than discarding graph work the user asked to keep."
                 )
+                if !drain.refused.isEmpty {
+                    // [WF-PE2] `refused` is silently dropped by this early return — real, but
+                    // deliberately not escalated into changing this alert's decision (the failed
+                    // canvas is where the one actionable escape lives, so this branch still owns
+                    // the choice). A log line is enough to keep the read-only-canvas prompt from
+                    // surprising the user on the VERY NEXT quit attempt once they fix the failure.
+                    Self.logger.notice(
+                        "[WF_CANVAS] \(drain.refused.count) additional workflow canvas(es) are also "
+                        + "refused by design (not shown in this alert — the transient failure above "
+                        + "takes priority): \(drain.refused.map(\.id.uuidString).joined(separator: ", ")). "
+                        + "CONSEQUENCE: the read-only-canvas prompt will appear on a SUBSEQUENT quit "
+                        + "attempt, once the failure above is resolved or discarded."
+                    )
+                }
                 presentQuitSaveFailure(String(
                     localized: "A workflow canvas couldn't be saved automatically. Save it from the canvas, then quit."))
                 return .cancel
+            }
+            // [WF-PE2] Checked AFTER `failed`, never merged with it: a REFUSED canvas can never be
+            // saved by retrying, so it needs an honest choice, not the "save it from the canvas"
+            // framing above — which is a false promise for exactly this case (the register's own
+            // filed defect). If BOTH a failed and a refused canvas are dirty at once, the `failed`
+            // branch above already returned — correct, since that is where the one actionable
+            // escape (fix the transient problem, retry) actually lives.
+            if !drain.refused.isEmpty {
+                if case .cancel = presentReadOnlyCanvasQuitChoice(drain.refused, profileService: profileService) {
+                    Self.logger.info(
+                        "[WF_CANVAS] Quit CANCELLED by the user at the read-only-canvas prompt "
+                        + "(\(drain.refused.count) canvas(es)). CONSEQUENCE: the app stays open; "
+                        + "the canvas(es) remain dirty and read-only, unchanged."
+                    )
+                    return .cancel
+                }
+                Self.logger.notice(
+                    "[WF_CANVAS] User chose Quit Anyway at the read-only-canvas prompt "
+                    + "(\(drain.refused.count) canvas(es)). CONSEQUENCE: quit proceeds; the in-memory "
+                    + "edits to \(drain.refused.map(\.id.uuidString).joined(separator: ", ")) are lost, "
+                    + "but the on-disk layout is byte-intact — nothing was written or could be."
+                )
             }
         }
 
@@ -381,12 +503,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             // exactly why the decision keys off the profile identity rather than the flag.
             if let registeredID = profileService.canvasEditGuard.registeredProfileID,
                drainedProfileIDs.contains(registeredID) {
-                Self.logger.info(
-                    "[WF_CANVAS] Quit-time save: the on-screen canvas (workflow \(registeredID)) was "
-                    + "already persisted by the cached-canvas drain, so its saveHook is SKIPPED. "
-                    + "CONSEQUENCE: none — both resolve to the same shared WorkflowCanvasState, and "
-                    + "skipping avoids a second write to the same layout row."
-                )
+                // [WF-PE2] The two ids in this set mean different things and need different text —
+                // a persisted one really was written (the original claim, still true for it); a
+                // refused one was NOT, and the earlier "already persisted" wording was flatly false
+                // for it — caught by adversarial review as a self-contradicting log trail against
+                // the read-only-canvas prompt's own "nothing was written" line two log calls above.
+                if refusedProfileIDs.contains(registeredID) {
+                    Self.logger.info(
+                        "[WF_CANVAS] Quit-time save: the on-screen canvas (workflow \(registeredID)) "
+                        + "was already handled by the cached-canvas drain as a by-design REFUSAL, so "
+                        + "its saveHook is SKIPPED. CONSEQUENCE: none beyond what the read-only-canvas "
+                        + "prompt already reported — nothing was written by either path; the edits "
+                        + "remain unsaved, exactly as that prompt said."
+                    )
+                } else {
+                    Self.logger.info(
+                        "[WF_CANVAS] Quit-time save: the on-screen canvas (workflow \(registeredID)) was "
+                        + "already persisted by the cached-canvas drain, so its saveHook is SKIPPED. "
+                        + "CONSEQUENCE: none — both resolve to the same shared WorkflowCanvasState, and "
+                        + "skipping avoids a second write to the same layout row."
+                    )
+                }
             } else {
                 guard let saveHook = profileService.canvasEditGuard.saveHook else {
                     Self.logger.error(
@@ -454,9 +591,89 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         alert.runModal()
     }
 
+    /// ⚠️ NO UNIT-TEST SEAM — reviewed, not tested, same as `handleInFlightWorkflowRunsBeforeQuit`
+    /// (WF-LC2) and `handleUnsavedProfileEditsBeforeQuit` above it. Reaching this means driving a
+    /// real `NSAlert.runModal()`, which cannot be headless. The DECISION vocabulary this alert
+    /// consumes — `WorkflowLayoutSaveOutcome.isRefusedByDesign`/`.quitTimeRefusalReason` — IS
+    /// tested, exhaustively, in `BlobWriteRefusalTests.swift`'s WF-PE2 section; what is untested is
+    /// only this function's own alert construction, button-to-branch mapping, and the caller-side
+    /// bucketing loop in `MainApplicationViewModel.persistDirtyWorkflowCanvases` (also VM-construction-
+    /// blocked, per the same established constraint WF-LC2/WF-PE7 already disclose).
+    ///
+    /// [WF-PE2] One or more dirty canvases are refused BY DESIGN — their stored layout is either
+    /// from a newer app version or unreadable, so `WorkflowLayoutStore.save` will refuse identically
+    /// on every attempt. Unlike `presentQuitSaveFailure`, this asks a real question: the canvas
+    /// genuinely cannot be saved, so the honest choice is Cancel (stay open, keep the in-memory
+    /// edits, unsaved) or Quit Anyway (lose them — the on-disk layout was never at risk either way).
+    ///
+    /// ⚠️ The wording per case is intentionally SIMILAR to, but not byte-identical with, what
+    /// `WorkflowCanvasView.saveLayout` shows IN-CANVAS — exactly matching for `.refusedNewerVersion`
+    /// (both read from the same `quitTimeRefusalReason`/banner text), but the unreadable case here
+    /// is deliberately SHORTER: the in-canvas overlay's node/edge/annotation counts are evidence for
+    /// a repair decision that belongs on the canvas, not a quit-time choice with only two options.
+    /// (An earlier draft of this comment overclaimed exact-wording parity for both cases — corrected
+    /// after adversarial review checked it against the actual overlay text and found it did not
+    /// match for the unreadable case.)
+    ///
+    /// ⚠️ Cancel is the Return-key DEFAULT and is added first — "Quit Anyway" here is exactly as
+    /// destructive as "Discard and Quit" in the sibling alert above (permanently discards real,
+    /// unrecoverable in-memory edits), so it gets the same treatment the already-shipped WF-LC2
+    /// in-flight-run prompt established after adversarial review caught the inverse ordering as a
+    /// real UX-safety defect: the destructive option must never be the accidental-Return default.
+    @MainActor
+    private func presentReadOnlyCanvasQuitChoice(
+        _ refused: [(id: UUID, outcome: WorkflowLayoutSaveOutcome)],
+        profileService: BackendProfileService
+    ) -> QuitDecision {
+        // Falls back rather than force-unwrapping: `quitTimeRefusalReason` is nil only for a case
+        // `isRefusedByDesign` would have excluded, which the caller already filtered on before this
+        // was ever invoked — reachable only if that invariant is ever broken, and a generic line in
+        // the alert is a far smaller failure than crashing the whole quit sequence over it.
+        //
+        // ⚠️ NAMED, not just listed — caught by adversarial review: two canvases refused for the
+        // SAME reason (e.g. both `.refusedUnreadable`) produce byte-identical reason text with
+        // nothing to tell them apart, which the doc comment below used to (wrongly) claim already
+        // matched WF-LC2's per-item naming. It did not, until this line existed.
+        let lines = refused.map { entry -> String in
+            let name = profileService.profiles.first(where: { $0.id == entry.id })?.displayName
+                ?? entry.id.uuidString
+            let reason = entry.outcome.quitTimeRefusalReason
+                ?? String(localized: "This workflow's layout can't be saved on this build.")
+            return "\(name): \(reason)"
+        }
+
+        let alert = NSAlert()
+        alert.messageText = refused.count == 1
+            ? String(localized: "A workflow canvas can't be saved")
+            : String(localized: "\(refused.count) workflow canvases can't be saved")
+        // Each reason on its own line — matches the multi-run naming this session's WF-LC2 alert
+        // added for the identical "don't leave the user guessing which one" reason.
+        alert.informativeText = lines.joined(separator: "\n\n")
+            + "\n\n"
+            + String(localized: "Your on-disk layout is unchanged either way — only the edits you made this session are at risk. Quitting now discards them.")
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: String(localized: "Cancel"))
+        alert.addButton(withTitle: String(localized: "Quit Anyway"))
+
+        switch alert.runModal() {
+        case .alertSecondButtonReturn:
+            return .proceed
+        default:
+            return .cancel
+        }
+    }
+
     /// Everything that needs `await` before quitting. Runs while the run loop is alive
     /// (from `applicationShouldTerminate`), so MainActor-bound services are reachable.
     private static func performAsyncTeardown() async {
+        // [WF-PE7] First, and before the observability flush below so its log lines ship: await
+        // any in-flight workflow-run persist. `WorkflowRunTicket.finalize()` is deliberately
+        // fire-and-forget for the UI, which made quit the one moment it lost data — exiting
+        // inside the encode+write window stranded the `.running` stub, and the next launch
+        // relabelled a COMPLETED run "Interrupted" with zero node results. The 3s quit watchdog
+        // wrapping this method still bounds a hung write.
+        await WorkflowRunTicket.drainPendingPersists()
+
         // Stop any live Whisper capture (composer dictation or Jarvis listening) so the
         // HAL client closes cleanly. An AVAudioEngine still running at process death can
         // wedge coreaudiod into refusing this app's audio IO (`_StartIO error 35`) until

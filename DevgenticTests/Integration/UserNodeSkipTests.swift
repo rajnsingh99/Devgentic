@@ -6,12 +6,14 @@
 //  2026-08-21): a user-requested skip records `.skipped(.byUser)`, forwards the node's INPUT
 //  downstream unchanged, activates no ports, and keeps every default edge below it LIVE.
 //
-//  ⚠️ TIMING TRICK, load-bearing in every end-to-end test here: requests can only exist MID-run
-//  (the button renders only on a live run's pending rows), and the executor CLEARS the store at
-//  ROOT-run start precisely so stale requests can't leak in. Pre-loading the store and running at
-//  `startingDepth: 1` (a nested run, which must NOT clear — it would wipe the outer run's
-//  requests) is how a mid-run request is simulated deterministically. The root-run staleness
-//  clear gets its own test, at root depth.
+//  ⚠️ SEEDING, load-bearing in every end-to-end test here: requests can only exist MID-run (the
+//  button renders only on a live run's pending rows). [WF-CC14] The store is run-token-keyed
+//  now: a toggle landing before any run owns the conversation is STAGED, and the root run's
+//  `beginRun` ADOPTS it — so pre-loading the store and running at ROOT depth is exactly the
+//  supported simulation of "clicked during the run, before dispatch reached the node". (The old
+//  harness ran at `startingDepth: 1` to dodge the root start-CLEAR, which no longer exists — a
+//  fresh token has no leftovers by construction, and leftover-request immunity across runs is
+//  pinned by its own test below plus `WorkflowSkipRunScopeTests`.)
 //
 
 import XCTest
@@ -44,7 +46,7 @@ final class UserNodeSkipTests: XCTestCase {
     private func execute(
         _ scenario: WorkflowTestScenario,
         userInput: String = "Test input",
-        startingDepth: Int? = 1
+        startingDepth: Int? = nil
     ) async throws -> [AgentStreamEvent] {
         let executor = WorkflowExecutor(workflowProfileID: UUID())
         let makeStream = {
@@ -209,19 +211,64 @@ final class UserNodeSkipTests: XCTestCase {
     /// At ROOT depth the executor clears the store before dispatch: a request left over from a
     /// previous run must never skip a node in a fresh one. (Requests can only legitimately be
     /// created mid-run; anything present at root start is stale by construction.)
-    func testRootRunStart_ClearsStaleRequests_NodeRunsNormally() async throws {
+    /// [WF-EX11] The skip's pass-through contract holds for ALL FOUR channels. Text, structured
+    /// JSON and edge liveness were each covered; ARTIFACTS were the missed twin — the profile-node
+    /// gather filtered upstream envelopes to `.completed` only, so a skipped node's forwarded
+    /// media/documents silently vanished at the next profile node (while the structural path
+    /// forwarded them). Workflow: Producer(+artifact) → Skipped → Consumer; the Consumer's
+    /// invocation context must carry the Producer's artifact.
+    func testUserSkipForwardsUpstreamArtifactsToTheNextProfileNode() async throws {
+        let scenario = WorkflowTestScenario()
+        let a = scenario.addBotNode(name: "Producer")
+        let b = scenario.addBotNode(name: "Skipped")
+        let c = scenario.addBotNode(name: "Consumer")
+        scenario.connect(from: a, to: b)
+        scenario.connect(from: b, to: c)
+
+        let artifact = MediaArtifact(kind: .image, reference: .ephemeralData(Data([1])), mimeType: "image/png", label: "chart")
+        mockProvider.scriptStream(for: scenario.profileID(for: a)!,
+                                  events: [.content("alpha"), .artifactProduced(artifact)])
+        mockProvider.scriptStream(for: scenario.profileID(for: b)!, events: [.content("SHOULD NEVER RUN")])
+        mockProvider.scriptStream(for: scenario.profileID(for: c)!, events: [.content("gamma")])
+
+        await requestSkip(b)
+        let events = try await execute(scenario)
+
+        XCTAssertEqual(skipReasons(in: events)[b], .byUser)
+        let consumerInvocation = mockProvider.workflowInvocations.first { $0.profileID == scenario.profileID(for: c)! }
+        XCTAssertEqual(consumerInvocation?.context.upstreamArtifacts.map(\.id), [artifact.id],
+                       "the skipped node's FORWARDED artifact must reach the consumer — the skip forwards its input unchanged, and media is part of that input")
+    }
+
+    /// [WF-CC14] The staleness contract, re-shaped for run-token keying. The old test pinned a
+    /// start-of-run CLEAR (a pre-run request "must be cleared, not honoured") — that clear is
+    /// gone BY DESIGN: a pre-run toggle is staged-and-adopted (it is how "clicked during the run"
+    /// is expressed before dispatch), and what actually protects a LATER run is that requests are
+    /// single-shot within a run and namespaces die with their run. Both halves pinned here:
+    /// a consumed request cannot re-skip in run 2, and an unconsumed adoptee is released at
+    /// run 1's end rather than lingering for run 2.
+    func testLeftoverRequestNeverSkipsALaterRun() async throws {
         let scenario = WorkflowTestScenario()
         let a = scenario.addBotNode(name: "Bot A")
         mockProvider.scriptStream(for: scenario.profileID(for: a)!, events: [.content("ran normally")])
-
-        await requestSkip(a)
-        let events = try await execute(scenario, startingDepth: nil)   // ROOT run
-
-        XCTAssertNil(skipReasons(in: events)[a], "the stale request must be cleared, not honoured")
-        XCTAssertEqual(StreamCollector.contentText(from: events), "ran normally")
         let cid = conversationID
-        let residual = await MainActor.run { WorkflowNodeSkipStore.shared.isRequested(nodeID: a, conversationID: cid) }
-        XCTAssertFalse(residual, "the stale request must be gone from the store")
+
+        // Half 1: adopted + consumed in run 1 → run 2 must run the node normally.
+        await requestSkip(a)
+        let run1 = try await execute(scenario)
+        XCTAssertEqual(skipReasons(in: run1)[a], .byUser, "run 1 adopts and honours the seed")
+
+        let run2 = try await execute(scenario)
+        XCTAssertNil(skipReasons(in: run2)[a], "a consumed request must never re-skip in a later run")
+        XCTAssertEqual(StreamCollector.contentText(from: run2), "ran normally")
+
+        // Half 2: an adoptee dispatch never reaches (bogus node id) is RELEASED at run end —
+        // nothing lingers for a later run.
+        let phantom = UUID()
+        await MainActor.run { WorkflowNodeSkipStore.shared.toggle(nodeID: phantom, conversationID: cid) }
+        _ = try await execute(scenario)
+        let residual = await MainActor.run { WorkflowNodeSkipStore.shared.isRequested(nodeID: phantom, conversationID: cid) }
+        XCTAssertFalse(residual, "an unconsumed request must die with its run, not linger for the next")
     }
 
     // MARK: - Phase A debt (Increment 4)
@@ -358,6 +405,14 @@ final class WorkflowNodeSkipStoreTests: XCTestCase {
 
     private let conv = UUID()
     private let node = UUID()
+    /// [WF-CC14] The store is run-token-keyed now; these unit tests declare a run scope the way
+    /// the executor does at run start.
+    private let token = UUID()
+
+    override func setUp() {
+        super.setUp()
+        WorkflowNodeSkipStore.shared.beginRun(conversationID: conv, runToken: token)
+    }
 
     override func tearDown() {
         WorkflowNodeSkipStore.shared.clear(conversationID: conv, reason: "test teardown")
@@ -378,24 +433,30 @@ final class WorkflowNodeSkipStoreTests: XCTestCase {
     func testConsumeIsSingleShot() {
         let store = WorkflowNodeSkipStore.shared
         store.toggle(nodeID: node, conversationID: conv)
-        XCTAssertTrue(store.consume(nodeID: node, conversationID: conv))
-        XCTAssertFalse(store.consume(nodeID: node, conversationID: conv), "second consume must find nothing")
+        XCTAssertTrue(store.consume(nodeID: node, conversationID: conv, runToken: token))
+        XCTAssertFalse(store.consume(nodeID: node, conversationID: conv, runToken: token), "second consume must find nothing")
         XCTAssertFalse(store.isRequested(nodeID: node, conversationID: conv))
     }
 
-    func testRequestsAreConversationScoped() {
+    func testRequestsAreRunScoped() {
         let store = WorkflowNodeSkipStore.shared
         let otherConv = UUID()
+        let otherToken = UUID()
+        store.beginRun(conversationID: otherConv, runToken: otherToken)
         store.toggle(nodeID: node, conversationID: conv)
         XCTAssertFalse(store.isRequested(nodeID: node, conversationID: otherConv))
-        XCTAssertFalse(store.consume(nodeID: node, conversationID: otherConv))
-        XCTAssertTrue(store.consume(nodeID: node, conversationID: conv))
+        XCTAssertFalse(store.consume(nodeID: node, conversationID: otherConv, runToken: otherToken),
+                       "another run must never consume this run's request")
+        XCTAssertTrue(store.consume(nodeID: node, conversationID: conv, runToken: token))
+        store.clear(conversationID: otherConv, reason: "test")
     }
 
     func testClearRemovesOnlyThatConversation() {
         let store = WorkflowNodeSkipStore.shared
         let otherConv = UUID()
         let otherNode = UUID()
+        let otherToken = UUID()
+        store.beginRun(conversationID: otherConv, runToken: otherToken)
         store.toggle(nodeID: node, conversationID: conv)
         store.toggle(nodeID: otherNode, conversationID: otherConv)
         store.clear(conversationID: conv, reason: "test")

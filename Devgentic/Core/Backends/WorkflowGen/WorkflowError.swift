@@ -43,6 +43,12 @@ enum WorkflowError: LocalizedError, Sendable {
     /// (they live outside the blob, written by the last successful save).
     case layoutUnreadable(nodeCount: Int, edgeCount: Int)
 
+    /// The canvas decoded, but contains node(s) this build cannot understand ([WF-PE4]
+    /// `.unsupported` placeholders — written by a different build, e.g. a rollback or the retired
+    /// Loop kind). The graph itself is intact, visible and saveable; only the RUN is refused,
+    /// because an unknown node can neither be executed nor honestly skipped.
+    case unsupportedNodes(names: [String])
+
     var errorDescription: String? {
         switch self {
         case .emptyWorkflow:
@@ -61,6 +67,8 @@ enum WorkflowError: LocalizedError, Sendable {
             return "Workflow has configuration errors that must be resolved:\n\(summary)"
         case .layoutUnreadable(let nodes, let edges):
             return "This workflow's saved canvas could not be read by this version of the app. It last held \(nodes) node\(nodes == 1 ? "" : "s") and \(edges) connection\(edges == 1 ? "" : "s") — the data is intact but the run is blocked to protect it. Open the workflow's canvas to review, repair, or discard it."
+        case .unsupportedNodes(let names):
+            return "This workflow contains \(names.count) node\(names.count == 1 ? "" : "s") saved by a different version of Devgentic (\(names.joined(separator: ", "))). The canvas is intact and editable, but the run is blocked — this version cannot execute \(names.count == 1 ? "that node" : "those nodes"). Update Devgentic, or remove \(names.count == 1 ? "the node" : "them") from the canvas."
         }
     }
 }

@@ -135,6 +135,79 @@ final class WorkflowRunSettlingTests: XCTestCase {
         XCTAssertFalse(row.isExecuting)
     }
 
+    // MARK: - WF-RU10: a node's OWN failure closes its OWN live tool rows
+
+    /// ⚠️ THE FILED BUG. `handleNodeFailed` is reached when the ENGINE reports a node failure
+    /// (e.g. a compute-budget timeout mid-tool) — a path that routes to an activated `error` port
+    /// and lets the RUN CONTINUE. `settleInFlightWork` (which correctly writes back) only fires
+    /// from `handleError`, which this path never reaches; `freeze()`'s own close acts on a
+    /// Dictionary-subscript COPY of `nodeTimelines` and never writes back either. Before this fix,
+    /// the LIVE `nodeTimelines` — what `AgentTimelineView` renders while `executionState` is still
+    /// attached — stayed open for the rest of the session, an indefinite spinner on a node that
+    /// had already failed.
+    func testNodeFailureClosesItsOwnLiveDanglingToolRows() {
+        let state = runningState()
+
+        state.handleNodeFailed(nodeID: nodeB, profileName: "Writer", error: "compute budget exceeded")
+
+        guard case .toolExecution(let row)? = state.nodeTimelines[nodeB]?.first else {
+            return XCTFail("node B's LIVE timeline must have its dangling row closed in place")
+        }
+        XCTAssertFalse(row.isExecuting,
+                       "the row must stop claiming to execute the moment its node fails — not only once persisted")
+        XCTAssertEqual(row.output, "Interrupted before the tool finished.")
+    }
+
+    /// The run then completes normally (the failure's error port was handled) — pinning that the
+    /// close happens WITHOUT any run-level settle ever running, which is exactly the case
+    /// `handleError`/`settleInFlightWork` cannot reach.
+    func testNodeFailureFollowedByANormalRunCompletionKeepsTheRowClosed() {
+        let state = runningState()
+
+        state.handleNodeFailed(nodeID: nodeB, profileName: "Writer", error: "compute budget exceeded")
+        // The run keeps going — an error-port handler answers — and ends via the NORMAL path, not
+        // `handleError`. `settleInFlightWork` is never called.
+        state.handleFinalOutput("recovered by the error handler")
+
+        guard case .toolExecution(let row)? = state.nodeTimelines[nodeB]?.first else {
+            return XCTFail("node B's timeline missing")
+        }
+        XCTAssertFalse(row.isExecuting, "the earlier failure's close must not be undone by a clean finish")
+    }
+
+    /// Control: a node with NO in-flight tool row (already settled, or never had one) must not
+    /// crash or fabricate a timeline entry.
+    func testNodeFailureWithNoLiveTimelineIsANoOp() {
+        let state = WorkflowExecutionState()
+        state.nodeResults = [
+            WorkflowNodeResult(id: UUID(), nodeID: nodeA, profileName: "Fetcher",
+                               status: .running, detail: "", startTime: Date())
+        ]
+
+        state.handleNodeFailed(nodeID: nodeA, profileName: "Fetcher", error: "boom")
+
+        XCTAssertNil(state.nodeTimelines[nodeA], "no timeline existed — the close must not invent one")
+        XCTAssertEqual(state.nodeResults.first?.status, .failed)
+    }
+
+    /// Control: a row that already finished on its own (a normal tool completion, not a dangling
+    /// one) must not have its real output overwritten by the failure close.
+    func testNodeFailureDoesNotTouchAnAlreadyClosedRow() {
+        let state = runningState()
+        state.nodeTimelines[nodeB] = [.toolExecution(ToolExecutionData(
+            id: UUID(), name: "execute_shell", params: "{}",
+            output: "actual tool output", isSuccess: true, isExecuting: false))]
+
+        state.handleNodeFailed(nodeID: nodeB, profileName: "Writer", error: "downstream error")
+
+        guard case .toolExecution(let row)? = state.nodeTimelines[nodeB]?.first else {
+            return XCTFail("node B's timeline missing")
+        }
+        XCTAssertEqual(row.output, "actual tool output",
+                       "a row that finished on its own must keep its real output, not the synthetic close text")
+        XCTAssertEqual(row.isSuccess, true)
+    }
+
     /// Control: a clean run still freezes as completed with its nodes intact.
     func testCleanRunFreezesAsCompleted() {
         let state = WorkflowExecutionState()

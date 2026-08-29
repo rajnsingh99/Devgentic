@@ -723,7 +723,15 @@ final class MessagingCoordinator {
             // ⚠️ UNATTENDED — same binding as the scheduler's, for the same reason: a Router's
             // ambiguity arbitration must take first-match instead of parking, because a bridge
             // run has NO container deadline at all and an unanswered park is forever.
-            let agentMessage = WorkflowRunAttendance.$isAttended.withValue(false) {
+            //
+            // ⚠️ …BUT A HUMAN IS REACHABLE (WF-SE6/SE11). `RemoteMirrorService` mirrors this run's
+            // HITL requests to Telegram/Slack/Discord with tappable Approve/Deny and resolves them
+            // through `handleApproval`, so a tool CONFIRMATION here must still park and mirror —
+            // refusing it would delete a shipped capability whose only remedy for a plain agent
+            // chat is disabling Ask-first globally. The two flags answer different questions; see
+            // `WorkflowRunAttendance.hasRemoteResponder`.
+            let agentMessage = WorkflowRunAttendance.$hasRemoteResponder.withValue(true) {
+            WorkflowRunAttendance.$isAttended.withValue(false) {
                 self.activeStreamManager.startMessageStream(
                 withConfig: config,
                 conversationID: conversationID,
@@ -740,6 +748,7 @@ final class MessagingCoordinator {
                     }
                 }
                 )
+            }
             }
 
             agentMessage.messageSource = source

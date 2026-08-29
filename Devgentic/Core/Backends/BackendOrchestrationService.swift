@@ -648,7 +648,7 @@ class BackendOrchestrationService {
                             // Workflow orchestration events (not emitted by agent profiles, but needed for exhaustive switch)
                             case .workflowNodeStarted, .workflowNodeCompleted, .workflowNodeFailed,
                                  .workflowNodeSkipped, .workflowNodeCancelled,
-                                 .workflowProgress:
+                                 .workflowProgress, .workflowRunFinished:
                                 continuation.yield(event)
 
                             // Multimodal events

@@ -136,7 +136,7 @@ actor SelfReflectionExecutorWrapper: Executor {
                     // OUTER LOOP: TRIALS
                     // =====================================================================
 
-                    for trial in 1...self.config.maxTrials {
+                    trialLoop: for trial in 1...self.config.maxTrials {
                         try Task.checkCancellation()
 
                         let trialSpan = executionTrace.newSpan()
@@ -321,14 +321,14 @@ actor SelfReflectionExecutorWrapper: Executor {
                         // =============================================================
 
                         // Skip reflection on the last trial
-                        guard trial < self.config.maxTrials else { break }
+                        guard trial < self.config.maxTrials else { break trialLoop }
 
                         continuation.yield(.reflectionEvaluating(trial: trial))
 
                         await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
                         try Task.checkCancellation()  // [G7] Catch cancellation before reflection LLM call
 
-                        let (reflection, reflectionUsage) = try await reflectionEvaluator.evaluate(
+                        let (evaluation, reflectionUsage) = try await reflectionEvaluator.evaluate(
                             summary: trialSummary,
                             originalGoal: input.userInput,
                             model: spyModel,
@@ -336,10 +336,27 @@ actor SelfReflectionExecutorWrapper: Executor {
                         )
                         continuation.yield(.tokenUsage(reflectionUsage))
 
+                        // [WF-CC11] An evaluation the LLM call itself failed is NOT a verdict.
+                        // Keep the trial's answer as-is and stop reflecting: re-running the whole
+                        // agent trial (tool side effects included) off an infrastructure fault —
+                        // while feeding the next prompt a fabricated "be more careful with tools"
+                        // critique — was the filed defect. No reflexion-memory entry, no
+                        // accumulated constraint: nothing was actually judged.
+                        guard case .verdict(let reflection) = evaluation else {
+                            if case .inconclusive(let reason) = evaluation {
+                                logger.warning("[REFLECTION] Trial \(trial) evaluation was INCONCLUSIVE (\(reason)). CONSEQUENCE: the trial's answer is kept without a verdict; remaining trials are skipped rather than spent re-running work nothing judged deficient.")
+                                continuation.yield(.warning(
+                                    category: .midRunError,
+                                    message: "Self-reflection could not evaluate this answer (\(reason)) — keeping it as-is."
+                                ))
+                            }
+                            break trialLoop
+                        }
+
                         if reflection.isAcceptable {
                             logger.info("Trial \(trial) accepted by reflection evaluator.")
                             continuation.yield(.reflectionAccepted(trial: trial))
-                            break
+                            break trialLoop
                         }
 
                         // Not acceptable -- prepare for next trial. The full critique travels

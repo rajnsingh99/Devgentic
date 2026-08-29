@@ -156,7 +156,6 @@ final class SkillPromptInjectionTests: XCTestCase {
             availableTools: [],
             userProfile: nil,
             skillManifests: manifests,
-            taskDescription: nil,
             promptLayerConfig: .agent,
             workflowContext: nil
         )
@@ -199,7 +198,6 @@ final class SkillPromptInjectionTests: XCTestCase {
             availableTools: [],
             userProfile: nil,
             skillManifests: nil,
-            taskDescription: nil,
             promptLayerConfig: .agent,
             workflowContext: nil
         )

@@ -140,6 +140,21 @@ final class MockWorkflowStreamProvider: WorkflowStreamProvider, @unchecked Senda
     /// `AgentTool.run` directly, bypassing `ToolExecutionMediator`) had zero coverage.
     private var scriptedTools: [String: AgentTool] = [:]
 
+    /// Invocation counts per scripted tool name, incremented every time ANY scripted tool's `run`
+    /// executes for real — regardless of which registration method created it. Lets a test assert
+    /// "the tool ran exactly N times" (e.g. "never a second time after Stop") without needing its
+    /// own synchronization.
+    private var _toolInvocationCounts: [String: Int] = [:]
+    func toolInvocationCount(for name: String) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return _toolInvocationCounts[name] ?? 0
+    }
+    private func recordToolInvocation(_ name: String) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        _toolInvocationCounts[name, default: 0] += 1
+        return _toolInvocationCounts[name]!
+    }
+
     /// Registers a tool an Action node will resolve, returning `output` when run.
     ///
     /// `contentMayLookLikeError` mirrors the real opt-out for tools whose legitimate output
@@ -159,7 +174,10 @@ final class MockWorkflowStreamProvider: WorkflowStreamProvider, @unchecked Senda
             parameters: ToolParameters(type: "object", properties: [:], required: []),
             requiresConfirmation: requiresConfirmation,
             contentMayLookLikeError: contentMayLookLikeError,
-            run: { _ in (output, artifacts) }
+            run: { [weak self] _ in
+                _ = self?.recordToolInvocation(name)
+                return (output, artifacts)
+            }
         )
     }
 
@@ -173,7 +191,32 @@ final class MockWorkflowStreamProvider: WorkflowStreamProvider, @unchecked Senda
             parameters: ToolParameters(type: "object", properties: [:], required: []),
             requiresConfirmation: requiresConfirmation,
             contentMayLookLikeError: false,
-            run: { _ in throw error }
+            run: { [weak self] _ in
+                _ = self?.recordToolInvocation(name)
+                throw error
+            }
+        )
+    }
+
+    /// Registers a tool that fires `onInvoke` then throws `error` — a deterministic barrier for
+    /// tests that must cancel the ambient Task at the exact moment a tool attempt starts (WF-CC4),
+    /// mirroring `onInvoke` (WF-TS2) for the Action-node tool path rather than the LLM-stream path.
+    /// `onInvoke` receives the 1-based invocation count, so a test can cancel on exactly the first
+    /// attempt and later assert no further attempt occurred.
+    func scriptThrowingToolWithBarrier(name: String, error: Error, onInvoke: @escaping @Sendable (Int) -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        scriptedTools[name] = AgentTool(
+            name: name,
+            description: "Scripted throwing test tool with invocation barrier",
+            parameters: ToolParameters(type: "object", properties: [:], required: []),
+            requiresConfirmation: false,
+            contentMayLookLikeError: false,
+            run: { [weak self] _ in
+                let count = self?.recordToolInvocation(name) ?? 0
+                onInvoke(count)
+                throw error
+            }
         )
     }
 
@@ -289,15 +332,12 @@ final class MockWorkflowStreamProvider: WorkflowStreamProvider, @unchecked Senda
         workflowInvocations.append((profileID: profile.id, context: workflowContext))
         lock.unlock()
 
-        // Compose userInput for the existing scripted response lookup
-        let composedInput = workflowContext.isFirstNode
-            ? workflowContext.taskDescription
-            : workflowContext.upstreamInput
-
+        // One input channel (2026-08-29) — mirrors the production default bridge in
+        // `WorkflowStreamProvider`, which no longer branches on `isFirstNode` either.
         // Delegate to the existing streamAgentResponse which handles scripted queues
         return streamAgentResponse(
             for: profile,
-            userInput: composedInput,
+            userInput: workflowContext.input,
             chatHistory: [],
             conversationID: conversationID,
             ragContext: nil,

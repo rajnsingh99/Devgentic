@@ -306,7 +306,6 @@ actor ReActAgentExecutor: Executor {
                             availableTools: availableToolsThisIteration,
                             userProfile: userProfile,
                             skillManifests: input.skillManifests,
-                            taskDescription: input.workflowContext?.taskDescription,
                             promptLayerConfig: input.workflowContext != nil ? .workflow : .agent,
                             workflowContext: input.workflowContext,
                             attachmentContext: input.attachmentContext,
@@ -449,6 +448,7 @@ actor ReActAgentExecutor: Executor {
                                     interactionMemory: interactionMemory,
                                     continuation: continuation,
                                     approvalNodeID: input.workflowContext?.nodeID,
+                                    unattendedAutoApprove: input.workflowContext?.unattendedAutoApprove ?? false,
                                     onTraceUpdate: onTraceUpdate
                                 )
                                 if let nativeAdapter {
@@ -888,6 +888,7 @@ actor ReActAgentExecutor: Executor {
                             interactionMemory: interactionMemory,
                             continuation: continuation,
                             approvalNodeID: input.workflowContext?.nodeID,
+                            unattendedAutoApprove: input.workflowContext?.unattendedAutoApprove ?? false,
                             onTraceUpdate: onTraceUpdate
                         )
 

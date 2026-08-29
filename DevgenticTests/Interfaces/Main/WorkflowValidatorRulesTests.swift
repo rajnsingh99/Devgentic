@@ -329,13 +329,15 @@ final class WorkflowValidatorRulesTests: XCTestCase {
         XCTAssertTrue(errors(issues, containing: "canvas is empty").isEmpty)
     }
 
-    // MARK: - WF-CC2: same-level MLX model contention (design-time warning)
+    // MARK: - WF-CC2 / WF-CC5: same-level MLX model contention (design-time warning)
     //
     // ⚠️ `MLXService` keeps ONE model container resident, so two same-level nodes on DIFFERENT MLX
     // models evict each other on every generation call; two on the SAME model share one container
-    // for free. The runtime lane split (`WorkflowExecutor.profileDispatchLanes`) handles the
-    // PROFILE group; this warning is what tells the author before they ever hit Run, and it is the
-    // ONLY coverage the structural (AI Classifier Router) half gets today.
+    // for free. `WorkflowExecutor.profileDispatchLanes` (WF-CC2) partitions the PROFILE group at
+    // runtime; `WorkflowExecutor.structuralDispatchLanes` (WF-CC5) now does the same for the
+    // STRUCTURAL group (Router `.condition` fallbacks + nested sub-workflow nodes). Both halves are
+    // ACTUALLY FIXED at runtime now — these warnings are informational (this step runs slower, not
+    // "this step is unsafe"), matching the profile pool's own long-standing framing.
 
     private static let mlxWarning = "Only one MLX model stays in memory"
 
@@ -433,9 +435,11 @@ final class WorkflowValidatorRulesTests: XCTestCase {
                       "structural and profile nodes are dispatched in separate, fully-awaited groups — they cannot contend")
     }
 
-    /// ⚠️ Two same-level Routers DO contend, and unlike profile nodes they are NOT covered by the
-    /// runtime lane split — the structural group was deliberately left alone. This warning is
-    /// their only protection, which is exactly why it must fire.
+    /// ⚠️ Two same-level Routers on different models used to thrash unconditionally — the
+    /// structural group was deliberately left unpartitioned until WF-CC5. Now the runtime lane
+    /// split (`structuralDispatchLanes`) actually serializes them, so this warning is informational
+    /// (a performance note) rather than a safety-critical "your run may fail" — but it must still
+    /// fire, since the sequential lanes cost real wall-clock time the author should be told about.
     func testTwoSameLevelMLXRouters_DoWarn() {
         func router(_ model: String, _ name: String) -> WorkflowNode {
             var config = ConditionNodeConfig()
@@ -463,6 +467,100 @@ final class WorkflowValidatorRulesTests: XCTestCase {
         let l = fanOut([router("qwen3-8b", "R1"), router("llama3-3b", "R2")], into: codeNode(name: "Merge"))
 
         XCTAssertTrue(warnings(validate(l), containing: Self.mlxWarning).isEmpty)
+    }
+
+    // MARK: - WF-CC5: nested sub-workflows share the STRUCTURAL group too
+    //
+    // ⚠️ A sub-workflow's own MLX demand is invisible at design time — it lives in the CHILD
+    // layout, which this rule cannot see (same reason `mlxProfileDemands` above skips `.workflow`
+    // entirely). Unlike two same-model Routers, there is no model name to compare, so this check
+    // cannot distinguish "these would never actually collide" from "these might" — it warns
+    // unconditionally, deliberately mirroring the runtime's own unconditional exclusive-lane choice
+    // in `WorkflowExecutor.structuralDispatchLanes`.
+
+    /// Two same-level sub-workflows ALWAYS warn, even though this test gives neither of them any
+    /// visible MLX demand at all.
+    func testTwoSameLevelSubWorkflows_DoWarn() {
+        let idA = UUID(), idB = UUID()
+        let l = fanOut([subWorkflowNode(idA, name: "Nested A"), subWorkflowNode(idB, name: "Nested B")],
+                       into: codeNode(name: "Merge"))
+        let (pA, profA) = workflowProfile(idA, name: "Nested A")
+        let (pB, profB) = workflowProfile(idB, name: "Nested B")
+        let issues = validate(l, profiles: [pA: profA, pB: profB])
+        XCTAssertEqual(warnings(issues, containing: Self.mlxWarning).count, 2)
+        XCTAssertTrue(errors(issues, containing: "MLX model").isEmpty)
+    }
+
+    /// A sub-workflow beside an MLX-fallback Router also warns — they physically share the
+    /// runtime's structural task group, unlike a sub-workflow beside a (separately-phased) regular
+    /// profile node (see the negative case below).
+    func testSubWorkflowBesideMLXRouter_DoesWarn() {
+        var config = ConditionNodeConfig()
+        config.rules = [rule("A"), rule("B")]
+        config.llmFallbackEnabled = true
+        config.llmModelName = "qwen3-8b"
+        let router = WorkflowNode(kind: .condition(config), position: .zero, displayName: "Router")
+        let nestedID = UUID()
+        let l = fanOut([router, subWorkflowNode(nestedID, name: "Nested")], into: codeNode(name: "Merge"))
+        let (p, prof) = workflowProfile(nestedID, name: "Nested")
+
+        let issues = validate(l, profiles: [p: prof])
+        XCTAssertEqual(warnings(issues, containing: Self.mlxWarning).count, 2)
+    }
+
+    /// A single sub-workflow with no other MLX-relevant sibling has nothing to contend with — full
+    /// parallelism is preserved, matching `structuralDispatchLanes`'s own `slotOrder.count > 1` gate.
+    func testSingleSubWorkflow_IsNotFlagged() {
+        let nestedID = UUID()
+        let l = fanOut([subWorkflowNode(nestedID, name: "Nested"), codeNode(name: "Sibling")], into: codeNode(name: "Merge"))
+        let (p, prof) = workflowProfile(nestedID, name: "Nested")
+        XCTAssertTrue(warnings(validate(l, profiles: [p: prof]), containing: Self.mlxWarning).isEmpty)
+    }
+
+    /// ⚠️ Same reason WF-CC2's own two-pool split exists. A sub-workflow node is dispatched
+    /// STRUCTURALLY, but a regular (non-workflow) profile node is dispatched in the fully-separate,
+    /// non-overlapping PROFILE phase — they cannot contend, so this must stay quiet.
+    func testSubWorkflowBesideRegularProfileNode_DoesNotWarn() {
+        let deep = mlxBotProfile("qwen3-8b", name: "Deep")
+        let nestedID = UUID()
+        let l = fanOut([subWorkflowNode(nestedID, name: "Nested"), botNode(deep)], into: codeNode(name: "Merge"))
+        let (p, prof) = workflowProfile(nestedID, name: "Nested")
+        XCTAssertTrue(warnings(validate(l, profiles: [deep.id: deep, p: prof]), containing: Self.mlxWarning).isEmpty,
+                      "a sub-workflow (structural) and a regular profile node (profile phase) are dispatched in separate, fully-awaited groups")
+    }
+
+    /// ⚠️ THE REGRESSION TEST for the false-positive adversarial review caught: a `.condition`
+    /// node with its AI Classifier fallback switched ON but a BLANK model name is genuinely
+    /// unconstrained at runtime (`structuralDispatchLanes` gives it `slot = nil`, same as
+    /// `mlxSlotKey` treats an empty model name), so it must never be blamed for MLX contention —
+    /// even when 2+ OTHER genuinely-slotted siblings force `lanes.count > 1` and sweep it along
+    /// into the same lane. The first version of this check gated a node's descriptor on
+    /// `llmFallbackEnabled` alone (ignoring the model name) and filtered `contenders` by
+    /// `lane.slot != nil` (a no-op once `lanes.count > 1`, since every RETURNED lane's slot is by
+    /// construction non-nil) — so this exact Router got a warning quoting the local MLX model `''`.
+    func testRouterWithFallbackEnabledButBlankModel_BesideTwoSubWorkflows_IsNotFlagged() {
+        var config = ConditionNodeConfig()
+        config.rules = [rule("A"), rule("B")]
+        config.llmFallbackEnabled = true
+        config.llmModelName = nil
+        let router = WorkflowNode(kind: .condition(config), position: .zero, displayName: "BlankRouter")
+        let idA = UUID(), idB = UUID()
+        let l = fanOut(
+            [router, subWorkflowNode(idA, name: "Nested A"), subWorkflowNode(idB, name: "Nested B")],
+            into: codeNode(name: "Merge")
+        )
+        let (pA, profA) = workflowProfile(idA, name: "Nested A")
+        let (pB, profB) = workflowProfile(idB, name: "Nested B")
+
+        let issues = validate(l, profiles: [pA: profA, pB: profB])
+        let mlxWarnings = warnings(issues, containing: Self.mlxWarning)
+
+        XCTAssertTrue(mlxWarnings.allSatisfy { $0.nodeName != "BlankRouter" },
+                      "BlankRouter never touches MLX and the runtime never gives it its own lane — it must not appear as a contender. Got: \(mlxWarnings.map(\.nodeName))")
+        XCTAssertTrue(mlxWarnings.allSatisfy { !$0.message.contains("BlankRouter") },
+                      "BlankRouter must not be named as a contending sibling in anyone else's warning either")
+        // The two sub-workflows still genuinely contend with EACH OTHER and must still warn.
+        XCTAssertEqual(mlxWarnings.count, 2)
     }
 
     // MARK: - Unified Router policy (2026-08-17)

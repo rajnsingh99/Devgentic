@@ -16,6 +16,23 @@ import OSLog
 
 private let logger = DGLogger(category: "ReflectionEvaluator")
 
+/// What one evaluation call produced — a real verdict, or nothing.
+///
+/// [WF-CC11] The `.inconclusive` case exists because the LLM-error catch used to manufacture a
+/// verdict: `isAcceptable: false` plus the fabricated advice "Retry the same approach with more
+/// careful tool usage." — asserting the agent's tool usage needed more care when nothing was ever
+/// evaluated. That forced a WHOLE extra agent trial (doubling latency, tokens and any tool side
+/// effects) off an infrastructure fault — an MLX slot race during the EVALUATOR's call — and fed
+/// the fabricated instruction into the next trial's prompt. With no evaluation there is no honest
+/// verdict; the caller keeps the trial it already has. Mirrors the `ClassifierOutcome`
+/// failed/unreadable split that closed WF-CC10: an infrastructure fault must never be reported as
+/// a content fault.
+enum ReflectionEvaluation: Sendable {
+    case verdict(ReflectionResult)
+    /// The evaluation CALL failed (provider/transport/model-slot) — not the trial being judged.
+    case inconclusive(reason: String)
+}
+
 struct ReflectionEvaluator: Sendable {
 
     func evaluate(
@@ -23,7 +40,7 @@ struct ReflectionEvaluator: Sendable {
         originalGoal: String,
         model: any LLMProvider,
         trial: Int
-    ) async throws -> (result: ReflectionResult, usage: TokenUsage) {
+    ) async throws -> (result: ReflectionEvaluation, usage: TokenUsage) {
 
         // Compute context-aware tool result budget
         let contextWindow = KnownModelContextWindows.lookup(model.modelName) ?? 8192
@@ -64,7 +81,7 @@ struct ReflectionEvaluator: Sendable {
             // Prefer the provider's real token counts; fall back to a chars÷4 estimate only when
             // the provider didn't report usage (e.g. MLX), so the eval call is still counted (#10b).
             let usage = reportedUsage ?? .estimated(inputChars: prompt.count, outputChars: response.count)
-            return (parseReflection(from: response, trial: trial), usage)
+            return (.verdict(parseReflection(from: response, trial: trial)), usage)
         } catch is CancellationError {
             // #18 (B): cancellation must propagate, not be swallowed. Folding it into a
             // "not acceptable" verdict would record a bogus "evaluation failed" critique
@@ -72,13 +89,11 @@ struct ReflectionEvaluator: Sendable {
             // the trial-stream catch in SelfReflectionCapability.
             throw CancellationError()
         } catch {
-            logger.warning("Reflection LLM call failed: \(error.localizedDescription). Defaulting to not acceptable.")
-            return (ReflectionResult(
-                isAcceptable: false,
-                critique: "Reflection evaluation failed due to LLM error: \(error.localizedDescription)",
-                suggestedRevisions: "Retry the same approach with more careful tool usage.",
-                trial: trial
-            ), TokenUsage())
+            // [WF-CC11] Infrastructure fault, not a verdict. This used to return
+            // `isAcceptable: false` with fabricated revision advice, which forced a full extra
+            // agent trial — see `ReflectionEvaluation.inconclusive`'s doc for the whole story.
+            logger.warning("[REFLECTION] Evaluation LLM call for trial \(trial) failed: \(error.localizedDescription). CONSEQUENCE: the verdict is INCONCLUSIVE — the caller keeps the trial's answer as-is; no extra trial runs and no fabricated critique enters the next prompt.")
+            return (.inconclusive(reason: error.localizedDescription), TokenUsage())
         }
     }
 

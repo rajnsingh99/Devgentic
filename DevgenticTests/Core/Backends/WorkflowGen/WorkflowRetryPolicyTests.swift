@@ -220,4 +220,48 @@ final class WorkflowRetryPolicyTests: XCTestCase {
         XCTAssertFalse(WorkflowRetryPolicy.declineReason(for: Whatever()).isEmpty)
         XCTAssertTrue(WorkflowRetryPolicy.declineReason(for: CancellationError()).contains("cancelled"))
     }
+
+    /// WF-CC4: a cancellation-shaped `URLError` must not be classified as an ordinary transient
+    /// network blip — a Stop-triggered cancellation can surface as `URLError(.cancelled)` rather
+    /// than `CancellationError`, and this predicate must not contradict the file's own rule that
+    /// cancellation is never retried just because of which shape it happened to arrive in.
+    func testCancelledURLErrorIsNotTransient() {
+        XCTAssertFalse(WorkflowRetryPolicy.isTransientToolError(URLError(.cancelled)))
+    }
+
+    /// The wrapped-error path (MCP over HTTP) must apply the same exclusion as the bare one.
+    func testWrappedCancelledURLErrorIsNotTransient() {
+        let wrapped = NSError(domain: "MCP", code: 1,
+                              userInfo: [NSUnderlyingErrorKey: URLError(.cancelled)])
+        XCTAssertFalse(WorkflowRetryPolicy.isTransientToolError(wrapped))
+    }
+
+    // MARK: - shouldRetryToolFailure — cancellation is checked first, unconditionally (WF-CC4)
+
+    /// The single most important property: cancelled beats everything else, including an error
+    /// that would otherwise clearly qualify as transient and retries remaining.
+    func testCancellationIsNeverRetriedEvenForATransientError() {
+        XCTAssertFalse(WorkflowRetryPolicy.shouldRetryToolFailure(
+            URLError(.networkConnectionLost), attempt: 0, maxRetries: 3, isCancelled: true
+        ))
+    }
+
+    func testNonCancelledTransientErrorWithRetriesRemainingIsRetried() {
+        XCTAssertTrue(WorkflowRetryPolicy.shouldRetryToolFailure(
+            URLError(.networkConnectionLost), attempt: 0, maxRetries: 3, isCancelled: false
+        ))
+    }
+
+    func testNonCancelledTransientErrorWithNoRetriesRemainingIsNotRetried() {
+        XCTAssertFalse(WorkflowRetryPolicy.shouldRetryToolFailure(
+            URLError(.networkConnectionLost), attempt: 3, maxRetries: 3, isCancelled: false
+        ))
+    }
+
+    func testNonCancelledPermanentErrorIsNotRetried() {
+        struct ToolArgumentError: Error {}
+        XCTAssertFalse(WorkflowRetryPolicy.shouldRetryToolFailure(
+            ToolArgumentError(), attempt: 0, maxRetries: 3, isCancelled: false
+        ))
+    }
 }

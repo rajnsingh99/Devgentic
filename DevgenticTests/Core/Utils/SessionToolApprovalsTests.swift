@@ -173,4 +173,24 @@ final class SessionToolApprovalsTests: XCTestCase {
         let allowed = await store.isAllowed(toolName: "execute_shell", conversationID: conversation)
         XCTAssertTrue(allowed, "a pre-existing conversation grant must not be dropped by the upgrade")
     }
+
+    // MARK: - [WF-SE6] Grants are attended-only
+
+    /// The store reads `WorkflowRunAttendance.isAttended` (a TaskLocal) on the caller's task:
+    /// an interactive "Allow for this chat" grant must never auto-approve a scheduled or
+    /// ChatOps run — that leak made one banner click a permanent unattended auto-approve.
+    func testGrantIsNotServedWhenTheRunIsUnattended() async {
+        let store = SessionToolApprovals(defaults: UserDefaults(suiteName: "se6-attendance-\(UUID().uuidString)")!)
+        let conv = UUID(), node = UUID()
+        await store.allow(toolName: "send_webhook", conversationID: conv, nodeID: node)
+
+        let attended = await store.isAllowed(toolName: "send_webhook", conversationID: conv, nodeID: node)
+        XCTAssertTrue(attended, "the default (attended) task keeps the existing behaviour")
+
+        let unattended = await WorkflowRunAttendance.$isAttended.withValue(false) {
+            await store.isAllowed(toolName: "send_webhook", conversationID: conv, nodeID: node)
+        }
+        XCTAssertFalse(unattended,
+                       "an unattended run must not consume an interactive grant — unattended approval is the node's explicit setting, never a banner side effect")
+    }
 }

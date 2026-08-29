@@ -220,6 +220,86 @@ final class WorkflowSkipReasonTests: XCTestCase {
         XCTAssertEqual(terminals.first?.profileName, "Second")
     }
 
+    // MARK: - Terminality requires a downstream that actually RAN (WF-EX1 follow-on)
+
+    /// The fan-in that dropped finished work. R1/R2/R3 feed one Synthesizer; R3 fails, so the join
+    /// correctly skips the Synthesizer. R1 and R2 fired LIVE edges into it — but nothing consumed
+    /// them, so their answers are still the end of the only paths that ran.
+    func testCompletedUpstreamsOfASkippedJoinAreTerminals() {
+        let r1 = UUID(), r2 = UUID(), r3 = UUID(), join = UUID()
+        var state = WorkflowState()
+        state.recordResult(from: envelope(.completed, id: r1, name: "R1", output: "first finding"))
+        state.recordResult(from: envelope(.completed, id: r2, name: "R2", output: "second finding"))
+        state.recordResult(from: envelope(.failed(.modelError(provider: "x", error: "boom")), id: r3, name: "R3", output: ""))
+        state.setActiveOutputPorts(["error"], for: r3)
+        state.recordResult(from: envelope(.skipped(reason: .upstreamFailed), id: join, name: "Synthesizer", output: ""))
+
+        let terminals = state.terminalOutputs(
+            edges: [edge(r1, join, port: nil), edge(r2, join, port: nil), edge(r3, join, port: nil)],
+            allNodeIDs: [r1, r2, r3, join]
+        )
+
+        let answering = terminals.filter { if case .completed = $0.status { return true }; return false }
+        XCTAssertEqual(Set(answering.map(\.profileName)), ["R1", "R2"],
+                       "both finished agents must reach the answer — the run used to report a bare failure and discard them")
+        XCTAssertTrue(terminals.contains { $0.profileName == "R3" },
+                      "the failed branch is still a terminal, so the failure is still reported")
+    }
+
+    /// The SILENT variant, and the reason this is severity-one: nothing fails, so the run reports
+    /// success — and used to present the Router's pass-through as the whole answer while the real
+    /// work went unmentioned.
+    func testCompletedUpstreamOfAnUnchosenBranchIsATerminal() {
+        let worker = UUID(), router = UUID(), join = UUID()
+        var state = WorkflowState()
+        state.recordResult(from: envelope(.completed, id: worker, name: "Worker", output: "the real answer"))
+        state.recordResult(from: envelope(.completed, id: router, name: "Router", output: "routing note"))
+        state.setActiveOutputPorts(["no"], for: router)
+        state.recordResult(from: envelope(.skipped(reason: .notChosen), id: join, name: "Merge", output: ""))
+
+        let terminals = state.terminalOutputs(
+            edges: [edge(worker, join, port: nil), edge(router, join, port: "yes")],
+            allNodeIDs: [worker, router, join]
+        )
+
+        XCTAssertTrue(terminals.contains { $0.text == "the real answer" },
+                      "the worker's output must reach the answer; the run reports COMPLETED either way")
+    }
+
+    /// The guard against over-correcting: a user-skipped node DID consume its input and forwards it
+    /// as its own output, so the upstream must NOT also become a terminal — that would print the
+    /// same content twice.
+    func testUserSkippedDownstreamStillConsumesItsUpstream() {
+        var state = WorkflowState()
+        state.recordResult(from: envelope(.completed, id: upstreamID, name: "First", output: "a"))
+        state.recordResult(from: envelope(.skipped(reason: .byUser), id: downstreamID, name: "Second", output: "a"))
+
+        let terminals = state.terminalOutputs(
+            edges: [edge(upstreamID, downstreamID, port: nil)],
+            allNodeIDs: [upstreamID, downstreamID]
+        )
+
+        XCTAssertEqual(terminals.count, 1)
+        XCTAssertEqual(terminals.first?.profileName, "Second",
+                       "the user-skipped node carries the forwarded text; its upstream must not double-print it")
+    }
+
+    /// A downstream that FAILED still ran, so its upstream is not a terminal — the failure is the
+    /// end of that path and is what the run should report.
+    func testFailedDownstreamStillConsumesItsUpstream() {
+        var state = WorkflowState()
+        state.recordResult(from: envelope(.completed, id: upstreamID, name: "First", output: "a"))
+        state.recordResult(from: envelope(.failed(.modelError(provider: "x", error: "boom")), id: downstreamID, name: "Second", output: ""))
+
+        let terminals = state.terminalOutputs(
+            edges: [edge(upstreamID, downstreamID, port: nil)],
+            allNodeIDs: [upstreamID, downstreamID]
+        )
+
+        XCTAssertFalse(terminals.contains { $0.profileName == "First" },
+                       "the downstream ran and failed; the path ended there, not at its upstream")
+    }
+
     // MARK: - Run verdict
 
     /// A run where nothing failed must report no failures, however its branches ended.

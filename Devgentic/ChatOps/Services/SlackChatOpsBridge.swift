@@ -352,10 +352,20 @@ final class SlackChatOpsBridge {
             return
         }
 
+        // [WF-SE10] Cancel the RUN, not just its parked question — same teardown as the
+        // in-app Stop button (cancellation cascades into any parked HITL and finalizes).
+        // The suspension drain stays as belt-and-braces for a parked interaction with no
+        // live stream task; after a stream cancel it finds nothing and no-ops.
+        let hadActiveRun = viewModel?.activeStreamManager.hasActiveStream(inConversation: conversationID) ?? false
+        viewModel?.activeStreamManager.cancelStreams(forConversation: conversationID)
         await ExecutionSuspensionService.shared.cancel(for: conversationID)
         awaitingClarification = false
 
-        _ = try? await apiClient?.postMessage(channel: channelID, text: "🛑 Cancelled active agent for this conversation.")
+        let reply = hadActiveRun
+            ? "🛑 Cancelled the active run for this conversation."
+            : "No run is currently active for this conversation — cleared any pending approvals."
+        _ = try? await apiClient?.postMessage(channel: channelID, text: reply)
+        logger.info("[CHATOPS] /cancel via Slack for conversation \(conversationID.uuidString) — hadActiveRun=\(hadActiveRun). CONSEQUENCE: the stream task itself was cancelled (not just the parked HITL), so the run stops instead of continuing after the bot claims it was cancelled.")
     }
 
     private func handleHelp(channelID: String) async {

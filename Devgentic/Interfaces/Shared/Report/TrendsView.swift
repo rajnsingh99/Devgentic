@@ -544,10 +544,14 @@ private struct WorkflowNodeStatsTable: View {
                     Text("\(stat.totalRuns)")
                         .font(.caption.monospacedDigit())
                         .frame(width: 60, alignment: .trailing)
-                    Text(String(format: "%.0f%%", stat.successRate * 100))
+                    // [WF-OB6] "—" when the node has no verdict yet (every run stopped, skipped,
+                    // or still in flight). Rendering 0% there would say "this node is broken" for
+                    // a node that was merely never allowed to finish — the same wrong signal, at a
+                    // different number. Matches how p50/p95 below already render an absent value.
+                    Text(stat.successRate.map { String(format: "%.0f%%", $0 * 100) } ?? "—")
                         .font(.caption.monospacedDigit())
                         .frame(width: 70, alignment: .trailing)
-                        .foregroundColor(stat.successRate >= 0.8 ? .green : (stat.successRate >= 0.5 ? .orange : .red))
+                        .foregroundColor(stat.successRate.map { $0 >= 0.8 ? .green : ($0 >= 0.5 ? .orange : .red) } ?? theme.tertiaryText)
                     Text(stat.p50DurationMs.map(formatMs) ?? "—")
                         .font(.caption.monospacedDigit())
                         .foregroundColor(theme.tertiaryText)

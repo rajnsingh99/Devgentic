@@ -287,11 +287,23 @@ final class ChatOpsBridge {
             return
         }
 
-        // Cancel any suspended HITL first
+        // [WF-SE10] Cancel the RUN, not just its parked question. This handler used to call
+        // only `ExecutionSuspensionService.cancel(for:)` and then claim the agent was
+        // cancelled — but that merely denies a parked HITL; the stream kept executing (and a
+        // denied Gate manufactured a red "not answered" failure that routed the run down its
+        // error branch, WF-CC1). `cancelStreams` is the same teardown the in-app Stop button
+        // uses: cancellation cascades into any parked suspension and finalizes the message.
+        let hadActiveRun = viewModel?.activeStreamManager.hasActiveStream(inConversation: conversationID) ?? false
+        viewModel?.activeStreamManager.cancelStreams(forConversation: conversationID)
+        // Belt-and-braces for a parked interaction with no live stream task (the pre-fix
+        // shape); after a stream cancel this finds nothing and no-ops.
         await ExecutionSuspensionService.shared.cancel(for: conversationID)
 
-        _ = try? await apiClient?.sendMessage(chatID: chatID, text: "🛑 Cancelled active agent for this conversation.")
-        logger.info("Cancelled agent via Telegram for conversation \(conversationID.uuidString)")
+        let reply = hadActiveRun
+            ? "🛑 Cancelled the active run for this conversation."
+            : "No run is currently active for this conversation — cleared any pending approvals."
+        _ = try? await apiClient?.sendMessage(chatID: chatID, text: reply)
+        logger.info("[CHATOPS] /cancel via Telegram for conversation \(conversationID.uuidString) — hadActiveRun=\(hadActiveRun). CONSEQUENCE: the stream task itself was cancelled (not just the parked HITL), so the run stops instead of continuing after the bot claims it was cancelled.")
     }
 
     private func handleHelp(chatID: Int64) async {

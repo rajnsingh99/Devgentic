@@ -147,7 +147,7 @@ enum SpanKind: String, Codable, Sendable, DatabaseValueConvertible {
     case workflowNode   // per-node span inside a workflow run; parent of inner agent iteration spans
 }
 
-enum SpanStatus: String, Codable, Sendable, DatabaseValueConvertible {
+enum SpanStatus: String, Codable, Sendable, DatabaseValueConvertible, CaseIterable {
     case running
     case completed
     case error
@@ -162,6 +162,28 @@ enum SpanStatus: String, Codable, Sendable, DatabaseValueConvertible {
     /// The user stopped the run while this span was open. Distinct from `.error`
     /// (nothing went wrong) and from `.skipped` (nothing was chosen against).
     case cancelled
+
+    /// The span status a finished workflow node's outcome closes with.
+    ///
+    /// [WF-OB6] Extracted as a pure function for the same reason `WorkflowRetryPolicy` was: this
+    /// mapping lived inline in TWO places that disagreed with each other, and neither had a test
+    /// surface. The profile path spelled out four arms; the structural path used a two-way
+    /// `completed ? .completed : .error` ternary that collapsed cancel AND skip into `.error` —
+    /// so a Stop on an Action/Condition/Code/Gate/sub-workflow node was persisted as a node
+    /// FAILURE and docked its success rate in the Workflow Activity panel.
+    ///
+    /// EXHAUSTIVE on purpose: a new `NodeExecutionStatus` case must fail to compile here rather
+    /// than silently inherit "error", which is precisely how cancellation got mis-tagged.
+    static func forNodeOutcome(_ status: NodeExecutionStatus) -> SpanStatus {
+        switch status {
+        case .completed: .completed
+        case .failed:    .error
+        // A Stop is not a failure. Nothing went wrong; the user asked it to end.
+        case .canceled:  .cancelled
+        // The node never ran, so it can be neither a success nor a failure.
+        case .skipped:   .skipped
+        }
+    }
 }
 
 // MARK: - Span (Logical operation unit)

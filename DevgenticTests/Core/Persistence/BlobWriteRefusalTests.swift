@@ -216,6 +216,86 @@ final class BlobWriteRefusalTests: XCTestCase {
                       + "keys, so the version refusal is the only thing that can prevent this.")
     }
 
+    // MARK: - WF-PE3: a save FAILURE leaves nothing pending on the shared context
+
+    /// Every store shares one `container.mainContext`, and `save` mutates the model BEFORE
+    /// `context.save()`. A throw there used to leave the mutation PENDING — so the very next save
+    /// any other store performed (in the shipped path, `profileService.saveProfile` on the next
+    /// line of the canvas's `saveLayout`) silently flushed the "failed" layout after all. `.failed`
+    /// must mean "not on disk AND nothing pending", which is what the caller's guard relies on.
+    ///
+    /// A read-only container (`allowsSave: false`) makes `context.save()` throw DETERMINISTICALLY —
+    /// no disk-full simulation needed.
+    @MainActor
+    func testFailedUpdateSaveRollsBackThePendingMutation() throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("layout-pe3-update-\(UUID().uuidString).store")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let profileID = UUID()
+
+        // Launch 1 (writable): the row the user last successfully saved — ONE note.
+        do {
+            let seeding = try ModelContainer(for: Schema([WorkflowLayoutSD.self]),
+                                             configurations: ModelConfiguration(url: storeURL))
+            let context = ModelContext(seeding)
+            context.insert(WorkflowLayoutSD(workflowProfileID: profileID, layout: makeLayout(noteCount: 1)))
+            try context.save()
+        }
+
+        // Launch 2 (read-only): every context.save() will throw.
+        let readOnly = try ModelContainer(
+            for: Schema([WorkflowLayoutSD.self]),
+            configurations: ModelConfiguration(url: storeURL, allowsSave: false))
+        WorkflowLayoutStore.shared.configureContainer(readOnly)
+
+        let outcome = WorkflowLayoutStore.shared.save(makeLayout(noteCount: 5), for: profileID)
+
+        guard case .failed = outcome else {
+            return XCTFail("Precondition: a read-only container must fail the save, got \(outcome)")
+        }
+        XCTAssertFalse(outcome.didPersist)
+
+        // ⚠️ THE CONTRACT. Read back through the SAME context the store mutated: it must hold the
+        // PRIOR layout, not the failed one. Without the rollback this fetch shows 5 notes — the
+        // pending mutation — which is exactly what a later unrelated save would have flushed.
+        let row = try XCTUnwrap(
+            try readOnly.mainContext.fetch(FetchDescriptor<WorkflowLayoutSD>()).first)
+        XCTAssertEqual(row.layout.annotations.count, 1,
+                       "a failed save must leave the in-memory row at its last-persisted state — "
+                       + "a pending 'failed' layout rides out on the shared context's next save")
+    }
+
+    /// The insert-path twin: the first-ever save of a profile failing must leave NO pending row on
+    /// the main context, or the phantom rides out the same way. (⚠️ Measured: retracting via
+    /// `context.delete(pendingInsert)` after a throwing save does NOT work — SwiftData still
+    /// returns the row from a fetch on that context — which is why the store stages first inserts
+    /// on a throwaway context instead.)
+    @MainActor
+    func testFailedInsertSaveRetractsThePendingRow() throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("layout-pe3-insert-\(UUID().uuidString).store")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+
+        // Launch 1 (writable): materialize the store file with NO layout rows.
+        _ = try ModelContainer(for: Schema([WorkflowLayoutSD.self]),
+                               configurations: ModelConfiguration(url: storeURL))
+
+        let readOnly = try ModelContainer(
+            for: Schema([WorkflowLayoutSD.self]),
+            configurations: ModelConfiguration(url: storeURL, allowsSave: false))
+        WorkflowLayoutStore.shared.configureContainer(readOnly)
+
+        let outcome = WorkflowLayoutStore.shared.save(makeLayout(noteCount: 2), for: UUID())
+
+        guard case .failed = outcome else {
+            return XCTFail("Precondition: a read-only container must fail the save, got \(outcome)")
+        }
+        let pending = try readOnly.mainContext.fetch(FetchDescriptor<WorkflowLayoutSD>())
+        XCTAssertTrue(pending.isEmpty,
+                      "a failed first save must retract its insert — a pending phantom row rides "
+                      + "out on the shared context's next save")
+    }
+
     func testUnreadableLayoutIsReportedAndCorroboratedByTheCounts() throws {
         let container = try makeContainer(for: WorkflowLayoutSD.self)
         let (row, _) = try makeUnreadableLayoutRow(in: container, previousNoteCount: 3)
@@ -746,5 +826,135 @@ final class BlobWriteRefusalTests: XCTestCase {
         XCTAssertFalse(WorkflowLayoutStore.shared.isLayoutUnreadable(for: profileID))
         XCTAssertTrue(WorkflowLayoutStore.shared.save(makeLayout(noteCount: 5), for: profileID).didPersist,
                       "Ordinary saves must work again after a repair.")
+    }
+
+    // MARK: - WF-PE2: refused-by-design must not be treated as a retriable failure
+
+    /// The exhaustive classifier `persistDirtyWorkflowCanvases` and the quit-time alert both key
+    /// off. Written exhaustively (a `switch` with no `default`, mirroring the property's own
+    /// implementation) so a SIXTH case added to `WorkflowLayoutSaveOutcome` fails to COMPILE here
+    /// rather than silently defaulting to the wrong bucket — the exact silent-drift class of defect
+    /// this session has hit before with other exhaustive-switch additions.
+    func testIsRefusedByDesignIsExhaustiveAndCorrectPerCase() {
+        let cases: [(WorkflowLayoutSaveOutcome, Bool)] = [
+            (.saved, false),
+            (.notConfigured, false),
+            (.refusedUnreadable(nodeCount: 1, edgeCount: 2, annotationCount: 3), true),
+            (.refusedNewerVersion(blobVersion: 4, appVersion: 3), true),
+            (.failed("disk full"), false),
+        ]
+        for (outcome, expected) in cases {
+            XCTAssertEqual(outcome.isRefusedByDesign, expected,
+                           "got \(outcome.isRefusedByDesign) for \(outcome), wanted \(expected)")
+        }
+    }
+
+    /// ⚠️ NOT a duplicate of the exhaustive table above despite the overlapping cases — this checks
+    /// a CROSS-PROPERTY invariant the table doesn't: `isRefusedByDesign == false` must imply
+    /// `quitTimeRefusalReason == nil`. A mutation that widened one property's cases without the
+    /// other (e.g. a future outcome case marked refused but given no reason text, or vice versa)
+    /// would pass every row of the exhaustive table yet break this.
+    func testNonRefusedOutcomesHaveNoRefusalReason() {
+        let nonRefused: [WorkflowLayoutSaveOutcome] = [.saved, .notConfigured, .failed("disk full")]
+        for outcome in nonRefused {
+            XCTAssertFalse(outcome.isRefusedByDesign, "precondition for \(outcome)")
+            XCTAssertNil(outcome.quitTimeRefusalReason,
+                        "isRefusedByDesign says no, but a reason exists — got: \(outcome.quitTimeRefusalReason ?? "nil")")
+        }
+    }
+
+    /// The quit-time alert's copy — must name the actual reason (interpolating the real version
+    /// numbers, POSITIONALLY, not just present as substrings — a transposed blobVersion/appVersion
+    /// would still contain both digits and read backwards, telling the user their build is the
+    /// newer one when the opposite is true), and must be nil for every case the caller should never
+    /// be asking about (guarded by `isRefusedByDesign` before this is ever read).
+    func testQuitTimeRefusalReasonNamesTheRealReason() {
+        let unreadable = WorkflowLayoutSaveOutcome.refusedUnreadable(nodeCount: 1, edgeCount: 2, annotationCount: 3)
+        let unreadableReason = try? XCTUnwrap(unreadable.quitTimeRefusalReason)
+        XCTAssertNotNil(unreadableReason)
+
+        let newer = WorkflowLayoutSaveOutcome.refusedNewerVersion(blobVersion: 5, appVersion: 3)
+        let newerReason = newer.quitTimeRefusalReason
+        XCTAssertNotNil(newerReason)
+        XCTAssertTrue(newerReason?.contains("v5 format") == true,
+                      "the STORED version must read as v5 — a transposition would still pass a bare .contains(\"5\") check. got: \(newerReason ?? "nil")")
+        XCTAssertTrue(newerReason?.contains("writes v3") == true,
+                      "this BUILD must read as v3 — got: \(newerReason ?? "nil")")
+
+        XCTAssertNil(WorkflowLayoutSaveOutcome.saved.quitTimeRefusalReason)
+        XCTAssertNil(WorkflowLayoutSaveOutcome.notConfigured.quitTimeRefusalReason)
+        XCTAssertNil(WorkflowLayoutSaveOutcome.failed("disk full").quitTimeRefusalReason)
+    }
+
+    /// End-to-end: a layout genuinely refused as unreadable, saved through the REAL store, still
+    /// reports `isRefusedByDesign == true` and a non-nil reason — the classifier is exercised
+    /// against a real `WorkflowLayoutSaveOutcome` the store actually returned, not just a
+    /// hand-constructed enum value, closing the gap between "the cases match" and "the store's own
+    /// refusal reaches the classifier unchanged."
+    ///
+    /// ⚠️ ON-DISK two-container pattern, like `testStoreReportsTheRefusalAndRepairClearsIt` above —
+    /// NOT `makeContainer`'s in-memory helper. An in-memory container hands
+    /// `WorkflowLayoutStore.shared.mainContext` back the SAME registered instance whose `@Transient`
+    /// cache `init` already populated, so the decode path never runs and the test proves nothing
+    /// (an earlier draft of this test used the in-memory helper and failed with `.saved` instead of
+    /// the refusal, for exactly that reason).
+    @MainActor
+    func testRealRefusedUnreadableOutcomeClassifiesCorrectly() throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("layout-pe2-unreadable-\(UUID().uuidString).store")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let profileID = UUID()
+
+        do {
+            let seeding = try ModelContainer(for: Schema([WorkflowLayoutSD.self]),
+                                              configurations: ModelConfiguration(url: storeURL))
+            let context = ModelContext(seeding)
+            let row = WorkflowLayoutSD(workflowProfileID: profileID, layout: makeLayout(noteCount: 1))
+            context.insert(row)
+            row.layoutData = Self.unreadable
+            try context.save()
+        }
+
+        let container = try ModelContainer(for: Schema([WorkflowLayoutSD.self]),
+                                            configurations: ModelConfiguration(url: storeURL))
+        WorkflowLayoutStore.shared.configureContainer(container)
+
+        let outcome = WorkflowLayoutStore.shared.save(makeLayout(noteCount: 1), for: profileID)
+        XCTAssertTrue(outcome.isRefusedByDesign, "got: \(outcome)")
+        XCTAssertNotNil(outcome.quitTimeRefusalReason)
+    }
+
+    /// Same, for the newer-version path — reuses the exact on-disk two-container lever
+    /// `testNewerVersionBlobKeepsAFutureFieldTheDecoderCannotSee` above establishes
+    /// (`BlobVersioning.stamped`, never an in-memory container — that hands back the same cached
+    /// registered instance and the decode path never runs).
+    @MainActor
+    func testRealRefusedNewerVersionOutcomeClassifiesCorrectly() throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("layout-pe2-newer-\(UUID().uuidString).store")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let profileID = UUID()
+
+        let stampedBytes = try BlobVersioning.stamped(
+            JSONEncoder().encode(makeLayout(noteCount: 1)),
+            version: WorkflowLayoutSD.layoutBlobVersion + 1)
+
+        do {
+            let seeding = try ModelContainer(for: Schema([WorkflowLayoutSD.self]),
+                                              configurations: ModelConfiguration(url: storeURL))
+            let context = ModelContext(seeding)
+            let row = WorkflowLayoutSD(workflowProfileID: profileID, layout: makeLayout(noteCount: 1))
+            context.insert(row)
+            row.layoutData = stampedBytes
+            try context.save()
+        }
+
+        let container = try ModelContainer(for: Schema([WorkflowLayoutSD.self]),
+                                            configurations: ModelConfiguration(url: storeURL))
+        WorkflowLayoutStore.shared.configureContainer(container)
+
+        let outcome = WorkflowLayoutStore.shared.save(makeLayout(noteCount: 1), for: profileID)
+        XCTAssertTrue(outcome.isRefusedByDesign, "got: \(outcome)")
+        XCTAssertNotNil(outcome.quitTimeRefusalReason)
     }
 }

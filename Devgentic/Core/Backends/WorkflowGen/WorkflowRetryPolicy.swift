@@ -8,7 +8,13 @@
 //
 //  THE RULE (owner decision, 2026-08-19). A retry fires in exactly two situations:
 //
-//    1. **A compute timeout**, on any node kind that retries at all.
+//    1. **A compute timeout**, on any node kind that retries at all — EXCEPT a sub-workflow node
+//       (WF-EX9, 2026-08-25): its outer timeout is now ONE cumulative budget shared across every
+//       attempt (`WorkflowExecutor.executeStructuralNodeBounded`), not a fresh one per attempt, so
+//       a timeout there ends the whole retry sequence instead of triggering another attempt — the
+//       cumulative budget is defined as already having spent everything a retry could have used.
+//       An Action node's own tool timeout is unaffected: it retries inside its OWN independent
+//       per-tool race (`runToolWithTimeout`), never through this outer mechanism.
 //    2. **A failure of a profile node** — bot, agent, or sub-workflow.
 //
 //  Everything else runs once. In particular an Action node's tool failure is NOT a retry trigger
@@ -96,16 +102,23 @@ enum WorkflowRetryPolicy {
     /// Deliberately a SHORT allowlist rather than a deny-list of permanent errors: an unrecognised
     /// error is treated as permanent, so a new tool error does not silently acquire retry behaviour
     /// nobody chose. Widening it is a one-line change plus a test.
+    ///
+    /// ⚠️ EXCLUDES a cancellation-shaped `URLError` (WF-CC4, 2026-08-26). A tool cancelled mid-flight
+    /// via URLSession's Task-cancellation bridging throws `URLError(.cancelled)`, not
+    /// `CancellationError` — without this exclusion this predicate called it "transient" and
+    /// contradicted the file's own rule above (cancellation is never retried) whenever a Stop
+    /// happened to surface through this specific error shape instead of `CancellationError`.
     nonisolated static func isTransientToolError(_ error: Error) -> Bool {
         // A compute timeout — trigger (1) of the rule. A fresh full budget genuinely helps a stall.
         if let agentError = error as? AgentExecutionError,
            case .executionTimeout = agentError.reason {
             return true
         }
-        // Network transport, including MCP over HTTP, which surfaces as URLError or wraps one.
-        if error is URLError { return true }
-        if let underlying = (error as NSError).userInfo[NSUnderlyingErrorKey] as? Error,
-           underlying is URLError {
+        // Network transport, including MCP over HTTP, which surfaces as URLError or wraps one —
+        // except .cancelled, which is Stop, not a transient blip.
+        if let urlError = error as? URLError, urlError.code != .cancelled { return true }
+        if let underlying = (error as NSError).userInfo[NSUnderlyingErrorKey] as? URLError,
+           underlying.code != .cancelled {
             return true
         }
         return false
@@ -115,5 +128,35 @@ enum WorkflowRetryPolicy {
     nonisolated static func declineReason(for error: Error) -> String {
         if error is CancellationError { return "the run was cancelled" }
         return "the error is not transient (\(type(of: error)))"
+    }
+
+    /// Whether an Action node's failed tool attempt should be retried.
+    ///
+    /// ⚠️ `isCancelled` is checked FIRST and unconditionally (WF-CC4, 2026-08-26) — a cancellation
+    /// must never be retried regardless of what shape the underlying error took (bare
+    /// `CancellationError`, a cancellation-flavored `URLError`, or something a tool's own internal
+    /// retry wrapped further). Extracted as a single choke point so a future widening of
+    /// `isTransientToolError`'s allowlist cannot silently reopen a retry-after-Stop path — the caller
+    /// still owns routing a `true`-for-`isCancelled` case to a `.canceled` result rather than treating
+    /// a `false` return here as an ordinary declined-retry failure.
+    ///
+    /// ⚠️ THIS GOVERNS ONLY THE OUTER ACTION-NODE LOOP. It has no visibility into, and no effect on,
+    /// what a single `tool.run()` call does internally before it returns or throws back here. An
+    /// MCP-resolved tool's own `reconnectAndRetry` wrapper has this identical bug class at least one
+    /// level deeper (its own `try?`-swallowed backoff sleep, no `Task.isCancelled` check of its own) —
+    /// tracked separately, not closed by this function. Do not read "cancellation is never retried"
+    /// here as a claim that a tool invocation as a whole cannot be re-run after Stop; it only means
+    /// THIS loop will not dispatch a second `tool.run()` call of its own.
+    ///
+    /// ⚠️ Also does not close the residual gap between deciding to retry and actually dispatching the
+    /// next attempt when `retryDelay == 0` (the field's default): with no sleep to interrupt, nothing
+    /// between that decision and the next `runToolWithTimeout` call checks cancellation, so a Stop
+    /// landing in that sub-microsecond, no-`await` window can still let one more attempt through. This
+    /// mirrors the same generic, unavoidable check-then-act race already accepted (and documented) for
+    /// the sub-workflow outer retry loop's own zero-delay case; closing it would need an unconditional
+    /// `Task.checkCancellation()` at the top of the loop body, which is not part of this fix.
+    nonisolated static func shouldRetryToolFailure(_ error: Error, attempt: Int, maxRetries: Int, isCancelled: Bool) -> Bool {
+        guard !isCancelled, attempt < maxRetries else { return false }
+        return isTransientToolError(error)
     }
 }

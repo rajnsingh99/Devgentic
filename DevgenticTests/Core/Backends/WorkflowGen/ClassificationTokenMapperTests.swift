@@ -288,4 +288,6 @@ final class RouterPortResolutionTests: XCTestCase {
             .port("Legacy")
         )
     }
+
+    // classifierUserPrompt escaping tests moved to ClassifierPromptEscapingTests.swift.
 }

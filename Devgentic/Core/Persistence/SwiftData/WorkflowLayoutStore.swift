@@ -50,6 +50,45 @@ enum WorkflowLayoutSaveOutcome: Equatable {
 
     /// True only when the bytes are on disk.
     var didPersist: Bool { self == .saved }
+
+    /// [WF-PE2] True for the two outcomes that are refused BY DESIGN and will refuse identically on
+    /// every future attempt, as opposed to `.failed`/`.notConfigured`, which may plausibly succeed
+    /// on retry (transient SwiftData error, or the container finishing configuration).
+    ///
+    /// ⚠️ This is the distinction `didPersist` collapses away. A caller that treats every non-`saved`
+    /// outcome as one undifferentiated failure ends up telling the user to retry something that is
+    /// refused by construction — exactly the quit-time loop this property exists to let callers
+    /// break out of. Both refused branches `return` in `save(_:for:)` strictly before any mutating
+    /// line, so nothing is ever attempted or left pending for either case — a caller may safely
+    /// treat a refused-only batch as "nothing to roll back, safe to proceed" with no compensating
+    /// logic needed.
+    var isRefusedByDesign: Bool {
+        switch self {
+        case .refusedUnreadable, .refusedNewerVersion: return true
+        case .saved, .notConfigured, .failed: return false
+        }
+    }
+
+    /// [WF-PE2] User-facing reason for a refused-by-design outcome, for the quit-time choice this
+    /// row's own doc comment on `.refusedNewerVersion` promises. `nil` for every other case — a
+    /// caller has no business asking this of an outcome it never checked `isRefusedByDesign` on.
+    ///
+    /// A DELIBERATELY SEPARATE property from `WorkflowCanvasView`'s own in-canvas copy for these
+    /// same two cases, not a shared one: the in-canvas banner/overlay carries node/edge/annotation
+    /// counts and view-local state (`UnreadableLayoutInfo`) this type has no business holding, and
+    /// unifying them would drag UI-layer detail into the persistence layer for a one-line save.
+    /// Kept here rather than inline at the call site so the WORDING is testable independent of
+    /// `AppDelegate`, which has no unit-test seam.
+    var quitTimeRefusalReason: String? {
+        switch self {
+        case .refusedNewerVersion(let blobVersion, let appVersion):
+            return String(localized: "This workflow was saved by a newer version of Devgentic (v\(blobVersion) format; this build writes v\(appVersion)). It's read-only here — update Devgentic to edit it.")
+        case .refusedUnreadable:
+            return String(localized: "This workflow's saved layout can't be read by this build, so edits are refused to keep the original bytes intact.")
+        case .saved, .notConfigured, .failed:
+            return nil
+        }
+    }
 }
 
 @MainActor
@@ -168,53 +207,107 @@ final class WorkflowLayoutStore {
         var descriptor = FetchDescriptor<WorkflowLayoutSD>(predicate: predicate)
         descriptor.fetchLimit = 1
 
+        // [WF-PE3] Fetched OUTSIDE the mutate-then-save scope so a fetch throw (nothing mutated,
+        // nothing to undo) and a save throw (a mutation is PENDING) are distinguishable — the old
+        // single do/catch conflated them, and the save-throw case matters: every store shares one
+        // `container.mainContext`, so a mutation left pending here would be silently flushed by
+        // the NEXT save any other store performs (the very next line of the canvas's own
+        // `saveLayout` used to call `profileService.saveProfile`, committing the "failed" layout
+        // after all). The rollbacks below make `.failed` actually MEAN "not on disk and nothing
+        // pending" — which is the contract the caller's guard relies on.
+        let existing: WorkflowLayoutSD?
         do {
-            if let existing = try context.fetch(descriptor).first {
-                // Ask BEFORE writing. The setter refuses silently (by design — it must not throw
-                // from a property), so the refusal is only observable by checking first.
-                if existing.hasNewerVersionLayout {
-                    let blobVersion = existing.newerBlobVersion ?? -1
-                    logger.error(
-                        "[PERSISTENCE] Canvas save REFUSED — profile \(profileID): the stored layout "
-                        + "was written by a NEWER build (blob v\(blobVersion), this build writes "
-                        + "v\(WorkflowLayoutSD.layoutBlobVersion)); re-encoding would permanently strip "
-                        + "every newer-version field. CONSEQUENCE: layoutData is left byte-intact and "
-                        + "saves are refused on this build; viewing and running still work. The user "
-                        + "needs the app update that wrote this layout."
-                    )
-                    return .refusedNewerVersion(
-                        blobVersion: blobVersion,
-                        appVersion: WorkflowLayoutSD.layoutBlobVersion
-                    )
-                }
-                if existing.hasUnreadableLayout {
-                    logger.error(
-                        "[PERSISTENCE] Canvas save REFUSED — profile \(profileID): the stored layout "
-                        + "could not be decoded, so this save would replace \(existing.nodeCount) "
-                        + "node(s)/\(existing.edgeCount) edge(s)/\(existing.annotationCount) "
-                        + "annotation(s) the user cannot see. CONSEQUENCE: layoutData is left "
-                        + "byte-intact and EVERY save for this profile will be refused until "
-                        + "repairUnreadableLayout(_:for:reason:) is called; the caller must tell the "
-                        + "user rather than letting them keep editing."
-                    )
-                    return .refusedUnreadable(
-                        nodeCount: existing.nodeCount,
-                        edgeCount: existing.edgeCount,
-                        annotationCount: existing.annotationCount
-                    )
-                }
-                existing.layout = layout    // setter refreshes blob + denormalized counts + updatedAt
-            } else {
-                context.insert(WorkflowLayoutSD(workflowProfileID: profileID, layout: layout))
-            }
-            try context.save()
-            return .saved
+            existing = try context.fetch(descriptor).first
         } catch {
             logger.error(
-                "[PERSISTENCE] Failed to save layout for \(profileID): \(error.localizedDescription). "
-                + "CONSEQUENCE: this canvas edit is not on disk and will be lost on reload."
+                "[PERSISTENCE] Failed to fetch the layout row for \(profileID) before saving: "
+                + "\(error.localizedDescription). CONSEQUENCE: nothing was written or mutated; this "
+                + "canvas edit is not on disk and stays in memory for another attempt."
             )
             return .failed(error.localizedDescription)
+        }
+
+        if let existing {
+            // Ask BEFORE writing. The setter refuses silently (by design — it must not throw
+            // from a property), so the refusal is only observable by checking first.
+            if existing.hasNewerVersionLayout {
+                let blobVersion = existing.newerBlobVersion ?? -1
+                logger.error(
+                    "[PERSISTENCE] Canvas save REFUSED — profile \(profileID): the stored layout "
+                    + "was written by a NEWER build (blob v\(blobVersion), this build writes "
+                    + "v\(WorkflowLayoutSD.layoutBlobVersion)); re-encoding would permanently strip "
+                    + "every newer-version field. CONSEQUENCE: layoutData is left byte-intact and "
+                    + "saves are refused on this build; viewing and running still work. The user "
+                    + "needs the app update that wrote this layout."
+                )
+                return .refusedNewerVersion(
+                    blobVersion: blobVersion,
+                    appVersion: WorkflowLayoutSD.layoutBlobVersion
+                )
+            }
+            if existing.hasUnreadableLayout {
+                logger.error(
+                    "[PERSISTENCE] Canvas save REFUSED — profile \(profileID): the stored layout "
+                    + "could not be decoded, so this save would replace \(existing.nodeCount) "
+                    + "node(s)/\(existing.edgeCount) edge(s)/\(existing.annotationCount) "
+                    + "annotation(s) the user cannot see. CONSEQUENCE: layoutData is left "
+                    + "byte-intact and EVERY save for this profile will be refused until "
+                    + "repairUnreadableLayout(_:for:reason:) is called; the caller must tell the "
+                    + "user rather than letting them keep editing."
+                )
+                return .refusedUnreadable(
+                    nodeCount: existing.nodeCount,
+                    edgeCount: existing.edgeCount,
+                    annotationCount: existing.annotationCount
+                )
+            }
+            // [WF-PE3] Captured BEFORE the mutation so a save throw can restore it. Decoding
+            // is safe here: both unreadable and newer-version rows were refused above, so the
+            // getter returns the real stored canvas, not a placeholder.
+            let priorLayout = existing.layout
+            existing.layout = layout    // setter refreshes blob + denormalized counts + updatedAt
+            do {
+                try context.save()
+                return .saved
+            } catch {
+                // Un-mutate THIS row only — never `context.rollback()`, which would discard
+                // every pending change on the shared mainContext, including other subsystems'.
+                // Re-running the setter restores blob, counts and cache together; `updatedAt`
+                // is re-stamped, which is the one field that may differ from the on-disk row
+                // if this restored state is ever flushed by a later save — acceptable against
+                // the alternative (the "failed" layout itself being flushed).
+                existing.layout = priorLayout
+                logger.error(
+                    "[PERSISTENCE] Failed to save layout for \(profileID): \(error.localizedDescription). "
+                    + "CONSEQUENCE: this canvas edit is not on disk and will be lost on reload. The "
+                    + "in-memory row was ROLLED BACK to its pre-save state, so the failed layout "
+                    + "cannot ride out on the shared context's next unrelated save."
+                )
+                return .failed(error.localizedDescription)
+            }
+        } else {
+            // The FIRST save of this profile goes through a THROWAWAY context, not `mainContext`,
+            // so a failed save leaves nothing pending anywhere by construction — the scratch
+            // context dies with this scope. (A `context.delete(inserted)` retraction on the shared
+            // context was tried first and measured NOT to work: after the throwing save, SwiftData
+            // still returned the deleted-pending-insert from a fetch on that context.) On success
+            // the committed row is visible to `mainContext`'s next fetch like any other row; there
+            // is no prior in-memory state for this profile to go stale, because no row existed.
+            guard let container = modelContainer else { return .notConfigured }
+            let scratch = ModelContext(container)
+            scratch.insert(WorkflowLayoutSD(workflowProfileID: profileID, layout: layout))
+            do {
+                try scratch.save()
+                return .saved
+            } catch {
+                logger.error(
+                    "[PERSISTENCE] Failed to save the FIRST layout for \(profileID): "
+                    + "\(error.localizedDescription). CONSEQUENCE: this canvas edit is not on disk "
+                    + "and will be lost on reload. The insert was staged on a throwaway context, so "
+                    + "nothing is left pending to ride out on the shared context's next save."
+                )
+                return .failed(error.localizedDescription)
+            }
         }
     }
 

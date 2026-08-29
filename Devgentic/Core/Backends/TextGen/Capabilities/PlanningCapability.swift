@@ -18,6 +18,25 @@ private let logger = DGLogger(category: "PlanningCapability")
 
 struct PlanningCapability: ExecutorCapability, Sendable {
 
+    /// Is this a fault of the PLUMBING rather than of the model's answer? [WF-CC9]
+    ///
+    /// Drives the one decision that separates "the run must fail honestly" from "degrade to a
+    /// single undecomposed task": a content fault is the model answering badly, and falling back
+    /// is a legitimate degraded mode; an infrastructure fault means planning never happened at
+    /// all, and reporting `.completed` for an undecomposed run is the lie WF-CC9 was filed for.
+    ///
+    /// ⚠️ Typed, never prose-matched — the WF-CC6 lesson. Kept as a named predicate rather than a
+    /// `catch` pattern so both the classification and its rationale live in one place, and so the
+    /// set can be asserted directly by tests.
+    static func isInfrastructureFault(_ error: Error) -> Bool {
+        if error is MLXService.ServiceError { return true }   // local model-slot race / no model
+        if error is CloudProviderError { return true }        // 4xx/5xx/429 from a cloud provider
+        if error is LLMProviderError { return true }          // Ollama & local HTTP transport
+        if error is TransportFatalError { return true }       // retries exhausted / deterministic
+        if error is URLError { return true }                  // DNS, connection, timeout
+        return false
+    }
+
     /// Whether parallel subtask execution is honoured at all.
     ///
     /// ⚠️ Register A67. `AgentCapabilitiesSection` hides the "Parallel Subtasks" toggle with a
@@ -156,7 +175,6 @@ actor PlanningExecutorWrapper: Executor {
                             availableTools: input.tools,
                             userProfile: userProfile,
                             skillManifests: input.skillManifests,
-                            taskDescription: nil,
                             promptLayerConfig: .agent,
                             workflowContext: nil
                         )
@@ -183,14 +201,36 @@ actor PlanningExecutorWrapper: Executor {
                     let planGenerator = PlanGeneratorStrategy(planningConfig: config)
                     var subtasks: [SubTask]
 
+                    // [WF-CC9] The MLX model-slot race is INFRASTRUCTURE, not content — it must
+                    // never fold into the single-task content fallback below. Same bound and
+                    // delay as the agent path's `modelSlotAction` and the bot path's
+                    // `TransportRetrier` (WF-CC12): one 2s re-attempt (the retry itself re-runs
+                    // `container(expecting:)`, which reloads the model), then the error
+                    // propagates and the run fails HONESTLY with the slot-race message instead
+                    // of silently degrading to an undecomposed plan that reports success.
+                    func generatePlanWithSlotRetry(
+                        context: SemanticContext, allowClarification: Bool
+                    ) async throws -> (outcome: PlanGenerationOutcome, usage: TokenUsage) {
+                        do {
+                            return try await planGenerator.generatePlan(
+                                model: spyModel, context: context, allowClarification: allowClarification)
+                        } catch let slotError as MLXService.ServiceError {
+                            logger.warning("[PLANNING] Plan generation lost the MLX model slot (\(slotError.localizedDescription)) — re-attempting once in 2s. CONSEQUENCE: no fallback plan is fabricated for an infrastructure fault; a second loss fails the run honestly.")
+                            try await Task.sleep(for: .seconds(2))
+                            try Task.checkCancellation()
+                            return try await planGenerator.generatePlan(
+                                model: spyModel, context: context, allowClarification: allowClarification)
+                        }
+                    }
+
                     do {
                         // Round 1 — the model may answer with a plan or (when enabled and the
                         // task is too vague) a single CLARIFY question. Suppressed in workflow
                         // mode: nodes run headless on task+input, and a mid-DAG question would
                         // stall the graph on context the upstream node should have provided.
                         let allowClarify = config.clarifyBeforePlanning && input.workflowContext == nil
-                        let planResult = try await planGenerator.generatePlan(
-                            model: spyModel, context: makePlanContext(nil), allowClarification: allowClarify
+                        let planResult = try await generatePlanWithSlotRetry(
+                            context: makePlanContext(nil), allowClarification: allowClarify
                         )
                         continuation.yield(.tokenUsage(planResult.usage))
 
@@ -220,8 +260,8 @@ actor PlanningExecutorWrapper: Executor {
                             // Round 2 — the answer shapes the plan; no second question allowed.
                             await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
                             let clarified = ClarificationContext(query: question, response: answerText)
-                            let secondResult = try await planGenerator.generatePlan(
-                                model: spyModel, context: makePlanContext(clarified), allowClarification: false
+                            let secondResult = try await generatePlanWithSlotRetry(
+                                context: makePlanContext(clarified), allowClarification: false
                             )
                             continuation.yield(.tokenUsage(secondResult.usage))
                             if case .plan(let plan) = secondResult.outcome {
@@ -258,8 +298,29 @@ actor PlanningExecutorWrapper: Executor {
                         // running. Rethrow to the outer cancel handler (mirrors the #18-B fix in
                         // ReflectionEvaluator + the subtask catches below). (chip task_61dd9583)
                         throw CancellationError()
+                    } catch let infrastructureError where PlanningCapability.isInfrastructureFault(infrastructureError) {
+                        // [WF-CC9] INFRASTRUCTURE, not content — rethrow to the outer catch, which
+                        // classifies, traces and finishes the run `.failed` with the real message.
+                        //
+                        // ⚠️ The typed set is the WHOLE provider family, not just MLX. The first
+                        // version of this fix rethrew only `MLXService.ServiceError`, which left
+                        // the identical lie in place for every cloud and Ollama fault: an Anthropic
+                        // 401, an exhausted quota, a 5xx or a dropped connection still fabricated a
+                        // one-step plan and reported the run `.completed`. Fixing the MLX case only
+                        // would have closed the row's example while leaving its contract broken.
+                        logger.error("[PLANNING] Plan generation failed with an INFRASTRUCTURE fault for conversation \(input.conversationID.uuidString.prefix(8)): \(infrastructureError.localizedDescription). CONSEQUENCE: the run FAILS with that message — no fabricated single-step plan, no false .planGenerated success. The task was never decomposed, so completing it undecomposed would report work that was never planned.")
+                        throw infrastructureError
                     } catch {
-                        logger.warning("Plan generation failed: \(error.localizedDescription). Using single-task fallback.")
+                        // Content fault (unparseable plan output): the single-task fallback is a
+                        // legitimate degraded mode — but LOUD [WF-CC9]. It used to yield
+                        // `.planGenerated` with one plausible-looking step and say nothing: the
+                        // user saw an intentional-looking 1-step plan, the run proceeded
+                        // undecomposed, and nothing anywhere said planning failed.
+                        logger.warning("[PLANNING] Plan generation failed for conversation \(input.conversationID.uuidString.prefix(8)): \(error.localizedDescription). CONSEQUENCE: the run continues as a SINGLE undecomposed task — the plan card's one step is a fallback, not a decision; a surfaced warning says so on the timeline.")
+                        continuation.yield(.warning(
+                            category: .midRunError,
+                            message: String(localized: "Planning failed (\(error.localizedDescription)) — continuing as a single task without decomposition.")
+                        ))
                         subtasks = [SubTask(id: "step_1", description: input.userInput)]
                     }
 

@@ -61,7 +61,10 @@ final class TransportRetrierTests: XCTestCase {
         for _ in 1...5 {
             let step = try retrier.nextStep(for: cloudError(429))
             XCTAssertEqual(step.category, .throttle)
-            XCTAssertNotNil(step.drainPenalty, "429 steps must instruct the caller to drain the rate bucket")
+            // chip task_70f0522b (committed): CloudRequestPipeline already drains the bucket for
+            // a cloud 429 before throwing CloudProviderError — the caller must NOT drain again.
+            // (This assertion pre-dated the chip and asserted the double-drain.)
+            XCTAssertNil(step.drainPenalty, "a cloud 429 is already drained by CloudRequestPipeline — a second drain double-penalizes")
         }
         XCTAssertThrowsError(try retrier.nextStep(for: cloudError(429))) { error in
             XCTAssertEqual((error as? TransportFatalError)?.category, .providerQuotaExhausted)
@@ -72,7 +75,18 @@ final class TransportRetrierTests: XCTestCase {
         var retrier = TransportRetrier(transport: cloudTransport())
         let step = try retrier.nextStep(for: cloudError(429, retryAfter: 30))
         XCTAssertEqual(step.delay, 30, accuracy: 0.01)
-        XCTAssertEqual(try XCTUnwrap(step.drainPenalty), 30, accuracy: 0.01)
+        // chip task_70f0522b: cloud 429s carry NO drain instruction (see above); the drain
+        // penalty only exists for pipeline-bypassing providers (LLMProviderError.httpError).
+        XCTAssertNil(step.drainPenalty)
+    }
+
+    /// The half of the chip contract that DOES drain: a pipeline-bypassing provider's 429
+    /// (Ollama/local → LLMProviderError.httpError) reaches the limiter only through the caller.
+    func test429_PipelineBypassingProvider_StillDrains() throws {
+        var retrier = TransportRetrier(transport: ollamaTransport())
+        let step = try retrier.nextStep(for: LLMProviderError.httpError(429, "rate limited"))
+        XCTAssertEqual(step.category, .throttle)
+        XCTAssertNotNil(step.drainPenalty, "no pipeline drained for this provider — the caller must")
     }
 
     func test429_AbsurdRetryAfter_FallsBackToBackoff() throws {
@@ -131,6 +145,61 @@ final class TransportRetrierTests: XCTestCase {
         XCTAssertThrowsError(try retrier.nextStep(for: original)) { error in
             XCTAssertFalse(error is TransportFatalError, "A non-transport error must be rethrown as-is, not wrapped")
             XCTAssertEqual((error as NSError).code, 7)
+        }
+    }
+
+    // MARK: - [WF-CC12] MLX model-slot race — typed arm, bounded like the agent path
+
+    /// The bot path used to surface this error unretried, only because the classifier's
+    /// `guard/else` rethrows what it doesn't recognize — the identical fault on an agent
+    /// profile self-heals after one bounded re-attempt (`LLMRetryStrategy.modelSlotAction`).
+    func testMLXModelSlotRace_OneBoundedRetry_ThenFatal() throws {
+        var retrier = TransportRetrier(transport: mlxTransport())
+        let race = MLXService.ServiceError.modelIdentityMismatch(expected: "qwen-7b", actual: "llama-3b")
+
+        let step = try retrier.nextStep(for: race)
+        XCTAssertEqual(step.category, .retry)
+        XCTAssertEqual(step.delay, 2.0, "same delay as the agent path's modelSlotRetryDelay")
+        XCTAssertNil(step.drainPenalty, "a slot race is not a rate limit — nothing to drain")
+        XCTAssertTrue(step.message.contains("llama-3b") && step.message.contains("qwen-7b"),
+                      "the warning must name both models")
+
+        XCTAssertThrowsError(try retrier.nextStep(for: race)) { error in
+            guard let fatal = error as? TransportFatalError else { return XCTFail("Expected TransportFatalError") }
+            XCTAssertEqual(fatal.category, .modelUnloaded,
+                           "same telemetry category as the agent path — not .providerServerError")
+            XCTAssertTrue(fatal.reason.contains("Nothing was answered by the wrong model"),
+                          "the fatal message mirrors the agent path verbatim")
+        }
+    }
+
+    /// The slot with no named squatter ("<none>" = emptied by a concurrent load) must never be
+    /// rendered to the user as a model name — mirrors modelSlotAction's holder handling.
+    func testMLXSlotRace_EmptiedSlot_NotRenderedAsModelName() throws {
+        var retrier = TransportRetrier(transport: mlxTransport())
+        let race = MLXService.ServiceError.modelIdentityMismatch(expected: "qwen-7b", actual: "<none>")
+        let step = try retrier.nextStep(for: race)
+        XCTAssertFalse(step.message.contains("<none>"))
+        XCTAssertTrue(step.message.contains("another local model load"))
+    }
+
+    /// The slot race has its OWN budget — charging the MLX transient budget (0) would fail on
+    /// the first hit, and a slot retry must not eat a later genuine transient's budget.
+    func testMLXSlotRetry_DoesNotChargeTransientOrThrottleBudget() throws {
+        var retrier = TransportRetrier(transport: mlxTransport())
+        _ = try retrier.nextStep(for: MLXService.ServiceError.modelIdentityMismatch(expected: "a", actual: "b"))
+        XCTAssertEqual(retrier.transientCount, 0)
+        XCTAssertEqual(retrier.throttleCount, 0)
+        XCTAssertEqual(retrier.modelSlotCount, 1)
+    }
+
+    /// `.noModelLoaded` is deterministic (the request carried no identity to reload) — fail
+    /// honestly at once rather than burning a retry on an identical request.
+    func testNoModelLoaded_IsImmediatelyFatal() {
+        var retrier = TransportRetrier(transport: mlxTransport())
+        XCTAssertThrowsError(try retrier.nextStep(for: MLXService.ServiceError.noModelLoaded)) { error in
+            guard let fatal = error as? TransportFatalError else { return XCTFail("Expected TransportFatalError") }
+            XCTAssertEqual(fatal.category, .modelUnloaded)
         }
     }
 }

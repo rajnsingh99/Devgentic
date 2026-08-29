@@ -110,6 +110,7 @@ final class WorkflowTestScenario {
         requiresConfirmation: Bool = false,
         sourceId: UUID = ToolSource.builtInSourceID,
         onFailure: NodeFailurePolicy? = nil,
+        unattendedAutoApprove: Bool? = nil,
         position: CGPoint = .zero
     ) -> UUID {
         let nodeID = UUID()
@@ -129,6 +130,10 @@ final class WorkflowTestScenario {
         )
         if let onFailure {
             node.nodeConfig = WorkflowNodeConfig(onFailure: onFailure)
+        }
+        if let unattendedAutoApprove {
+            if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }
+            node.nodeConfig?.unattendedAutoApprove = unattendedAutoApprove
         }
         nodes.append(node)
         return nodeID

@@ -222,6 +222,17 @@ struct WorkflowNodeView: View {
                     color: profileColor,
                     isSelected: isSelected
                 )
+            case .unsupported:
+                // [WF-PE4] Preserved-but-unknown node. Profile-card chrome (same footprint), the
+                // colourless identity and a dashed-question icon make it read as "not one of
+                // ours"; the subtitle says why it cannot run.
+                ProfileNodeCard(
+                    title: node.displayName,
+                    subtitle: nodeKindLabel,
+                    iconName: iconName,
+                    color: profileColor,
+                    isSelected: isSelected
+                )
             }
         }
     }
@@ -269,8 +280,16 @@ struct WorkflowNodeView: View {
         .accessibilityAction(named: Text("Select")) {
             canvasState.select(nodeID: node.id)
         }
+        // [WF-PE4] Gated the same way the double-tap gesture below is gated — found on
+        // adversarial audit that this VoiceOver twin had no such guard, so a screen-reader user
+        // invoking "Configure" on a `.trigger` or `.unsupported` node opened a borderless,
+        // effectively blank inspector panel (`.unsupported`'s config is opaque preserved JSON;
+        // there is nothing this build could show or edit — see the gesture's own comment).
         .accessibilityAction(named: Text("Configure")) {
-            canvasState.targetConfigNode = node
+            switch node.kind {
+            case .trigger, .unsupported: break
+            default: canvasState.targetConfigNode = node
+            }
         }
         .accessibilityAction(named: Text("Delete node")) {
             canvasState.removeNode(node.id)
@@ -286,7 +305,9 @@ struct WorkflowNodeView: View {
                 // `case .profile:`); only the gesture refused, so a sub-workflow node could
                 // never have its failure policy, retries or join mode configured either.
                 canvasState.targetConfigNode = node
-            case .trigger:
+            case .trigger, .unsupported:
+                // `.unsupported`: there is nothing this build could show or edit — the node's
+                // config is opaque preserved JSON. Selection, moving and DELETION all still work.
                 break
             }
         }
@@ -329,6 +350,7 @@ struct WorkflowNodeView: View {
         case .gate:       return "hand.raised"
         case .trigger:    return "bolt"
         case .action:     return "bolt.horizontal.fill"
+        case .unsupported: return "questionmark.square.dashed"
         }
     }
 
@@ -361,6 +383,7 @@ struct WorkflowNodeView: View {
         case .gate:               return String(localized: "Gate")
         case .trigger:            return String(localized: "Trigger")
         case .action(let config): return config.tool?.name ?? String(localized: "Action")
+        case .unsupported:        return String(localized: "Needs a newer Devgentic")
         }
     }
 

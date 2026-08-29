@@ -873,9 +873,6 @@ struct SemanticContext: Sendable {
     // 7. Skills — on-demand discovery layer (name + description one-liners)
     let skillManifests: [SkillManifest]?
 
-    // 8. Workflow — per-node task description (nil for normal chat)
-    let taskDescription: String?
-
     // 9. Prompt layer configuration — controls which optional layers are included
     let promptLayerConfig: PromptLayerConfig
 

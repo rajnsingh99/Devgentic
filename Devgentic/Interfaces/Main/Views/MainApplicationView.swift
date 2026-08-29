@@ -609,10 +609,32 @@ private struct ModeTabButton: View {
                         .frame(width: 6, height: 6)
                         .offset(x: 2, y: -1)
                         .transition(.scale.combined(with: .opacity))
+                        // Purely decorative — the meaning is announced on the BUTTON below, not
+                        // here. A label on this Circle would sit inside the Button's own label
+                        // subtree and never be spoken.
+                        .accessibilityHidden(true)
                 }
             }
         }
         .buttonStyle(.plain)
+        // [WF-CS4] The dot had NO tooltip and NO accessibility label, so it read as an unexplained
+        // warning — and worse, as one implying the edits were at risk. They are not: the canvas
+        // cache is App-scoped, survives every view teardown, and is drained at quit (WF-LC1). What
+        // it actually means is "a run right now would not include these", which is the one
+        // consequence the user can act on. Said here rather than by adding a navigation prompt,
+        // which WF-LC1 closed by explicitly ruling out.
+        //
+        // ⚠️ WORDED FOR AN APP-WIDE SIGNAL, deliberately. This dot lights when ANY workflow canvas
+        // is dirty (`!dirtyWorkflowCanvasIDs.isEmpty` — not scoped to the selected profile), so it
+        // must NOT promise anything about the next run in particular. That per-run claim is
+        // `WorkflowRunEditDisclosure`'s job, and it is scoped to one profile precisely so it can
+        // make it truthfully.
+        .help(mode == .workflow && !viewModel.dirtyWorkflowCanvasIDs.isEmpty
+              ? "One or more workflow canvases have unsaved edits. They are kept safely, but a workflow always runs its last saved version — save a canvas to include its edits."
+              : "")
+        .accessibilityValue(mode == .workflow && !viewModel.dirtyWorkflowCanvasIDs.isEmpty
+                            ? Text("Unsaved canvas edits")
+                            : Text(""))
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovering = hovering

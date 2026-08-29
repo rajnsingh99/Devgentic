@@ -28,13 +28,8 @@ struct ProfileNodeInspectorView: View {
     @Environment(ToastManager.self) private var toastManager
     @Environment(\.appTheme) private var theme
 
-    // MARK: - Constants
-
-    private static let maxTaskDescriptionLength: Int = 500
-
     // MARK: - State
 
-    @State private var taskDescription: String = ""
     @State private var showGuide: Bool = false
     @State private var editBuffer: ProfileEditBuffer?
     @State private var inlineProfileError: String?
@@ -51,26 +46,21 @@ struct ProfileNodeInspectorView: View {
         }
     }
 
-    /// Trimmed task description for validation.
-    private var trimmedTaskDescription: String {
-        taskDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
     /// A node backed by a *workflow* profile runs as a nested sub-workflow: its steps come from
-    /// that workflow's own canvas and its directive is the upstream output, so there is no
-    /// per-node task to write. `WorkflowValidator` exempts it for the same reason.
+    /// that workflow's own canvas, and its input is this node's upstream output. Still used by the
+    /// guide copy below, which explains that difference.
     private var isSubWorkflowNode: Bool {
         if case .profile(_, .workflow) = node.kind { return true }
         return false
     }
 
-    private var isValid: Bool {
-        // ⚠️ Do NOT collapse this to `!trimmedTaskDescription.isEmpty`. Gating Done on a task
-        // description a sub-workflow node has no use for made this panel a trap: the panel is
-        // borderless, always-on-top and has no Cancel, so the only exits were typing text the
-        // user did not want or double-clicking another node — impossible on a one-node canvas.
-        isSubWorkflowNode || !trimmedTaskDescription.isEmpty
-    }
+    /// ⚠️ ALWAYS TRUE since the Node Task field was removed (2026-08-29). Kept as the single
+    /// place Done is gated, so a future required field has an obvious home — and deliberately NOT
+    /// deleted along with the condition it used to hold, because this panel is borderless,
+    /// always-on-top and has no Cancel: anything that can make `isValid` false traps the user with
+    /// no exit on a one-node canvas. That is what gating Done on a task description did to
+    /// sub-workflow nodes, which had no use for one.
+    private var isValid: Bool { true }
 
     // MARK: - Node Config Bindings
     //
@@ -105,6 +95,17 @@ struct ProfileNodeInspectorView: View {
         )
     }
 
+    private var unattendedAutoApproveBinding: Binding<Bool> {
+        Binding(
+            get: { node.nodeConfig?.unattendedAutoApprove ?? false },
+            set: { newValue in
+                ensureNodeConfig()
+                // nil (not false) when off — the default costs no bytes in the blob.
+                node.nodeConfig?.unattendedAutoApprove = newValue ? true : nil
+            }
+        )
+    }
+
     private var retryDelayBinding: Binding<TimeInterval> {
         Binding(
             get: { node.nodeConfig?.retryDelay ?? 0 },
@@ -125,7 +126,6 @@ struct ProfileNodeInspectorView: View {
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 24) {
                     guideCard
-                    taskDescriptionCard
                     nodeConfigCard
                     profileSection
                 }
@@ -202,12 +202,12 @@ struct ProfileNodeInspectorView: View {
                     if isSubWorkflowNode {
                         profileGuideLine("This node runs another workflow's canvas as a child. Its directive is the upstream output — there is no per-node task to write.")
                         profileGuideLine("Text-only handoff: the child receives this node's input as its message. Workflow variables and files do NOT cross into the child; files the child produces DO flow out.")
-                        profileGuideLine("⚠️ The Hard Timeout below bounds the child's ENTIRE run, not one step — size it for the whole child workflow.")
+                        profileGuideLine("⚠️ Unlike every other node kind, \"Default\" here means NO timeout at all — the child canvas already bounds every one of its own nodes on its own terms. Setting the Hard Timeout below adds a ceiling over the child's ENTIRE run, not one step, and — with retries configured — ALL attempts share that ONE ceiling rather than each getting its own.")
                         profileGuideLine("Nesting is limited to 3 levels, and cycles (a workflow that ends up running itself) are blocked before the run starts.")
                         profileGuideLine("Approvals and gates INSIDE the child surface here exactly as if they were this workflow's own.")
                     } else {
-                        profileGuideLine("Runs the bound profile for one turn. The Task Description is this node's standing instruction; upstream output arrives as its input.")
-                        profileGuideLine("The message that started the run reaches ENTRY nodes only (appended to their task as a user query) — downstream nodes see upstream output instead.")
+                        profileGuideLine("Runs the bound profile for one turn. What it DOES is the profile's own system instructions — edit them below; there is no separate per-node task.")
+                        profileGuideLine("What it acts on is its input: the message that started the run for ENTRY nodes, and upstream output for every node below one.")
                         profileGuideLine("An agent's tool confirmations pause the run for approval, scoped to THIS node. Waiting never counts against the node's timeout.")
                         profileGuideLine("Retries re-run the WHOLE turn — including tool side effects the agent already performed. Keep retries at 0 for agents whose tools write or send things.")
                         profileGuideLine("On failure the error port activates; wire it for recovery, or the branch stops with the reason in the final output.")
@@ -240,79 +240,6 @@ struct ProfileNodeInspectorView: View {
                 .font(.system(size: 11))
                 .foregroundColor(theme.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    // MARK: - Task Description Card
-
-    private var taskDescriptionCard: some View {
-        /// Approaching limit: warn at 90%+ usage
-        let isNearLimit = taskDescription.count >= (Self.maxTaskDescriptionLength * 9 / 10)
-
-        return SettingsCard(
-            title: isSubWorkflowNode ? "Node Task (Not Used)" : "Node Task (Required)",
-            icon: "text.alignleft",
-            theme: theme
-        ) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(isSubWorkflowNode
-                     ? "Not used by a sub-workflow node — the nested workflow runs its own canvas, and its input is this node's upstream output. Configure the steps on that workflow's own canvas."
-                     : "What this node should do with its input. Combined at run time with the agent's persona — the task changes per node; the agent profile stays the same.")
-                    .font(.system(size: 11))
-                    .foregroundColor(theme.secondaryText)
-
-                ZStack(alignment: .topLeading) {
-                    TextEditor(text: $taskDescription)
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundColor(theme.primaryText)
-                        .scrollContentBackground(.hidden)
-                        .frame(minHeight: 120, maxHeight: 200)
-                        .padding(8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(theme.secondaryBackground)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(
-                                    trimmedTaskDescription.isEmpty ? theme.warningColor.opacity(0.4)
-                                    : theme.surfaceOverlayStrong.opacity(0.3),
-                                    lineWidth: trimmedTaskDescription.isEmpty ? 1 : 0.5
-                                )
-                        )
-                        .onChange(of: taskDescription) { _, newValue in
-                            // Enforce hard limit — prevent typing beyond max
-                            if newValue.count > Self.maxTaskDescriptionLength {
-                                taskDescription = String(newValue.prefix(Self.maxTaskDescriptionLength))
-                            }
-                        }
-
-                    if taskDescription.isEmpty {
-                        Text("Describe what this node should do with the provided input...")
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(theme.tertiaryText)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 16)
-                            .allowsHitTesting(false)
-                    }
-                }
-
-                HStack {
-                    if trimmedTaskDescription.isEmpty {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 9))
-                            .foregroundColor(theme.warningColor)
-                        Text("Node task is required")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(theme.warningColor)
-                    }
-                    Text("\(taskDescription.count)/\(Self.maxTaskDescriptionLength)")
-                        .font(.system(size: 10))
-                        .foregroundColor(isNearLimit ? theme.warningColor : theme.tertiaryText)
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 16)
         }
     }
 
@@ -379,6 +306,33 @@ struct ProfileNodeInspectorView: View {
                         .fixedSize()
                     }
                 }
+
+                // [WF-SE6/SE11] The EXPLICIT unattended approval — the sanctioned way to let a
+                // scheduled run use a confirming tool. An interactive "Allow for this chat" grant
+                // is never served to a run nobody can answer.
+                //
+                // ⚠️ HIDDEN on sub-workflow nodes: they dispatch STRUCTURALLY and never build a
+                // `WorkflowExecutionContext`, so nothing reads THIS node's setting — the child
+                // graph's own nodes carry their own. Rendering it there would persist a
+                // security-relevant toggle that silently does nothing, which is worse than absent.
+                if !isSubWorkflowNode {
+                    Divider().opacity(0.3)
+
+                    behaviorRow(
+                        label: "Unattended Auto-Approve",
+                        // ⚠️ Wording deliberately differs from the Action node's twin row. On the
+                        // AGENT path a refused confirmation returns a failed OBSERVATION to the
+                        // agent, which keeps running and usually still answers — the node does NOT
+                        // fail onto its error port (only the Action arm does that). Promising an
+                        // error port here would have users wire a branch that never fires.
+                        explainer: "Scheduled runs auto-approve this node's tool confirmations. Off: the tool is refused and the agent is told it could not run — the node itself still completes, so check its output rather than wiring the error port."
+                    ) {
+                        Toggle("", isOn: unattendedAutoApproveBinding)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                    }
+                }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 16)
@@ -387,7 +341,10 @@ struct ProfileNodeInspectorView: View {
 
     /// Per-node timeout control. Mirrors the agent's `ExecutionLimitsSection`
     /// pattern: "Default" with a Set button (nil state) vs stepper + Remove
-    /// button (explicit state). Default = inherits `WorkflowConfig.resolvedNodeTimeout`.
+    /// button (explicit state). Default = inherits `WorkflowConfig.resolvedNodeTimeout` —
+    /// EXCEPT for a sub-workflow node (WF-EX3), where "Default" means NO outer ceiling at all;
+    /// its child canvas already bounds every one of its own nodes independently. Pressing "Set"
+    /// still seeds 120s as a starting point to adjust, same as any other node kind.
     @ViewBuilder
     private var timeoutControl: some View {
         if let current = hardTimeoutBinding.wrappedValue {
@@ -527,7 +484,8 @@ struct ProfileNodeInspectorView: View {
     // MARK: - Load / Save
 
     private func loadFromNode() {
-        taskDescription = node.nodeConfig?.taskDescription ?? ""
+        // Nothing node-local left to load — the Node Task field was removed 2026-08-29 and the
+        // orchestration fields below bind straight through to `node.nodeConfig`.
     }
 
     private func saveAndDismiss() {
@@ -535,8 +493,6 @@ struct ProfileNodeInspectorView: View {
         if node.nodeConfig == nil {
             node.nodeConfig = WorkflowNodeConfig()
         }
-        // Trim whitespace to prevent spaces-only from passing validation downstream
-        node.nodeConfig?.taskDescription = trimmedTaskDescription
 
         // If profile was edited, validate and save
         if let editBuffer, editBuffer.isDirty {

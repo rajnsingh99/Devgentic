@@ -295,6 +295,13 @@ private struct BundleSpanRow: View {
         case "completed": return .green
         case "error":     return theme.errorColor
         case "running":   return .blue
+        // [WF-OB6] Explicit rather than riding `default`. Both are deliberately NEUTRAL, not the
+        // error colour: a stopped or skipped span is not a failure, and painting it red is the
+        // whole defect this row was filed on. They already fell to `.gray` by default — naming
+        // them keeps that a decision, so a future `SpanStatus` case has to choose for itself
+        // instead of silently inheriting "grey" from these two.
+        case "cancelled": return .gray
+        case "skipped":   return .gray
         default:          return .gray
         }
     }

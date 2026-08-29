@@ -32,6 +32,9 @@ func executeToolCalls(
     /// Workflow node this run belongs to, or nil for chat/code. Scopes the "Allow for this chat"
     /// allowlist so a grant in one node does not answer for another — see `SessionToolApprovals`.
     approvalNodeID: UUID? = nil,
+    /// [WF-SE6/SE11] The workflow node's EXPLICIT unattended-approval setting; false for
+    /// chat/code and for nodes without it. Only consulted when the run is unattended.
+    unattendedAutoApprove: Bool = false,
     onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
 ) async throws -> [ToolObservation] {
 
@@ -118,6 +121,7 @@ func executeToolCalls(
                         interactionMemory: interactionMemory,
                         continuation: continuation,
                         approvalNodeID: approvalNodeID,
+                        unattendedAutoApprove: unattendedAutoApprove,
                         onTraceUpdate: onTraceUpdate
                     )
                 }
@@ -145,6 +149,7 @@ func executeToolCalls(
             interactionMemory: interactionMemory,
             continuation: continuation,
             approvalNodeID: approvalNodeID,
+            unattendedAutoApprove: unattendedAutoApprove,
             onTraceUpdate: onTraceUpdate
         )
         observations.append(observation)
@@ -171,6 +176,8 @@ private func executeSingleTool(
     continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation,
     /// Workflow node this run belongs to, or nil for chat/code — scopes the approval allowlist.
     approvalNodeID: UUID?,
+    /// [WF-SE6/SE11] see the outer overload.
+    unattendedAutoApprove: Bool,
     onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
 ) async throws -> ToolObservation {
 
@@ -229,6 +236,43 @@ private func executeSingleTool(
                 output: "User Response: \(answerText)",
                 artifacts: [],
                 failureCategory: didAnswer ? nil : .cancelled
+            )
+        }
+
+        // [WF-SE11] The closest twin of the confirmation refusal below — same function, and the
+        // shape most likely to hit it: `AskUserTool` is appended to EVERY agent profile
+        // (AgentConnect: `wrapTool(AskUserTool(...), requiresConfirmation: false)`), so a scheduled
+        // run is one model decision away from an indefinite park. `suspendForClarification` is
+        // unbounded by contract ("Indefinite — container owns the deadline"), so with nobody
+        // reachable it only ever ended one way: the 600s deadline killing the whole run.
+        //
+        // ⚠️ The confirmation arm's remedy ("turn off Ask-first for this tool") CANNOT apply here —
+        // ask_user is wrapped `requiresConfirmation: false` and never reaches the Tool Library
+        // gate — so refusing with the existing skip observation is the only honest option. That
+        // observation already has a defined meaning downstream ("the user skipped or did not
+        // respond"), which is exactly what happened.
+        if !WorkflowRunAttendance.canReachAHuman {
+            let skipText = "System: No one is available to answer (this run is unattended). Proceed with reasonable assumptions, or stop and report what you need."
+            logger.error("[HITL] ask_user REFUSED — nobody can answer this run (scheduled), question: \(String(question.prefix(120))). CONSEQUENCE: the agent is told immediately that no answer is coming and continues on assumptions, instead of parking indefinitely until the run deadline cancels everything.")
+            // ⚠️ Found on adversarial audit: this arm returned the ToolObservation WITHOUT ever
+            // closing the `.toolCall` row opened above — the timeline showed the step as
+            // perpetually running (or, once a run-end settle pass closes dangling rows, as an
+            // "Interrupted" failure) for a run that actually completed cleanly on its own
+            // assumptions. Mirrors the identical-re-ask replay arm just above, which correctly
+            // closes its own `.toolCall` with a terminal event before returning.
+            let askOutput = ToolOutput(toolName: toolName, params: paramsString, output: skipText, isSuccess: true)
+            continuation.yield(.toolSucceeded(askOutput))
+            return ToolObservation(
+                stepId: currentIteration,
+                toolCallId: toolCallId,
+                toolName: toolName,
+                result: skipText,
+                summary: skipText,
+                isSuccess: true,
+                params: paramsString,
+                output: skipText,
+                artifacts: [],
+                failureCategory: nil
             )
         }
 
@@ -323,6 +367,62 @@ private func executeSingleTool(
                 artifacts: [],
                 failureCategory: .userDenied
             )
+        } else if !WorkflowRunAttendance.canReachAHuman {
+            // [WF-SE11] NOBODY TO ASK — a SCHEDULED run: no local banner and no remote channel.
+            // Before this, the confirmation parked to an empty room until the 600s deadline killed
+            // the WHOLE run as an unexplained `.cancelled`, on every fire, forever.
+            //
+            // ⚠️ `hasRemoteResponder` is load-bearing, not belt-and-braces. A ChatOps run also
+            // binds `isAttended = false` (for the Router arbitration reason, WF-EX5), but a human
+            // IS reachable there: `RemoteMirrorService` mirrors this confirmation to
+            // Telegram/Slack/Discord with tappable Approve/Deny and resolves it through
+            // `handleApproval`. Keying the refusal on `isAttended` alone deleted that shipped
+            // flow and left a plain ChatOps agent chat no remedy but disabling Ask-first globally.
+            //
+            // The node's EXPLICIT setting is the sanctioned unattended path (threaded from
+            // `WorkflowNodeConfig.unattendedAutoApprove`); a scheduled plain agent (no node
+            // dimension) has no such setting — its remedy is the profile Tool Library's per-tool
+            // Ask-first toggle. Refused fast, with an honest observation the model can act on and
+            // an honest category for the dashboards (`.hitlUnattendedRefused`, NOT
+            // `.toolUserDenied` — no user denied anything).
+            if unattendedAutoApprove {
+                logger.notice("[HITL] '\(toolName)' auto-approved by the workflow node's EXPLICIT unattended setting (run is unattended). CONSEQUENCE: the tool runs with no banner; this is configured intent, not a leaked chat grant.")
+                // fall through to execution below — same as an attended allowlist hit
+            } else {
+                let remedy = approvalNodeID != nil
+                    ? "Enable \u{201C}Unattended auto-approve\u{201D} on this workflow node, or run attended."
+                    : "Turn off Ask-first for this tool in the profile's Tool Library, or run attended."
+                let reason = "Tool '\(toolName)' requires confirmation, but this run is unattended — nobody can answer. The tool was NOT executed. \(remedy)"
+                logger.error("[HITL] '\(toolName)' REFUSED — unattended run, no standing approval. CONSEQUENCE: the tool is refused NOW with an honest observation instead of parking to nobody until the run deadline kills everything. \(remedy)")
+                let refusalOutput = ToolOutput(toolName: toolName, params: paramsString, output: reason, isSuccess: false)
+                // Timeline tier: `.permissionRejected` (permission unavailable — pointedly NOT
+                // `.userDenied`, no user denied anything). Dashboard tier: the classified
+                // `.hitlUnattendedRefused`, so a schedule failing on this every night shows up
+                // in the error panels as what it is.
+                continuation.yield(.toolFailed(refusalOutput, category: .permissionRejected))
+                await TraceRecorder.shared.emitAgentError(
+                    span: iterationSpan,
+                    error: ClassifiedAgentError.synthetic(
+                        category: .hitlUnattendedRefused,
+                        origin: "ToolExecutionLoop.unattendedConfirmation",
+                        message: reason,
+                        context: ["tool": toolName]
+                    ),
+                    iteration: currentIteration
+                )
+                return ToolObservation(
+                    stepId: currentIteration,
+                    toolCallId: toolCallId,
+                    toolName: toolName,
+                    result: reason,
+                    summary: reason,
+                    isSuccess: false,
+                    params: paramsString,
+                    output: reason,
+                    artifacts: [],
+                    failureCategory: .permissionRejected
+                )
+            }
         } else {
             let operationID = UUID()
             continuation.yield(.requestConfirmation(toolName: toolName, params: ps, operationID: operationID))

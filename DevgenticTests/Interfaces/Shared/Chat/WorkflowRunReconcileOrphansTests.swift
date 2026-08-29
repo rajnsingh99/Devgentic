@@ -16,6 +16,15 @@
 //  (Launch-time gating — the schema-change and test-env skips — lives at the call site in the app
 //  and is not reachable from a unit test; what is pinned here is the store-level contract.)
 //
+//  [WF-RU2] That store-level contract is exactly what makes it SAFE for `DevgenticApp.swift` to
+//  call this method on a `.deferSchemaChanged` launch too, unlike the download-history sweep next
+//  to it in that switch: `testSettledRowsAreUntouched` pins that only exact-`.running` rows are
+//  touched, and only `statusRaw`/`errorMessage` are rewritten — no lightweight migration can
+//  PRODUCE a `.running` row (that only happens while a run is genuinely executing), so there is
+//  nothing here for a botched migration to have silently degraded. Left un-reconciled, an orphan
+//  from a force-quit or crash rendered as a LIVE run — ticking elapsed timer, "Running" pill — for
+//  every session between the crash and the next launch that happens to take the `.run` branch.
+//
 
 import XCTest
 import SwiftData

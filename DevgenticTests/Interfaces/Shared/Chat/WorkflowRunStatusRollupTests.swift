@@ -166,6 +166,27 @@ final class WorkflowRunStatusRollupTests: XCTestCase {
         XCTAssertEqual(freeze(state).finalOutput, "done")
     }
 
+    /// [WF-RU1] A run whose FAILURE was settled (`handleError`, called by ActiveStreamManager
+    /// when the engine's terminal outcome is `.failed`) must not have the failure text
+    /// re-narrated as its answer at stream end: `finalText` on that path is the `.error` card's
+    /// textContent. Before the fix, `finalOutput` froze as "Execution Failed: The workflow
+    /// failed…" while `record.error` froze nil — the Final Outcome panel rendered the failure as
+    /// ordinary markdown with a Copy chip and VoiceOver spoke it as "Output: …".
+    func testStreamEndAfterRunFailureDoesNotLaunderTheErrorIntoFinalOutput() {
+        let state = conditionalRunState()
+        state.isRunning = true
+
+        state.handleError("Node A: connection refused")
+        state.handleStreamEnd(finalText: "Execution Failed: The workflow failed.\n\nNode A: connection refused", cancelled: false)
+
+        XCTAssertEqual(state.finalOutput, "", "the failure text is not the run's answer")
+        let record = freeze(state)
+        XCTAssertEqual(record.status, .failed)
+        XCTAssertEqual(record.error, "Node A: connection refused",
+                       "the failure must reach record.error — the history card and Final Outcome panel key on it")
+        XCTAssertEqual(record.finalOutput, "")
+    }
+
     /// `freeze`'s force-settle is the LAST gate, reached only when `settleInFlightWork` did not
     /// run (the buffered-event race). Its default used to be `.failed` unconditionally, which
     /// re-created the whole defect one layer down: a `.failed` node satisfies `isGenuineFailure`,
@@ -252,5 +273,52 @@ final class WorkflowRunStatusRollupTests: XCTestCase {
         ]
 
         XCTAssertEqual(freeze(state).status, .failed)
+    }
+
+    // MARK: - WF-RU4: a node failure the engine still routed to a successful terminal
+
+    /// The engine's root-level completion gate already treats "a successful terminal exists" as
+    /// non-failure for the chat bubble; `completedDespiteNodeFailure` carries that same verdict
+    /// across to the persisted record so the two surfaces agree, instead of the workflow-side
+    /// roll-up unconditionally reporting `.failed` whenever ANY node genuinely failed.
+    func testGenuineFailureWithSuccessfulTerminalRecordsCompletedWithWarnings() {
+        let state = conditionalRunState()
+        state.nodeResults.append(result(.failed, name: "Publisher", detail: "Model returned an error"))
+        state.completedDespiteNodeFailure = true
+
+        XCTAssertEqual(freeze(state).status, .completedWithWarnings,
+                       "a node genuinely failed but the run still reached a successful terminal")
+    }
+
+    /// The control: without the engine's signal, the exact same failed node still rolls up as
+    /// plain `.failed` — the flag only ever UPGRADES the verdict, never on its own downgrades one.
+    func testGenuineFailureWithoutEngineSignalStillRecordsFailed() {
+        let state = conditionalRunState()
+        state.nodeResults.append(result(.failed, name: "Publisher", detail: "Model returned an error"))
+        XCTAssertFalse(state.completedDespiteNodeFailure, "default must be false — the safe, pre-fix behaviour")
+
+        XCTAssertEqual(freeze(state).status, .failed)
+    }
+
+    /// `completedDespiteNodeFailure` must never MANUFACTURE a failure-flavoured status out of a
+    /// clean run — it only upgrades an already-`.failed` verdict. A run with no genuine failure at
+    /// all must stay plain `.completed` even if the flag is (nonsensically) set.
+    func testEngineSignalWithNoGenuineFailureStaysPlainCompleted() {
+        let state = conditionalRunState()
+        state.completedDespiteNodeFailure = true
+
+        XCTAssertEqual(freeze(state).status, .completed,
+                       "no node failed — the flag has nothing to upgrade")
+    }
+
+    /// Cancellation still outranks everything, including this new signal — a user Stop must not
+    /// be reported as a degraded success.
+    func testCancelOutranksCompletedDespiteNodeFailure() {
+        let state = conditionalRunState()
+        state.nodeResults.append(result(.failed, name: "Publisher", detail: "Model returned an error"))
+        state.completedDespiteNodeFailure = true
+        state.handleError("Cancelled", cancelled: true)
+
+        XCTAssertEqual(freeze(state).status, .cancelled)
     }
 }

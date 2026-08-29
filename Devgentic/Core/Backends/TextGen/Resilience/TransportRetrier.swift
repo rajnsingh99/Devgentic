@@ -36,6 +36,17 @@ struct TransportRetrier {
 
     private(set) var transientCount = 0
     private(set) var throttleCount = 0
+    /// [WF-CC12] Its own budget, mirroring `LLMRetryStrategy.consecutiveModelSlotFailures`: the
+    /// MLX model-slot race is neither a throttle nor a transient network fault, and charging it
+    /// to `transientCount` would fail on the first hit (the MLX transient budget is 0).
+    private(set) var modelSlotCount = 0
+
+    /// One bounded re-attempt, then fail honestly — the same bound and delay as the agent path
+    /// (`LLMRetryStrategy.maxModelSlotRetries` / `.modelSlotRetryDelay`). A single re-attempt is
+    /// enough because the retry itself re-runs `container(expecting:)`, which reloads the
+    /// requested model; a second consecutive loss means a live contender keeps evicting it.
+    private static let maxModelSlotRetries = 1
+    private static let modelSlotRetryDelay: TimeInterval = 2.0
 
     init(transport: TransportResiliencePolicy) {
         self.transport = transport
@@ -63,6 +74,17 @@ struct TransportRetrier {
     /// `CancellationError` is never reached here — callers check cancellation around
     /// the operation and rethrow it before consulting the retrier.
     mutating func nextStep(for error: Error) throws -> RetryStep {
+        // [WF-CC12] Typed MLX model-slot arm, BEFORE the shared classifier — and deliberately NOT
+        // added to `classifyTransport` itself: the agent path calls that classifier too, and
+        // classifying `ServiceError` there would intercept the fault before `LLMRetryStrategy`'s
+        // own typed switch (the WF-CC6 fix) and route it into the wrong machinery. Until this arm,
+        // the bot path showed the true slot-race text only because the `guard/else` below rethrows
+        // what the classifier doesn't recognize — correct by accident — and it got ZERO retries
+        // where the identical fault on an agent profile self-heals after one bounded re-attempt.
+        if let mlxError = error as? MLXService.ServiceError {
+            return try modelSlotStep(for: mlxError)
+        }
+
         guard let verdict = ProviderErrorClassifier.classifyTransport(
             error,
             connectionRefusedIsFatal: transport.connectionRefusedIsFatal,
@@ -116,6 +138,45 @@ struct TransportRetrier {
                 message: "⏳ \(detail) — retrying in \(Int(delay))s (\(transientCount)/\(transport.maxTransientRetries))…",
                 category: .retry,
                 drainPenalty: nil
+            )
+        }
+    }
+
+    /// [WF-CC12] The MLX model-slot race, bounded identically to the agent path's
+    /// `modelSlotAction`. The messages are copied from there verbatim so both surfaces report the
+    /// same fault in the same words.
+    ///
+    /// ⚠️ No `default:` on purpose (same rule as `LLMRetryStrategy`'s typed switch): a new
+    /// `ServiceError` case must BREAK THIS BUILD rather than silently fall through to the
+    /// rethrow-unrecognized path and lose its retry.
+    private mutating func modelSlotStep(for error: MLXService.ServiceError) throws -> RetryStep {
+        switch error {
+        case .modelIdentityMismatch(let expected, let actual):
+            modelSlotCount += 1
+            // "<none>" means the slot was EMPTIED by a concurrent load, not that a named model
+            // is squatting — never render it to the user as a model name (mirrors modelSlotAction).
+            let holder = (actual == "<none>") ? "another local model load" : "'\(actual)'"
+            if modelSlotCount > Self.maxModelSlotRetries {
+                throw TransportFatalError(
+                    reason: "This run needs the local model '\(expected)', but \(holder) still held the model slot after a retry. Only one MLX model stays in memory at a time, so two local runs evict each other. Nothing was answered by the wrong model. Run them one at a time — or point both profiles at the same model — and try again.",
+                    category: .modelUnloaded
+                )
+            }
+            return RetryStep(
+                delay: Self.modelSlotRetryDelay,
+                message: "⏳ \(holder) is using the local model slot — reloading '\(expected)' and retrying in \(Int(Self.modelSlotRetryDelay))s (\(modelSlotCount)/\(Self.maxModelSlotRetries))...",
+                category: .retry,
+                drainPenalty: nil
+            )
+
+        case .noModelLoaded:
+            // Deterministic: this is thrown only when the request carried NO expected model
+            // identity, so a re-attempt re-issues the identical identity-free request. (Unreachable
+            // in production today — both MLXLLMProvider construction sites pin a modelDirectory —
+            // kept so the exhaustive switch stays honest if that changes.)
+            throw TransportFatalError(
+                reason: error.localizedDescription,
+                category: .modelUnloaded
             )
         }
     }

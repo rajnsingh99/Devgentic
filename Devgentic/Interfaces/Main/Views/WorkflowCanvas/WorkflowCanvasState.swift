@@ -144,6 +144,7 @@ final class WorkflowCanvasState {
         case .gate:      return String(localized: "Gate")
         case .trigger:   return String(localized: "Trigger")
         case .action:    return String(localized: "Action")
+        case .unsupported: return String(localized: "Unsupported node")
         }
     }
 
@@ -204,10 +205,43 @@ final class WorkflowCanvasState {
 
     var canUndo: Bool { !undoStack.isEmpty }
 
+    /// [WF-CS3] Which node `replaceNode`'s last COALESCED push was for, and when — every other
+    /// mutating method's plain `pushUndoSnapshot()` call clears this, so it only ever survives
+    /// across consecutive `replaceNode` calls for the same node.
+    @ObservationIgnored private var lastCoalescedNodeID: UUID?
+    @ObservationIgnored private var lastCoalescedAt: Date?
+
+    /// Overridable only under `@testable import` — lets tests move the coalescing window without
+    /// real `Task.sleep`s.
+    @ObservationIgnored var undoCoalescingClock: () -> Date = Date.init
+
+    /// How long a run of `replaceNode` calls on the SAME node counts as one editing session. Wide
+    /// enough to span a normal typing pause, narrow enough that leaving the inspector and coming
+    /// back later to make a deliberate second edit still gets its own undo step.
+    private static let undoCoalescingWindow: TimeInterval = 3.0
+
     /// Captures the current graph so the next mutation can be undone.
     ///
     /// ⚠️ Call BEFORE mutating, never after.
-    private func pushUndoSnapshot() {
+    ///
+    /// [WF-CS3] `coalescingKey` is `replaceNode`'s node id, and ONLY `replaceNode` passes one. A
+    /// live-bound inspector control (`TextField("Node Name", text: $node.displayName)`, in all
+    /// five inspectors) calls `replaceNode` once per KEYSTROKE, so pushing unconditionally meant
+    /// 25 characters of typing evicted the whole 25-deep undo history — including the accidental
+    /// delete the stack exists to protect. A run of calls for the same node within
+    /// `undoCoalescingWindow` now shares the ONE snapshot taken at the start of that run; every
+    /// other mutating method still calls this with no key, which both pushes unconditionally and
+    /// resets the coalescing state, so a structural edit always gets its own undo step and the
+    /// next `replaceNode` after it starts a fresh session.
+    private func pushUndoSnapshot(coalescingKey: UUID? = nil) {
+        let now = undoCoalescingClock()
+        if let coalescingKey, coalescingKey == lastCoalescedNodeID,
+           let lastAt = lastCoalescedAt, now.timeIntervalSince(lastAt) < Self.undoCoalescingWindow {
+            lastCoalescedAt = now   // slide the window so a long typing session stays coalesced
+            return
+        }
+        lastCoalescedNodeID = coalescingKey
+        lastCoalescedAt = coalescingKey != nil ? now : nil
         undoStack.append(currentLayout())
         if undoStack.count > Self.maxUndoDepth {
             undoStack.removeFirst(undoStack.count - Self.maxUndoDepth)
@@ -224,6 +258,12 @@ final class WorkflowCanvasState {
             logger.info("[WF_CANVAS] Undo requested with an empty stack for profile \(profileID) — nothing to undo. CONSEQUENCE: the canvas is unchanged.")
             return
         }
+        // [WF-CS3] The just-popped snapshot is gone; if a coalescing session for the node it
+        // covered were left standing, the NEXT `replaceNode` on that node would coalesce into a
+        // snapshot that no longer exists on the stack — that edit would become unrecoverable
+        // (⌘Z again finds nothing) instead of stepping back to the state Undo just restored.
+        lastCoalescedNodeID = nil
+        lastCoalescedAt = nil
         let before = (nodes.count, edges.count, annotations.count)
         nodes = previous.nodes
         edges = previous.edges
@@ -331,6 +371,9 @@ final class WorkflowCanvasState {
         case .action:
             // Integration card (similar footprint to profile)
             return CGSize(width: 200, height: 76)
+        case .unsupported:
+            // [WF-PE4] Same footprint as a profile card so the preserved graph keeps its shape.
+            return CGSize(width: 200, height: 80)
         }
     }
 
@@ -361,6 +404,12 @@ final class WorkflowCanvasState {
         // how a different profile's layout arrives — an undo across that boundary would splice one
         // workflow's nodes into another's canvas, which is the WF-CV1 data-loss shape all over again.
         undoStack.removeAll()
+        // [WF-CS3] …and the coalescing token with it. Revert reloads THIS profile's own saved
+        // layout, which very plausibly still has a node at the id being coalesced — leaving the
+        // token set would make the next `replaceNode` on that node skip pushing a snapshot onto
+        // the now-EMPTY stack, so that edit could never be undone at all.
+        lastCoalescedNodeID = nil
+        lastCoalescedAt = nil
         revalidate()
     }
 
@@ -944,6 +993,15 @@ final class WorkflowCanvasState {
         case .trigger:
             // Entry-point marker only — never executes, so it has no failure to route.
             return []
+
+        case .unsupported:
+            // [WF-PE4] The node's real ports are unknown to this build, so none are declared and
+            // the edges still DRAW via the index-0 anchor fallback — the user sees the preserved
+            // topology. ⚠️ The validator says NOTHING about these edges: its dangling-port rule
+            // skips empty-port nodes (the single-implicit-default carve-out), so the executor's
+            // whole-run refusal on unsupported nodes is the ONLY backstop. Do not relax that
+            // refusal (e.g. into partial runs) without first giving these edges validation cover.
+            return []
         }
     }
 
@@ -994,7 +1052,10 @@ final class WorkflowCanvasState {
             logger.error("[WF_CANVAS] Node edit DISCARDED: no node \(nodeID) on the canvas to replace (it was deleted, or the canvas was reverted/cleared, while its inspector was open). CONSEQUENCE: every change made in that panel is lost. The inspector is now closed when its node disappears, so reaching this means a new path bypassed that.")
             return
         }
-        pushUndoSnapshot()
+        // [WF-CS3] A write that changes nothing (a redundant Binding fire, a Save with no edits)
+        // must not consume an undo step either — same reasoning as the missing-node guard above.
+        guard newNode != nodes[idx] else { return }
+        pushUndoSnapshot(coalescingKey: nodeID)
         let oldNode = nodes[idx]
         nodes[idx] = newNode
 
@@ -1025,37 +1086,181 @@ final class WorkflowCanvasState {
     ///
     /// Identity differs by kind, which is why this is not a positional diff everywhere:
     /// `ConditionRule` carries a stable `let id: UUID`, so a rule can be renamed AND reordered in
-    /// one edit and still be tracked. Gate options are plain strings with no identity, so they can
-    /// only be matched positionally — a rename is tracked, a simultaneous reorder is not, which is
-    /// why the validator backstop matters rather than this being the only defence.
+    /// one edit and still be tracked. Gate options are plain strings with no identity, so renames
+    /// are recovered from position + set difference — see `gateRenameMap` for what that can and
+    /// cannot distinguish, and why the validator backstop still matters.
+    ///
+    /// The map is applied SIMULTANEOUSLY: `replaceNode` consults it exactly once per edge, against
+    /// the edge's pre-edit label. A shift-rename permutation (Low→High while High→Critical in one
+    /// Save) is therefore safe by construction — no entry can contaminate another. [WF-CS1] An
+    /// earlier filter here didn't know that: it dropped any entry whose OLD label survives on the
+    /// new node, which applied exactly half of every permutation, silently leaving one branch
+    /// running on the wrong rule.
+    ///
+    /// What IS ambiguous — and each gets its own refuse-and-log arm rather than a guess — is:
+    /// a NEW label carried by more than one port; an OLD label still carried by an unrenamed
+    /// twin (the edge may belong to the keeper); either side being the reserved "error" label,
+    /// which counting cannot see because `withErrorPort` de-duplicates it; and any Gate save a
+    /// delete may be hiding in, where positional identity itself breaks (see `gateRenameMap`).
     static func portRenameMap(from oldNode: WorkflowNode, to newNode: WorkflowNode) -> [String: String] {
         var map: [String: String] = [:]
 
         switch (oldNode.kind, newNode.kind) {
         case (.condition(let oldConfig), .condition(let newConfig)):
             let newRulesByID = Dictionary(newConfig.rules.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            var ambiguousOldLabels: Set<String> = []
             for oldRule in oldConfig.rules {
                 guard let newRule = newRulesByID[oldRule.id], newRule.label != oldRule.label else { continue }
+                if let existing = map[oldRule.label], existing != newRule.label {
+                    // Two old rules shared one label and diverged. Edges address the port by that
+                    // shared label, so there is no telling which rule an edge meant to follow.
+                    ambiguousOldLabels.insert(oldRule.label)
+                    continue
+                }
                 map[oldRule.label] = newRule.label
             }
-            if oldConfig.fallbackLabel != newConfig.fallbackLabel {
+            for label in ambiguousOldLabels {
+                map.removeValue(forKey: label)
+                logger.warning("[WF_CANVAS] Port rename from shared label '\(label)' NOT applied: two rules carried that label and were renamed to different things, so an edge on '\(label)' has no single owner. CONSEQUENCE: those edges keep the old label and the validator reports them as dangling rather than this guessing a branch.")
+            }
+            // A rename away from a label that another rule KEEPS is equally unowned: the port
+            // still exists as a live source, so an edge on it may belong to the keeper. (The
+            // divergent-rename check above cannot see this — a keeper never enters the map.)
+            let keptLabels = Set(oldConfig.rules.compactMap { rule -> String? in
+                guard let newRule = newRulesByID[rule.id], newRule.label == rule.label else { return nil }
+                return rule.label
+            })
+            for (oldLabel, _) in map where keptLabels.contains(oldLabel) {
+                map.removeValue(forKey: oldLabel)
+                logger.warning("[WF_CANVAS] Port rename from shared label '\(oldLabel)' NOT applied: another rule still carries that label, so an edge on '\(oldLabel)' may belong to it. CONSEQUENCE: those edges stay on the surviving port instead of following the renamed twin.")
+            }
+            // ⚠️ [WF-CS12] The legacy catch-all's port belongs to the RULE it names — decode
+            // guarantees a non-empty `fallbackLabel` names a real rule — so a fallback change is a
+            // port rename ONLY for a phantom label naming no rule (pre-normalization data built in
+            // memory). Clearing it (new value empty) deletes that phantom port; deletions dangle
+            // for the validator, they don't re-point. The old unconditional write here ran AFTER
+            // the rules loop and CLOBBERED the rename entry of the very rule the catch-all names —
+            // the normal case, since the inspector clears the catch-all on every Save — re-pointing
+            // that rule's edges to a nonexistent "" port whenever it was renamed in the same Save.
+            if oldConfig.fallbackLabel != newConfig.fallbackLabel,
+               !oldConfig.fallbackLabel.isEmpty,
+               !newConfig.fallbackLabel.isEmpty,
+               !oldConfig.rules.contains(where: { $0.label == oldConfig.fallbackLabel }) {
                 map[oldConfig.fallbackLabel] = newConfig.fallbackLabel
             }
 
         case (.gate(let oldConfig), .gate(let newConfig)):
-            guard oldConfig.options.count == newConfig.options.count else { return [:] }
-            for (old, new) in zip(oldConfig.options, newConfig.options) where old != new {
-                map[old] = new
-            }
+            map = gateRenameMap(old: oldConfig.options, new: newConfig.options)
 
         default:
             return [:]
         }
 
-        // A rename INTO a label that still exists on another port would re-point edges onto the
-        // wrong branch. Drop those rather than guess.
-        let survivingLabels = Set(outputPortLabels(for: newNode))
-        return map.filter { oldLabel, _ in !survivingLabels.contains(oldLabel) }
+        // The destination filter: a rename whose NEW label is carried by more than one port on the
+        // edited node has an ambiguous target — re-pointing would pick a branch by luck. Leave the
+        // edge where it is; the validator reports the dangle and the user resolves the duplicate.
+        //
+        // ⚠️ The reserved failure label gets its own arm, in BOTH directions, because counting
+        // cannot see it: `withErrorPort` de-duplicates, so a user rule/option literally named
+        // "error" and the reserved failure port collapse into ONE counted label. A rename AWAY from
+        // "error" would unwire failure routing (the engine activates that literal on failure and
+        // cascade skip); a rename INTO it would make the edge fire on failures too. Both refuse.
+        var newLabelCounts: [String: Int] = [:]
+        for label in outputPortLabels(for: newNode) {
+            newLabelCounts[label, default: 0] += 1
+        }
+        return map.filter { oldLabel, newLabel in
+            if oldLabel == WorkflowEdge.errorPortLabel {
+                logger.warning("[WF_CANVAS] Port rename '\(oldLabel)'→'\(newLabel)' NOT applied: '\(WorkflowEdge.errorPortLabel)' is the reserved failure label and its port survives every rename. CONSEQUENCE: edges stay on '\(WorkflowEdge.errorPortLabel)' so failure routing keeps working; wire the renamed port by hand if the edge was meant to follow the rule.")
+                return false
+            }
+            if newLabel == WorkflowEdge.errorPortLabel {
+                logger.warning("[WF_CANVAS] Port rename '\(oldLabel)'→'\(newLabel)' NOT applied: '\(WorkflowEdge.errorPortLabel)' is the reserved failure label, so the destination would also fire on every failure and cascade skip. CONSEQUENCE: edges wired to '\(oldLabel)' keep their old label and the validator reports them as dangling.")
+                return false
+            }
+            if newLabelCounts[newLabel, default: 0] == 1 { return true }
+            logger.warning("[WF_CANVAS] Port rename '\(oldLabel)'→'\(newLabel)' NOT applied: \(newLabelCounts[newLabel, default: 0]) ports on the edited node now share the label '\(newLabel)', so the destination is ambiguous. CONSEQUENCE: edges wired to '\(oldLabel)' keep their old label and the validator reports them as dangling rather than this guessing a branch.")
+            return false
+        }
+    }
+
+    /// [WF-CS2] Rename recovery for Gate options, which are plain strings with no identity.
+    ///
+    /// The old logic abandoned tracking on ANY count change (`guard old.count == new.count else
+    /// return [:]`), so renaming an option in the same Save as Add Option, a row delete, or
+    /// blanking a row's text (which the save-time `filter { !$0.isEmpty }` then drops) stranded
+    /// every edge on the renamed port — while the canvas kept drawing the edge anchored to port
+    /// index 0, looking wired to the new label.
+    ///
+    /// Position is the only anchor, and it is only trustworthy while NOTHING was deleted: the
+    /// inspector appends adds at the end and edits text in place, so with zero deletes every
+    /// surviving text keeps its exact index. Deletes are what break it — and a delete is NOT
+    /// detectable from the count (a delete plus two adds still grows it). So recovery is limited
+    /// to what is PROVABLE:
+    ///
+    ///  - Any DISPLACED survivor (text present in both lists but at a different index) proves a
+    ///    delete happened, which invalidates every positional inference → the whole map refuses.
+    ///  - Under count GROWTH, a vanished row is trusted as a rename only when a LATER survivor
+    ///    still anchors its own index — that survivor proves no delete occurred at or before this
+    ///    row. Vanished rows after the last anchored survivor (the suffix) are exactly where
+    ///    "renamed the last row" and "deleted the last row, then added" are byte-identical, and
+    ///    guessing wrong re-points an edge onto a live WRONG branch — strictly worse than the
+    ///    dangling edge the validator reports. Those refuse, and the refusal is logged.
+    ///  - At EQUAL count, positional matching keeps its long-shipped semantics (the pre-existing
+    ///    zip behaviour): a suffix rename still tracks, accepting the same delete-plus-add
+    ///    ambiguity that behaviour always carried.
+    ///  - A save that SHRANK is ambiguous everywhere (delete-then-rename is byte-identical to
+    ///    rename-then-delete) → no map, logged.
+    private static func gateRenameMap(old: [String], new: [String]) -> [String: String] {
+        let oldSet = Set(old), newSet = Set(new)
+        guard new.count >= old.count else {
+            let vanished = old.filter { !newSet.contains($0) }
+            if !vanished.isEmpty {
+                logger.notice("[WF_CANVAS] Gate options \(vanished.map { "'\($0)'" }.joined(separator: ", ")) removed in a Save that shrank the option count — a delete cannot be told apart from a rename-plus-delete. CONSEQUENCE: if one of these was meant as a rename, its edges did NOT follow; they now dangle and the validator reports them.")
+            }
+            return [:]
+        }
+
+        // Survivors must sit at their exact old indices — adds append and renames edit in place,
+        // so any displaced survivor proves a delete, and a delete shifts every later row.
+        var lastAnchoredSurvivorIndex = -1
+        for (index, label) in old.enumerated() where newSet.contains(label) {
+            guard index < new.count, new[index] == label else {
+                logger.notice("[WF_CANVAS] Gate option '\(label)' moved from row \(index + 1) in this Save, which proves a row was deleted — positional rename tracking is unsafe for the whole edit. CONSEQUENCE: no edges are re-pointed; any renamed option's edges now dangle and the validator reports them.")
+                return [:]
+            }
+            lastAnchoredSurvivorIndex = index
+        }
+
+        // Consumable budget of genuinely new texts, so a rename can't grab a shifted survivor or
+        // claim the same new text twice.
+        var addedCounts: [String: Int] = [:]
+        for label in new where !oldSet.contains(label) {
+            addedCounts[label, default: 0] += 1
+        }
+
+        var map: [String: String] = [:]
+        var ambiguousOldLabels: Set<String> = []
+        for (index, oldLabel) in old.enumerated() where !newSet.contains(oldLabel) {
+            if new.count > old.count, index > lastAnchoredSurvivorIndex {
+                logger.notice("[WF_CANVAS] Gate option '\(oldLabel)' (row \(index + 1)) vanished past the last surviving row in a Save that also ADDED options — a rename of that row is byte-identical to deleting it and adding a new one, so no guess is made. CONSEQUENCE: if it was a rename, its edges did NOT follow; they now dangle and the validator reports them. Re-wire the new port by hand.")
+                continue
+            }
+            let candidate = new[index]     // index < new.count: guarded by new.count >= old.count
+            guard !oldSet.contains(candidate), addedCounts[candidate, default: 0] > 0 else { continue }
+            if let existing = map[oldLabel], existing != candidate {
+                // Duplicate old texts renamed to different things — no single owner for the label.
+                ambiguousOldLabels.insert(oldLabel)
+                continue
+            }
+            map[oldLabel] = candidate
+            addedCounts[candidate]! -= 1
+        }
+        for label in ambiguousOldLabels {
+            map.removeValue(forKey: label)
+            logger.warning("[WF_CANVAS] Gate option rename from duplicated text '\(label)' NOT applied: two rows carried that text and were renamed to different things. CONSEQUENCE: edges on '\(label)' keep the old label and the validator reports them as dangling rather than this guessing a branch.")
+        }
+        return map
     }
 
     /// Returns the center position of a node's input port in canvas coordinates.

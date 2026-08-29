@@ -172,14 +172,12 @@ enum WorkflowValidator {
         // that can never start is noise.
         typealias MLXDemand = (nodeID: UUID, displayName: String, level: Int, model: String, slot: String)
         var mlxProfileDemands: [MLXDemand] = []
-        var mlxRouterDemands: [MLXDemand] = []
         for node in layout.nodes {
             guard let level = nodeLevel[node.id] else { continue }
             switch node.kind {
             case .profile(let profileID, let profileType):
-                // `.workflow` runs a CHILD executor and its demand lives in the child layout,
-                // which this rule cannot see. `resolvedLLMConfig` is already nil for both
-                // `.workflow` and `.imageGen`; the explicit guard says so at the call site.
+                // `.workflow` runs a CHILD executor — see the WF-CC5 pool below, which covers it
+                // (and Router fallbacks) via the runtime's own partition function instead.
                 guard profileType != .workflow,
                       let profile = profileMap[profileID],
                       let config = profile.resolvedLLMConfig,
@@ -190,20 +188,10 @@ enum WorkflowValidator {
                 mlxProfileDemands.append((node.id, node.displayName, level,
                                           config.modelName.trimmingCharacters(in: .whitespacesAndNewlines), slot))
 
-            case .condition(let config):
-                // The AI Classifier is MLX-only by construction — `evaluateConditionWithLLM`
-                // resolves `llmModelName` through `MLXModelService.installedModel(named:)` and
-                // calls `MLXService.shared.loadModel`. There is no provider field, so presence is
-                // the whole check.
-                guard config.llmFallbackEnabled,
-                      let slot = WorkflowExecutor.mlxSlotKey(modelName: config.llmModelName ?? "") else { continue }
-                mlxRouterDemands.append((node.id, node.displayName, level,
-                                         (config.llmModelName ?? "").trimmingCharacters(in: .whitespacesAndNewlines), slot))
-
-            case .code, .gate, .trigger, .action:
-                // `.code` is deterministic non-LLM processing and `.action` invokes a tool
-                // directly; neither can reach MLXService. Exhaustive on purpose — a new
-                // `WorkflowNodeKind` must fail to compile here rather than inherit a silent skip.
+            case .unsupported, .condition, .code, .gate, .trigger, .action:
+                // Handled by the WF-CC5 pool below (`.condition`) or provably MLX-inert
+                // (everything else). Exhaustive on purpose — a new `WorkflowNodeKind` must fail to
+                // compile here rather than inherit a silent skip.
                 continue
             }
         }
@@ -211,9 +199,6 @@ enum WorkflowValidator {
         let mlxPools: [(demands: [MLXDemand], body: (String, String) -> String)] = [
             (mlxProfileDemands, { model, others in
                 "Runs the local MLX model '\(model)' on the same step as \(others). Only one MLX model stays in memory, so the engine runs these one after another instead of in parallel — this step takes as long as both nodes combined. Point them at the same model, or wire one into the other so they run on different steps, to get the parallelism back."
-            }),
-            (mlxRouterDemands, { model, others in
-                "Its AI Classifier runs the local MLX model '\(model)' on the same step as \(others). Only one MLX model stays in memory, and same-step Routers are NOT run one at a time — they evict each other's weights, so every hand-off re-reads multi-GB of model from disk and a classification can fail outright. Point them at the same model, or wire them onto different steps."
             })
         ]
         for pool in mlxPools {
@@ -235,6 +220,93 @@ enum WorkflowValidator {
                         message: pool.body(demand.model, others)
                     ))
                 }
+            }
+        }
+
+        // --- WF-CC5: same-level STRUCTURAL MLX contention (Router fallback + nested sub-workflow) ---
+        //
+        // Router `.condition` fallback calls and nested sub-workflow nodes physically share the
+        // runtime's STRUCTURAL task group (unlike profile nodes, which run in a separate,
+        // non-overlapping phase — that's why they keep their own pool above). Until WF-CC5 that
+        // group was entirely unpartitioned; it is now split by `WorkflowExecutor.structuralDispatchLanes`.
+        //
+        // ⚠️ Reuses that function DIRECTLY rather than re-deriving an approximation of it, so this
+        // warning and the runtime partition CANNOT disagree about which nodes contend — the same
+        // invariant `mlxSlotKey` already enforces for the profile pool above. A nested sub-workflow
+        // gets a unique-per-node lane there (its real MLX demand lives in a child layout this rule
+        // cannot see either — see that function's doc comment for why precise resolution isn't
+        // attempted), so any level with 2+ same-level sub-workflows, or a sub-workflow beside an
+        // MLX-fallback Router, always collides — deliberately conservative, matching the runtime.
+        struct StructuralMLXDescriptor { let displayName: String; let model: String?; let isSubWorkflow: Bool }
+        var structuralDescriptorByNodeID: [UUID: StructuralMLXDescriptor] = [:]
+        var structuralNodesByLevel: [Int: [WorkflowNode]] = [:]
+        for node in layout.nodes {
+            guard let level = nodeLevel[node.id] else { continue }
+            switch node.kind {
+            case .profile(_, let profileType) where profileType == .workflow:
+                structuralNodesByLevel[level, default: []].append(node)
+                structuralDescriptorByNodeID[node.id] = StructuralMLXDescriptor(
+                    displayName: node.displayName, model: nil, isSubWorkflow: true
+                )
+            case .condition(let config):
+                structuralNodesByLevel[level, default: []].append(node)
+                // ⚠️ Mirrors `WorkflowExecutor.mlxSlotKey(modelName:)`'s own emptiness check ON
+                // PURPOSE — a fallback-enabled Router with a blank/whitespace model name resolves
+                // to `slot == nil` there too (`structuralDispatchLanes` treats it as unconstrained,
+                // riding along in lane 0), so it must get NO descriptor here. Gating on
+                // `llmFallbackEnabled` alone (the original shape of this check) let such a node
+                // acquire a descriptor anyway, so a THIRD, genuinely-slotted sibling forcing
+                // `lanes.count > 1` swept it into `contenders` below and warned it was contending
+                // for a local MLX model named `''` — a fabricated warning about a node the runtime
+                // never separates into its own lane and that never touches MLX at all.
+                let trimmedModel = (config.llmModelName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if config.llmFallbackEnabled, !trimmedModel.isEmpty {
+                    structuralDescriptorByNodeID[node.id] = StructuralMLXDescriptor(
+                        displayName: node.displayName,
+                        model: trimmedModel,
+                        isSubWorkflow: false
+                    )
+                }
+            case .code, .gate, .trigger, .action, .unsupported:
+                structuralNodesByLevel[level, default: []].append(node)
+            case .profile:
+                continue
+            }
+        }
+        for (_, nodesAtLevel) in structuralNodesByLevel {
+            let lanes = WorkflowExecutor.structuralDispatchLanes(nodesAtLevel)
+            guard lanes.count > 1 else { continue }
+            // ⚠️ Filtered by DESCRIPTOR presence, not by `lane.slot != nil` — every lane returned
+            // once `lanes.count > 1` necessarily has a non-nil slot (drawn from `slotOrder`, which
+            // by construction contains only non-nil entries), so a lane-level filter here is a
+            // no-op that cannot exclude a node that merely "rode along" into lane 0 via
+            // `structuralDispatchLanes`'s `unconstrained + bySlot[slot]!` merge. A node's OWN
+            // descriptor (built above with the same emptiness gate as `mlxSlotKey`) is what
+            // actually says whether it demands a real slot.
+            let contenders = lanes.flatMap(\.members).filter { structuralDescriptorByNodeID[$0.id] != nil }
+            guard contenders.count > 1 else { continue }
+            for node in contenders {
+                guard let descriptor = structuralDescriptorByNodeID[node.id] else { continue }
+                let others = contenders
+                    .filter { $0.id != node.id }
+                    .compactMap { structuralDescriptorByNodeID[$0.id] }
+                    .sorted { $0.displayName < $1.displayName }
+                    .map { other in
+                        other.isSubWorkflow
+                            ? "'\(other.displayName)' (nested sub-workflow)"
+                            : "'\(other.displayName)' (\(other.model ?? "?"))"
+                    }
+                    .joined(separator: ", ")
+                guard !others.isEmpty else { continue }
+                let message = descriptor.isSubWorkflow
+                    ? "Only one MLX model stays in memory, and this nested sub-workflow can independently reach it on the same step as \(others). Devgentic can't see which model(s) a sub-workflow uses at design time, so it always runs same-step sub-workflows — and same-step AI Classifiers — one after another instead of in parallel, to stay safe. This step now takes as long as all of them combined."
+                    : "Its AI Classifier runs the local MLX model '\(descriptor.model ?? "")' on the same step as \(others). Only one MLX model stays in memory, so the engine now runs these one after another instead of in parallel — this step takes as long as all of them combined."
+                issues.append(WorkflowValidationIssue(
+                    nodeID: node.id,
+                    nodeName: node.displayName,
+                    severity: .warning,
+                    message: message
+                ))
             }
         }
 
@@ -335,6 +407,18 @@ enum WorkflowValidator {
 
             case .trigger:
                 break // Trigger nodes have no user-configurable fields to validate
+
+            case .unsupported:
+                // [WF-PE4] BLOCKING. The graph is intact and saveable, but this build cannot
+                // execute a node it does not understand — the executor refuses the run at its
+                // choke point with the same message, and this issue is the design-time surface
+                // that tells the user BEFORE they press Run.
+                issues.append(WorkflowValidationIssue(
+                    nodeID: node.id,
+                    nodeName: node.displayName,
+                    severity: .error,
+                    message: "'\(node.displayName)' was saved by a different version of Devgentic and cannot run on this one. The node and its connections are preserved — update Devgentic to use it, or delete it to run this workflow."
+                ))
             }
         }
 
@@ -410,27 +494,17 @@ enum WorkflowValidator {
             return
         }
 
-        // Task description is mandatory for workflow execution — EXCEPT for a node backed by a
-        // workflow profile, which runs as a nested sub-workflow: its steps come from that
-        // workflow's own canvas and its directive is the upstream output, so there is no
-        // per-node task to write.
+        // ⚠️ NO TASK-DESCRIPTION RULE ANY MORE (2026-08-29). A blocking "Task description is
+        // required" error used to live here, so every profile node had to be configured before any
+        // run could start. The field it guarded is gone: a node's behaviour is its profile's
+        // system instructions, and its input is the run's query (entry node) or its upstream's
+        // output. There is nothing left on a profile node that must be filled in beyond choosing
+        // the profile, which adding the node already did.
         //
-        // ⚠️ Requiring it here is what made adding a sub-workflow node brick the whole workflow.
-        // The error told the user to "Double-click to configure", the double-click handler
-        // excluded exactly this node type, and `targetConfigNode` has no other writer — so the
-        // blocking error was unfixable from the app and every later Run threw `validationFailed`
-        // before a single node executed.
-        if case .profile(_, .workflow) = node.kind { return }
-
-        let taskDescription = node.nodeConfig?.taskDescription ?? ""
-        if taskDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            issues.append(WorkflowValidationIssue(
-                nodeID: node.id,
-                nodeName: node.displayName,
-                severity: .error,
-                message: "Task description is required. Double-click to configure."
-            ))
-        }
+        // The sub-workflow exemption that used to sit here is gone with it — and it is worth
+        // recording WHY it existed, because it was the first place this design was conceded: a
+        // sub-workflow node had no task because "its directive is the upstream output". That is
+        // now true of every node.
     }
 
     // MARK: - Condition Node

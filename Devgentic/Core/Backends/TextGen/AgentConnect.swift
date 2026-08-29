@@ -747,11 +747,12 @@ class AgentConnect: @unchecked Sendable {
                     }
 
                     // 7. Build AgentInput — workflow-aware, no history/RAG/compaction
-                    // taskDescription contains the merged user query for first nodes.
-                    // For downstream nodes, upstreamInput is the primary data.
-                    let userInputForNode = workflowContext.isFirstNode
-                        ? workflowContext.taskDescription
-                        : workflowContext.upstreamInput
+                    //
+                    // ⚠️ ONE CHANNEL (2026-08-29). This used to branch on `isFirstNode` between
+                    // `taskDescription` and `upstreamInput` — the two-channel model. The executor
+                    // now resolves that question at the graph, so the node's input is simply its
+                    // input, and this seam has nothing left to decide.
+                    let userInputForNode = workflowContext.input
 
                     // EFFECTIVE window — see the main-path note; workflow nodes get the
                     // same num_ctx-aware sizing so per-node budgets match reality.

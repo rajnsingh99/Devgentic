@@ -275,4 +275,58 @@ final class ReflectionEvaluatorTests: XCTestCase {
         XCTAssertTrue(result.isAcceptable)
         XCTAssertEqual(result.critique, "No critique provided.")
     }
+
+    // MARK: - [WF-CC11] Evaluation-call failure is INCONCLUSIVE, not a verdict
+
+    /// A provider that fails every call — the shape of an MLX model-slot race hitting the
+    /// EVALUATOR's own LLM call.
+    private struct ThrowingProvider: LLMProvider {
+        let modelName = "mock-throwing-model"
+        let error: Error
+        func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
+            throw error
+        }
+        func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {
+            AsyncThrowingStream { $0.finish(throwing: error) }
+        }
+        func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
+            throw error
+        }
+    }
+
+    /// The old catch manufactured `isAcceptable: false` plus the fabricated advice "Retry the
+    /// same approach with more careful tool usage." — which forced a WHOLE extra agent trial
+    /// (tool side effects included) off an infrastructure fault, and fed a false corrective
+    /// instruction into the next trial's prompt. With no evaluation there is no honest verdict.
+    func testEvaluate_LLMFailure_IsInconclusiveNotAVerdict() async throws {
+        let provider = ThrowingProvider(
+            error: MLXService.ServiceError.modelIdentityMismatch(expected: "qwen-7b", actual: "llama-3b"))
+        let summary = ExecutionSummary(originalGoal: "test goal")
+
+        let (evaluation, _) = try await evaluator.evaluate(
+            summary: summary, originalGoal: "test goal", model: provider, trial: 1)
+
+        guard case .inconclusive(let reason) = evaluation else {
+            return XCTFail("an evaluation whose own LLM call failed must be INCONCLUSIVE, got \(evaluation) — a manufactured RETRY verdict re-runs the whole agent trial off an infrastructure fault")
+        }
+        XCTAssertTrue(reason.contains("qwen-7b"),
+                      "the reason must carry the real error text, not fabricated advice")
+    }
+
+    /// Cancellation must still propagate — folding it into any evaluation outcome would delay
+    /// the user's Stop by a trial boundary (register #18 B, unchanged by the CC11 fix).
+    func testEvaluate_Cancellation_StillPropagates() async {
+        let provider = ThrowingProvider(error: CancellationError())
+        let summary = ExecutionSummary(originalGoal: "test goal")
+
+        do {
+            _ = try await evaluator.evaluate(
+                summary: summary, originalGoal: "test goal", model: provider, trial: 1)
+            XCTFail("CancellationError must propagate, not become an evaluation outcome")
+        } catch is CancellationError {
+            // expected
+        } catch {
+            XCTFail("expected CancellationError, got \(error)")
+        }
+    }
 }

@@ -129,18 +129,21 @@ final class WorkflowLayoutForwardCompatTests: XCTestCase {
 
     /// A MODERN non-profile node whose `kind` fails must surface the TRUE error — not
     /// `keyNotFound(profileID)`, a legacy key with nothing to do with the failure.
-    func testUnknownKindOnAModernNodeThrowsTheRealError() {
+    /// [WF-PE4 rewrite, 2026-08-24] This test used to pin "an unknown kind on a modern node must
+    /// THROW the real error" — the diagnostic half of the defect, when the throw itself still cost
+    /// the whole layout. The contract is now stronger: an unknown kind decodes as a PRESERVED
+    /// `.unsupported` placeholder (never a guessed runnable kind — the half of the old assertion
+    /// that still matters), and the throw survives only for genuine corruption
+    /// (`testMissingKindWithNoLegacyKeysStillFailsTheDecode`).
+    func testUnknownKindOnAModernNodeBecomesAPlaceholderNotAGuess() throws {
         let json = """
         {"id":"\(UUID().uuidString)","kind":{"teleport":{}},"positionX":0,"positionY":0,"displayName":"Future Node"}
         """
-        do {
-            _ = try JSONDecoder().decode(WorkflowNode.self, from: json.data(using: .utf8)!)
-            XCTFail("an unknown kind on a modern node must throw — silently guessing a kind would run the wrong graph")
-        } catch {
-            let description = String(describing: error)
-            XCTAssertFalse(description.contains("profileID"),
-                           "the diagnostic must name the real failure, not the absent legacy key — got: \(description)")
+        let node = try JSONDecoder().decode(WorkflowNode.self, from: json.data(using: .utf8)!)
+        guard case .unsupported = node.kind else {
+            return XCTFail("an unknown kind must become a preserved placeholder — silently guessing a runnable kind would run the wrong graph; got \(node.kind)")
         }
+        XCTAssertEqual(node.displayName, "Future Node")
     }
 
     /// A LEGACY node (no `kind`, `profileID` present) must still decode via the fallback.
@@ -189,5 +192,139 @@ final class WorkflowLayoutForwardCompatTests: XCTestCase {
         XCTAssertFalse(reEncoded.contains("concurrencyLimit"),
                        "If this now PASSES a sidecar through, the guarantee has genuinely widened: "
                        + "delete this test and update the file header.")
+    }
+
+    // MARK: - [WF-PE4] Unknown node KINDS decode as preserved placeholders
+
+    /// A layout JSON with one node whose `kind` case name this build has never heard of.
+    private func layoutJSON(kind: String) -> Data {
+        Data("""
+        {"nodes": [
+            {"id": "11111111-1111-1111-1111-111111111111", "kind": {"profile": {"profileID": "AAAAAAAA-0000-0000-0000-000000000000", "profileType": "Bot"}},
+             "positionX": 0, "positionY": 0, "displayName": "Bot A"},
+            {"id": "22222222-2222-2222-2222-222222222222", "kind": \(kind),
+             "positionX": 100, "positionY": 0, "displayName": "Future Node"},
+            {"id": "33333333-3333-3333-3333-333333333333", "kind": {"profile": {"profileID": "BBBBBBBB-0000-0000-0000-000000000000", "profileType": "Bot"}},
+             "positionX": 200, "positionY": 0, "displayName": "Bot C"}
+        ],
+        "edges": [
+            {"id": "44444444-4444-4444-4444-444444444444", "sourceNodeID": "11111111-1111-1111-1111-111111111111", "targetNodeID": "22222222-2222-2222-2222-222222222222"},
+            {"id": "55555555-5555-5555-5555-555555555555", "sourceNodeID": "22222222-2222-2222-2222-222222222222", "targetNodeID": "33333333-3333-3333-3333-333333333333"}
+        ]}
+        """.utf8)
+    }
+
+    /// The headline: ONE unknown case name no longer costs the whole graph. Before this, the
+    /// element throw failed the `[WorkflowNode]` array, which made the layout unreadable (empty
+    /// canvas + overlay), unrunnable, AND permanently unsaveable (the `WorkflowLayoutSD` setter
+    /// refuses every write while unreadable) — total loss, destructive repair the only exit.
+    func testUnknownNodeKindDecodesAsPlaceholderAndTheGraphSurvives() throws {
+        let decoded = try JSONDecoder().decode(WorkflowLayout.self,
+                                               from: layoutJSON(kind: #"{"futureKind": {"answer": 42}}"#))
+
+        XCTAssertEqual(decoded.nodes.count, 3, "the two known nodes and both edges must survive")
+        XCTAssertEqual(decoded.edges.count, 2)
+        XCTAssertEqual(decoded.unsupportedNodes.map(\.displayName), ["Future Node"])
+        if case .unsupported = decoded.nodes[1].kind {} else {
+            XCTFail("the unknown kind must become a preserved placeholder, got \(decoded.nodes[1].kind)")
+        }
+    }
+
+    /// The preservation half — the load-bearing one, per this file's header rule: a re-save must
+    /// write the ORIGINAL kind JSON back, so the build that understands the node reads it again
+    /// untouched, and the literal case name `unsupported` never reaches a blob.
+    func testUnknownNodeKindRoundTripsItsOriginalJSON() throws {
+        let decoded = try JSONDecoder().decode(WorkflowLayout.self,
+                                               from: layoutJSON(kind: #"{"futureKind": {"answer": 42}}"#))
+        let reEncoded = try JSONEncoder().encode(decoded)
+
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: reEncoded) as? [String: Any])
+        let nodes = try XCTUnwrap(json["nodes"] as? [[String: Any]])
+        let futureNode = try XCTUnwrap(nodes.first { $0["displayName"] as? String == "Future Node" })
+        let kind = try XCTUnwrap(futureNode["kind"] as? [String: Any])
+        XCTAssertNil(kind["unsupported"], "the placeholder wrapper must never be persisted")
+        let payload = try XCTUnwrap(kind["futureKind"] as? [String: Any])
+        XCTAssertEqual(payload["answer"] as? Double, 42,
+                       "the original kind JSON must round-trip VERBATIM — a lossy placeholder is the defect class this file forbids")
+
+        // And the round-trip is stable: decoding the re-encoded blob yields the same placeholder.
+        let again = try JSONDecoder().decode(WorkflowLayout.self, from: reEncoded)
+        XCTAssertEqual(again.unsupportedNodes.count, 1)
+    }
+
+    /// The retired Loop node — the one shipped instance of this class. Its layouts used to land on
+    /// the unreadable-layout total-loss path; now they open with a placeholder (run still blocked,
+    /// loop semantics NOT resurrected — the 2026-08-15 no-decode-shim decision stands).
+    func testRetiredLoopNodeDecodesAsPlaceholderNotLostLayout() throws {
+        let decoded = try JSONDecoder().decode(WorkflowLayout.self,
+                                               from: layoutJSON(kind: #"{"loop": {"_0": {"maxIterations": 3}}}"#))
+        XCTAssertEqual(decoded.nodes.count, 3)
+        XCTAssertEqual(decoded.unsupportedNodes.count, 1)
+    }
+
+    /// The corruption boundary: a node with NO kind and NO legacy profileID is not version skew,
+    /// and must still fail the decode so the unreadable-layout machinery owns it.
+    func testMissingKindWithNoLegacyKeysStillFailsTheDecode() {
+        let json = Data("""
+        {"nodes": [{"id": "11111111-1111-1111-1111-111111111111", "positionX": 0, "positionY": 0, "displayName": "No Kind"}], "edges": []}
+        """.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(WorkflowLayout.self, from: json),
+                             "a missing kind is corruption, not a preservable unknown")
+    }
+
+    // MARK: - [WF-SE6] unattendedAutoApprove round-trips (and its absence decodes as nil)
+
+    /// The new SECURITY field must survive its own round-trip, and a pre-v3 blob without the key
+    /// must decode nil (= off) — this addition is why `layoutBlobVersion` bumped 2 → 3.
+    func testUnattendedAutoApproveRoundTripsAndDefaultsNil() throws {
+        var config = WorkflowNodeConfig()
+        config.unattendedAutoApprove = true
+        let decoded = try roundTrip(config)
+        XCTAssertEqual(decoded.unattendedAutoApprove, true)
+
+        let legacy = Data("""
+        {"maxNodeRetries": 2}
+        """.utf8)
+        let old = try JSONDecoder().decode(WorkflowNodeConfig.self, from: legacy)
+        XCTAssertNil(old.unattendedAutoApprove, "a pre-v3 config decodes with the setting OFF, never guessed")
+        XCTAssertEqual(old.maxNodeRetries, 2)
+    }
+
+    /// The run gate: an unsupported node raises a BLOCKING validation error, so the user learns
+    /// at design time — the executor's choke point enforces the same refusal at run time.
+    func testUnsupportedNodeRaisesABlockingValidationError() throws {
+        let decoded = try JSONDecoder().decode(WorkflowLayout.self,
+                                               from: layoutJSON(kind: #"{"futureKind": {}}"#))
+        let issues = WorkflowValidator.validate(layout: decoded, profileMap: [:])
+        let blocking = issues.filter { $0.severity == .error && $0.nodeName == "Future Node" }
+        XCTAssertFalse(blocking.isEmpty,
+                       "an unsupported node must BLOCK the run — this build cannot execute or honestly skip it")
+    }
+
+    // MARK: - [Found on adversarial audit] Corruption of a KNOWN kind must not masquerade as version skew
+
+    /// The unknown-kind placeholder exists for a case name this build has NEVER HEARD OF. It must
+    /// NOT also catch a case name this build fully understands whose PAYLOAD failed to decode —
+    /// that is real corruption, and reclassifying it as "saved by a different version, update
+    /// Devgentic" is actively misleading (updating changes nothing; the corrupted bytes round-trip
+    /// forever disguised as an ordinary forward-compat placeholder). `{"action": {}}` is a KNOWN
+    /// discriminator ("action") with a payload missing `ActionNodeConfig.argumentBindings` — a
+    /// non-optional field with only a Swift-level default, which — per this file's own header
+    /// rule about synthesized Codable ignoring property defaults for missing keys — synthesized
+    /// Decodable throws `keyNotFound` on, not `.unsupported`.
+    func testKnownKindWithCorruptedPayload_FailsTheWholeDecodeNotAPlaceholder() {
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(WorkflowLayout.self, from: layoutJSON(kind: #"{"action": {}}"#)),
+            "a KNOWN kind's corrupted payload is real corruption — it must hit the unreadable-layout machinery, not decode as a silently-preserved placeholder"
+        )
+    }
+
+    /// …and the sibling contract: a genuinely UNRECOGNIZED discriminator still becomes the
+    /// placeholder (this is the actual forward-compat case the mechanism exists for) — pinned
+    /// again here, right beside the corruption test, so the two contracts are read together.
+    func testUnrecognizedDiscriminator_StillBecomesAPlaceholder() throws {
+        let decoded = try JSONDecoder().decode(WorkflowLayout.self,
+                                               from: layoutJSON(kind: #"{"someKindFromANewerBuild": {"field": 1}}"#))
+        XCTAssertEqual(decoded.unsupportedNodes.count, 1)
     }
 }

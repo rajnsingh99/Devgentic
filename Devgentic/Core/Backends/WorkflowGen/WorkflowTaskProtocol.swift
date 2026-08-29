@@ -145,6 +145,31 @@ enum NodeExecutionStatus: Sendable {
 
     /// Node did not run. See `NodeSkipReason` — "did not run" is NOT one thing.
     case skipped(reason: NodeSkipReason)
+
+    /// Whether this node CONSUMED its upstream's output — i.e. whether a path that actually ran
+    /// continues through it.
+    ///
+    /// ⚠️ Not the same question as "did it succeed". A `.failed` node ran: it took its input,
+    /// tried, and ended the path itself, so its upstream is not the end of anything. That is why
+    /// this is a separate predicate rather than a `case .completed` check.
+    ///
+    /// ⚠️ `.skipped(.byUser)` is TRUE, and it is the only skip that is — the same split
+    /// `NodeSkipReason.keepsDownstreamAlive` makes, for the same reason: a user-skipped node
+    /// forwards its input as its own output, and `terminalOutputs`' caller surfaces that
+    /// pass-through text. Calling it "did not consume" would put the upstream back in the terminal
+    /// set and print the same content twice — once bare, once under the skipped node's heading.
+    ///
+    /// Every other skip means this node never took the input, so whatever fed it is still the end
+    /// of a path that ran and still owns an answer nobody else will print.
+    ///
+    /// Exhaustive on purpose: no `default`, so a new status cannot inherit an answer.
+    var consumedUpstreamOutput: Bool {
+        switch self {
+        case .completed, .failed: return true
+        case .canceled: return false
+        case .skipped(let reason): return reason.keepsDownstreamAlive
+        }
+    }
 }
 
 // MARK: - Node Skip Reason

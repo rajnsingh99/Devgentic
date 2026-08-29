@@ -490,8 +490,50 @@ struct WorkflowState: Sendable {
     /// `edgeIsLive` is the same predicate routing and data-passing already use, so a node is a
     /// terminal precisely when nothing downstream of it ran — which is what the word means.
     func terminalOutputs(edges: [WorkflowEdge], allNodeIDs: [UUID]) -> [NodeOutput] {
-        let nodesWithLiveOutgoing = Set(edges.filter { edgeIsLive($0) }.map(\.sourceNodeID))
+        // ⚠️ TWO conditions, and the second is load-bearing. `edgeIsLive` is a property of the
+        // edge's SOURCE alone — it answers "was this route taken", never "did anything come of
+        // it". Filtering on liveness by itself therefore excluded a node whose downstream was
+        // reached but never ran, and that node's answer was then owned by nobody: not by itself
+        // (not a terminal) and not by the consumer (which never produced anything).
+        //
+        // The shape that exposed it is an ordinary fan-in. R1, R2, R3 → Synthesizer; R3 fails, so
+        // the join correctly skips the Synthesizer. R1 and R2 completed, their edges are live, and
+        // both were struck from the terminal set — leaving only the failed R3 and the skipped
+        // Synthesizer, no answering terminal at all, and a run that reported "The workflow failed"
+        // while discarding two finished agent answers the user had already paid for.
+        //
+        // The silent variant is worse: `A → M` plus a Router `C → M` on port "yes". Route "no" and
+        // M skips as `.notChosen`, nothing fails, C is the only terminal — so the run reports
+        // COMPLETED and presents the Router's pass-through text as the answer while A's real
+        // output is dropped without a word.
+        //
+        // `consumedUpstreamOutput` is the missing half: a node stops being a terminal only when
+        // something downstream actually TOOK its output. This is also what the paragraph above
+        // has always claimed ("a node is a terminal precisely when nothing downstream of it ran")
+        // — the doc was right and the code was weaker than its own contract.
+        let consumingEdges = edges.filter { edge in
+            guard edgeIsLive(edge) else { return false }
+            guard let downstream = nodeOutputs[edge.targetNodeID] else { return false }
+            return downstream.status.consumedUpstreamOutput
+        }
+        let nodesWithLiveOutgoing = Set(consumingEdges.map(\.sourceNodeID))
         let terminalNodeIDs = allNodeIDs.filter { !nodesWithLiveOutgoing.contains($0) }
+
+        // Name the RESCUED nodes specifically. A node that is a terminal only because its
+        // downstream never ran is the case this method used to get wrong, so it is the one worth
+        // being able to see in a field log — a bare terminal count cannot distinguish "3 terminals"
+        // here from "3 terminals" in a healthy fan-out.
+        let liveButUnconsumed = Set(
+            edges.filter { edgeIsLive($0) }.map(\.sourceNodeID)
+        ).subtracting(nodesWithLiveOutgoing)
+        if !liveButUnconsumed.isEmpty {
+            let names = liveButUnconsumed
+                .compactMap { nodeOutputs[$0]?.profileName }
+                .sorted()
+                .joined(separator: ", ")
+            wfStateLogger.notice("[WF_EXEC] \(liveButUnconsumed.count) node(s) took a live route to a downstream that never ran: [\(names)]. CONSEQUENCE: each is treated as a terminal so its output still reaches the run's answer, instead of being dropped because an edge it fired was counted as a consumer.")
+        }
+
         return terminalNodeIDs.compactMap { nodeOutputs[$0] }
     }
 }

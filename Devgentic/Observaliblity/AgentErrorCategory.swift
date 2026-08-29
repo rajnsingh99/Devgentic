@@ -99,6 +99,7 @@ enum AgentErrorCategory: String, Codable, Sendable, CaseIterable, DatabaseValueC
     case toolSemanticFail           // tool ran but returned error-shaped output
     case toolSystemCrash            // tool's run closure threw an unhandled exception
     case toolUserDenied             // HITL: user explicitly rejected the call
+    case hitlUnattendedRefused      // [WF-SE11] tool needed confirmation, run was UNATTENDED (scheduled/ChatOps) with no standing config — refused fast, never parked
 
     // MARK: Circuit breaker (5)
     case cbRepetitiveAction         // same (tool, args, output) fingerprint N times → abort
@@ -165,7 +166,7 @@ enum AgentErrorCategory: String, Codable, Sendable, CaseIterable, DatabaseValueC
         case .parseJsonMalformed, .parseJsonEmpty, .parseFormatDrift,
              .providerTimeout,
              .toolNotFound, .toolArgMissing, .toolArgInvalid, .toolPermissionDenied,
-             .toolTimeout, .toolSemanticFail, .toolSystemCrash, .toolUserDenied,
+             .toolTimeout, .toolSemanticFail, .toolSystemCrash, .toolUserDenied, .hitlUnattendedRefused,
              .cbToolRetryLimit, .cbAskUserLimit,
              .subtaskFailed, .reflectionEvalFailed,
              .memExhausted,
@@ -204,7 +205,7 @@ enum AgentErrorCategory: String, Codable, Sendable, CaseIterable, DatabaseValueC
             return .llm
 
         case .toolNotFound, .toolArgMissing, .toolArgInvalid, .toolPermissionDenied,
-             .toolTimeout, .toolSemanticFail, .toolSystemCrash, .toolUserDenied,
+             .toolTimeout, .toolSemanticFail, .toolSystemCrash, .toolUserDenied, .hitlUnattendedRefused,
              .cbRepetitiveAction, .cbConsecutiveFail, .cbToolRetryLimit,
              .cbIdleLimit, .cbAskUserLimit,
              // Resource/data-loading happens during tool/context preparation —
@@ -280,6 +281,7 @@ enum AgentErrorCategory: String, Codable, Sendable, CaseIterable, DatabaseValueC
         case .toolSemanticFail:          return "Tool Semantic Fail"
         case .toolSystemCrash:           return "Tool Crash"
         case .toolUserDenied:            return "User Denied"
+        case .hitlUnattendedRefused:     return "Unattended — Refused"
 
         case .cbRepetitiveAction:        return "Repetitive Action"
         case .cbConsecutiveFail:         return "Consecutive Failures"
