@@ -715,7 +715,11 @@ struct DevgenticApp: App {
                     // no profiles yet, it invented an ID that had never existed and navigated to it,
                     // landing the user on "Profile Not Found" for a profile they never created. The
                     // one state where the menu item most needs to help was the one it broke.
-                    if let firstProfile = backendProfileService.profiles.first {
+                    // ⚠️ `sharedProfiles`. `profiles` is sorted by `lastSelected` DESCENDING and
+                    // `saveProfile` stamps that on every write — including when a workflow node
+                    // mints its private row — so the plain `.first` opened whichever node was added
+                    // most recently, in the profile editor, outside the workflow that owns it.
+                    if let firstProfile = backendProfileService.sharedProfiles.first {
                         mainViewRouter.navigateToProfile(
                             firstProfile.id,
                             activatingBufferOn: backendProfileService

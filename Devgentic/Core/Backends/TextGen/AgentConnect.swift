@@ -106,11 +106,14 @@ class AgentConnect: @unchecked Sendable {
                         // has no `knowledgeSources` field, so a workflow profile cannot define any
                         // — the old `kb` term here was always nil for the workflow arm.
                         let workflowExecutor = WorkflowExecutor(workflowProfileID: profile.id)
+                        // ⚠️ `chatHistory`/`ragContext` are deliberately NOT passed and no longer
+                        // exist on this signature (register EXA-9): a workflow run is
+                        // conversation-stateless by design and consumed neither at any depth. Both
+                        // are still in scope on this arm for the chat path above; passing them here
+                        // advertised a capability the engine does not have.
                         let wfStream = workflowExecutor.executeWorkflow(
                             userInput: userInput,
-                            chatHistory: chatHistory,
                             conversationID: conversationID,
-                            ragContext: ragContext,
                             attachmentContext: attachmentContext,
                             traceContext: traceContext,
                             onTraceUpdate: { log in onTraceUpdate?(log) }

@@ -185,7 +185,7 @@ class NodeInspectorPanelManager {
         // reference to its REPLACEMENT.
         panel.onSystemClose = { [weak self, weak panel] in
             guard let self, let panel, self.activePanel === panel else { return }
-            logger.notice("[WF_CANVAS] Node inspector panel was closed by the window system (⌘W maps to `NSApp.keyWindow?.close()` app-wide) rather than by the manager. CONSEQUENCE: the manager's reference and the canvas's `targetConfigNode` are cleared here so the next inspector can open; any unsaved fields in the panel were discarded, exactly as Cancel discards them.")
+            logger.notice("[WF_CANVAS] Node inspector panel was closed by the window system (⌘W maps to `NSApp.keyWindow?.close()` app-wide) rather than by the manager. CONSEQUENCE: the manager's reference and the canvas's `targetConfigNode` are cleared here so the next inspector can open; any fields the panel buffered are discarded — but NOT the same as Cancel: the Profile inspector's node name and per-node orchestration settings are written through as they are changed, and only Cancel restores them (register INS-2), so this route KEEPS them.")
             self.activePanel = nil
             let callback = self.onCloseCallback
             self.onCloseCallback = nil

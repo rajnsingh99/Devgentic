@@ -107,11 +107,6 @@ struct WorkflowExecutionTimelineView: View {
         displayData.nodeDidNotRun(node)
     }
 
-    /// What to tell the user about a node that did not run.
-    ///
-    /// The engine now writes the structural cause into `detail` via `NodeSkipReason.displayText`, so
-    /// a Router that branched elsewhere says so instead of claiming an upstream failure. The
-    /// fallback covers records written before 2026-08-15, whose detail is the old sentence.
     /// THE status word for a skipped node. Both the visible tag and the VoiceOver label go
     /// through here — they used to hard-code "Not run" independently, which is false for a node
     /// the user skipped mid-flight (it started, spent model time, and its output was discarded).
@@ -119,6 +114,11 @@ struct WorkflowExecutionTimelineView: View {
         displayData.skipTagLabel(for: node)
     }
 
+    /// What to tell the user about a node that did not run.
+    ///
+    /// The engine now writes the structural cause into `detail` via `NodeSkipReason.displayText`, so
+    /// a Router that branched elsewhere says so instead of claiming an upstream failure. The
+    /// fallback covers records written before 2026-08-15, whose detail is the old sentence.
     private func notRunMessage(for node: WorkflowRunDisplayData.NodeDisplayData) -> String {
         displayData.notRunMessage(for: node)
     }
@@ -324,9 +324,8 @@ struct WorkflowExecutionTimelineView: View {
                 stepHeaderRow(
                     name: node.profileName,
                     nameColor: (node.status == .pending && !isAwaiting) || notRun ? theme.secondaryText : theme.primaryText,
-                    tagLabel: isAwaiting ? "Needs your input"
-                        : (notRun ? skipTagLabel(for: node)
-                        : (degraded ? "Completed · warnings" : node.status.label)),
+                    // [XUI-10] ONE source for the word, shared with the accessibility label below.
+                    tagLabel: displayData.nodeTagLabel(for: node, isAwaiting: isAwaiting),
                     tagColor: isAwaiting ? theme.warningColor : (node.status == .pending || notRun ? theme.secondaryText : statusColor),
                     tagIcon: isAwaiting ? "hand.raised.fill" : nil,
                     tagAction: isAwaiting ? onAwaitingTap : nil,
@@ -425,10 +424,12 @@ struct WorkflowExecutionTimelineView: View {
         }
         .onTapGesture { selectedNodeID = node.nodeID }
         .accessibilityAddTraits(.isButton)
-        // ⚠️ Must agree with the visible tag. This read the RAW status, so on every conditional
-        // run VoiceOver announced "Failed" for a node the screen labelled "Not run" — the two
-        // descriptions of the same row contradicted each other.
-        .accessibilityLabel("\(node.profileName), \(isNotRun(node) ? skipTagLabel(for: node) : node.status.label)")
+        // ⚠️ Must agree with the visible tag, and now does BY CONSTRUCTION — both read
+        // `nodeTagLabel`. This used to read the RAW status, so on every conditional run VoiceOver
+        // announced "Failed" for a node the screen labelled "Not run". [XUI-10] extended that to the
+        // other two overrides the tag applies: a node parked on a HITL prompt was TAGGED "Needs your
+        // input" but ANNOUNCED "Running...", and a degraded node was announced as a clean "Completed".
+        .accessibilityLabel("\(node.profileName), \(displayData.nodeTagLabel(for: node, isAwaiting: isAwaiting))")
         .accessibilityHint(isSelected ? "Selected step" : "Show step details")
         .accessibilityAction { selectedNodeID = node.nodeID }
     }
@@ -504,7 +505,14 @@ struct WorkflowExecutionTimelineView: View {
                 )
 
                 if isSelected {
-                    finalOutcomeExpanded(status: status)
+                    // ⚠️ [XUI-13] `statusColor`, not `status`. The panel used to re-derive its own
+                    // edge from the raw status and so bypassed this row's whole override chain —
+                    // a Stop got a red edge under an amber tag, an `.other` record got a GREEN
+                    // success edge under a grey "Unknown" tag (the false success claim WF-UI1
+                    // exists to prevent, re-entering through the edge), and a
+                    // `.completedWithWarnings` record got a red edge under an amber tag, undoing
+                    // WF-RU4's softening. One colour decision per row, computed above.
+                    finalOutcomeExpanded(status: status, edgeColor: statusColor)
                         .padding(.top, 6)
                 }
             }
@@ -588,8 +596,18 @@ struct WorkflowExecutionTimelineView: View {
                 .foregroundColor(nameColor)
                 .lineLimit(1)
 
-            statusTag(label: tagLabel, color: tagColor, icon: tagIcon)
-                .onTapGesture { tagAction?() }
+            // [XUI-10] Attach a gesture ONLY when there is something to invoke. A descendant
+            // TapGesture takes precedence over an ancestor's — that is what `highPriorityGesture`
+            // exists to invert — so an unconditional `.onTapGesture { tagAction?() }` made this pill
+            // a dead zone on every ordinary row: the closure did nothing and the row's own selection
+            // tap never fired. Also covers the Final Outcome row, which passes `tagAction: nil`.
+            if let tagAction {
+                statusTag(label: tagLabel, color: tagColor, icon: tagIcon)
+                    .onTapGesture { tagAction() }
+                    .help(Text("Show me where to respond"))
+            } else {
+                statusTag(label: tagLabel, color: tagColor, icon: tagIcon)
+            }
 
             Spacer(minLength: 6)
 
@@ -716,11 +734,43 @@ struct WorkflowExecutionTimelineView: View {
                 case .pending:
                     inlineStatusLine(message: "Waiting for execution", showsSpinner: false)
 
+                // XUI-1: a node skipped MID-FLIGHT or cancelled while executing HAS a trace —
+                // that is the whole reason the :697 guard exists — but these arms rendered only
+                // the one-liner, making the guard a no-op for its own case. Same shape as the
+                // settled arm: captured evidence above, the reason line beneath it. No
+                // `finalContentText`: the detail here is the skip/cancel REASON, not the model's
+                // answer, and must not render as one (AgentTimelineView uses it only to dedupe a
+                // trailing reasoning event against an answer rendered below — passing the reason
+                // would wrongly suppress the trace's real tail).
+                //
+                // ⚠️ UNOBSERVABLE ARM ROUTING: whether an arm renders the trace at all is
+                // `@ViewBuilder` code no unit test can reach — `nodeShowsCapturedTrace` (the
+                // gate's truth table) is the testable half. A future re-suppression of these two
+                // arms would be invisible to the suite; that blind spot is exactly what let
+                // XUI-1 ship, so treat any edit here as needing an on-device check.
                 case .skipped:
-                    inlineStatusLine(message: notRunMessage(for: node), showsSpinner: false)
+                    VStack(alignment: .leading, spacing: 14) {
+                        if displayData.nodeShowsCapturedTrace(node) {
+                            AgentTimelineView(
+                                events: node.nodeTimeline,
+                                isStreaming: false,
+                                chatFidelity: true
+                            )
+                        }
+                        inlineStatusLine(message: notRunMessage(for: node), showsSpinner: false)
+                    }
 
                 case .cancelled:
-                    inlineStatusLine(message: String(localized: "Cancelled before this node finished."), showsSpinner: false)
+                    VStack(alignment: .leading, spacing: 14) {
+                        if displayData.nodeShowsCapturedTrace(node) {
+                            AgentTimelineView(
+                                events: node.nodeTimeline,
+                                isStreaming: false,
+                                chatFidelity: true
+                            )
+                        }
+                        inlineStatusLine(message: String(localized: "Cancelled before this node finished."), showsSpinner: false)
+                    }
 
                 // `.unknown` routes with the settled arms: the node FINISHED under a newer build,
                 // so its detail, duration and full agent trace must render — suppressing them was
@@ -740,7 +790,7 @@ struct WorkflowExecutionTimelineView: View {
                             }
                         }
 
-                        if node.supportsTimeline && !node.nodeTimeline.isEmpty {
+                        if displayData.nodeShowsCapturedTrace(node) {
                             AgentTimelineView(
                                 events: node.nodeTimeline,
                                 isStreaming: false,
@@ -774,16 +824,26 @@ struct WorkflowExecutionTimelineView: View {
     }
 
     @ViewBuilder
-    private func finalOutcomeExpanded(status: WorkflowRunDisplayData.NodeDisplayData.NodeStatus) -> some View {
-        detailContainer(edgeColor: status.color(theme)) {
-            if displayData.nodeResults.isEmpty || displayData.nodeResults.allSatisfy({ $0.status == .pending }) {
+    /// - Parameter edgeColor: the ROW's already-overridden colour. ⚠️ Never re-derive it from
+    ///   `status` here (register XUI-13) — `status` is deliberately left un-overridden because the
+    ///   spine and the awaiting logic read it, and every override lives at the call site.
+    private func finalOutcomeExpanded(
+        status: WorkflowRunDisplayData.NodeDisplayData.NodeStatus,
+        edgeColor: Color
+    ) -> some View {
+        // ⚠️ WHICH panel shows is decided on `WorkflowRunDisplayData.finalOutcomePanel` (XUI-2,
+        // the WF-UI5 shape) — the branch ORDER was the defect and it is now testable there. This
+        // switch only renders; do not grow decisions back into it.
+        detailContainer(edgeColor: edgeColor) {
+            switch displayData.finalOutcomePanel(rowStatus: status) {
+            case .waiting:
                 inlineStatusLine(message: "Waiting for execution", showsSpinner: false)
-            } else if displayData.isRunning && displayData.finalOutput.isEmpty {
+            case .progress(let synthesising):
                 inlineStatusLine(
-                    message: status == .running ? "Synthesising final output…" : "Awaiting node outputs…",
-                    showsSpinner: status == .running
+                    message: synthesising ? "Synthesising final output…" : "Awaiting node outputs…",
+                    showsSpinner: synthesising
                 )
-            } else if let error = displayData.workflowError, displayData.finalOutput.isEmpty {
+            case .error(let error):
                 let (errorBody, suggestion) = splitDetail(error)
                 VStack(alignment: .leading, spacing: 10) {
                     Text(errorBody)
@@ -795,20 +855,32 @@ struct WorkflowExecutionTimelineView: View {
                         suggestionLine(suggestion)
                     }
                 }
-            } else {
+            case .reason(let reason):
+                // Neutral register, matching the history card's `.reason` arm: no warning glyph,
+                // no error tint. A Stop is not a fault.
+                HStack(spacing: 8) {
+                    Image(systemName: "stop.circle")
+                        .font(.system(size: 12))
+                        .foregroundColor(theme.secondaryText)
+                    Text(reason)
+                        .font(theme.fontFootnote)
+                        .foregroundColor(theme.secondaryText)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: Self.proseMaxWidth, alignment: .leading)
+                }
+            case .output(let finalOutput):
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
                         Spacer()
-                        TimelineCopyChip(target: displayData.finalOutput)
+                        TimelineCopyChip(target: finalOutput)
                     }
-                    WorkflowMarkdownView(text: displayData.finalOutput)
+                    WorkflowMarkdownView(text: finalOutput)
                         .frame(maxWidth: Self.proseMaxWidth, alignment: .leading)
                 }
             }
         }
     }
 
-    /// Rounded container with a colored leading edge — the "this is the focused step" panel.
     /// Rounded container with a colored leading edge — the "this is the focused step" panel.
     private func detailContainer<Content: View>(edgeColor: Color, @ViewBuilder content: () -> Content) -> some View {
         HStack(spacing: 0) {

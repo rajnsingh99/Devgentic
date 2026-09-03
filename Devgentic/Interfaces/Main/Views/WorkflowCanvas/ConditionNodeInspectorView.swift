@@ -333,7 +333,11 @@ struct ConditionNodeInspectorView: View {
             VStack(alignment: .leading, spacing: 12) {
                 // Counter
                 HStack {
-                    Text("Rules are evaluated top-to-bottom. First match wins.")
+                    // ⚠️ NOT "first match wins" — that is the LEGACY arm (`decisionPolicy == nil`). On a node
+                    // carrying a policy, which is every node ever saved from this panel,
+                    // `decided = distinctMatched.count == 1 ? distinctMatched[0] : nil`, so several
+                    // matches fall through to "When Routing Can't Decide" instead.
+                    Text("Rules are evaluated top-to-bottom. Exactly one match routes to that rule's port; if several match, the setting below decides.")
                         .font(.system(.caption))
                         .foregroundColor(theme.secondaryText)
                     Spacer()
@@ -386,7 +390,7 @@ struct ConditionNodeInspectorView: View {
                         let sanitized = String(
                             rule.wrappedValue.label
                                 .filter { $0.isLetter || $0.isNumber }
-                                .prefix(10)
+                                .prefix(ConditionNodeConfig.maxLabelLength)
                         )
                         if rule.wrappedValue.label != sanitized {
                             rule.wrappedValue.label = sanitized
@@ -406,8 +410,20 @@ struct ConditionNodeInspectorView: View {
                 .frame(width: 90)
 
                 // Operator picker
+                //
+                // [INS-10] The options are `allCases` PLUS the rule's own operator when that is not
+                // in `allCases`. `ConditionOp.other(_)` is a real, reachable case — it holds a newer
+                // build's operator (WF-PE3) and the RETIRED `always`, which the enum's own note says
+                // "now decodes to `.other("always")`". With no matching tag the Picker rendered
+                // BLANK, so a legacy catch-all rule showed an empty operator with nothing to explain
+                // it, on a rule the engine treats as permanently inert.
+                //
+                // ⚠️ Offering it does NOT rewrite it: re-selecting the same value is a no-op, and
+                // choosing a real operator is the user's explicit migration. That is the house
+                // pattern for preserved-but-unknown values (`WorkflowNodeKind.unsupported`,
+                // `StickyNoteColor.other`) — show it honestly, never silently replace it.
                 Picker("", selection: rule.op) {
-                    ForEach(ConditionOp.allCases, id: \.self) { op in
+                    ForEach(Self.operatorOptions(including: rule.wrappedValue.op), id: \.self) { op in
                         Text(op.displayName).tag(op)
                     }
                 }
@@ -675,6 +691,56 @@ struct ConditionNodeInspectorView: View {
     ///
     /// ⚠️ A legacy catch-all (`fallbackLabel`) outranks `noMatchBehavior` at runtime today, so it
     /// seeds the route — otherwise saving would silently move where unmatched input goes.
+    /// Which route target a policy names that no longer exists on this node, and what to write
+    /// instead (register INS-7).
+    ///
+    /// ⚠️ Pure and `static` for the same reason `seedPolicy` is: a repair that CHANGES the author's
+    /// stored routing decision must be provable from a test, and the `if case` chain it replaces
+    /// lived inside `saveAndDismiss`, which a test cannot reach.
+    ///
+    /// ⚠️ EXHAUSTIVE, with no `default:` — a new `RouterDecisionPolicy` case must break this build
+    /// rather than silently persist a target nothing checks.
+    enum DanglingRouteRepair: Equatable {
+        case none
+        /// The policy itself pointed at `ruleID`; write `.failNode`.
+        case policy(ruleID: UUID)
+        /// The `ask` fallback pointed at `ruleID`; write `.ask(fallback: .failNode)`.
+        case askFallback(ruleID: UUID)
+    }
+
+    /// The operator menu's options: every operator this build can evaluate, plus `current` when it is
+    /// not one of them, so a preserved-but-unevaluable operator has a tag to bind to instead of
+    /// rendering as an empty dropdown (register INS-10).
+    ///
+    /// The unavailable operator sorts LAST — it is not something to pick, only something to see.
+    nonisolated static func operatorOptions(including current: ConditionOp) -> [ConditionOp] {
+        ConditionOp.allCases.contains(current)
+            ? ConditionOp.allCases
+            : ConditionOp.allCases + [current]
+    }
+
+    nonisolated static func danglingRouteRepair(
+        in policy: RouterDecisionPolicy,
+        against rules: [ConditionRule]
+    ) -> DanglingRouteRepair {
+        func exists(_ id: UUID) -> Bool { rules.contains { $0.id == id } }
+        switch policy {
+        case .route(let ruleID):       return exists(ruleID) ? .none : .policy(ruleID: ruleID)
+        case .ask(.route(let ruleID)): return exists(ruleID) ? .none : .askFallback(ruleID: ruleID)
+        case .ask(.failNode), .ask(.endBranch), .endBranch, .failNode: return .none
+        }
+    }
+
+    /// One line per silent repair, naming what the user loses.
+    ///
+    /// ⚠️ `when` is supplied by the caller because the three repairs do NOT share a consequence: the
+    /// no-match repair patches `noMatchBehavior` (so only input matching NO rule is affected), while
+    /// the policy and ask-fallback repairs patch `decisionPolicy` (which also governs input matching
+    /// SEVERAL rules). A single blended sentence would be wrong for two of the three.
+    private func logDanglingRepair(target ruleID: UUID, what: String, when: String) {
+        inspectorLogger.notice("[WF_CANVAS] Router '\(node.displayName)' [node \(node.id.uuidString.prefix(8))]: the \(what) pointed at rule \(ruleID.uuidString.prefix(8)), which was deleted in this editing session — saving 'fail the node' instead. CONSEQUENCE: \(when) now FAILS onto this node's error port rather than routing to the branch you had chosen; pick a new target in 'When Routing Can't Decide' if that is not what you want.")
+    }
+
     static func seedPolicy(from config: ConditionNodeConfig) -> RouterDecisionPolicy {
         if let existing = config.decisionPolicy { return existing }
 
@@ -723,20 +789,29 @@ struct ConditionNodeInspectorView: View {
     }
 
     private func saveAndDismiss() {
+        // [INS-6] The de-dup is `ConditionNodeConfig.deduplicatedLabel`, which REPLACES the label's
+        // tail with the suffix instead of appending-then-truncating. The old inline form no-opped for
+        // any already-10-character label, writing the duplicate through to the validator as a
+        // blocking error.
+        //
+        // ⚠️ A rewrite here RENAMES AN OUTPUT PORT — rule labels are ports, and
+        // `WorkflowEdge.sourcePortLabel` matches them by exact string.
+        //
+        // ⚠️ And `portRenameMap` REFUSES this particular rename, every time, by construction: the
+        // duplicate's twin KEEPS the shared label, and the map drops any rename away from a label
+        // another rule still carries ("an edge on it may belong to the keeper"). That refusal is
+        // CORRECT — an edge on a shared label genuinely has no single owner — but it means the edge
+        // stays on the surviving rule rather than following the renamed one. The log says that
+        // rather than promising a re-point that cannot happen.
         var seen = Set<String>()
         for i in rules.indices {
-            var label = rules[i].label
-            if seen.contains(label) {
-                for suffix in 2...99 {
-                    let candidate = String("\(label)\(suffix)".prefix(10))
-                    if !seen.contains(candidate) {
-                        label = candidate
-                        break
-                    }
-                }
+            let original = rules[i].label
+            let deduped = ConditionNodeConfig.deduplicatedLabel(original, taken: seen)
+            if deduped != original {
+                inspectorLogger.notice("[WF_CANVAS] Router '\(node.displayName)' [node \(node.id.uuidString.prefix(8))]: rule label '\(original)' duplicated another rule and was renamed to '\(deduped)' on Save. CONSEQUENCE: the run no longer refuses to start on a duplicate-label error, and this rule now has its own output port — but any edge already drawn from the shared '\(original)' port STAYS on the rule that kept that label, because an edge on a shared label has no single owner. Re-wire this rule's branch if it should have followed the rename.")
             }
-            rules[i].label = label
-            seen.insert(label)
+            rules[i].label = deduped
+            seen.insert(deduped)
         }
 
         // ⚠️ Start from the config we LOADED, never a fresh one. Building from scratch silently
@@ -756,6 +831,7 @@ struct ConditionNodeInspectorView: View {
         // rather than persisting a dangling id — the validator would flag it, but not writing it
         // is better than writing-then-flagging.
         if case .route(let ruleID) = noMatchBehavior, !rules.contains(where: { $0.id == ruleID }) {
+            logDanglingRepair(target: ruleID, what: "'When nothing matches' target", when: "input that matches no rule")
             config.noMatchBehavior = .failNode
         } else {
             config.noMatchBehavior = noMatchBehavior
@@ -768,10 +844,17 @@ struct ConditionNodeInspectorView: View {
         var policyToWrite = decisionPolicy
         if case .ask = policyToWrite { policyToWrite = .ask(fallback: askFallback) }
         // Same dangling-target repair as above, for both the policy and its fallback.
-        if case .route(let ruleID) = policyToWrite, !rules.contains(where: { $0.id == ruleID }) {
+        // [INS-7] These three repairs SILENTLY changed the author's stored routing decision — the
+        // sibling repair 20 lines below (clearing a legacy catch-all) has always logged; these did
+        // not. The decision is extracted so it can be truth-tabled.
+        switch Self.danglingRouteRepair(in: policyToWrite, against: rules) {
+        case .none:
+            break
+        case .policy(let ruleID):
+            logDanglingRepair(target: ruleID, what: "routing policy target", when: "input the router cannot decide (no rule matched, or several did)")
             policyToWrite = .failNode
-        }
-        if case .ask(.route(let ruleID)) = policyToWrite, !rules.contains(where: { $0.id == ruleID }) {
+        case .askFallback(let ruleID):
+            logDanglingRepair(target: ruleID, what: "'If nobody can answer' fallback", when: "input the router cannot decide, on a run where nobody answers the prompt,")
             policyToWrite = .ask(fallback: .failNode)
         }
         config.decisionPolicy = policyToWrite
@@ -787,8 +870,14 @@ struct ConditionNodeInspectorView: View {
         }
         node.kind = .condition(config)
 
-        // Persist fan-in behaviour on the shared per-node config.
-        if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }
+        // [INS-11] The `if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }` that
+        // stood here is GONE. Its comment said "persist fan-in behaviour", but `joinMode` was
+        // retired 2026-08-13 (decode/encode only) and a Router has no other per-node config this
+        // panel edits — so the line's only effect was to turn `nil` into `.some(defaults)`, which
+        // `replaceNode`'s equality guard cannot absorb. That made every Save a real mutation:
+        // opening a Router, changing nothing and pressing Save dirtied the canvas and burned an
+        // undo slot. (Harmless at RUN time for this kind — only Profile and Action nodes read
+        // retries — which is exactly why nothing was noticing.)
 
         closeInspector()
     }

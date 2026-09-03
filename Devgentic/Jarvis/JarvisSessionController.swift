@@ -252,7 +252,12 @@ final class JarvisSessionController {
     // MARK: Profile selection
 
     func loadProfiles() {
-        let all = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
+        // ⚠️ `fetchSharedProfiles`, not `fetchProfiles`. The type filter below is NOT sufficient:
+        // bot/agent is exactly what a workflow node owns, so the unfiltered list offered every
+        // node's private configuration here as if it were one of the user's chat profiles — and
+        // selecting one persists its id to UserDefaults, making a node's row the remembered Jarvis
+        // profile until the node is deleted and its row collected out from under it.
+        let all = (try? BackendProfileStore.shared.fetchSharedProfiles()) ?? []
         // Same restriction as QuickAccess: only chat-style profiles make sense here.
         profiles = all.filter { $0.profileType == .bot || $0.profileType == .agent }
         if let idString = UserDefaults.standard.string(forKey: Self.profileMemoryKey) {

@@ -163,11 +163,15 @@ struct CreateScheduledTaskView: View {
     /// either broken (code) or pointless (imageGen).
     private static let schedulableTypes: Set<ProfileType> = [.bot, .agent, .workflow]
 
-    /// Backed by the @Observable `BackendProfileService.profiles` list so the
+    /// Backed by the @Observable `BackendProfileService.sharedProfiles` list so the
     /// picker auto-refreshes when a profile is added or deleted in another
     /// part of the app while this form is open.
+    ///
+    /// ⚠️ `sharedProfiles`, so a workflow node's owned configuration row is never schedulable —
+    /// it is not a profile the user has anywhere else, and a scheduled run of one would execute a
+    /// single node outside the workflow that gives it its input.
     private var profiles: [BackendProfileModel] {
-        profileService.profiles.filter { Self.schedulableTypes.contains($0.profileType) }
+        profileService.sharedProfiles.filter { Self.schedulableTypes.contains($0.profileType) }
     }
 
     private var isEditing: Bool { existingTask != nil }

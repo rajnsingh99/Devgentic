@@ -40,7 +40,16 @@ struct WorkflowToolbarView: View {
                     // Validation errors indicator
                     if !canvasState.validationErrors.isEmpty {
                         ToolbarPillButton(
-                            title: "\(canvasState.validationErrors.count) error\(canvasState.validationErrors.count == 1 ? "" : "s")",
+                            // ⚠️ [CVV-8] TWO KEYS, not one with a concatenated plural letter. The
+                            // old form built `"\(n) error" + ("" or "s")` as a Swift String, which
+                            // was both unextractable AND unpluralizable — the "s" would arrive as a
+                            // `%@` argument no translator can inflect. Written as two
+                            // `LocalizedStringKey` literals, the Int interpolation emits `%lld`, so
+                            // a translator can attach per-language plural variations to the second
+                            // key. Same reasoning as `WorkflowCanvasState.accessibilityDescription`.
+                            title: canvasState.validationErrors.count == 1
+                                ? "1 error"
+                                : "\(canvasState.validationErrors.count) errors",
                             icon: "exclamationmark.triangle.fill",
                             color: .red
                         ) {
@@ -87,7 +96,14 @@ struct WorkflowToolbarView: View {
                         }
                     }
 
-                    if !canvasState.nodes.isEmpty {
+                    // [CVV-9] Annotations are CONTENT — the same widening the empty-state placard
+                    // got. Gated on nodes alone, a canvas holding only sticky notes offered no Clear
+                    // pill even though `clearCanvas()` removes the notes (and the alert this pill
+                    // opens says so in as many words).
+                    if !WorkflowCanvasView.showsEmptyPlacard(
+                        nodeCount: canvasState.nodes.count,
+                        annotationCount: canvasState.annotations.count
+                    ) {
                         ToolbarPillButton(
                             title: "Clear",
                             icon: "arrow.uturn.backward.square",
@@ -111,7 +127,11 @@ struct WorkflowToolbarView: View {
                 // Bottom Right: Save / Revert Status
                 if canvasState.hasUnsavedChanges {
                     saveRevertGroup
-                } else if !canvasState.nodes.isEmpty {
+                } else if !WorkflowCanvasView.showsEmptyPlacard(
+                    nodeCount: canvasState.nodes.count,
+                    annotationCount: canvasState.annotations.count
+                ) {
+                    // [CVV-9] Same widening: a saved notes-only canvas must still confirm it is saved.
                     HStack(spacing: 5) {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.system(size: 11, weight: .bold))
@@ -253,19 +273,6 @@ struct WorkflowToolbarView: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: canvasState.hasUnsavedChanges)
     }
 
-    private func floatingActionButton(title: String, icon: String, color: Color, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: icon)
-                .font(.system(.caption, weight: .semibold))
-                .foregroundColor(color)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                // MARK: Liquid Glass
-                .glassEffect(.regular, in: .capsule)
-        }
-        .buttonStyle(.plain)
-    }
-
     // MARK: - Node Palette
 
     private var nodePaletteContent: some View {
@@ -287,6 +294,14 @@ struct WorkflowToolbarView: View {
             }
 
             // Logic
+            //
+            // ⚠️ [CVV-8] The SECOND argument to `onAddStructuralNode` is the node's PERSISTED
+            // `displayName`, not chrome — it must stay an untranslated literal. `WorkflowNodeView`'s
+            // `nodeKindLabel` compares `displayName` against "Router" to decide whether to show the
+            // rule count, so localizing the palette's "Router" would silently drop that subtitle in
+            // every non-English locale. Only the `title:` and `label:` arguments are user-facing
+            // copy, which is why only those two took `LocalizedStringKey`. Same for "Code", "Gate"
+            // and "Action" below; `icon:` values are SF Symbol names, likewise not copy.
             paletteSection(title: "LOGIC", icon: "arrow.triangle.branch", color: theme.nodeIdentityColor(for: .router)) {
                 Button {
                     showNodePalette = false
@@ -340,7 +355,10 @@ struct WorkflowToolbarView: View {
             paletteSection(title: "ANNOTATE", icon: "note.text", color: .yellow) {
                 Button {
                     showNodePalette = false
-                    canvasState.addStickyNote(at: CGPoint(x: 60, y: 80 + CGFloat(canvasState.nodes.count + canvasState.annotations.count) * 120))
+                    // CVC-2: no position — the state centres the note in the current viewport on
+                    // a free slot, exactly like Add Node. The count-based formula that lived here
+                    // put notes off-screen on a panned canvas and stacked them after a delete.
+                    canvasState.addStickyNote()
                 } label: {
                     paletteItem(icon: "note.text", label: "Sticky Note", color: .yellow)
                 }
@@ -352,7 +370,7 @@ struct WorkflowToolbarView: View {
     }
 
     @ViewBuilder
-    private func paletteSection(title: String, icon: String, color: Color, @ViewBuilder content: () -> some View) -> some View {
+    private func paletteSection(title: LocalizedStringKey, icon: String, color: Color, @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 4) {
                 Image(systemName: icon)
@@ -366,7 +384,7 @@ struct WorkflowToolbarView: View {
         }
     }
 
-    private func paletteItem(icon: String, label: String, color: Color) -> some View {
+    private func paletteItem(icon: String, label: LocalizedStringKey, color: Color) -> some View {
         HStack(spacing: 8) {
             Image(systemName: icon)
                 .font(.system(size: 12))
@@ -389,7 +407,14 @@ struct WorkflowToolbarView: View {
 // MARK: - Toolbar Pill Button (8pt continuous rounded rectangle with hover)
 
 struct ToolbarPillButton: View {
-    let title: String
+    /// ⚠️ `LocalizedStringKey`, NOT `String` (register CVV-8). `Text(_: S) where S: StringProtocol`
+    /// is `@_disfavoredOverload`, so a `String` VARIABLE binds it and the String Catalog extractor
+    /// never sees the value — every one of this button's titles ("Add Node", "Guide", "Undo",
+    /// "Delete", "Clear", "Discard Changes", "Save Changes") was passed as a literal and then
+    /// rendered through that overload, so none of them was extractable. Taking the key here means
+    /// the literals at the call sites bind `Text(_ key: LocalizedStringKey)` instead, with no
+    /// change at any call site.
+    let title: LocalizedStringKey
     let icon: String?
     var isPrimary: Bool = false
     var color: Color? = nil
@@ -431,7 +456,7 @@ struct ToolbarPillButton: View {
             .shadow(
                 color: isPrimary
                 ? (isHovered ? theme.accentColor.opacity(0.45) : theme.accentColor.opacity(0.25))
-                : (isHovered ? Color.black.opacity(0.15) : Color.black.opacity(0.08)),
+                : (isHovered ? theme.shadowColor.opacity(0.18) : theme.shadowColor.opacity(0.08)),
                 radius: isHovered ? 4 : 2,
                 x: 0,
                 y: 1
@@ -451,13 +476,17 @@ struct ToolbarPillButton: View {
 
 struct ToolbarIconButton: View {
     let icon: String
-    let help: String
+    /// ⚠️ `LocalizedStringKey`, NOT `String` (register CVV-8) — `.help(_: S)` has the same
+    /// non-localizing `StringProtocol` overload `Text` does, so "Zoom out", "Zoom in" and
+    /// "Reset zoom" were passed as literals and then rendered through it, invisible to the
+    /// String Catalog extractor.
+    let help: LocalizedStringKey
     let action: () -> Void
 
     @State private var isHovered = false
     @Environment(\.appTheme) private var theme
 
-    init(icon: String, help: String = "", action: @escaping () -> Void) {
+    init(icon: String, help: LocalizedStringKey = "", action: @escaping () -> Void) {
         self.icon = icon
         self.help = help
         self.action = action

@@ -126,12 +126,64 @@ final class WorkflowExecutionState {
     /// ran — the same reasoning that makes `WorkflowRunTicket.layoutSnapshot` a start-time capture.
     var ranWithUnsavedCanvasEdits: Bool = false
 
-    /// Shared workflow variables (written by Code nodes).
+    /// [XUI-7] ⚠️⚠️ **NEVER POPULATED. ALWAYS `[:]`.** This is a stub, and the doc comment it
+    /// replaces ("Shared workflow variables (written by Code nodes)") actively misled: that
+    /// sentence is true of the ENGINE's `WorkflowState.variables`, which is a DIFFERENT type.
+    ///
+    /// The engine's field works — `WorkflowState.setVariable` is fed by Code-node `outputVariable`,
+    /// and Router rules and templates read it. But `WorkflowState` is a struct local to the
+    /// executor's stream closure, while this is an `@Observable` class rebuilt from
+    /// `AgentStreamEvent`s, and there is no event case carrying variables across that boundary. So
+    /// nothing writes this, `WorkflowRunRecord.freeze` copies the empty map into every run record,
+    /// and `WorkflowRunRecordSD` faithfully persists `{}` for every run ever executed.
+    ///
+    /// ⚠️ **THE READ SIDE IS DEAD TOO**, which is why this is documented rather than fixed (owner
+    /// decision, 2026-09-02). `WorkflowRunDisplayData.variables` is assigned from both factories and
+    /// read by ZERO call sites app-wide — no Variables panel exists. Nothing is corrupted and
+    /// nothing is lost that anyone reads.
+    ///
+    /// ⚠️ **WIRING THIS UP BUYS ALMOST NOTHING**, and that is the substantive reason, not the
+    /// effort: every variable's value is ALREADY persisted verbatim in the same row. A Code node's
+    /// output is simultaneously `variableUpdates[name]` and the node's `detail`, so capture would
+    /// add only the name→value MAPPING — itself recoverable by joining the persisted layout's
+    /// `config.outputVariable` to the node id. It would also roughly double the stored bytes for
+    /// Code-node output, uncapped (a Code node whose template is `{{ input }}` copies an LLM's
+    /// whole response into a variable, and there is no `maxPersistedNodeTimelineEvents` equivalent).
+    ///
+    /// **If you are here to build a Variables panel: wire the CAPTURE first.** Add a
+    /// `case workflowVariablesSnapshot([String: String])` to `AgentStreamEvent`, yield it from the
+    /// executor's serial drain right after the `state.setVariable` folds (⚠️ NOT from
+    /// `.workflowRunFinished`, which is yielded only on the SUCCESS branch — precisely the runs
+    /// where variables are least diagnostic), assign it here, and cap the VALUES on the way into
+    /// `freeze`. Wiring the capture WITHOUT a reader is strictly worse than this comment: pure
+    /// write cost, still nothing visible.
     var variables: [String: String] = [:]
 
     /// Per-node timeline events for expanded node detail views.
     /// Keyed by nodeID, populated by ActiveStreamManager when sourceNodeID is present.
     var nodeTimelines: [UUID: [TimelineEvent]] = [:]
+
+    /// Drops this run's per-node traces once it has settled, keeping the state object itself
+    /// (register XUI-15). Returns the number of events released, for the caller's log.
+    ///
+    /// ⚠️ THE STATE OBJECT SURVIVES ON PURPOSE. `workflowExecutionStates` is keyed by conversation
+    /// and holds `runRecordID`, `isRunning` and the HITL wiring; evicting the ENTRY is the
+    /// dangerous shape XUI-11 rejected. Dropping only the traces keeps every identity and every
+    /// binding intact, and the run view re-reads them from the store exactly as it does for a
+    /// historical run.
+    ///
+    /// ⚠️ REFUSES WHILE RUNNING, and that is not defensive: a scheduled, ChatOps, QuickAccess or
+    /// Jarvis run continues in a conversation that is not on screen, and its trace is being
+    /// appended to as it goes. Dropping it mid-flight would delete the evidence of a run in
+    /// progress and leave the events after the drop looking like the whole story.
+    @discardableResult
+    func releaseSettledTraces() -> Int {
+        guard !isRunning else { return 0 }
+        let released = nodeTimelines.values.reduce(0) { $0 + $1.count }
+        guard released > 0 else { return 0 }
+        nodeTimelines = [:]
+        return released
+    }
 
     // [HITL/P6] Workflow HITL moved to the unified InteractionCenter; the per-run
     // pendingInteractions container + the in-canvas WorkflowInteractionPanel were removed.

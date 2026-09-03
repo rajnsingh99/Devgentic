@@ -473,7 +473,8 @@ final class WorkflowCanvasMutationTests: XCTestCase {
         XCTAssertTrue(s.nodes.isEmpty, "exactly one step per move — the next undo must reach the ADD")
     }
 
-    /// ⚠️ A drag released where it began, or clamped back to the canvas edge, is not an edit. It
+    /// ⚠️ A drag released exactly where it began is not an edit. (This used to add "or clamped back
+    /// to the canvas edge"; the drag floor was removed 2026-09-02 and that arm no longer exists.) It
     /// must not burn an undo slot on a step ⌘Z cannot show, nor mark the canvas unsaved and fire
     /// the quit guard for a change that never happened.
     func testAMoveToTheSamePositionPushesNoUndoStep() {
@@ -481,7 +482,7 @@ final class WorkflowCanvasMutationTests: XCTestCase {
         let ids = addNodes(s, 1)
         let origin = s.nodes[0].position
 
-        s.moveNode(ids[0], to: origin)      // released where it started, or clamped to the edge
+        s.moveNode(ids[0], to: origin)      // released exactly where it started
 
         s.undo()
         XCTAssertTrue(s.nodes.isEmpty, "no step was pushed, so ONE undo must reach the ADD directly")
@@ -512,9 +513,12 @@ final class WorkflowCanvasMutationTests: XCTestCase {
         XCTAssertNotEqual(s.annotations[0].color, .blue, "note colour must be undoable")
     }
 
-    /// ⚠️ The view's own resize floor is 100×60 but the model's is 120×80, so every release between
-    /// those two floors arrives as a genuine change yet resolves to the size the note already had.
-    /// Comparing the RAW argument instead of the clamped one would push a snapshot for each.
+    /// ⚠️ The two floors were UNIFIED on `StickyNote.minimumSize` (register CVC-8, 2026-09-01) — the
+    /// view no longer previews a size the model refuses. This test still matters, and for a reason
+    /// that outlives that fix: `resizeStickyNote` is the MODEL boundary and must not trust its
+    /// caller. A sub-floor size can still arrive from a decoded layout (`StickyNote.init(from:)` has
+    /// no clamp) or from any future non-gesture caller, and comparing the RAW argument instead of
+    /// the clamped one would push an undo snapshot for a release that changes nothing.
     func testAResizeClampedToTheFloorPushesNoUndoStep() {
         let s = state()
         s.addStickyNote(at: .zero)                                    // undo step 1
@@ -684,7 +688,6 @@ final class WorkflowCanvasMutationTests: XCTestCase {
 
         let offered = WorkflowProfilePickerView.offeredProfiles(
             from: [bot, agent, sub, image],
-            excludingNodeProfileIDs: [],
             workflowProfileID: UUID()
         )
 
@@ -703,37 +706,210 @@ final class WorkflowCanvasMutationTests: XCTestCase {
         let bot = profile("Writer", .bot)
 
         let offered = WorkflowProfilePickerView.offeredProfiles(
-            from: [code, bot], excludingNodeProfileIDs: [], workflowProfileID: UUID())
+            from: [code, bot], workflowProfileID: UUID())
 
         XCTAssertEqual(offered.map(\.id), [bot.id],
                        "a .code profile has no section to render in — offering it produced a blank panel")
     }
 
-    func testThePickerStillExcludesTheWorkflowItselfAndProfilesAlreadyOnTheCanvas() {
+    func testThePickerStillExcludesTheWorkflowItself() {
         let selfID = UUID()
-        let onCanvas = profile("Already There", .bot)
-        let fresh = profile("Fresh", .bot)
+        let other = profile("Other", .bot)
         let itself = BackendProfileSnapshot(id: selfID, displayName: "Me",
                                             details: .workflow(WorkflowConfig(agentProfileIDs: [])))
 
         let offered = WorkflowProfilePickerView.offeredProfiles(
-            from: [itself, onCanvas, fresh],
-            excludingNodeProfileIDs: [onCanvas.id],
+            from: [itself, other],
             workflowProfileID: selfID
         )
-        XCTAssertEqual(offered.map(\.id), [fresh.id],
-                       "the pre-existing self-reference and duplicate guards must survive the allow-list")
+        XCTAssertEqual(offered.map(\.id), [other.id],
+                       "a workflow must not be able to add itself as a sub-workflow node — that is a cycle")
+    }
+
+    /// ⚠️ THE DEDUP EXCLUSION IS GONE (2026-08-29) and this pins that it stays gone. It existed
+    /// because a node REFERENCED a shared profile, so two nodes on one profile meant two nodes
+    /// editing each other's settings. Import now COPIES into a node-owned row, so offering the same
+    /// profile twice is correct — two differently-tuned Summarizers no longer require two entries in
+    /// the profile library, which was the point of the change.
+    func testThePickerOffersAProfileThatIsAlreadyOnTheCanvas() {
+        let alreadyUsed = profile("Summarizer", .agent)
+
+        let offered = WorkflowProfilePickerView.offeredProfiles(
+            from: [alreadyUsed],
+            workflowProfileID: UUID()
+        )
+        XCTAssertEqual(offered.map(\.id), [alreadyUsed.id],
+                       "importing the same profile a second time yields an independent node, not a shared one")
     }
 
     /// The model-level backstop: even if some future path bypasses the picker, no imageGen node
     /// reaches the canvas.
     func testAddNodeRefusesAnImageGenProfileEvenIfSomethingBypassesThePicker() {
         let s = state()
+        // This test is about the imageGen refusal, not validation — install a lookup so the
+        // "no profileLookup was ever installed" tripwire in `revalidate()` stays out of the way.
+        s.profileLookup = { [:] }
         s.addNode(from: profile("Poster Maker", .imageGen))
         XCTAssertTrue(s.nodes.isEmpty, "the model must refuse it, not just the picker")
 
         s.addNode(from: profile("Writer", .bot))
         XCTAssertEqual(s.nodes.count, 1, "supported types must still be added")
+    }
+
+    // MARK: - A canvas loaded from a FAILED read must not collect anything
+
+    /// ⚠️ THE WORST DATA-LOSS SHAPE IN THIS FEATURE. `WorkflowLayoutStore.load(for:)` returns
+    /// `.empty` both for "never saved" and "the fetch threw", so a transient failure renders a
+    /// canvas that is blank, clean and overlay-free — indistinguishable from a new workflow. Saving
+    /// it overwrites the real graph AND hands the reconcile an empty reference set, which would hard
+    /// -delete every node configuration for that workflow along with its Keychain credentials. The
+    /// layout overwrite is recoverable by re-reading disk; the credentials are not.
+    func testAStateLoadedFromAFailedReadIsMarkedAndDoesNotClearOnSave() {
+        let s = state()
+        s.profileLookup = { [:] }
+        s.load(from: WorkflowLayout(nodes: [], edges: []))
+        XCTAssertFalse(s.lastLoadDidFail, "precondition: a successful load leaves the gate open")
+
+        s.markLoadFailed()
+        XCTAssertTrue(s.lastLoadDidFail)
+
+        // ⚠️ `markSaved()` must NOT clear it — a save does not make the earlier read any truer, and
+        // clearing here would re-open the collection path on the very next save.
+        s.markSaved()
+        XCTAssertTrue(s.lastLoadDidFail,
+                      "only a successful load may clear the failed-read gate")
+    }
+
+    /// The control: a successful load clears it, so the gate cannot latch permanently and leak every
+    /// deleted node's row forever.
+    func testASuccessfulLoadClearsTheFailedReadGate() {
+        let s = state()
+        s.profileLookup = { [:] }
+        s.markLoadFailed()
+        XCTAssertTrue(s.lastLoadDidFail)
+
+        s.load(from: WorkflowLayout(nodes: [], edges: []))
+        XCTAssertFalse(s.lastLoadDidFail,
+                       "a successful read is what re-enables collection — otherwise rows for deleted "
+                       + "nodes would accumulate untouched for the rest of the session")
+    }
+
+    // MARK: - A node one ⌘Z away must keep its configuration
+
+    /// ⚠️ THE DATA-LOSS DEFECT, and it invalidated a premise written into the reconcile's own doc:
+    /// "while a deletion is still undoable, it has not been saved, so nothing is collected".
+    /// Saving does NOT clear the undo stack — `markSaved()` touches only `initialLayout` and
+    /// `hasUnsavedChanges`, and `undoStack.removeAll()` lives only in `load(from:)`. So
+    /// delete-node → Save → ⌘Z brought the node back pointing at a row the save-time reconcile had
+    /// already hard-deleted, along with its Keychain credential: model, instructions, tools and API
+    /// key gone, for an ordinary change-your-mind sequence.
+    func testADeletedNodesProfileStaysRecoverableWhileUndoCanRestoreIt() {
+        let s = state()
+        let owned = profile("Summarizer", .agent)
+        s.profileLookup = { [owned.id: owned] }
+        s.addNode(from: owned)
+        let nodeID = try! XCTUnwrap(s.nodes.first).id
+
+        s.removeNode(nodeID)
+        XCTAssertTrue(s.nodes.isEmpty, "precondition: the node is off the canvas")
+
+        // What the save-time reconcile is handed. The saved layout no longer names the row...
+        let savedLayoutRefs = Set(s.nodes.compactMap(\.profileID))
+        XCTAssertFalse(savedLayoutRefs.contains(owned.id))
+
+        // ...but the row must NOT be collected, because ⌘Z can still bring the node back.
+        XCTAssertTrue(s.canUndo, "precondition: the deletion is still undoable")
+        XCTAssertTrue(s.undoRecoverableProfileIDs.contains(owned.id),
+                      "a row one undo step from being referenced again must survive the reconcile")
+    }
+
+    /// The control: once the undo stack is gone, the row is collectible. Without this the fix could
+    /// be "never collect anything", which leaks a row per deleted node forever.
+    func testAProfileBecomesCollectibleOnceUndoCanNoLongerRestoreIt() {
+        let s = state()
+        let owned = profile("Summarizer", .agent)
+        s.profileLookup = { [owned.id: owned] }
+        s.addNode(from: owned)
+        let nodeID = try! XCTUnwrap(s.nodes.first).id
+        s.removeNode(nodeID)
+
+        // `load(from:)` is the one place the undo stack is cleared — a reload or Revert.
+        s.load(from: WorkflowLayout(nodes: [], edges: []))
+
+        XCTAssertFalse(s.canUndo, "precondition: the stack was cleared by the load")
+        XCTAssertFalse(s.undoRecoverableProfileIDs.contains(owned.id),
+                       "with no way back, the row must be collectible — otherwise every deleted "
+                       + "node leaks its configuration row forever")
+    }
+
+    /// Undo must actually restore a working node — the end-to-end shape of the same guarantee.
+    func testUndoRestoresANodeWhoseProfileStillResolves() {
+        let s = state()
+        let owned = profile("Summarizer", .agent)
+        s.profileLookup = { [owned.id: owned] }
+        s.addNode(from: owned)
+        let nodeID = try! XCTUnwrap(s.nodes.first).id
+
+        s.removeNode(nodeID)
+        s.undo()
+
+        XCTAssertEqual(s.nodes.count, 1, "the node came back")
+        XCTAssertEqual(s.nodes.first?.profileID, owned.id)
+        XCTAssertFalse(s.validationIssues.contains {
+            $0.severity == .error && $0.message.lowercased().contains("configuration is missing")
+        }, "the restored node must still resolve — got: \(s.validationIssues.map(\.message))")
+    }
+
+    // MARK: - Validation resolves profiles LIVE, not from a snapshot
+    //
+    // ⚠️ THE GAP THAT LET A P1 SHIP. Every test around node-owned configuration covered the factory
+    // and the store in isolation; none covered the SEQUENCE add-node -> validate through
+    // `WorkflowCanvasState`. That sequence is where the defect lived: `resolvedProfileMap` was a
+    // snapshot taken in `loadLayout()`, and once adding a node started MINTING a profile row, the
+    // snapshot was always one row behind — so every node the user added immediately reported its
+    // configuration as missing, a blocking error the executor refuses the whole run over.
+
+    /// A node added against a profile that did not exist when the canvas loaded must validate
+    /// clean — which is now every node, since each add creates its own row.
+    func testANodeAddedAfterLoadValidatesAgainstTheLiveProfileList() {
+        let s = state()
+        // Mirrors production: the lookup reads whatever the service holds AT VALIDATION TIME.
+        var library: [UUID: BackendProfileModel] = [:]
+        s.profileLookup = { library }
+
+        // The canvas has already loaded and validated with an empty library. (An empty canvas may
+        // legitimately report issues of its own — "no nodes" and the like — so the precondition is
+        // only that it reports no MISSING-CONFIGURATION error, which is what this test is about.)
+        s.revalidateForTesting()
+        XCTAssertFalse(s.validationIssues.contains { $0.message.lowercased().contains("configuration is missing") },
+                       "precondition: an empty canvas references no profiles")
+
+        // ...then a node is added, and its private row is created at that moment.
+        let owned = profile("Summarizer", .agent)
+        library[owned.id] = owned
+        s.addNode(from: owned)
+
+        let missing = s.validationIssues.filter {
+            $0.severity == .error && $0.message.lowercased().contains("configuration is missing")
+        }
+        XCTAssertTrue(missing.isEmpty,
+                      "a node added after load must not report its configuration as missing — got: "
+                      + "\(s.validationIssues.map(\.message))")
+    }
+
+    /// The control that keeps the fix honest: a node whose profile genuinely is not in the library
+    /// must STILL be reported. Resolving live must not turn the check into a no-op — a workflow
+    /// saved before node-owned config, whose node referenced an already-deleted profile, stays
+    /// dangling forever and this error is the only thing that reports it.
+    func testANodeWhoseProfileIsGenuinelyAbsentIsStillReported() {
+        let s = state()
+        s.profileLookup = { [:] }
+
+        s.addNode(from: profile("Ghost", .agent))
+
+        XCTAssertTrue(s.validationIssues.contains {
+            $0.severity == .error && $0.message.lowercased().contains("configuration is missing")
+        }, "an unresolvable node must still block — got: \(s.validationIssues.map(\.message))")
     }
 
     // MARK: - WF-CU9: the inspector must not outlive the canvas
@@ -917,6 +1093,159 @@ final class WorkflowCanvasMutationTests: XCTestCase {
         let node = CGRect(origin: s.nodes[0].position, size: WorkflowCanvasState.nodeSize(for: s.nodes[0].kind))
         let note = CGRect(origin: s.annotations[0].position, size: s.annotations[0].size)
         XCTAssertFalse(node.intersects(note))
+    }
+
+    // MARK: - Sticky-note default placement (CVC-2)
+
+    /// ⚠️ THE CVC-2 PIN. The Add-Note palette item carried the retired `(60, 80 + count × 120)`
+    /// formula — the exact defect `nextAvailablePosition`'s own doc names as its reason to exist,
+    /// fixed for both node-add paths and left behind on the sticky-note one. Pan away and the new
+    /// note landed off-screen: undo armed, canvas dirty, nothing visible.
+    func testStickyNoteDefaultPlacementFollowsThePan() {
+        let s = state()
+        s.viewportSize = CGSize(width: 1000, height: 800)
+        s.updateOffset(by: CGSize(width: -2000, height: -1000))
+
+        s.addStickyNote()
+
+        let note = s.annotations[0]
+        // Visible canvas region is [2000, 3000] x [1000, 1800]; the note must be inside it.
+        XCTAssertTrue((2000...3000).contains(note.position.x), "landed at x=\(note.position.x) — off-screen")
+        XCTAssertTrue((1000...1800).contains(note.position.y), "landed at y=\(note.position.y) — off-screen")
+    }
+
+    /// The collision half of CVC-2: after a delete the count went back down, so the next note
+    /// stacked EXACTLY on an existing one. Default placement must probe to a free slot.
+    func testSuccessiveDefaultStickyNotesDoNotOverlap() {
+        let s = state()
+        s.viewportSize = CGSize(width: 1000, height: 800)
+
+        s.addStickyNote()
+        s.addStickyNote()
+
+        let first = CGRect(origin: s.annotations[0].position, size: s.annotations[0].size)
+        let second = CGRect(origin: s.annotations[1].position, size: s.annotations[1].size)
+        XCTAssertFalse(first.intersects(second),
+                       "successive default-position notes must not stack — got \(first) and \(second)")
+    }
+
+    // MARK: - Edge-drop target and the missed drop (CVV-2)
+
+    /// The doc always said "closest"; the implementation returned the FIRST in-radius node in
+    /// array order. With two input ports under 40pt apart the winner depended on insertion order
+    /// — and the primary-target pulse now derives from this function, so first-match would pulse
+    /// one node while the drop landed on another.
+    func testFindInputPortTargetPicksTheNearestPort() {
+        let s = state()
+        // Code nodes are 220x100 → input port at (x, y + 50).
+        s.addStructuralNode(kind: .code(CodeNodeConfig()), displayName: "First", at: CGPoint(x: 100, y: 0))
+        s.addStructuralNode(kind: .code(CodeNodeConfig()), displayName: "Second", at: CGPoint(x: 100, y: 24))
+        let first = s.nodes[0].id, second = s.nodes[1].id
+
+        // Ports: First at (100, 50), Second at (100, 74). Point (100, 66): 16pt from First,
+        // 8pt from Second — BOTH in radius; nearest must win, not array order.
+        let target = s.findInputPortTarget(near: CGPoint(x: 100, y: 66), excluding: UUID())
+        XCTAssertEqual(target, second, "the nearest in-radius port must win, not the first in array order")
+        _ = first
+    }
+
+    /// ⚠️ THE CVV-2 MISS PIN. A release outside every accept radius was the one silent non-event
+    /// left on this path: no edge, no banner, no log — the user repeated the gesture with no idea
+    /// what was wrong, while every graph refusal (cycle/duplicate) showed a notice.
+    func testMissedEdgeDropRecordsARefusalAndChangesNothing() {
+        let s = state()
+        let ids = addNodes(s, 2)
+        // Baseline AFTER the adds: `addStructuralNode` legitimately dirties and pushes undo.
+        let undoBaseline = s.canUndo
+        let dirtyBaseline = s.hasUnsavedChanges
+
+        s.recordMissedEdgeDrop(from: ids[0], sourcePortLabel: nil, at: CGPoint(x: 4000, y: 4000))
+
+        XCTAssertEqual(s.lastEdgeRefusal, .missedDrop, "the miss must surface like any other refusal")
+        XCTAssertTrue(s.edges.isEmpty, "a miss must not create anything")
+        // A miss is a NON-EVENT for the document: it must neither dirty the canvas nor burn an
+        // undo step (cold-read finding — 'changes nothing' was under-asserted).
+        XCTAssertEqual(s.canUndo, undoBaseline, "a miss must not push an undo snapshot")
+        XCTAssertEqual(s.hasUnsavedChanges, dirtyBaseline, "a miss must not dirty the document")
+    }
+
+    /// ⚠️ Boundary probes (cold-read finding): without them, inflating `edgeDragAbortRadius`
+    /// from 24 to anything under ~5000 — turning most real misses back into silent non-events,
+    /// CVV-2 wholesale — passed every test. A release 30pt from the source port is a MISS.
+    func testMidDistanceReleaseIsAMissNotAnAbort() {
+        let s = state()
+        s.addStructuralNode(kind: .code(CodeNodeConfig()), displayName: "Src", at: CGPoint(x: 0, y: 0))
+        let src = s.nodes[0].id
+
+        // Default output port of the 220x100 code node at (0,0) is (220, ~33.3); release 30pt
+        // to its right — outside the 24pt abort radius, near no input port.
+        s.recordMissedEdgeDrop(from: src, sourcePortLabel: nil, at: CGPoint(x: 250, y: 33))
+
+        XCTAssertEqual(s.lastEdgeRefusal, .missedDrop,
+                       "30pt from the source port is a MISS — only a release back AT the port is an abort")
+    }
+
+    /// The accept radius's own boundary: 19pt in, 21pt out. Kills a silent shrink OR growth of
+    /// `inputPortHitRadius` that every distance-free test would wave through.
+    func testInputPortHitRadiusBoundary() {
+        let s = state()
+        s.addStructuralNode(kind: .code(CodeNodeConfig()), displayName: "Target", at: CGPoint(x: 100, y: 0))
+        let target = s.nodes[0].id
+        // Input port of a 220x100 code node at (100, 0) is (100, 50).
+        XCTAssertEqual(s.findInputPortTarget(near: CGPoint(x: 100, y: 69), excluding: UUID()), target,
+                       "19pt from the port centre must be inside the accept radius")
+        XCTAssertNil(s.findInputPortTarget(near: CGPoint(x: 100, y: 71), excluding: UUID()),
+                     "21pt from the port centre must be outside the accept radius")
+    }
+
+    /// ⚠️ Cold-read finding: the banner's dismiss task was keyed on the refusal VALUE, so an
+    /// IDENTICAL repeat — miss, retry, miss again, the expected pattern — never restarted the 3s
+    /// timer and the second miss's notice vanished almost immediately. The generation is what the
+    /// view keys on now; every refusal write must bump it, equal values included.
+    func testRepeatedIdenticalRefusalsBumpTheGeneration() {
+        let s = state()
+        let ids = addNodes(s, 1)
+
+        s.recordMissedEdgeDrop(from: ids[0], sourcePortLabel: nil, at: CGPoint(x: 4000, y: 4000))
+        let first = s.edgeRefusalGeneration
+        s.recordMissedEdgeDrop(from: ids[0], sourcePortLabel: nil, at: CGPoint(x: 4000, y: 4000))
+
+        XCTAssertEqual(s.lastEdgeRefusal, .missedDrop)
+        XCTAssertGreaterThan(s.edgeRefusalGeneration, first,
+                             "an identical repeat must still restart the banner's dismiss timer")
+    }
+
+    /// The saturated-viewport fallback (cold-read finding): staggered by `nodes.count` alone,
+    /// two consecutive default-placed notes on a fully packed canvas landed at the IDENTICAL
+    /// point — the collision the function's own doc promises can never return.
+    func testSaturatedFallbackStaggersStickyNotes() {
+        let s = state()
+        s.viewportSize = CGSize(width: 1000, height: 800)
+        // One giant note blankets every ring slot (the probe spans ~±5 slots of 260x160 around
+        // the viewport centre), forcing every candidate through to the fallback.
+        s.addStickyNote(at: CGPoint(x: -3000, y: -3000))
+        s.resizeStickyNote(s.annotations[0].id, to: CGSize(width: 8000, height: 8000))
+
+        s.addStickyNote()
+        s.addStickyNote()
+
+        XCTAssertNotEqual(s.annotations[1].position, s.annotations[2].position,
+                          "fallback placements must stay distinct — stacking is the exact CVC-2 defect")
+    }
+
+    /// The abort guard: a release back at the source port is the user CANCELLING the drag, not
+    /// missing a target — a refusal banner there would punish changing your mind.
+    func testReleaseNearTheSourcePortIsAnAbortNotAMiss() {
+        let s = state()
+        s.addStructuralNode(kind: .code(CodeNodeConfig()), displayName: "Src", at: CGPoint(x: 0, y: 0))
+        let src = s.nodes[0].id
+
+        // A code node has TWO stacked output ports (default + error), so the default port of a
+        // 220x100 node at (0,0) sits at (220, ~33) — height/(count+1) spacing, not the vertical
+        // centre. Release ~9pt away from it.
+        s.recordMissedEdgeDrop(from: src, sourcePortLabel: nil, at: CGPoint(x: 228, y: 38))
+
+        XCTAssertNil(s.lastEdgeRefusal, "an aborted drag must not show a refusal notice")
     }
 
     // MARK: - Revert / Discard Changes (WF-CV7 follow-up)

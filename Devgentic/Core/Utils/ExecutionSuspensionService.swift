@@ -58,6 +58,20 @@ actor ExecutionSuspensionService {
     /// process-wide singleton with no reset, so a removal missed at any one of the five sites leaks
     /// for the life of the process.
     private var operationToNode: [UUID: UUID] = [:]
+    /// Reverse lookup: operationID -> owning workflow RUN (register EXC-2), for `cancelRun`.
+    ///
+    /// Stamped by reading the `WorkflowRunScope.token` TaskLocal inside each `suspend*` body — an
+    /// actor call runs on the CALLER's task, so every park raised anywhere inside a workflow run's
+    /// structured task tree (the executor's own Gate/Router/Action parks, AND an agent node's tool
+    /// confirmations via ToolExecutionLoop, plan reviews via PlanningCapability) carries its run's
+    /// token with zero signature changes at the 23 suspend call sites. Absent for parks raised
+    /// outside any run's task tree: chat and code runs, and both MCP brokers (whose parks arrive on
+    /// the MCP transport's own task) — those remain drainable by ANY drain in their conversation,
+    /// exactly as before.
+    ///
+    /// ⚠️ Same LOCKSTEP rule as `operationToNode`: removed at all five removal sites or it leaks
+    /// for the life of the process.
+    private var operationToRunToken: [UUID: UUID] = [:]
 
     // MARK: - Park accounting (for compute-only node timeouts)
 
@@ -182,6 +196,9 @@ actor ExecutionSuspensionService {
 
         operationToConversation[operationID] = conversationID
         if let nodeID { operationToNode[operationID] = nodeID }
+        // EXC-2: reads the caller's TaskLocal — see `operationToRunToken`'s doc for why this
+        // stamps every workflow-run park with no signature change.
+        if let runToken = WorkflowRunScope.token { operationToRunToken[operationID] = runToken }
         beginPark(conversationID)
 
         logger.info("[Suspension] Suspending operation \(operationID) for conversation: \(conversationID). Indefinite — container owns the deadline.")
@@ -216,6 +233,7 @@ actor ExecutionSuspensionService {
     func resume(for operationID: UUID, approved: Bool, editedArguments: [String: JSONValue]? = nil, outcome: String? = nil) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
         operationToNode.removeValue(forKey: operationID)
+        operationToRunToken.removeValue(forKey: operationID)
         if let conversationID { endPark(conversationID) }
 
         // [HITL/A3] Stash user edits to apply on approval; drop them on denial.
@@ -260,6 +278,9 @@ actor ExecutionSuspensionService {
 
         operationToConversation[operationID] = conversationID
         if let nodeID { operationToNode[operationID] = nodeID }
+        // EXC-2: reads the caller's TaskLocal — see `operationToRunToken`'s doc for why this
+        // stamps every workflow-run park with no signature change.
+        if let runToken = WorkflowRunScope.token { operationToRunToken[operationID] = runToken }
         beginPark(conversationID)
 
         logger.info("[Clarification] Suspending operation \(operationID) for conversation: \(conversationID). Indefinite — container owns the deadline.")
@@ -282,6 +303,7 @@ actor ExecutionSuspensionService {
     func resumeClarification(for operationID: UUID, userInput: String?, outcome: String? = nil) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
         operationToNode.removeValue(forKey: operationID)
+        operationToRunToken.removeValue(forKey: operationID)
         if let conversationID { endPark(conversationID) }
 
         guard let continuation = clarificationContinuations.removeValue(forKey: operationID) else {
@@ -313,6 +335,9 @@ actor ExecutionSuspensionService {
 
         operationToConversation[operationID] = conversationID
         if let nodeID { operationToNode[operationID] = nodeID }
+        // EXC-2: reads the caller's TaskLocal — see `operationToRunToken`'s doc for why this
+        // stamps every workflow-run park with no signature change.
+        if let runToken = WorkflowRunScope.token { operationToRunToken[operationID] = runToken }
         beginPark(conversationID)
 
         logger.info("[PlanReview] Suspending operation \(operationID) for conversation: \(conversationID). No timeout — awaiting user action.")
@@ -337,6 +362,7 @@ actor ExecutionSuspensionService {
     func resumePlanReview(for operationID: UUID, editedPlan: [SubTask]?, outcome: String? = nil) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
         operationToNode.removeValue(forKey: operationID)
+        operationToRunToken.removeValue(forKey: operationID)
         if let conversationID { endPark(conversationID) }
 
         guard let continuation = planReviewContinuations.removeValue(forKey: operationID) else {
@@ -364,6 +390,9 @@ actor ExecutionSuspensionService {
 
         operationToConversation[operationID] = conversationID
         if let nodeID { operationToNode[operationID] = nodeID }
+        // EXC-2: reads the caller's TaskLocal — see `operationToRunToken`'s doc for why this
+        // stamps every workflow-run park with no signature change.
+        if let runToken = WorkflowRunScope.token { operationToRunToken[operationID] = runToken }
         beginPark(conversationID)
         logger.info("[Gate] Suspending operation \(operationID) for conversation: \(conversationID). Indefinite — container owns the deadline.")
 
@@ -383,6 +412,7 @@ actor ExecutionSuspensionService {
     func resumeGate(for operationID: UUID, chosenOption: String?) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
         operationToNode.removeValue(forKey: operationID)
+        operationToRunToken.removeValue(forKey: operationID)
         if let conversationID { endPark(conversationID) }
 
         guard let continuation = gateContinuations.removeValue(forKey: operationID) else {
@@ -400,6 +430,11 @@ actor ExecutionSuspensionService {
 
     /// Force-cancels ALL suspensions for a conversation (e.g., user stops the stream).
     /// Resumes with `false` (Denied) for permissions, `nil` for clarifications.
+    ///
+    /// ⚠️ CONVERSATION-scoped by design, and staying that way: conversation delete, ChatOps
+    /// `/cancel`, Jarvis teardown, and chat-run stops all legitimately want EVERY park in the
+    /// conversation gone, including the token-less ones (chat/code confirmations, MCP-broker
+    /// consents). A WORKFLOW root run's own stop wants `cancelRun` instead — see register EXC-2.
     func cancel(for conversationID: UUID) {
         // Find all operations belonging to this conversation
         let permissionOps = operationToConversation.filter { $0.value == conversationID }.map(\.key)
@@ -407,6 +442,41 @@ actor ExecutionSuspensionService {
         for opID in permissionOps {
             drainOperation(opID, conversationID: conversationID, outcome: "cancelled")
         }
+    }
+
+    /// Force-cancels ONE workflow run's suspensions, leaving a concurrent run's parks standing.
+    ///
+    /// ⚠️ THE EXC-2 FIX, and the run-scoped sibling of `cancel(for:)` — NOT a replacement for it.
+    /// Stopping run A used to drain run B's parked tool confirmation with `approved = false`; back
+    /// in run B `Task.isCancelled` was false, so the node recorded "User denied tool 'X'" and fired
+    /// its error branch — a webhook or Slack post running on a run the user never touched.
+    ///
+    /// Drains operations in the conversation whose stamped run token MATCHES, plus the TOKEN-LESS
+    /// ones. The token-less inclusion is deliberate and load-bearing: parks raised outside the
+    /// run's task tree (MCP sampling/elicitation consents — even ones triggered BY this run's own
+    /// MCP tool call) carry no token, and a token-partitioned drain that skipped them would leave a
+    /// consent banner standing for a run that no longer exists. `cancelNode`'s doc already records
+    /// the same class of mistake as "a HANG, not a warning". The cost is that a token-less park
+    /// belonging to a concurrent CHAT run in the same conversation is still swept — byte-identical
+    /// to today's behavior, so this drain strictly narrows, never widens.
+    ///
+    /// Returns the operations it resolved, so the caller can log what it actually did.
+    @discardableResult
+    func cancelRun(_ runToken: UUID, in conversationID: UUID) -> [UUID] {
+        let conversationOps = operationToConversation.filter { $0.value == conversationID }.map(\.key)
+        let drained = conversationOps.filter { operationToRunToken[$0] == nil || operationToRunToken[$0] == runToken }
+        let survivors = conversationOps.count - drained.count
+        // ⚠️ Counted BEFORE the drain loop — `drainOperation` removes the token entry, so counting
+        // after would report every drained op as token-less.
+        let tokenless = drained.filter { operationToRunToken[$0] == nil }.count
+
+        for opID in drained {
+            drainOperation(opID, conversationID: conversationID, outcome: "cancelled")
+        }
+        if !drained.isEmpty || survivors > 0 {
+            logger.info("[Suspension] Run-scoped drain for run \(runToken.uuidString.prefix(8)) in conversation \(conversationID.uuidString.prefix(8)): resolved \(drained.count) park(s) (\(tokenless) token-less, swept by conversation). CONSEQUENCE: \(survivors) park(s) belonging to a DIFFERENT run survive THIS drain and stay awaiting the user. ⚠️ Scope honesty: the attended Stop surfaces (MessagingCoordinator, scheduler deadline, ChatOps /cancel) still run their own conversation-wide cancel(for:) BEFORE this arm — run-scoping those is the concurrency design's deferred increment 2, which this token machinery now unblocks.")
+        }
+        return drained
     }
 
     /// Force-resolves every park belonging to ONE workflow node, leaving its siblings alone.
@@ -421,11 +491,19 @@ actor ExecutionSuspensionService {
     /// one-root-run-per-conversation boundary and guards against a stale node id from an earlier
     /// run of the same graph.
     ///
+    /// EXC-2 twin: when the CALLER runs inside a workflow run (its `WorkflowRunScope.token`
+    /// TaskLocal is set), the drain additionally requires the park's stamped token to match (or be
+    /// absent) — two concurrent runs of the SAME workflow have IDENTICAL node IDs, so without the
+    /// filter run A's node timeout drained run B's park for the same node. A caller with no token
+    /// (tests, any future non-run teardown) behaves exactly as before.
+    ///
     /// Returns the operations it resolved, so a caller can log what it actually did.
     @discardableResult
     func cancelNode(_ nodeID: UUID, in conversationID: UUID, outcome: String = "cancelled") -> [UUID] {
+        let callerToken = WorkflowRunScope.token
         let ops = operationToConversation
             .filter { $0.value == conversationID && operationToNode[$0.key] == nodeID }
+            .filter { callerToken == nil || operationToRunToken[$0.key] == nil || operationToRunToken[$0.key] == callerToken }
             .map(\.key)
 
         guard !ops.isEmpty else { return [] }
@@ -455,6 +533,7 @@ actor ExecutionSuspensionService {
     private func drainOperation(_ opID: UUID, conversationID: UUID, outcome: String) {
         operationToConversation.removeValue(forKey: opID)
         operationToNode.removeValue(forKey: opID)
+        operationToRunToken.removeValue(forKey: opID)
         // ⚠️ Force-cancel closes the park too. Without this the depth never returns to zero and
         // `cumulativeParkedTime` grows forever, so every later node in the conversation would
         // believe it had been waiting on a human and its timeout would never fire.

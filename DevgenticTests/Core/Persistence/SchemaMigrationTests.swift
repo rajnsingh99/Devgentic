@@ -428,7 +428,7 @@ final class SchemaMigrationTests: XCTestCase {
         let current = DevgenticSchema.structuralDescriptor(for: DevgenticSchema.schema)
 
         if ProcessInfo.processInfo.environment["DEVGENTIC_WRITE_SCHEMA_BASELINE"] != nil {
-            // Regeneration escape hatch. Prints the descriptor for pasting into SchemaBaselineV2.swift.
+            // Regeneration escape hatch. Prints the descriptor for pasting into SchemaBaselineV3.swift.
             print("=== BEGIN SCHEMA DESCRIPTOR ===\n\(current)\n=== END SCHEMA DESCRIPTOR ===")
             // ⚠️ SKIP, not `return`. A bare return reports this test as PASSED — so the run that
             // regenerates the baseline also announces that the schema matches it, which is the one
@@ -437,23 +437,23 @@ final class SchemaMigrationTests: XCTestCase {
             // `XCTSkip` makes the suite say "not checked" instead of "checked and fine".
             throw XCTSkip(
                 "Baseline regeneration mode — the drift check did NOT run. Paste the descriptor above "
-                + "into SchemaBaselineV2.swift, then re-run WITHOUT DEVGENTIC_WRITE_SCHEMA_BASELINE "
+                + "into SchemaBaselineV3.swift, then re-run WITHOUT DEVGENTIC_WRITE_SCHEMA_BASELINE "
                 + "to actually verify it."
             )
         }
 
-        guard !SchemaBaselineV2.descriptor.isEmpty else {
+        guard !SchemaBaselineV3.descriptor.isEmpty else {
             return XCTFail(
-                "SchemaBaselineV2.descriptor is empty. Regenerate it with:\n"
+                "SchemaBaselineV3.descriptor is empty. Regenerate it with:\n"
                 + "  DEVGENTIC_WRITE_SCHEMA_BASELINE=1 xcodebuild test-without-building "
                 + "-only-testing:devgenticTests/SchemaMigrationTests/testSchemaStructureMatchesCheckedInBaseline"
             )
         }
 
-        guard current != SchemaBaselineV2.descriptor else { return }
+        guard current != SchemaBaselineV3.descriptor else { return }
 
         // Emit a line-level diff — a 13-entity descriptor is far too long to eyeball whole.
-        let baselineLines = SchemaBaselineV2.descriptor.components(separatedBy: "\n")
+        let baselineLines = SchemaBaselineV3.descriptor.components(separatedBy: "\n")
         let currentLines = current.components(separatedBy: "\n")
         let removed = Set(baselineLines).subtracting(currentLines).sorted()
         let added = Set(currentLines).subtracting(baselineLines).sorted()
@@ -969,6 +969,48 @@ final class SchemaMigrationTests: XCTestCase {
         XCTAssertEqual(report.offendingColumns["ZPROMPTMODEL.ZTITLE"], 1,
                        "One VALUE is duplicated (not two rows) — the report counts values, not rows.")
         XCTAssertTrue(report.summary.contains("ZPROMPTMODEL.ZTITLE"))
+    }
+
+    /// The order-sensitivity regression behind the 2026-08-31 batched-run flake of the test above.
+    ///
+    /// ⚠️ The report used to open the store `immutable=1` ONLY — a mode that reads the MAIN FILE
+    /// and ignores the WAL. Its correctness therefore silently depended on the writing
+    /// `ModelContainer` having fully deallocated at the `autoreleasepool` drain, because only the
+    /// final close checkpoints the WAL into the main file. In a large batched run, anything that
+    /// briefly kept the last context/container reference alive past the drain (async notification
+    /// delivery, autorelease traffic in the shared app test host) left the just-written rows —
+    /// on a fresh store, the whole schema — sitting in the `-wal`: the scan hit "no such table",
+    /// skipped the column, and reported CLEAN. A false "safe to constrain" from the exact tool
+    /// meant to stop a `.unique` addition from bricking user stores, surfacing as a test that
+    /// failed only in batches.
+    ///
+    /// This test makes that hazard deterministic instead of timing-dependent: the container is
+    /// deliberately STILL OPEN — the WAL deliberately un-checkpointed — while the report runs.
+    /// Verified by mutation: with the immutable-only reader restored, this fails every time.
+    func testDuplicateReportSeesRowsWhileTheWritingContainerIsStillOpen() throws {
+        let storeURL = workDirectory.appendingPathComponent("live-dupe.store")
+
+        let container = try Self.makeContainer(at: storeURL)
+        let context = ModelContext(container)
+        context.insert(PromptModel(title: "Live", text: "a", category: "general", isUserDefined: true))
+        context.insert(PromptModel(title: "Live", text: "b", category: "general", isUserDefined: true))
+        try context.save()
+
+        // No autoreleasepool, no container teardown: the SQLite connection is open and the store's
+        // committed state lives (at least partly) in the -wal, exactly like the running app's store.
+        let report = DevgenticSchema.duplicateReport(
+            storeURL: storeURL,
+            columns: [(table: "ZPROMPTMODEL", column: "ZTITLE")]
+        )
+        XCTAssertEqual(
+            report.offendingColumns["ZPROMPTMODEL.ZTITLE"], 1,
+            """
+            A store that is still open elsewhere must be scannable: its committed rows sit in the \
+            WAL until checkpoint, and a WAL-blind scan reports a false clean on exactly the data \
+            the pre-flight exists to protect.
+            """
+        )
+        withExtendedLifetime(container) {}
     }
 
     /// A column with no duplicates must report clean — otherwise the pre-flight is noise and nobody

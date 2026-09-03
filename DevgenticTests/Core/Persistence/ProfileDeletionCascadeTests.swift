@@ -48,19 +48,23 @@ final class WorkflowProfileDeletionValidationTests: XCTestCase {
         let issues = WorkflowValidator.validate(layout: layout, profileMap: [:])
         let blocking = issues.filter { $0.severity == .error }
 
-        XCTAssertTrue(blocking.contains { $0.message.contains("Profile not found") },
-                      "if this stops being an error, deleting a profile silently breaks workflows")
+        XCTAssertEqual(blocking.count, 1,
+                       "if this stops being an error, an unresolvable node silently breaks workflows")
     }
 
-    /// The message has to point at deletion — "Profile not found" alone reads like a bug in the app.
-    func testTheMessageSaysItMayHaveBeenDeleted() throws {
+    /// ⚠️ The message must name an ACTIONABLE remedy, and the remedy changed on 2026-08-29. It used
+    /// to read "Profile not found — it may have been deleted", which described a dead end: a node
+    /// referenced a shared profile and nothing in the app could repoint it. A node's configuration
+    /// is now its own, so the fix is in reach — hence "Delete it and add the node again".
+    func testTheMessageNamesAFixTheUserCanPerform() throws {
         let layout = WorkflowLayout(nodes: [profileNode(profileID: UUID())], edges: [])
 
         let issue = try XCTUnwrap(
             WorkflowValidator.validate(layout: layout, profileMap: [:])
-                .first { $0.message.contains("Profile not found") })
+                .first { $0.severity == .error })
 
-        XCTAssertTrue(issue.message.lowercased().contains("deleted"))
+        XCTAssertTrue(issue.message.lowercased().contains("add the node again"),
+                      "the message must tell the user what to DO, not just what is wrong — got: \(issue.message)")
     }
 
     /// A node whose profile still exists must NOT be flagged — otherwise the guard is noise and
@@ -83,7 +87,7 @@ final class WorkflowProfileDeletionValidationTests: XCTestCase {
 
         let issue = try XCTUnwrap(
             WorkflowValidator.validate(layout: layout, profileMap: [:])
-                .first { $0.message.contains("Profile not found") })
+                .first { $0.severity == .error })
 
         XCTAssertEqual(issue.nodeID, nodeID)
         XCTAssertEqual(issue.nodeName, "Researcher")

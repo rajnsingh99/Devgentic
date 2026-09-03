@@ -35,7 +35,15 @@ struct WorkflowEdgeView: View {
     ///
     /// Untaken branches recede instead of disappearing: the connection is still part of the design
     /// and must stay selectable and deletable while the run is on screen.
-    private var runOpacityScale: Double {
+    private var runOpacityScale: Double { Self.runOpacityScale(for: runState) }
+
+    /// ⚠️ `nonisolated static` and pure (WF-UI5) so the curve and the arrowhead that terminates it
+    /// can be PROVEN to fade by the same factor. They could not before: the line multiplied
+    /// `baseEdgeOpacity` by this scale while `arrowHead` carried its own parallel constant ladder
+    /// and no scale at all, and nothing forced the two ladders to agree.
+    nonisolated static func runOpacityScale(
+        for runState: WorkflowCanvasRunOverlay.EdgeState
+    ) -> Double {
         switch runState {
         case .fired:        return 1.0
         case .notTaken:     return 0.28
@@ -43,12 +51,50 @@ struct WorkflowEdgeView: View {
         }
     }
 
+    /// The arrowhead's opacity multiplier on `targetColor`: `baseEdgeOpacity`'s
+    /// selected → error → ordinary precedence, times the SAME run scale the curve gets.
+    ///
+    /// ⚠️ The run scale used to stop at the curve (register CVV-5). A `.notTaken` branch faded its
+    /// line to 0.196 while its arrow stayed at 0.70 — ~3.6× the curve — so the brightest surviving
+    /// element on a dead branch was the arrow landing on its target, and the canvas still read as
+    /// if that branch had delivered. That defeats the one question the graph view exists to answer.
+    nonisolated static func arrowOpacity(
+        isSelected: Bool,
+        isErrorEdge: Bool,
+        runState: WorkflowCanvasRunOverlay.EdgeState
+    ) -> Double {
+        let base: Double = isSelected ? 1.0 : (isErrorEdge ? 0.90 : 0.70)
+        return base * runOpacityScale(for: runState)
+    }
+
     private var runLineWidthBoost: CGFloat {
         runState == .fired ? 1.0 : 0
     }
 
-    private var sourceColor: Color { color(ofNode: edge.sourceNodeID, end: "source") }
-    private var targetColor: Color { color(ofNode: edge.targetNodeID, end: "target") }
+    private var isErrorEdge: Bool {
+        edge.sourcePortLabel == WorkflowEdge.errorPortLabel
+    }
+
+    private var sourceColor: Color {
+        guard let sourceNode = canvasState.nodes.first(where: { $0.id == edge.sourceNodeID }) else {
+            return isErrorEdge ? theme.errorColor : theme.secondaryText
+        }
+        return sourceNode.kind.portColor(forLabel: edge.sourcePortLabel, in: theme)
+    }
+
+    private var targetColor: Color {
+        if isErrorEdge {
+            // Error path blends into a warm error tint so the whole wire is visually distinguishable
+            return theme.errorColor.opacity(0.85)
+        }
+        return color(ofNode: edge.targetNodeID, end: "target")
+    }
+
+    private var baseEdgeOpacity: Double {
+        if isSelected { return 0.98 }
+        if isErrorEdge { return 0.85 }
+        return 0.70
+    }
 
     /// ⚠️ Resolved HERE rather than on `WorkflowCanvasState`, which has no `@Environment` and
     /// therefore no theme (WF-CU10). This view already holds one, and it was the only caller of the
@@ -85,11 +131,16 @@ struct WorkflowEdgeView: View {
     }
 
     private var midPoint: CGPoint {
-        // Evaluate the midpoint for a symmetric cubic Bezier S-curve
-        CGPoint(
-            x: (sourcePoint.x + targetPoint.x) / 2,
-            y: (sourcePoint.y + targetPoint.y) / 2
-        )
+        // Evaluate the exact midpoint along the cubic Bezier curve at t = 0.5
+        let dx = abs(targetPoint.x - sourcePoint.x)
+        let controlOffset = max(dx * 0.5, 50)
+        let c1 = CGPoint(x: sourcePoint.x + controlOffset, y: sourcePoint.y)
+        let c2 = CGPoint(x: targetPoint.x - controlOffset, y: targetPoint.y)
+        
+        // B(0.5) = (P0 + 3*C1 + 3*C2 + P3) / 8
+        let x = (sourcePoint.x + 3 * c1.x + 3 * c2.x + targetPoint.x) / 8
+        let y = (sourcePoint.y + 3 * c1.y + 3 * c2.y + targetPoint.y) / 8
+        return CGPoint(x: x, y: y)
     }
 
     var body: some View {
@@ -98,10 +149,6 @@ struct WorkflowEdgeView: View {
             bezierPath
                 .stroke(Color.black.opacity(0.001), lineWidth: 24)
                 .onTapGesture(perform: onTap)
-                // ⚠️ Connections were entirely absent from the accessibility tree — a bare drawn
-                // path with a tap gesture and nothing else. The graph's TOPOLOGY is the one thing a
-                // node-graph editor exists to convey, so a VoiceOver user could reach the nodes
-                // (badly) and never learn how any of them were wired together.
                 .accessibilityElement()
                 .accessibilityLabel(accessibilityDescription)
                 .accessibilityAddTraits(isSelected ? [.isSelected] : [])
@@ -113,30 +160,30 @@ struct WorkflowEdgeView: View {
                 .stroke(
                     LinearGradient(
                         colors: [
-                            sourceColor.opacity((isSelected ? 0.95 : 0.55) * runOpacityScale),
-                            targetColor.opacity((isSelected ? 0.95 : 0.55) * runOpacityScale)
+                            sourceColor.opacity(baseEdgeOpacity * runOpacityScale),
+                            targetColor.opacity(baseEdgeOpacity * runOpacityScale)
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
                     style: StrokeStyle(
-                        lineWidth: (isSelected ? 2.5 : 1.5) + runLineWidthBoost,
+                        lineWidth: (isSelected ? 2.5 : (isErrorEdge ? 1.75 : 1.5)) + runLineWidthBoost,
                         lineCap: .round,
-                        dash: isSelected ? [6, 4] : [],
+                        dash: isSelected ? [6, 4] : (isErrorEdge ? [6, 3] : (runState == .fired ? [8, 4] : [])),
                         dashPhase: dashOffset
                     )
                 )
                 .onAppear {
-                    if isSelected {
+                    if isSelected || runState == .fired {
                         withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
-                            dashOffset = -20
+                            dashOffset = -24
                         }
                     }
                 }
                 .onChange(of: isSelected) { _, selected in
-                    if selected {
+                    if selected || runState == .fired {
                         withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
-                            dashOffset = -20
+                            dashOffset = -24
                         }
                     } else {
                         dashOffset = 0
@@ -146,17 +193,43 @@ struct WorkflowEdgeView: View {
             // Arrowhead at target
             arrowHead
 
-            // Delete Button at the center on selection
+            // Selection Controls at curve midpoint (Branch Tag + Delete Button)
             if isSelected {
-                Button(action: onDelete) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(.body))
-                        .foregroundColor(.red)
-                        .background(Circle().fill(theme.primaryBackground).padding(2))
+                HStack(spacing: 5) {
+                    if let label = edge.sourcePortLabel, !label.isEmpty {
+                        Text(label)
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .foregroundColor(sourceColor)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule()
+                                    .fill(theme.primaryBackground)
+                                    .overlay(Capsule().stroke(sourceColor.opacity(0.4), lineWidth: 0.75))
+                            )
+                    }
+
+                    Button(action: onDelete) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(theme.errorColor)
+                            .frame(width: 20, height: 20)
+                            .background(
+                                Circle()
+                                    .fill(theme.primaryBackground)
+                                    .overlay(Circle().stroke(theme.errorColor.opacity(0.4), lineWidth: 0.75))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Delete connection")
                 }
-                .buttonStyle(.plain)
+                .padding(3)
+                .background(
+                    Capsule()
+                        .fill(theme.controlBackground.opacity(0.92))
+                        .shadow(color: theme.shadowColor.opacity(0.28), radius: 5, y: 2)
+                )
                 .position(midPoint)
-                .accessibilityLabel("Delete connection")
                 .transition(.scale.combined(with: .opacity))
             }
         }
@@ -168,7 +241,11 @@ struct WorkflowEdgeView: View {
 
     private var arrowHead: some View {
         Self.makeArrowPath(at: targetPoint)
-            .fill(isSelected ? targetColor : targetColor.opacity(0.55))
+            .fill(targetColor.opacity(Self.arrowOpacity(
+                isSelected: isSelected,
+                isErrorEdge: isErrorEdge,
+                runState: runState
+            )))
     }
 
     static func makeArrowPath(at target: CGPoint) -> Path {
@@ -206,6 +283,7 @@ struct WorkflowEdgeView: View {
 struct WorkflowEdgeDragPreview: View {
     let sourcePoint: CGPoint
     let currentPoint: CGPoint
+    var color: Color = .accentColor
 
     @Environment(\.appTheme) private var theme
 
@@ -213,12 +291,12 @@ struct WorkflowEdgeDragPreview: View {
         ZStack {
             WorkflowEdgeView.makeBezierPath(from: sourcePoint, to: currentPoint)
                 .stroke(
-                    theme.accentColor.opacity(0.6),
+                    color.opacity(0.85),
                     style: StrokeStyle(lineWidth: 2, lineCap: .round, dash: [6, 4])
                 )
                 
             WorkflowEdgeView.makeArrowPath(at: currentPoint)
-                .fill(theme.accentColor.opacity(0.8))
+                .fill(color.opacity(0.95))
         }
     }
 }

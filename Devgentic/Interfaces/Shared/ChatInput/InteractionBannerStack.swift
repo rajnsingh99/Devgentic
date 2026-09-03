@@ -83,7 +83,7 @@ struct InteractionBannerStack: View {
         // The banner slides in and flashes — both of which are invisible to a VoiceOver user,
         // who was left with a silently blocked agent. `.immediate` is warranted here and
         // almost nowhere else: execution is halted until they answer, and a gate will
-        // auto-reject on a deadline they can't see.
+        // fail on a deadline they can't see.
         .onChange(of: current?.id, initial: true) { _, _ in
             guard let pending = current else { return }
             let base = Self.announcement(for: pending)
@@ -127,7 +127,7 @@ struct InteractionBannerStack: View {
         case .planReview:
             return String(localized: "Plan review needed. The agent is paused until you approve or edit the plan.")
         case .gate(let gate):
-            let deadline = gate.deadline != nil ? String(localized: " This will auto-reject if you don't respond.") : ""
+            let deadline = gate.deadline != nil ? String(localized: " This will fail onto its error port if you don't respond.") : ""
             return String(localized: "Input needed: \(gate.prompt).\(deadline)")
         }
     }
@@ -819,7 +819,7 @@ private struct ClarificationInteractionBanner: View {
 
 // MARK: - Gate Banner (E1 — per-option routing)
 
-/// Renders a workflow Gate HITL: the prompt, a live countdown to the auto-reject deadline, and one
+/// Renders a workflow Gate HITL: the prompt, a live countdown to the failure deadline, and one
 /// button per configured option. Picking an option routes the workflow to that option's output port.
 private struct GateInteractionBanner: View {
     let pending: PendingHITL
@@ -842,7 +842,9 @@ private struct GateInteractionBanner: View {
                 .lineSpacing(2)
 
             if gate.deadline != nil {
-                // Live countdown to the configured auto-reject. WorkflowExecutor enforces the actual
+                // Live countdown to the configured timeout. ⚠️ NOT an auto-reject: the executor's
+                // timeout arm fails the node with `activePorts` unset, so no option branch — not even
+                // "Reject" — is ever taken (register INS-3). WorkflowExecutor enforces the actual
                 // timeout; this only displays it.
                 TimelineView(.periodic(from: Date(), by: 1)) { context in
                     if let text = countdownText(now: context.date) {
@@ -852,7 +854,7 @@ private struct GateInteractionBanner: View {
                             .accessibilityLabel(text)
                             // Announcing every tick would talk over the whole app, so speak
                             // only at thresholds. Silence here meant a VoiceOver user was
-                            // auto-rejected on a deadline they had no way to perceive.
+                            // failed on a deadline they had no way to perceive.
                             .onChange(of: Int(max(0, gate.deadline?.timeIntervalSince(context.date) ?? 0))) { _, remaining in
                                 announceCountdownIfNeeded(remaining)
                             }
@@ -883,7 +885,7 @@ private struct GateInteractionBanner: View {
         let remaining = max(0, deadline.timeIntervalSince(now))
         if remaining <= 0 { return String(localized: "Timing out…") }
         let m = Int(remaining) / 60, s = Int(remaining) % 60
-        return m > 0 ? String(format: String(localized: "Auto-rejects in %d:%02d"), m, s) : String(localized: "Auto-rejects in \(s)s")
+        return m > 0 ? String(format: String(localized: "Fails in %d:%02d"), m, s) : String(localized: "Fails in \(s)s")
     }
 
     /// Speaks the deadline at a few thresholds — enough warning to act, not a metronome.
@@ -895,7 +897,7 @@ private struct GateInteractionBanner: View {
               !announcedThresholds.contains(crossed) else { return }
         announcedThresholds.insert(crossed)
         AccessibilityAnnouncer.announce(
-            String(localized: "\(crossed) seconds left to respond, or this auto-rejects."),
+            String(localized: "\(crossed) seconds left to respond, or this node fails onto its error port."),
             urgency: .immediate
         )
     }

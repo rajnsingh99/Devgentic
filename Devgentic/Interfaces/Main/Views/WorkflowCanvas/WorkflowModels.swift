@@ -133,6 +133,74 @@ extension WorkflowNodeKind {
         case .unsupported: return theme.secondaryText
         }
     }
+
+    /// Dedicated branch colors for multi-port routing nodes (e.g. Router/Condition rules 1...5, Gate options).
+    /// Assigned by slot index (0...4) so user-renamed branches stay distinct and consistently colored.
+    static func branchColor(forIndex index: Int) -> Color {
+        switch index {
+        case 0:
+            // Branch 1: Emerald Green (default True / affirmative / first branch)
+            return Color(red: 0.20, green: 0.78, blue: 0.42)
+        case 1:
+            // Branch 2: Warm Amber (default False / alternative / second branch)
+            return Color(red: 1.00, green: 0.60, blue: 0.15)
+        case 2:
+            // Branch 3: Electric Violet
+            return Color(red: 0.68, green: 0.42, blue: 0.98)
+        case 3:
+            // Branch 4: Sky Cyan
+            return Color(red: 0.18, green: 0.75, blue: 0.96)
+        case 4:
+            // Branch 5: Rose Pink
+            return Color(red: 0.98, green: 0.35, blue: 0.58)
+        default:
+            return Color(red: 0.55, green: 0.60, blue: 0.68)
+        }
+    }
+
+    /// Resolves the output port / branch color for a node given the port label.
+    /// Error ports take precedence with theme.errorColor; multi-port nodes resolve
+    /// their rules/options by slot index; single-port nodes use kind identity color.
+    func portColor(forLabel portLabel: String?, in theme: any Theme) -> Color {
+        if portLabel == WorkflowEdge.errorPortLabel {
+            return theme.errorColor
+        }
+        switch self {
+        case .condition(let config):
+            if let index = config.rules.firstIndex(where: { $0.label == portLabel }) {
+                return Self.branchColor(forIndex: index)
+            }
+        case .gate(let config):
+            if let index = config.options.firstIndex(of: portLabel ?? "") {
+                return Self.branchColor(forIndex: index)
+            }
+        default:
+            break
+        }
+        return identityColor(in: theme)
+    }
+
+    /// The node inspector window's minimum content size for this kind (register INS-4).
+    ///
+    /// ⚠️ SINGLE SOURCE, and it must stay one: the inspector view's own root `.frame(minHeight:)`
+    /// and the AppKit host's `minSize` are the same quantity stated twice. They disagreed by up to
+    /// 160pt — the host passed one 800×520 for EVERY kind while Router declares 680, Action 620,
+    /// Gate 560 and Profile 540 — so the content was laid out taller than the window hosting it,
+    /// and the strip that gets clipped is the header carrying Cancel and Save.
+    ///
+    /// ⚠️ Total, with NO `default:`. Adding a node kind must be a compile error here rather than a
+    /// silently-wrong window. `.trigger` and `.unsupported` never reach an inspector — both writers
+    /// of `targetConfigNode` gate them out — but they still need an answer.
+    nonisolated var inspectorMinimumSize: CGSize {
+        switch self {
+        case .condition:   return CGSize(width: 800, height: 680)
+        case .action:      return CGSize(width: 800, height: 620)
+        case .gate:        return CGSize(width: 800, height: 560)
+        case .profile:     return CGSize(width: 800, height: 540)
+        case .code:        return CGSize(width: 800, height: 520)
+        case .trigger, .unsupported: return CGSize(width: 800, height: 520)
+        }
+    }
 }
 
 // MARK: - Node Kind Configs
@@ -213,10 +281,41 @@ struct ConditionNodeConfig: Codable, Hashable, Sendable {
     static let minRules = 2
     static let maxRules = 5
 
-    /// Validates a label: single word, alphanumeric only, max 10 characters.
+    /// The rule-label length contract. THE one definition — `isValidLabel` below, the inspector's
+    /// keystroke sanitizer, `WorkflowCanvasState.portBadgeCharacterCap` and `deduplicatedLabel` all
+    /// read it, so the four cannot drift apart (register INS-6). Do not restate the number.
+    static let maxLabelLength = 10
+
+    /// Validates a label: single word, alphanumeric only, max `maxLabelLength` characters.
     static func isValidLabel(_ label: String) -> Bool {
-        guard !label.isEmpty, label.count <= 10 else { return false }
+        guard !label.isEmpty, label.count <= maxLabelLength else { return false }
         return label.range(of: "^[a-zA-Z0-9]+$", options: .regularExpression) != nil
+    }
+
+    /// `label` if it is free, else the first `<base><n>` (n = 2…99) not already in `taken`.
+    ///
+    /// ⚠️ The numeric suffix REPLACES the tail; it never extends it. The de-dup used to build
+    /// `String("\(label)\(n)".prefix(10))`, which for an already-10-character label truncates
+    /// straight back to the SAME ten characters — so every one of the 98 candidates was already in
+    /// `taken`, the loop fell through, and the duplicate was written unchanged. That is a blocking
+    /// validator error the user then has to find and fix by hand. Replacing the tail also stops
+    /// suffixes 10…99 collapsing onto nine distinct candidates for a 9-character base.
+    ///
+    /// ⚠️ The result always ends in a digit, so it can never collide with
+    /// `WorkflowEdge.errorPortLabel` ("error"), which is a reserved port name.
+    ///
+    /// Returns `label` unchanged if all 98 candidates are taken — the caller cannot have 98 rules
+    /// (`maxRules` is 5), so that arm is unreachable in production and is a safe identity.
+    nonisolated static func deduplicatedLabel(_ label: String, taken: Set<String>) -> String {
+        guard taken.contains(label) else { return label }
+        let base = String(label.filter { $0.isLetter || $0.isNumber })
+        for n in 2...99 {
+            let tail = String(n)
+            let head = String(base.prefix(max(0, maxLabelLength - tail.count)))
+            let candidate = head + tail
+            if !taken.contains(candidate) { return candidate }
+        }
+        return label
     }
 
     // --- Output Behavior ---
@@ -608,7 +707,10 @@ enum ConditionOp: RawRepresentable, Codable, Hashable, Sendable, CaseIterable {
         case .isEmpty: return "is empty"
         case .isNotEmpty: return "is not empty"
         // The raw value IS the most useful display for an op this build cannot evaluate.
-        case .other(let raw): return "\(raw) (newer version)"
+        // ⚠️ "(unavailable)", not "(newer version)" — `.other` also holds the RETIRED `always`
+        // (see the note on the enum above), which came from an OLDER build, so the previous
+        // wording was false for the one case a user is actually likely to meet.
+        case .other(let raw): return "\(raw) (unavailable)"
         }
     }
 }
@@ -685,12 +787,12 @@ struct WorkflowNodeConfig: Codable, Hashable, Sendable {
     /// it, and `WorkflowExecutor` no longer reads it: a node's behaviour is its profile's system
     /// instructions, and its input is the run's query (entry node) or its upstream's output.
     ///
-    /// ⚠️ THE PROPERTY AND ITS CODING KEY STAY, and must. `WorkflowNodeConfig` decodes out of the
-    /// persisted layout blob; every workflow saved before this date carries a `taskDescription`,
-    /// and while `decodeIfPresent` means dropping the key would not fail the decode, re-encoding
-    /// without it would strip those bytes from disk on the next save — silently discarding text
-    /// users wrote, with no UI left to show them what was lost. Keeping the field round-trips it
-    /// untouched, so a future build could surface or migrate it.
+    /// ⚠️ THE PROPERTY AND ITS CODING KEY STAY — but the ORIGINAL reason has expired. It was kept
+    /// because every workflow saved before this date carried a `taskDescription`, and re-encoding
+    /// without the key would strip that text from disk with no UI left to show what was lost.
+    /// Devgentic is pre-release and those workflows were deleted by the owner on 2026-08-29, so
+    /// there is no such text any more. It stays only because a `decodeIfPresent` field costs
+    /// nothing and removing a key from a persisted blob is a change with no upside.
     ///
     /// ⚠️ Do NOT reintroduce a reader. If per-node direction is ever wanted again it should be a
     /// new, deliberately-named field, not this one silently coming back to life with old content.
@@ -728,6 +830,24 @@ struct WorkflowNodeConfig: Codable, Hashable, Sendable {
     /// per-element resilience (WF24), so dropping a Codable key is not free. A stored value is
     /// logged once per run and ignored — never rewritten, so a downgrade still reads the file.
     var joinMode: JoinMode = .all
+
+    /// A per-node config being MATERIALISED for the first time, carrying forward what `nil` already
+    /// meant for this workflow (register INS-8).
+    ///
+    /// ⚠️ `maxNodeRetries` is a non-optional `Int`, so `WorkflowExecutor`'s
+    /// `node.nodeConfig?.maxNodeRetries ?? workflowConfig.resolvedMaxRetries` fallback is reachable
+    /// ONLY while `nodeConfig` is nil. Materialising a BARE config therefore silently pins the node
+    /// to 0 retries — and it fires from controls the user does not associate with retries at all
+    /// (the timeout, the retry delay, unattended auto-approve), so on a legacy workflow the retry
+    /// stepper visibly dropped to 0 as a side effect of pressing "Set" on the timeout.
+    ///
+    /// Pure and `nonisolated` so the seed itself is truth-tableable — the caller is a `private func`
+    /// on a SwiftUI view, which no test can reach.
+    nonisolated static func materialised(inheritedRetryDefault: Int) -> WorkflowNodeConfig {
+        var fresh = WorkflowNodeConfig()
+        fresh.maxNodeRetries = inheritedRetryDefault
+        return fresh
+    }
 }
 
 // MARK: - WorkflowNodeConfig Codable (backward-compatible)
@@ -1037,6 +1157,29 @@ struct StickyNote: Identifiable, Codable, Hashable {
     var size: CGSize
     var text: String
     var color: StickyNoteColor
+
+    /// The one size a sticky note may shrink to, in canvas points (register CVC-8).
+    ///
+    /// ⚠️ SINGLE SOURCE. The resize handle's live preview and `WorkflowCanvasState.resizeStickyNote`'s
+    /// clamp MUST both read this. They used to carry independent literals — 100×60 in the view,
+    /// 120×80 in the model — so every release in that band previewed a size the model refused and
+    /// the note visibly snapped back out from under the cursor.
+    ///
+    /// 120 is not arbitrary: the note header's colour-swatch row is ~114pt intrinsically wide, so a
+    /// 100pt card clips its own chrome. The committed size is unchanged by unifying on the higher
+    /// floor — `max(120, max(100, x)) == max(120, x)` — so only the preview stops lying.
+    static let minimumSize = CGSize(width: 120, height: 80)
+
+    /// The size a resize drag of `translation` from `base` resolves to — the ONLY resize arithmetic.
+    ///
+    /// Pure and nonisolated so the floor can be truth-tabled (WF-UI5): the two `DragGesture`
+    /// closures that used to hold this expression are unreachable from a test.
+    static func resizedSize(from base: CGSize, translation: CGSize) -> CGSize {
+        CGSize(
+            width: max(minimumSize.width, base.width + translation.width),
+            height: max(minimumSize.height, base.height + translation.height)
+        )
+    }
 
     init(id: UUID = UUID(), position: CGPoint, size: CGSize = CGSize(width: 180, height: 120), text: String = "", color: StickyNoteColor = .yellow) {
         self.id = id

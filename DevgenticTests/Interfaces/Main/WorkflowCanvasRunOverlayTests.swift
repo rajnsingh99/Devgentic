@@ -226,4 +226,153 @@ final class WorkflowCanvasRunOverlayTests: XCTestCase {
         XCTAssertEqual(overlay([result(.running, nodeID: a, name: "A")], isRunning: true)?.isLive, true)
         XCTAssertEqual(overlay([result(.running, nodeID: a, name: "A")], isRunning: false)?.isLive, false)
     }
+
+    // MARK: - CVV-4 — the running pulse
+    //
+    // The pulse was armed from `.onAppear` behind a `guard shouldPulse`. That could never fire on
+    // the transition it exists for, because the badge is inserted when the CANVAS is — the display
+    // layer pre-populates a `.pending` placeholder for every layout node — so `onAppear` always ran
+    // while the answer was still false, and the later `.pending → .running` update never re-ran it.
+    // The rule is now pure, and the premise it depends on is pinned below.
+    //
+    // ⚠️ WHAT THESE TESTS DO **NOT** PIN, stated so nobody mistakes this section for coverage of
+    // the fix. `badgeShouldPulse` is a verbatim move of the old expression — it was never the
+    // defect. The defect and the fix are both the TRIGGER (`.onAppear` → `.onChange(of:initial:)`)
+    // and the unconditional `runPulse = false` reset, neither of which is reachable from XCTest:
+    // arming a SwiftUI animation and cancelling an in-flight `repeatForever` have no headless seam
+    // here. Reverting WorkflowNodeView's `.onChange` back to `.onAppear` leaves every test below
+    // GREEN and fully restores the filed defect.
+    //
+    // What these tests DO pin is the premise that makes the trigger change necessary — that a node
+    // is in the overlay as `.pending` before it runs — plus the rule's truth table. The trigger
+    // itself needs an ON-DEVICE check, and it is an open verification item on the register row:
+    //   1. Start a multi-node run and switch to the Canvas. The badge on the node that is
+    //      EXECUTING must pulse, and it must move to the next node as the run advances.
+    //   2. Let a node fail and retry. Its badge must re-animate, not sit statically enlarged.
+    //   3. Open a FINISHED run's canvas. Nothing may pulse.
+
+    func testBadgeShouldPulseIsTrueOnlyForALiveRunningNode() {
+        typealias Status = WorkflowRunDisplayData.NodeDisplayData.NodeStatus
+        let every: [Status?] = [nil, .pending, .running, .completed, .failed, .skipped, .cancelled, .unknown]
+
+        for status in every {
+            for isLive in [true, false] {
+                let expected = (status == .running && isLive)
+                XCTAssertEqual(
+                    WorkflowCanvasRunOverlay.badgeShouldPulse(status: status, isLive: isLive),
+                    expected,
+                    "status \(String(describing: status)), isLive \(isLive)"
+                )
+            }
+        }
+    }
+
+    /// The named regression guard: a HISTORICAL run's `.running` node never settled, so animating
+    /// it would claim work is still happening in a run that has ended.
+    func testAHistoricalRunningNodeDoesNotPulse() {
+        XCTAssertFalse(
+            WorkflowCanvasRunOverlay.badgeShouldPulse(status: .running, isLive: false)
+        )
+    }
+
+    /// ⚠️ THE PREMISE, pinned at the producer. This is what makes `.onAppear` structurally
+    /// insufficient and `.onChange(of:initial:)` necessary: a node the run has not reached yet is
+    /// ALREADY in the overlay as `.pending`, so its badge — and its `onAppear` — happen long before
+    /// it starts. If anyone later changes `buildNodesFromLayout` to emit started-nodes-only, this
+    /// test is what says why that matters.
+    func testANodeThatHasNotStartedIsAlreadyInTheOverlayAsPending() {
+        let a = UUID(), b = UUID()
+        let layout = WorkflowLayout(
+            nodes: [
+                WorkflowNode(id: a, kind: .code(CodeNodeConfig()), position: .zero, displayName: "A"),
+                WorkflowNode(id: b, kind: .code(CodeNodeConfig()), position: CGPoint(x: 400, y: 0), displayName: "B")
+            ],
+            edges: [WorkflowEdge(sourceNodeID: a, targetNodeID: b)],
+            annotations: []
+        )
+        let state = WorkflowExecutionState()
+        state.isRunning = true
+        state.startedAt = Date()
+        state.nodeResults = [result(.running, nodeID: a, name: "A")]
+
+        let overlay = WorkflowCanvasRunOverlay(displayData: .from(live: state, layout: layout))
+
+        XCTAssertEqual(overlay?.status(for: b), .pending,
+                       "B has not started, yet its badge already exists — so arming the pulse from "
+                       + "the badge's appearance can never catch B becoming .running")
+        XCTAssertEqual(overlay?.status(for: a), .running)
+        XCTAssertFalse(WorkflowCanvasRunOverlay.badgeShouldPulse(status: .pending, isLive: true),
+                       "…and at that moment the answer for B is false, which is what the old "
+                       + "`guard` in `.onAppear` silently dropped")
+    }
+
+    // MARK: - CVV-5 — the arrowhead must fade with the curve it terminates
+
+    /// The property that IS the bug: a not-taken branch must be fainter than a fired one. This was
+    /// false in all four (selected × error) cells, because the arrowhead never saw the run scale.
+    func testANotTakenArrowIsAlwaysFainterThanAFiredOne() {
+        for isSelected in [true, false] {
+            for isErrorEdge in [true, false] {
+                let notTaken = WorkflowEdgeView.arrowOpacity(
+                    isSelected: isSelected, isErrorEdge: isErrorEdge, runState: .notTaken)
+                let fired = WorkflowEdgeView.arrowOpacity(
+                    isSelected: isSelected, isErrorEdge: isErrorEdge, runState: .fired)
+                XCTAssertLessThan(notTaken, fired,
+                                  "selected \(isSelected), error \(isErrorEdge)")
+            }
+        }
+    }
+
+    /// The anti-drift assertion — the one that would have caught the original defect: the arrowhead
+    /// must fade by EXACTLY the run scale the curve is multiplied by.
+    ///
+    /// ⚠️ What this does NOT pin: the curve's own base ladder (`baseEdgeOpacity`, 0.98/0.85/0.70) is
+    /// a private view property and is deliberately DIFFERENT from the arrowhead's (1.0/0.90/0.70) —
+    /// the arrow is meant to sit slightly above its line. So this pins the shared RUN SCALE, not
+    /// that the two ladders agree; they are not supposed to.
+    func testTheArrowFadesByExactlyTheCurvesRunScale() {
+        for isSelected in [true, false] {
+            for isErrorEdge in [true, false] {
+                let base = WorkflowEdgeView.arrowOpacity(
+                    isSelected: isSelected, isErrorEdge: isErrorEdge, runState: .undetermined)
+                let faded = WorkflowEdgeView.arrowOpacity(
+                    isSelected: isSelected, isErrorEdge: isErrorEdge, runState: .notTaken)
+                XCTAssertEqual(faded / base,
+                               WorkflowEdgeView.runOpacityScale(for: .notTaken),
+                               accuracy: 1e-9,
+                               "selected \(isSelected), error \(isErrorEdge)")
+            }
+        }
+    }
+
+    /// Zero regression on an un-run canvas and on a fired branch.
+    func testFiredAndUndeterminedArrowsAreUnchanged() {
+        for isSelected in [true, false] {
+            for isErrorEdge in [true, false] {
+                XCTAssertEqual(
+                    WorkflowEdgeView.arrowOpacity(
+                        isSelected: isSelected, isErrorEdge: isErrorEdge, runState: .fired),
+                    WorkflowEdgeView.arrowOpacity(
+                        isSelected: isSelected, isErrorEdge: isErrorEdge, runState: .undetermined),
+                    accuracy: 1e-9
+                )
+            }
+        }
+    }
+
+    /// Precedence pinned by NAMING the answers rather than re-deriving them from the subject —
+    /// the `testKeepsDownstreamAliveIsByUserAndNothingElse` lesson.
+    func testArrowPrecedenceIsSelectedThenErrorThenOrdinary() {
+        XCTAssertEqual(WorkflowEdgeView.arrowOpacity(isSelected: true, isErrorEdge: false, runState: .undetermined), 1.0)
+        XCTAssertEqual(WorkflowEdgeView.arrowOpacity(isSelected: true, isErrorEdge: true, runState: .undetermined), 1.0,
+                       "selected must outrank the error tint, as it does for the curve")
+        XCTAssertEqual(WorkflowEdgeView.arrowOpacity(isSelected: false, isErrorEdge: true, runState: .undetermined), 0.90)
+        XCTAssertEqual(WorkflowEdgeView.arrowOpacity(isSelected: false, isErrorEdge: false, runState: .undetermined), 0.70)
+    }
+
+    func testRunOpacityScaleNamesItsThreeAnswers() {
+        XCTAssertEqual(WorkflowEdgeView.runOpacityScale(for: .fired), 1.0)
+        XCTAssertEqual(WorkflowEdgeView.runOpacityScale(for: .undetermined), 1.0)
+        XCTAssertEqual(WorkflowEdgeView.runOpacityScale(for: .notTaken), 0.28)
+    }
 }

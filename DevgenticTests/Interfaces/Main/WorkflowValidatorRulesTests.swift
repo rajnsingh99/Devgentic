@@ -61,8 +61,10 @@ final class WorkflowValidatorRulesTests: XCTestCase {
     private func validate(_ layout: WorkflowLayout,
                           subs: [UUID: WorkflowLayout] = [:],
                           profiles: [UUID: BackendProfileModel] = [:],
+                          sources: [ToolSource] = [],
                           root: UUID? = nil) -> [WorkflowValidationIssue] {
         WorkflowValidator.validate(layout: layout, profileMap: profiles,
+                                   availableToolSources: sources,
                                    subWorkflowLayouts: subs, rootProfileID: root)
     }
 
@@ -119,11 +121,56 @@ final class WorkflowValidatorRulesTests: XCTestCase {
                       "sequential writes are legal — got: \(issues.map(\.message))")
     }
 
+    /// ⚠️ Matched on the ACTIONABLE half of the message, not on "may have been deleted". That
+    /// wording was retired 2026-08-29: with node-owned configuration the remedy changed from a dead
+    /// end into something the user can perform, and the message now says so.
     func testProfileNodeWithUnknownProfileIsAnError() {
         let orphan = WorkflowNode(profileID: UUID(), position: .zero,
                                   displayName: "Ghost", profileType: .agent)
         let issues = validate(layout([orphan, codeNode()]))
-        XCTAssertEqual(errors(issues, containing: "may have been deleted").count, 1)
+        XCTAssertEqual(errors(issues, containing: "add the node again").count, 1)
+    }
+
+    /// ⚠️ The message is SHARED with `ProfileNodeInspectorView`'s card, so the two surfaces cannot
+    /// describe what looks like two different problems. Asserted against the constant rather than a
+    /// literal — a test that restates the string would stay green through a reword that broke the
+    /// sharing, which is the exact shape of weak test this repo's 2026-08-03 remediation pass was
+    /// about.
+    /// ⚠️ A dangling SUB-WORKFLOW node must NOT be told to delete and re-add itself. Its
+    /// `profileID` is the only surviving record of which child workflow that step ran, and
+    /// re-adding is impossible once the child is gone. The validator gave every kind the same
+    /// advice until 2026-08-30, contradicting both its own doc and the node inspector.
+    func testADanglingSubWorkflowNodeGetsItsOwnRemedy() {
+        let sub = WorkflowNode(profileID: UUID(), position: .zero,
+                               displayName: "Nested", profileType: .workflow)
+        let issues = validate(layout([sub, codeNode()]))
+
+        let issue = issues.first { $0.nodeID == sub.id && $0.severity == .error }
+        XCTAssertEqual(issue?.message, WorkflowValidator.missingWorkflowMessage,
+                       "got: \(String(describing: issue?.message))")
+        XCTAssertFalse(issue?.message.contains("add the node again") ?? true,
+                       "deleting and re-adding destroys the only record of which child ran")
+    }
+
+    /// The control: a bot/agent node still gets the re-add remedy, which genuinely repairs it.
+    func testADanglingAgentNodeStillGetsTheReAddRemedy() {
+        let agent = WorkflowNode(profileID: UUID(), position: .zero,
+                                 displayName: "Ghost", profileType: .agent)
+        let issues = validate(layout([agent, codeNode()]))
+
+        XCTAssertEqual(issues.first { $0.nodeID == agent.id && $0.severity == .error }?.message,
+                       WorkflowValidator.missingConfigurationMessage)
+    }
+
+    func testTheMissingConfigurationIssueUsesTheSharedMessage() {
+        let orphan = WorkflowNode(profileID: UUID(), position: .zero,
+                                  displayName: "Ghost", profileType: .agent)
+        let issues = validate(layout([orphan, codeNode()]))
+
+        XCTAssertTrue(issues.contains { $0.message == WorkflowValidator.missingConfigurationMessage },
+                      "got: \(issues.map(\.message))")
+        XCTAssertTrue(WorkflowValidator.missingConfigurationMessage.contains("add the node again"),
+                      "the shared sentence must keep naming a remedy the user can perform")
     }
 
     // MARK: - Router (condition) error rules
@@ -207,6 +254,55 @@ final class WorkflowValidatorRulesTests: XCTestCase {
     func testActionWithoutToolIsAnError() {
         let action = WorkflowNode(kind: .action(ActionNodeConfig()), position: .zero, displayName: "Call")
         XCTAssertEqual(errors(validate(layout([action, codeNode()])), containing: "no tool selected").count, 1)
+    }
+
+    // MARK: - Disabled MCP server (INS-1)
+
+    private func mcpFixture(serverEnabled: Bool) -> (node: WorkflowNode, sources: [ToolSource]) {
+        let sourceID = UUID()
+        let tool = Tool(
+            name: "post_message", description: "test tool", isEnabled: true,
+            requiresConfirmation: true, sourceId: sourceID,
+            parameters: ToolParameters(type: "object", properties: [:], required: [])
+        )
+        let source = ToolSource(
+            id: sourceID, type: .mcp, serverName: "Slack",
+            tools: [ToolDefinition(name: "post_message", description: "test tool",
+                                   category: "mcp",
+                                   parameters: ToolParameters(type: "object", properties: [:], required: []))],
+            serverDefinition: nil, isEnabled: serverEnabled
+        )
+        let node = WorkflowNode(kind: .action(ActionNodeConfig(tool: tool)),
+                                position: .zero, displayName: "Post")
+        return (node, [source])
+    }
+
+    /// ⚠️ THE INS-1 PIN — the gap INSIDE the availability gap. A disabled server stays in the
+    /// catalog WITH its tools (the Tool Library needs it visible to re-enable), so the membership
+    /// test passed and no warning ever fired — while the executor's resolver refuses a disabled
+    /// source by design and the node fails at run time, routed to its error port.
+    func testActionToolOnDisabledServerWarns() {
+        let (node, sources) = mcpFixture(serverEnabled: false)
+        let issues = validate(layout([node, codeNode()]), sources: sources)
+        XCTAssertEqual(warnings(issues, containing: "disabled MCP server").count, 1,
+                       "a disabled server must surface at design time, not as a run-time node failure")
+    }
+
+    /// Control: the same tool on an ENABLED, present server raises nothing.
+    func testActionToolOnEnabledServerDoesNotWarn() {
+        let (node, sources) = mcpFixture(serverEnabled: true)
+        let issues = validate(layout([node, codeNode()]), sources: sources)
+        XCTAssertTrue(warnings(issues, containing: "disabled MCP server").isEmpty)
+        XCTAssertTrue(warnings(issues, containing: "isn't currently available").isEmpty)
+    }
+
+    /// The pre-existing offline/absent arm must be unchanged by the disabled clause.
+    func testActionToolOnAbsentServerStillWarnsUnavailable() {
+        let (node, _) = mcpFixture(serverEnabled: true)
+        let unrelated = ToolSource(id: UUID(), type: .mcp, serverName: "Other",
+                                   tools: [], serverDefinition: nil, isEnabled: true)
+        let issues = validate(layout([node, codeNode()]), sources: [unrelated])
+        XCTAssertEqual(warnings(issues, containing: "isn't currently available").count, 1)
     }
 
     // MARK: - Router no-match behaviour (2026-08-16)

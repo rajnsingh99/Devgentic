@@ -37,12 +37,20 @@ enum WorkflowActionArgs {
             // Skip unbound arguments — an empty/whitespace template means "not set".
             guard !template.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
 
-            let resolved = WorkflowTemplate.render(
+            let (resolved, unresolved) = WorkflowTemplate.renderReportingUnresolved(
                 template,
                 input: input,
                 inputJSON: inputJSON,
                 variables: variables
             )
+            // ⚠️ Register EIO-6 — the silent half. An unresolvable placeholder stays verbatim in
+            // the rendered text (by design: visible beats vanished), but it is about to become a
+            // TOOL ARGUMENT, where "visible" means the tool receives the literal `{{ var.x }}` and
+            // fails — or worse, acts on it. Logged at warning with the EXPRESSION, never the
+            // resolved values, preserving the argument-hygiene rule this file already follows.
+            if !unresolved.isEmpty {
+                logger.warning("[WF_EXEC] Action argument '\(argName)' rendered with \(unresolved.count) UNRESOLVED placeholder(s): [\(unresolved.map { "{{\($0)}}" }.joined(separator: ", "))]. CONSEQUENCE: the tool receives the literal placeholder text inside this argument — it will fail validation on it or act on it as data. Check the binding's spelling against the upstream's JSON keys and the workflow's variable names.")
+            }
             let declaredType = schema.properties[argName]?.type.lowercased()
             args[argName] = coerce(resolved, to: declaredType)
         }

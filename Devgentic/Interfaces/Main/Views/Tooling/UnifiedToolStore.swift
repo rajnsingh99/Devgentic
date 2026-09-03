@@ -23,6 +23,9 @@ final class UnifiedToolStore {
     /// The unified list of all available tool sources.
     var sources: [ToolSource] = []
 
+    /// Incremented on every rebuild of `sources` (register INS-12). See `refreshSources()`.
+    private(set) var catalogGeneration: Int = 0
+
     private let mcpStore = MCPToolStore.shared
     private let localManager = LocalToolManager.shared
 
@@ -114,6 +117,15 @@ final class UnifiedToolStore {
         // 4. Combine the lists, ensuring "Built-in Tools" always appears first,
         // and publish the result to the UI.
         self.sources = [localSource] + mcpSources
+        // [INS-12] Bumped on every rebuild, so a surface that CACHES a decision derived from the
+        // catalogue can tell the catalogue moved. The workflow canvas's validator reads
+        // `sources` for its tool-availability arm but runs only on graph edits, undo and load —
+        // so disabling an MCP server with a canvas open left "Workflow Ready" standing over a run
+        // that would now fail. A monotonic counter rather than notifications, for the same reason
+        // `WorkflowLayoutStore.writeGeneration` is one: a redundant bump is harmless, a missed one
+        // is not. This is the single funnel — add/update/delete/setEnabled and the MCP observation
+        // tracker all land here.
+        catalogGeneration &+= 1
     }
     
     // MARK: - CRUD Pass-through Methods

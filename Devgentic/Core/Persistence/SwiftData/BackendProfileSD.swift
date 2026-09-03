@@ -56,6 +56,33 @@ final class BackendProfile {
     /// Denormalized model name for queryability without decoding the blob.
     var modelNameRaw: String = ""
 
+    /// Non-nil when this row is a workflow NODE's private configuration rather than a shared profile.
+    ///
+    /// ⚠️ These two fields are what make a workflow node's settings workflow-scoped. A node still
+    /// references a profile by UUID exactly as before; what changed is that the row it points at can
+    /// be owned by that node — created fresh or duplicated on import — instead of being a profile the
+    /// user also runs in chat. Editing such a row affects nothing outside its workflow.
+    ///
+    /// ⚠️ THE TWO IDS DO DIFFERENT JOBS, and neither is "scoping the reconcile" — an earlier
+    /// version of this comment said `ownerNodeID` did that, which is the exact rule
+    /// `BackendProfileService.reconcileOwnedProfiles` documents as a LEAK and refuses to use.
+    ///
+    /// `ownerWorkflowID` is what both the save-time reconcile and the workflow-delete cascade key
+    /// on, via `BackendProfileStore.fetchOwnedProfiles(forWorkflow:)` — which is why it exists:
+    /// finding a workflow's private rows without loading and decoding every layout blob.
+    ///
+    /// `ownerNodeID` is the ownership MARKER (`isNodeOwned` is a nil-check on it) and the key for
+    /// the one-node-per-row aliasing tripwire in `WorkflowCanvasState.addNode`. Survival is decided
+    /// by whether a node REFERENCES the row, never by whether this id names a live node.
+    ///
+    /// ⚠️ An owned row must never appear anywhere a shared profile is offered — sidebar, composer
+    /// picker, QuickAccess, scheduler, ChatOps routing. Filter through
+    /// `BackendProfileService.sharedProfiles`, never by re-deriving the test at each call site.
+    /// `profiles` itself stays unfiltered: the executor and the node inspector resolve owned rows
+    /// by id and must keep finding them.
+    var ownerWorkflowID: UUID?
+    var ownerNodeID: UUID?
+
     /// JSON-encoded `ProfileDetails` blob. This is the single source of truth for
     /// the type-specific configuration (Bot, Agent, Workflow, ImageGen).
     var configData: Data
@@ -305,12 +332,16 @@ final class BackendProfile {
         displayName: String,
         lastSelected: Date? = nil,
         details: ProfileDetails,
-        fileContextStrategy: FileContextStrategy? = nil
+        fileContextStrategy: FileContextStrategy? = nil,
+        ownerWorkflowID: UUID? = nil,
+        ownerNodeID: UUID? = nil
     ) {
         self.id = id
         self.displayName = displayName
         self.lastSelected = lastSelected
         self.fileContextStrategyRaw = fileContextStrategy?.rawValue
+        self.ownerWorkflowID = ownerWorkflowID
+        self.ownerNodeID = ownerNodeID
 
         // Derive discriminator from the details case
         switch details {
@@ -459,7 +490,9 @@ extension BackendProfile {
             displayName: displayName,
             lastSelected: lastSelected,
             details: details,
-            fileContextStrategy: fileContextStrategy
+            fileContextStrategy: fileContextStrategy,
+            ownerWorkflowID: ownerWorkflowID,
+            ownerNodeID: ownerNodeID
         )
     }
 }
@@ -493,6 +526,17 @@ struct BackendProfileSnapshot: Identifiable, Hashable, Sendable {
     /// User-selected file context strategy. When nil, resolves to the smart default for the profile type.
     var fileContextStrategy: FileContextStrategy?
 
+    /// Non-nil when this profile is a workflow node's private configuration — see the same-named
+    /// properties on `BackendProfile` for the full contract.
+    ///
+    /// ⚠️ Carried by `duplicated(as:)` for free, like every other property. An import must therefore
+    /// RE-STAMP them for the new owner (or clear them, for a copy that is becoming a shared profile).
+    var ownerWorkflowID: UUID?
+    var ownerNodeID: UUID?
+
+    /// Whether this row belongs to a workflow node rather than the shared profile library.
+    var isNodeOwned: Bool { ownerNodeID != nil }
+
     /// Resolved file context strategy — explicit setting when the profile type can
     /// honor it, otherwise the smart default. A persisted override the type can't
     /// honor (e.g. a legacy bot set to `.stateless`) heals to the default here.
@@ -515,13 +559,17 @@ struct BackendProfileSnapshot: Identifiable, Hashable, Sendable {
         displayName: String,
         lastSelected: Date? = nil,
         details: ProfileDetails,
-        fileContextStrategy: FileContextStrategy? = nil
+        fileContextStrategy: FileContextStrategy? = nil,
+        ownerWorkflowID: UUID? = nil,
+        ownerNodeID: UUID? = nil
     ) {
         self.id = id
         self.displayName = displayName
         self.lastSelected = lastSelected
         self.details = details
         self.fileContextStrategy = fileContextStrategy
+        self.ownerWorkflowID = ownerWorkflowID
+        self.ownerNodeID = ownerNodeID
     }
 
     /// A copy of this profile under a new identity — everything is carried across except the

@@ -671,9 +671,32 @@ final class ActiveStreamManager {
                         workflowExecutionState?.handleNodeFailed(nodeID: nodeID, profileName: profileName, error: error, suggestion: suggestion)
 
                     case .workflowNodeSkipped(let nodeID, let profileName, let reason, let ranBeforeSkip):
+                        // [XUI-12] `.info` and `reason.rawValue`: this matches the five sibling arms,
+                        // skips are high-volume (a wide DAG can skip a whole subtree, so this must not
+                        // be a `.notice`), and the raw value is the stable machine token that already
+                        // appears in the trace context as `skip_reason` — `displayText` is localized
+                        // prose that would break log grepping across locales.
+                        //
+                        // ⚠️ BOTH consequence clauses are CONDITIONAL, and the first draft of this
+                        // line stated both unconditionally — inverting the engine's own central skip
+                        // invariant in the line a field debugger reads. `.byUser` is the ONE skip
+                        // whose subtree stays live (`NodeSkipReason.keepsDownstreamAlive`); for the
+                        // other six `edgeIsLive` kills every edge below. And a pre-dispatch skip —
+                        // which is the high-volume case, both engine emitters pass
+                        // `ranBeforeSkip: false` — is labelled "Not run" on screen, not "Skipped".
+                        // The line already printed both discriminators right beside the false claims.
+                        let skipRowWord = ranBeforeSkip ? "Skipped" : "Not run"
+                        let skipDownstream = reason.keepsDownstreamAlive
+                            ? "downstream receives this node's INPUT unchanged"
+                            : "every edge below it is dead, so its whole subtree is skipped too"
+                        logger.info("[WF_EVENT] NodeSkipped: '\(profileName)' [\(nodeID)] reason=\(reason.rawValue) ranBeforeSkip=\(ranBeforeSkip). CONSEQUENCE: the node's row settles as '\(skipRowWord)' and contributes no output of its own; \(skipDownstream).")
                         workflowExecutionState?.handleNodeSkipped(nodeID: nodeID, profileName: profileName, reason: reason, ranBeforeSkip: ranBeforeSkip)
 
                     case .workflowNodeCancelled(let nodeID, let profileName):
+                        // [XUI-12] `.notice`, not `.info`: a cancel is rare and user-initiated, and it
+                        // is the one path whose emitter side is also quiet — keeping both at `.notice`
+                        // makes the Stop story readable at one level across the two files.
+                        logger.notice("[WF_EVENT] NodeCancelled: '\(profileName)' [\(nodeID)]. CONSEQUENCE: the node's row settles as 'Cancelled' (not failed) with any partial output discarded; no output port is activated, so nothing downstream of it runs.")
                         workflowExecutionState?.handleNodeCancelled(nodeID: nodeID, profileName: profileName)
 
                     case .workflowProgress(let completed, let total):

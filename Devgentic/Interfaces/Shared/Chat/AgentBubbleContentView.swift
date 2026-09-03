@@ -51,7 +51,7 @@ struct AgentBubbleContentView: View, Equatable {
 
     /// See `ContentBlockView.codeFontSize` — code tracks `chatFontSize`, a step below prose.
     private var codeFontSize: CGFloat {
-        max(10, themeManager.chatFontSize - 2)
+        ChatUIConstants.codeFontSize(forChatFontSize: themeManager.chatFontSize)
     }
 
     /// True when the bubble's current content is an `.error` card. The error

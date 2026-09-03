@@ -18,6 +18,10 @@ struct ActionNodeInspectorView: View {
     @Binding var node: WorkflowNode
     /// Workflow variable names (Code-node outputs) surfaced in the binding menu.
     var availableVariables: [String] = []
+    /// The workflow-level retry count this node INHERITS when it carries no count of its own
+    /// (register INS-8). Supplied by the canvas from the workflow profile's `resolvedMaxRetries`;
+    /// 0 for a workflow that never set one, which is the overwhelmingly common case.
+    var inheritedRetryDefault: Int = 0
     @Environment(\.closeNodeInspector) private var closeInspector
     @Environment(\.appTheme) private var theme
 
@@ -115,6 +119,7 @@ struct ActionNodeInspectorView: View {
                 Group {
                     bindingHint("{{ input }}", "the upstream node's text output")
                     bindingHint("{{ input.json.field }}", "a field from upstream JSON output")
+                    bindingHint("{{ input.parsed.field }}", "a field from this node's own input, parsed as JSON")
                     bindingHint("{{ var.name }}", "a workflow variable")
                 }
                 Text("Anything else is treated as a literal value.")
@@ -260,7 +265,11 @@ struct ActionNodeInspectorView: View {
             }
 
             if isBoolean {
-                booleanControl(argName: argName, value: value)
+                // [INS-9] `isRequired` is threaded through. It used to be dropped here, so a
+                // REQUIRED boolean's Custom field carried the "Optional — leave blank to omit"
+                // placeholder and lost its amber required-and-empty stroke, flatly contradicting the
+                // "required" badge rendered eight lines above it.
+                booleanControl(argName: argName, value: value, isRequired: isRequired)
             } else {
                 bindingField(argName: argName, isRequired: isRequired, unbalanced: unbalanced)
             }
@@ -297,7 +306,7 @@ struct ActionNodeInspectorView: View {
     /// True/False/Custom control for boolean arguments. True/False write a literal;
     /// Custom reveals a text field for a template (e.g. `{{ var.flag }}`).
     @ViewBuilder
-    private func booleanControl(argName: String, value: String) -> some View {
+    private func booleanControl(argName: String, value: String, isRequired: Bool) -> some View {
         let mode = boolMode(value)
         Picker("", selection: Binding(
             get: { mode },
@@ -320,7 +329,7 @@ struct ActionNodeInspectorView: View {
         .controlSize(.small)
 
         if mode == .custom {
-            bindingField(argName: argName, isRequired: false, unbalanced: !bracesBalanced(value))
+            bindingField(argName: argName, isRequired: isRequired, unbalanced: !bracesBalanced(value))
         }
     }
 
@@ -328,16 +337,31 @@ struct ActionNodeInspectorView: View {
     private func tokenMenu(argName: String) -> some View {
         Menu {
             Button("{{ input }}") { appendToken(argName, "{{ input }}") }
-            Button("{{ input.json. }}") { appendToken(argName, "{{ input.json. }}") }
+            // [EIO-8] Inserts an UNFINISHED placeholder that cannot resolve by accident. The old
+            // `{{ input.json. }}` had an EMPTY path, which the renderer resolved to the whole
+            // upstream document — so a user who inserted it and did not complete it silently passed
+            // the ENTIRE JSON as one argument.
+            //
+            // ⚠️ `<field>`, NOT `path`. `path` is an ordinary JSON key — it is this codebase's own
+            // metasyntactic example, and file tools genuinely return one — so `{{ input.json.path }}`
+            // would resolve silently to an unrelated field whenever the upstream happens to have it,
+            // trading one silent wrong value for another. `<field>` cannot be a key any tool here
+            // produces, so `resolve` returns nil and EIO-6's unresolved-placeholder warning fires,
+            // which is the loud failure this row asks for.
+            Button("{{ input.json.… }}") { appendToken(argName, "{{ input.json.<field> }}") }
+            // [EIO-11] The explicit "parse my input as JSON" form. Same `<field>` treatment and the
+            // same reason: an incomplete token must fail LOUDLY through EIO-6's unresolved warning,
+            // never resolve to the whole document.
+            Button("{{ input.parsed.… }}") { appendToken(argName, "{{ input.parsed.<field> }}") }
             if availableVariables.isEmpty {
-                Button("{{ var. }}") { appendToken(argName, "{{ var. }}") }
+                Button("{{ var.… }}") { appendToken(argName, "{{ var.<name> }}") }
             } else {
                 Menu("Variable") {
                     ForEach(availableVariables, id: \.self) { v in
                         Button("{{ var.\(v) }}") { appendToken(argName, "{{ var.\(v) }}") }
                     }
                     Divider()
-                    Button("{{ var. }}") { appendToken(argName, "{{ var. }}") }
+                    Button("{{ var.… }}") { appendToken(argName, "{{ var.<name> }}") }
                 }
             }
         } label: {
@@ -493,14 +517,31 @@ struct ActionNodeInspectorView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         ForEach(toolSources) { source in
+                            // INS-1: a DISABLED server's tools are shown (the Tool Library idiom —
+                            // 0.55 opacity + pause glyph — so the user can see what exists and where
+                            // to re-enable it) but NOT selectable: the executor's resolver refuses a
+                            // disabled source by design, so a selection here could only ever fail at
+                            // run time and route the node to its error port.
                             VStack(alignment: .leading, spacing: 6) {
-                                Text(source.serverName.uppercased())
-                                    .font(.system(size: 10, weight: .bold))
-                                    .foregroundColor(theme.tertiaryText)
+                                HStack(spacing: 5) {
+                                    Text(source.serverName.uppercased())
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundColor(theme.tertiaryText)
+                                    if !source.isEnabled {
+                                        Image(systemName: "pause.circle.fill")
+                                            .font(.system(size: 9))
+                                            .foregroundColor(theme.secondaryText.opacity(0.6))
+                                        Text("Disabled — enable in Tool Library")
+                                            .font(.system(size: 9))
+                                            .foregroundColor(theme.tertiaryText)
+                                    }
+                                }
                                 ForEach(source.tools) { def in
                                     toolPickerRow(source: source, def: def)
+                                        .disabled(!source.isEnabled)
                                 }
                             }
+                            .opacity(source.isEnabled ? 1 : 0.55)
                         }
                     }
                     .padding(16)
@@ -582,9 +623,52 @@ struct ActionNodeInspectorView: View {
         showToolPicker = false
     }
 
+    /// The per-node execution config a Save should persist, or the stored value unchanged when the
+    /// panel holds exactly the defaults `nil` already means (register INS-11).
+    ///
+    /// ⚠️ Returning `existing` — `nil` included — is the whole point: `WorkflowCanvasState.replaceNode`
+    /// refuses a write that changes nothing, so an unedited Save must produce a byte-identical node.
+    /// Materialising `WorkflowNodeConfig()` defeats that guard AND changes run behaviour, because
+    /// `maxNodeRetries` is non-optional and the executor's `?? workflowConfig.resolvedMaxRetries`
+    /// fallback is reachable only while `nodeConfig` is nil.
+    ///
+    /// `nonisolated static` and pure so the "is this a real change?" decision is truth-tableable —
+    /// a `private func` inside `saveAndDismiss` is unreachable from a test.
+    nonisolated static func executionConfigToPersist(
+        existing: WorkflowNodeConfig?,
+        maxRetries: Int,
+        retryDelay: TimeInterval,
+        hardTimeout: TimeInterval?,
+        unattendedAutoApprove: Bool,
+        inheritedRetryDefault: Int = 0
+    ) -> WorkflowNodeConfig? {
+        var updated = existing ?? WorkflowNodeConfig()
+        updated.maxNodeRetries = maxRetries
+        updated.retryDelay = retryDelay
+        updated.hardTimeout = hardTimeout
+        // nil (not false) when off — the default costs no bytes in the blob. [WF-SE6/SE11]
+        updated.unattendedAutoApprove = unattendedAutoApprove ? true : nil
+        // Nothing to write: the panel holds exactly what `nil` already means for THIS workflow.
+        //
+        // ⚠️ `inheritedRetryDefault`, not a bare `WorkflowNodeConfig()`. `loadFromNode` seeds the
+        // stepper with the inherited count, so on a legacy workflow (`resolvedMaxRetries > 0`) an
+        // UNEDITED panel holds that count — and comparing against the bare defaults would call that
+        // a change, write a config, dirty the canvas and burn an undo step for a Save that changed
+        // nothing. It would also convert an inherited value into a PINNED one silently, dropping the
+        // node out of the executor's "still honoured by N node(s)" notice.
+        if existing == nil,
+           updated == .materialised(inheritedRetryDefault: inheritedRetryDefault) { return nil }
+        return updated
+    }
+
     private func loadFromNode() {
         // Execution config lives on the shared per-node config.
-        maxRetries = node.nodeConfig?.maxNodeRetries ?? 0
+        // [INS-8] `?? inheritedRetryDefault`, not `?? 0`. `maxNodeRetries` is a non-optional Int, so
+        // the executor's `node.nodeConfig?.maxNodeRetries ?? workflowConfig.resolvedMaxRetries`
+        // falls back ONLY while `nodeConfig` is nil — i.e. the stepper showing 0 was claiming "no
+        // retries" for a node the engine would retry `resolvedMaxRetries` times. Seeding the
+        // inherited value also migrates it onto the node on the first Save instead of erasing it.
+        maxRetries = node.nodeConfig?.maxNodeRetries ?? inheritedRetryDefault
         unattendedAutoApprove = node.nodeConfig?.unattendedAutoApprove ?? false
         retryDelay = node.nodeConfig?.retryDelay ?? 0
         hardTimeout = node.nodeConfig?.hardTimeout
@@ -600,12 +684,21 @@ struct ActionNodeInspectorView: View {
         node.kind = .action(ActionNodeConfig(tool: selectedTool, argumentBindings: cleaned))
 
         // Persist execution config (preserving other nodeConfig fields).
-        if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }
-        node.nodeConfig?.maxNodeRetries = maxRetries
-        node.nodeConfig?.retryDelay = retryDelay
-        node.nodeConfig?.hardTimeout = hardTimeout
-        // nil (not false) when off — the default costs no bytes in the blob. [WF-SE6/SE11]
-        node.nodeConfig?.unattendedAutoApprove = unattendedAutoApprove ? true : nil
+        // [INS-11] ONE write through the binding, via a pure helper that returns the stored value
+        // UNCHANGED — nil included — when the panel holds exactly the defaults nil already means.
+        // The old form materialised `WorkflowNodeConfig()` before writing, which `replaceNode`'s
+        // equality guard cannot absorb (nil != .some(defaults)), so a Save with no edits dirtied the
+        // canvas and burned an undo slot. Not cosmetic here: materialising the default PINS a legacy
+        // workflow's inherited retry budget to 0 and drops the node out of the executor's
+        // "still honoured by N node(s)" notice.
+        node.nodeConfig = Self.executionConfigToPersist(
+            existing: node.nodeConfig,
+            maxRetries: maxRetries,
+            retryDelay: retryDelay,
+            hardTimeout: hardTimeout,
+            unattendedAutoApprove: unattendedAutoApprove,
+            inheritedRetryDefault: inheritedRetryDefault
+        )
 
         closeInspector()
     }

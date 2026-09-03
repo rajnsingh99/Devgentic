@@ -20,9 +20,18 @@
 
 import SwiftUI
 
+private let logger = DGLogger(category: "ProfileNodeInspector")
+
 struct ProfileNodeInspectorView: View {
     @Binding var node: WorkflowNode
     let profile: BackendProfileModel?
+    /// The workflow-level retry count this node INHERITS when it carries no count of its own
+    /// (register INS-8). Same value and same reason as the Action inspector's.
+    var inheritedRetryDefault: Int = 0
+    /// Ends the canvas's undo-coalescing run, so Cancel's restore becomes its own undo step rather
+    /// than folding into the edits it discards (register INS-2). A closure rather than a
+    /// `WorkflowCanvasState` reference, so this panel keeps its single dependency on the node binding.
+    var endCoalescingRun: () -> Void = {}
     @Environment(\.closeNodeInspector) private var closeInspector
     @Environment(BackendProfileService.self) private var profileService
     @Environment(ToastManager.self) private var toastManager
@@ -34,11 +43,30 @@ struct ProfileNodeInspectorView: View {
     @State private var editBuffer: ProfileEditBuffer?
     @State private var inlineProfileError: String?
 
+    /// [INS-2] The node as it stood when this panel opened, so Cancel can put it back.
+    ///
+    /// ⚠️ The orchestration controls deliberately write STRAIGHT THROUGH the binding — that is what
+    /// makes the live canvas rename work, what the 3s undo coalescing was engineered for, and what
+    /// stops the Run auto-flip teardown (which never reaches Done) from losing an edit. So the fix
+    /// is NOT to buffer them in `@State`; that would reintroduce the exact loss
+    /// `NodeInspectorPendingCommit` exists to prevent. The fix is to give Cancel the one thing it
+    /// lacked: something to restore. Captured in `init`, not `onAppear`, so it cannot miss a write
+    /// made before the first layout pass.
+    private let openSnapshot: NodeInspectorOpenSnapshot
+
     // MARK: - Init
 
-    init(node: Binding<WorkflowNode>, profile: BackendProfileModel?) {
+    init(
+        node: Binding<WorkflowNode>,
+        profile: BackendProfileModel?,
+        inheritedRetryDefault: Int = 0,
+        endCoalescingRun: @escaping () -> Void = {}
+    ) {
         self._node = node
         self.profile = profile
+        self.inheritedRetryDefault = inheritedRetryDefault
+        self.endCoalescingRun = endCoalescingRun
+        self.openSnapshot = NodeInspectorOpenSnapshot(node.wrappedValue)
         if let profile {
             self._editBuffer = State(initialValue: ProfileEditBuffer(profile: profile))
         } else {
@@ -70,8 +98,16 @@ struct ProfileNodeInspectorView: View {
     // from `WorkflowConfig` defaults if the per-node override is unset).
 
     private func ensureNodeConfig() {
-        if node.nodeConfig == nil {
-            node.nodeConfig = WorkflowNodeConfig()
+        guard node.nodeConfig == nil else { return }
+        // ⚠️ [INS-8] SEED the inherited retry count. `maxNodeRetries` is a non-optional Int, so the
+        // executor's `?? workflowConfig.resolvedMaxRetries` fallback is reachable only while
+        // `nodeConfig` is nil — materialising a BARE config therefore pins the node to 0 retries.
+        // That fired from the timeout, retry-delay and auto-approve setters, none of which the user
+        // thinks of as touching retries: on a legacy workflow the stepper visibly dropped from its
+        // inherited value to 0 as a side effect of pressing "Set" on the timeout.
+        node.nodeConfig = .materialised(inheritedRetryDefault: inheritedRetryDefault)
+        if inheritedRetryDefault > 0 {
+            logger.notice("[WF_CANVAS] Node '\(node.displayName)' [node \(node.id.uuidString.prefix(8))] had no per-node config; creating one and PINNING this workflow's retired default of \(inheritedRetryDefault) retries onto the node. CONSEQUENCE: the node keeps the retry count it was already running with, but it now carries its own copy — changing the workflow-level default will no longer move it.")
         }
     }
 
@@ -87,7 +123,12 @@ struct ProfileNodeInspectorView: View {
 
     private var maxRetriesBinding: Binding<Int> {
         Binding(
-            get: { node.nodeConfig?.maxNodeRetries ?? 0 },
+            // [INS-8] `?? inheritedRetryDefault`, not `?? 0` — `maxNodeRetries` is a non-optional
+            // Int, so the executor's `?? workflowConfig.resolvedMaxRetries` fallback is reachable
+            // only while `nodeConfig` is nil. Showing 0 there claimed "no retries" for a node the
+            // engine would retry, on the one control whose own explainer warns about duplicated
+            // tool side effects.
+            get: { node.nodeConfig?.maxNodeRetries ?? inheritedRetryDefault },
             set: { newValue in
                 ensureNodeConfig()
                 node.nodeConfig?.maxNodeRetries = max(0, min(newValue, 5))
@@ -181,7 +222,17 @@ struct ProfileNodeInspectorView: View {
             // user with a floating panel, a disabled Done and nothing to click. Discarding on
             // Cancel is exactly what the other four inspectors already do — including discarding an
             // unsaved `ProfileEditBuffer`.
-            GlassActionButton(title: "Cancel", icon: "xmark", isAccent: false) { closeInspector() }
+            GlassActionButton(title: "Cancel", icon: "xmark", isAccent: false) {
+                // Cancel is the ONE explicit discard (Phase 2, option C) — clear the teardown
+                // commit first, or the close it triggers would save the very edits being discarded.
+                NodeInspectorPendingCommit.shared.clear()
+                // [INS-2] …and put back what the write-through controls already committed. Without
+                // this, Cancel discarded only the profile buffer while the node KEPT every
+                // orchestration override and the rename — so "Cancel" left a 120s timeout and 3
+                // retries on a node, which the next unrelated Save writes to disk.
+                restoreOpenSnapshot()
+                closeInspector()
+            }
 
             GlassActionButton(title: "Done", icon: "checkmark", isAccent: true) { saveAndDismiss() }
                 .disabled(!isValid)
@@ -202,7 +253,10 @@ struct ProfileNodeInspectorView: View {
                     if isSubWorkflowNode {
                         profileGuideLine("This node runs another workflow's canvas as a child. Its directive is the upstream output — there is no per-node task to write.")
                         profileGuideLine("Text-only handoff: the child receives this node's input as its message. Workflow variables and files do NOT cross into the child; files the child produces DO flow out.")
-                        profileGuideLine("⚠️ Unlike every other node kind, \"Default\" here means NO timeout at all — the child canvas already bounds every one of its own nodes on its own terms. Setting the Hard Timeout below adds a ceiling over the child's ENTIRE run, not one step, and — with retries configured — ALL attempts share that ONE ceiling rather than each getting its own.")
+                        // [CVV-7] "Hard Timeout" is the MODEL property name — the control 58 lines
+                        // below is labelled "Per-Node Timeout", so this line sent the user hunting
+                        // for a setting that appears on no screen, in the very panel that holds it.
+                        profileGuideLine("⚠️ Unlike every other node kind, \"Default\" here means NO timeout at all — the child canvas already bounds every one of its own nodes on its own terms. Setting the Per-Node Timeout below adds a ceiling over the child's ENTIRE run, not one step, and — with retries configured — ALL attempts share that ONE ceiling rather than each getting its own.")
                         profileGuideLine("Nesting is limited to 3 levels, and cycles (a workflow that ends up running itself) are blocked before the run starts.")
                         profileGuideLine("Approvals and gates INSIDE the child surface here exactly as if they were this workflow's own.")
                     } else {
@@ -431,14 +485,47 @@ struct ProfileNodeInspectorView: View {
                 }
             }
         } else {
-            SettingsCard(title: "Profile", icon: "person.circle", theme: theme) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Profile not found or was deleted.")
-                        .font(.system(size: 11))
-                        .foregroundColor(theme.errorColor)
-                }
-                .padding(16)
+            missingConfigurationCard
+        }
+    }
+
+    /// Shown when this node's backing row cannot be resolved.
+    ///
+    /// ⚠️ The copy is KIND-SPECIFIC because the remedy is. A bot/agent node OWNS its configuration
+    /// (a private profile row created when the node was added), so re-adding the node genuinely
+    /// fixes it. The sentence is `WorkflowValidator.missingConfigurationMessage` — SHARED, not
+    /// copied, so this card and the validation panel cannot drift into describing what looks like
+    /// two different problems.
+    ///
+    /// A SUB-WORKFLOW node is different: it REFERENCES another workflow's canvas, which is a real
+    /// thing the user may still want back. Telling them to delete and re-add would discard the only
+    /// record of which workflow this step ran, so it names the situation instead.
+    ///
+    /// ⚠️ This replaced "Profile not found or was deleted." — accurate once, but passive, and it
+    /// described a dead end that no longer exists: before nodes owned their configuration there was
+    /// nothing the user could do from here at all.
+    private var missingConfigurationCard: some View {
+        SettingsCard(
+            title: isSubWorkflowNode ? "Workflow Missing" : "Configuration Missing",
+            icon: "exclamationmark.triangle",
+            theme: theme
+        ) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(isSubWorkflowNode
+                     ? WorkflowValidator.missingWorkflowMessage
+                     : WorkflowValidator.missingConfigurationMessage)
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.errorColor)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(isSubWorkflowNode
+                     ? "Its steps lived on that workflow's own canvas, so they cannot be recovered from here."
+                     : "Its model, instructions and tools were stored with this node and are not recoverable.")
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .padding(16)
         }
     }
 
@@ -486,14 +573,76 @@ struct ProfileNodeInspectorView: View {
     private func loadFromNode() {
         // Nothing node-local left to load — the Node Task field was removed 2026-08-29 and the
         // orchestration fields below bind straight through to `node.nodeConfig`.
+
+        // ⚠️ Register the teardown commit (Phase 2, option C). Three close routes bypass Done —
+        // node deletion, a superseding inspector, and canvas teardown (including the Run
+        // auto-flip) — and each used to discard the buffered profile draft silently. The closure
+        // captures the CLASS instances (`ProfileEditBuffer`, the service), so it reads the live
+        // draft at fire time; Done and Cancel clear it first, keeping their own semantics.
+        if let editBuffer {
+            let service = profileService
+            let nodeName = node.displayName
+            NodeInspectorPendingCommit.shared.register {
+                Self.commitBufferedEdits(editBuffer, service: service, nodeDisplayName: nodeName)
+            }
+        }
+    }
+
+    /// Persists a dirty buffered draft on a close route that bypassed Done.
+    ///
+    /// ⚠️ Static and headless: the panel is gone (or going) when this fires, so there is no UI to
+    /// show a validation error in — a refused save is LOGGED with its consequence rather than
+    /// silently swallowed or crashed on. The instructions-missing rule is deliberately NOT applied
+    /// here the way Done applies it: Done can refuse and stay open for the user to fix; a teardown
+    /// cannot, and discarding the whole draft over a transiently empty field would reintroduce the
+    /// exact loss this commit exists to prevent. `saveProfile`'s own validation still runs.
+    @discardableResult
+    static func commitBufferedEdits(
+        _ editBuffer: ProfileEditBuffer,
+        service: BackendProfileService,
+        nodeDisplayName: String
+    ) -> Bool {
+        guard editBuffer.isDirty else { return false }
+        do {
+            _ = try service.saveProfile(editBuffer.draft)
+            editBuffer.markSaved()
+            // The rebase contract (`BackendProfileService.rebaseEditBuffer`'s doc): every
+            // out-of-band save must rebase any open editor buffer. Matters for the sub-workflow
+            // kind, whose draft IS the shared workflow profile.
+            service.rebaseEditBuffer(to: editBuffer.draft)
+            logger.info("[WF_CANVAS] Node inspector closed without Done — COMMITTED the buffered profile edits for node '\(nodeDisplayName)' (profile \(editBuffer.draft.id.uuidString.prefix(8))). CONSEQUENCE: what the user typed is saved, matching Done; Cancel remains the one explicit discard.")
+            return true
+        } catch {
+            logger.error("[WF_CANVAS] Node inspector closed without Done and the buffered profile edits for node '\(nodeDisplayName)' could NOT be saved: \(error.localizedDescription). CONSEQUENCE: those edits are LOST — the panel is gone, so there is no surface left to show the refusal on.")
+            return false
+        }
+    }
+
+    /// Puts the node back as it was when the panel opened, and says so.
+    private func restoreOpenSnapshot() {
+        guard let restored = openSnapshot.restored(into: node) else {
+            logger.debug("[WF_CANVAS] Cancel on node inspector \(openSnapshot.nodeID.uuidString.prefix(8)): nothing to restore (\(openSnapshot.unchangedOrGoneReason(for: node))). CONSEQUENCE: no write, no undo step, and the canvas's unsaved state is untouched.")
+            return
+        }
+        logger.notice("[WF_CANVAS] Cancel on node inspector \(openSnapshot.nodeID.uuidString.prefix(8)): restoring the node name and per-node orchestration settings written while the panel was open. CONSEQUENCE: timeout, retries, retry delay, unattended auto-approve and the node name go back to their values from when it opened; the profile edit buffer is discarded separately, and the whole discard is ONE undo step.")
+        // ⚠️ Break the coalescing run FIRST. The restore writes through the same binding — and so the
+        // same `coalescingKey` — as the edits it is undoing, and `pushUndoSnapshot` folds writes to
+        // one node inside a 3s window. Inside the window the restore left a no-op step on the stack;
+        // outside it, the snapshot captured the EDITED graph and ⌘Z re-applied what the user had just
+        // cancelled.
+        endCoalescingRun()
+        node = restored
     }
 
     private func saveAndDismiss() {
-        // Ensure nodeConfig exists before saving
-        if node.nodeConfig == nil {
-            node.nodeConfig = WorkflowNodeConfig()
-        }
-
+        // [INS-11] The `if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }` that
+        // stood here is GONE. Every orchestration control already calls `ensureNodeConfig()` on a
+        // real write, so nothing below needs it — its only effect was to turn `nil` into
+        // `.some(defaults)` on a Done the user made without editing anything, which
+        // `replaceNode`'s equality guard cannot absorb. That dirtied the canvas, burned an undo
+        // slot, AND pinned a legacy workflow's inherited retry budget to 0, because
+        // `maxNodeRetries` is non-optional and the executor's `?? resolvedMaxRetries` fallback is
+        // reachable only while `nodeConfig` is nil.
         // If profile was edited, validate and save
         if let editBuffer, editBuffer.isDirty {
             var instructions: String?
@@ -512,6 +661,8 @@ struct ProfileNodeInspectorView: View {
             do {
                 _ = try profileService.saveProfile(editBuffer.draft)
                 editBuffer.markSaved()
+                // The rebase contract — see `commitBufferedEdits`. Done was the missing call site.
+                profileService.rebaseEditBuffer(to: editBuffer.draft)
                 inlineProfileError = nil
             } catch {
                 inlineProfileError = error.localizedDescription
@@ -520,6 +671,9 @@ struct ProfileNodeInspectorView: View {
             }
         }
 
+        // Done just saved — the teardown commit has nothing left to do, and letting it fire on the
+        // close below would re-save (a redundant write that bumps `lastSelected`).
+        NodeInspectorPendingCommit.shared.clear()
         closeInspector()
     }
 }

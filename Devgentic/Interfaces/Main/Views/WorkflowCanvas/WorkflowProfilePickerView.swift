@@ -11,8 +11,9 @@ import SwiftUI
 
 struct WorkflowProfilePickerView: View {
     let profiles: [BackendProfileModel]
-    let existingNodeProfileIDs: Set<UUID>
     let workflowProfileID: UUID
+    /// False when embedded inside `WorkflowAddNodeSheet`, which draws its own header.
+    var showsHeader: Bool = true
     let onSelect: (BackendProfileModel) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -41,23 +42,29 @@ struct WorkflowProfilePickerView: View {
     /// ⚠️ Not tidiness: `availableProfiles` is `private`, which is file-scoped — `@testable`
     /// elevates *internal*, not private — and this project has no view-inspection harness, so a
     /// filter reachable only through `body` cannot be asserted at all.
+    /// ⚠️ NO LONGER EXCLUDES PROFILES ALREADY ON THE CANVAS (2026-08-29). That exclusion existed
+    /// because a node REFERENCED a shared profile, so a second node on the same profile meant two
+    /// nodes editing each other's settings. Importing now COPIES into a node-owned row, so adding
+    /// the same profile twice yields two independent nodes — which is the point: two
+    /// differently-tuned Summarizers no longer require two entries in the profile library.
+    ///
+    /// The self-reference exclusion STAYS. A workflow that could add itself as a sub-workflow node
+    /// is a cycle the run would have to refuse anyway, and sub-workflow nodes still reference rather
+    /// than copy.
     static func offeredProfiles(
         from profiles: [BackendProfileModel],
-        excludingNodeProfileIDs existing: Set<UUID>,
         workflowProfileID: UUID
     ) -> [BackendProfileModel] {
         profiles.filter { profile in
             // Exclude the current workflow itself (prevent self-reference).
             // Other workflow profiles are allowed for sub-workflow nesting (P0-4).
             profile.id != workflowProfileID
-                && !existing.contains(profile.id)
                 && offerableProfileTypes.contains(profile.profileType)
         }
     }
 
     private var availableProfiles: [BackendProfileModel] {
         Self.offeredProfiles(from: profiles,
-                             excludingNodeProfileIDs: existingNodeProfileIDs,
                              workflowProfileID: workflowProfileID)
     }
 
@@ -82,26 +89,29 @@ struct WorkflowProfilePickerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
-            HStack(spacing: 12) {
-                Image(systemName: "plus.square.on.square")
-                    .font(.title2)
-                    .foregroundColor(theme.accentColor)
+            // Header — suppressed when embedded in `WorkflowAddNodeSheet`, which draws its own
+            // (with a Back control); two stacked headers read as a broken sheet.
+            if showsHeader {
+                HStack(spacing: 12) {
+                    Image(systemName: "plus.square.on.square")
+                        .font(.title2)
+                        .foregroundColor(theme.accentColor)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Add Profile to Workflow")
-                        .font(.headline)
-                        .foregroundColor(theme.primaryText)
-                    Text("Select a profile to add as a node.")
-                        .font(.caption)
-                        .foregroundColor(theme.secondaryText)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Add Profile to Workflow")
+                            .font(.headline)
+                            .foregroundColor(theme.primaryText)
+                        Text("Select a profile to add as a node.")
+                            .font(.caption)
+                            .foregroundColor(theme.secondaryText)
+                    }
+                    Spacer()
                 }
-                Spacer()
-            }
-            .padding()
-            .background(theme.primaryBackground)
+                .padding()
+                .background(theme.primaryBackground)
 
-            Divider()
+                Divider()
+            }
 
             // Search
             HStack {
@@ -124,9 +134,9 @@ struct WorkflowProfilePickerView: View {
                     Image(systemName: "tray")
                         .font(.largeTitle)
                         .foregroundColor(theme.secondaryText)
-                    Text("No available profiles.")
+                    Text("No profiles to import from.")
                         .foregroundColor(theme.secondaryText)
-                    Text("Create profiles first, then add them here.")
+                    Text("Go back and choose \u{201C}New node\u{201D} to build one from scratch instead.")
                         .font(.caption)
                         .foregroundColor(theme.secondaryText)
                         .multilineTextAlignment(.center)

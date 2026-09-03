@@ -111,6 +111,25 @@ struct WorkflowCanvasRunOverlay: Equatable {
     }
 }
 
+extension WorkflowCanvasRunOverlay {
+
+    /// Whether a node's run badge should PULSE (register CVV-4).
+    ///
+    /// Only the node executing RIGHT NOW, on a run that is still going. A historical run's
+    /// `.running` node is a node that never settled — animating it would claim work is still
+    /// happening in a run that has ended.
+    ///
+    /// ⚠️ `nonisolated static` and pure (WF-UI5) because this rule is the fix. It used to live in a
+    /// `View`'s private computed property, read exactly once from `.onAppear` — and the badge is
+    /// inserted when the CANVAS is, not when the node starts, because
+    /// `WorkflowRunDisplayData.buildNodesFromLayout` pre-populates a `.pending` placeholder for
+    /// every layout node. So `.onAppear` always fired while the answer was still false, the guard
+    /// dropped the arming, and nothing re-ran it when the node actually started.
+    nonisolated static func badgeShouldPulse(status: NodeStatus?, isLive: Bool) -> Bool {
+        isLive && status == .running
+    }
+}
+
 extension WorkflowRunDisplayData.NodeDisplayData.NodeStatus {
 
     /// Whether the node actually executed. `.cancelled` counts — it started, it just did not finish.

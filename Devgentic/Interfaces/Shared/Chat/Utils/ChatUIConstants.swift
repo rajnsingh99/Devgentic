@@ -51,6 +51,26 @@ enum ChatUIConstants {
     /// value used when no chat size is available.
     static let defaultCodeFontSize: CGFloat = 12
 
+    /// Code point size for a given chat prose size (register XUI-8).
+    ///
+    /// Code sits one step BELOW body prose, but it MOVES with `chatFontSize` — a reader at 20pt prose
+    /// getting 12pt code with no way to change it was the defect this formula was introduced to fix
+    /// on the chat side. Floored at 10 so the smallest prose setting (12) still yields legible code.
+    ///
+    /// ⚠️ SINGLE SOURCE for CODE sizing. The arithmetic was copy-pasted into two views
+    /// (`ContentBlockView`, `AgentBubbleContentView`), and the workflow node output — the one code
+    /// surface that never got the copy — silently pinned code at the 12pt default while its own
+    /// prose and tables scaled. Three callers now, two of them former copies. `nonisolated` and pure
+    /// so the rule is testable; a `private var` on a SwiftUI view is not.
+    ///
+    /// ⚠️ Two sites share this ARITHMETIC without sharing its MEANING, and are deliberately left
+    /// alone — routing them here would make a later change to the code rule silently restyle prose:
+    ///   • `ErrorMessageView`'s suggestion line is `max(10, chatFontSize - 2)` prose, not code.
+    ///   • Markdown tables floor at 11, not 10, and that asymmetry is pre-existing.
+    nonisolated static func codeFontSize(forChatFontSize chatFontSize: CGFloat) -> CGFloat {
+        max(10, chatFontSize - 2)
+    }
+
     /// Narrowest the chat column may be squeezed by the Code Viewer's split mode before
     /// the inset stops growing (the panel then overlaps the difference, as overlay mode
     /// always did). Roughly the width at which message bubbles remain readable.

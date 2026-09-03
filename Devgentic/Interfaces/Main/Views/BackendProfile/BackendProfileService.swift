@@ -23,9 +23,25 @@ private let logger = DGLogger(category: "BackendProfileService")
 @Observable @MainActor
 final class BackendProfileService {
 
-    /// The array of profiles that the sidebar observes.
+    /// Every persisted profile row, INCLUDING workflow-node-owned ones.
     /// This always reflects the **last-persisted** state.
+    ///
+    /// ⚠️ Do NOT bind a user-facing picker to this. It contains rows that are a workflow node's
+    /// private configuration; offering one for chat, QuickAccess, a schedule or a ChatOps route
+    /// would let a node's settings be run — and edited — outside the workflow that owns them.
+    /// Use `sharedProfiles`. This stays unfiltered because the executor and the node inspector
+    /// resolve owned rows BY ID and must keep finding them.
     var profiles: [BackendProfileModel] = []
+
+    /// The profiles that belong to the user's shared library — everything a picker may offer.
+    ///
+    /// ⚠️ THE ONE FILTER. Every surface that lets a user choose a profile reads this, so the rule
+    /// lives in a single auditable place rather than being re-derived per call site — the same
+    /// mistake that let `.code` profiles leak into pickers until each one grew its own
+    /// `profileType != .code` test.
+    var sharedProfiles: [BackendProfileModel] {
+        profiles.filter { !$0.isNodeOwned }
+    }
 
     /// The active edit buffer for the currently selected profile.
     /// Owned by the service so the panel view's navigation guard can check `editBuffer?.isDirty`.
@@ -146,10 +162,133 @@ final class BackendProfileService {
         return advisories
     }
 
+    /// Deletes the private profile rows of nodes that are no longer on a workflow's canvas.
+    ///
+    /// ⚠️ RUNS AT SAVE TIME, NOT ON NODE DELETE. Canvas undo restores deleted nodes, so deleting an
+    /// owned row the moment its node disappeared would let Undo resurrect a node whose configuration
+    /// is gone.
+    ///
+    /// ⚠️ SAVE TIME ALONE IS NOT ENOUGH — this doc used to claim "reconciling against the layout
+    /// that actually reached disk makes undo safe by construction: while a deletion is still
+    /// undoable, it has not been saved". THAT WAS FALSE, and it cost a user's configuration in the
+    /// obvious sequence: saving does NOT clear the undo stack (`markSaved()` touches only
+    /// `initialLayout`/`hasUnsavedChanges`; `undoStack.removeAll()` lives only in `load(from:)`), so
+    /// delete-node → Save → ⌘Z brought the node back pointing at a row this method had already
+    /// hard-deleted along with its Keychain credential.
+    ///
+    /// Callers must therefore pass `referencedProfileIDs` UNIONED with
+    /// `WorkflowCanvasState.undoRecoverableProfileIDs`, so a row survives while any undo step could
+    /// still restore a node that references it.
+    ///
+    /// ⚠️ SURVIVAL IS KEYED ON BEING REFERENCED, not on its owner node still existing — and the
+    /// difference is a leak. Keying on `ownerNodeID ∈ liveNodeIDs` misses a row whose node exists
+    /// but points somewhere ELSE: the row's owner id names a live node, so an owner-based sweep
+    /// would never collect it. Asking "does any node actually reference this row" instead collects
+    /// that case, rows whose node was deleted, and rows for a node added and then undone before
+    /// saving — all three with one rule.
+    ///
+    /// ⚠️ The shape that first exposed this was a convert-on-open ownership migration that created
+    /// a row and then failed to persist the repoint. That migration was DELETED on 2026-08-29 (no
+    /// pre-release data left to convert), so the reference-keyed rule is no longer load-bearing for
+    /// it — but it remains correct for the three cases above, and reverting to an owner-keyed sweep
+    /// would reintroduce the leak for any future path that repoints a node.
+    ///
+    /// ⚠️ CALL ONLY AFTER A SUCCESSFUL LAYOUT WRITE. `referencedProfileIDs` is trusted as the
+    /// complete set of profile ids the surviving nodes point at, so calling this with a layout that
+    /// failed to persist — or with an empty set from a canvas that failed to load — would delete
+    /// every node's configuration for that workflow.
+    ///
+    /// - Returns: how many rows were collected. ⚠️ NOT currently consumed — both call sites invoke
+    ///   this as a bare statement, so the only trace is the per-row `logger.info` in the loop. If a
+    ///   "collected N rows for workflow X" summary line is wanted, it has to be added at the call
+    ///   sites; the value is returned so that stays a one-line change.
+    @discardableResult
+    func reconcileOwnedProfiles(forWorkflow workflowID: UUID, referencedProfileIDs: Set<UUID>) -> Int {
+        let owned: [BackendProfileModel]
+        do {
+            owned = try profileStore.fetchOwnedProfiles(forWorkflow: workflowID)
+        } catch {
+            logger.error(
+                "[PROFILE] Could NOT list the node-owned profile rows for workflow \(workflowID): "
+                + "\(error.localizedDescription). CONSEQUENCE: nothing is collected this save, so rows "
+                + "for deleted nodes stay on disk — invisible to every picker, but real. The next "
+                + "successful save reconciles them."
+            )
+            return 0
+        }
+
+        let orphans = owned.filter { !referencedProfileIDs.contains($0.id) }
+        guard !orphans.isEmpty else { return 0 }
+
+        var collected = 0
+        for orphan in orphans {
+            do {
+                // Goes through the full delete so the row's Keychain entry goes with it —
+                // `BackendProfileStore.deleteProfile` calls `ProviderKeyStore.delete(for:)`.
+                try deleteProfile(withId: orphan.id)
+                collected += 1
+                logger.info(
+                    "[PROFILE] Collected node-owned profile '\(orphan.displayName)' (\(orphan.id)) — "
+                    + "no node on workflow \(workflowID)'s saved canvas references it (its owner was "
+                    + "node \(orphan.ownerNodeID?.uuidString.prefix(8) ?? "?")). CONSEQUENCE: the row "
+                    + "and its stored credential are gone — the node was deleted and saved, or was "
+                    + "repointed away from this row."
+                )
+            } catch {
+                logger.error(
+                    "[PROFILE] Could NOT collect node-owned profile '\(orphan.displayName)' "
+                    + "(\(orphan.id)) for workflow \(workflowID): \(error.localizedDescription). "
+                    + "CONSEQUENCE: the row stays on disk, hidden from every picker; it is retried on "
+                    + "the next successful save of this workflow."
+                )
+            }
+        }
+        return collected
+    }
+
     /// Deletes a profile using its ID from the persistence layer and reloads the local array.
     /// Cascades to the matching `WorkflowLayoutSD` row (if any) — a no-op for non-workflow
     /// profiles since the layout store keys on profile ID and simply finds nothing to delete.
     func deleteProfile(withId id: UUID) throws {
+        // ⚠️ FOURTH cascade — a workflow's nodes own private profile rows, and nothing else would
+        // ever find them once the workflow is gone: they are hidden from every picker, and the
+        // layout that named their nodes is deleted three lines below. Runs FIRST so a failure
+        // partway leaves the workflow itself intact and the next attempt can finish the job.
+        //
+        // A no-op for every non-workflow profile — nothing carries their id as an `ownerWorkflowID`,
+        // and an owned row itself owns nothing, so this cannot recurse.
+        // ⚠️ A FETCH FAILURE MUST ABORT, not be swallowed. This was `try?` with no log: on a throw
+        // the block was skipped silently and the workflow was deleted anyway, stranding every one of
+        // its node-configuration rows — and their Keychain credentials — permanently. Nothing could
+        // ever reach them again: they are hidden from every picker, the layout naming their nodes is
+        // deleted two calls later, and `reconcileOwnedProfiles` is only ever called with a LIVE
+        // workflow id. Throwing here leaves the workflow intact so the next attempt can finish, which
+        // is what the ordering below was always for.
+        let owned: [BackendProfileModel]
+        do {
+            owned = try profileStore.fetchOwnedProfiles(forWorkflow: id)
+        } catch {
+            logger.error(
+                "[PROFILE] Delete ABORTED for workflow \(id): could not list its node-owned profile "
+                + "rows (\(error.localizedDescription)). CONSEQUENCE: nothing is deleted — the "
+                + "workflow, its layout and its nodes' private rows are all left intact. Deleting the "
+                + "workflow now would strand those rows and their stored credentials with nothing "
+                + "left that could ever find them."
+            )
+            throw error
+        }
+
+        if !owned.isEmpty {
+            logger.info("[PROFILE] Deleting workflow \(id) cascades to \(owned.count) node-owned profile row(s). CONSEQUENCE: each node's private configuration and its stored credential are removed with the workflow that scoped them.")
+            for row in owned {
+                do {
+                    try profileStore.deleteProfile(withId: row.id)
+                } catch {
+                    logger.error("[PROFILE] Could NOT delete node-owned profile '\(row.displayName)' (\(row.id)) while deleting workflow \(id): \(error.localizedDescription). CONSEQUENCE: the row is left on disk, hidden from every picker and no longer reachable from any canvas — an orphan needing manual cleanup.")
+                }
+            }
+        }
+
         try profileStore.deleteProfile(withId: id)
         WorkflowLayoutStore.shared.delete(for: id)
         // ⚠️ THIRD cascade, and it must live here with the other two. The canvas STATE for this
@@ -374,9 +513,13 @@ final class BackendProfileService {
 
         case .workflow(let config):
             logOutput += "[WORKFLOW CONFIGURATION]\n"
-            logOutput += "Agent Profile IDs: \(config.agentProfileIDs.count)\n"
-            for (index, id) in config.agentProfileIDs.enumerated() {
-                logOutput += "  \(index + 1). \(id.uuidString)\n"
+            // ⚠️ The LAYOUT's counts, not `agentProfileIDs`. That field is retired and stale by
+            // design; printing it in a support bundle would describe a graph the app no longer runs.
+            // These counts are denormalized columns, so this costs no blob decode.
+            let counts = WorkflowLayoutStore.shared.storedCounts(for: profile.id)
+            logOutput += "Nodes: \(counts.nodes), Edges: \(counts.edges), Notes: \(counts.annotations)\n"
+            if !config.agentProfileIDs.isEmpty {
+                logOutput += "Retired agentProfileIDs still stored: \(config.agentProfileIDs.count) (inert)\n"
             }
 
         case .imageGen(let config):

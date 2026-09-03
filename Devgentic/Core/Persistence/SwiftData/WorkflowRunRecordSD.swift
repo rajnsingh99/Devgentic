@@ -116,6 +116,10 @@ final class WorkflowRunRecordSD {
         // rather than silently reporting "this run had no nodes".
         self.nodeResultsData = resolved.nodeResults ?? Data("NODE_RESULTS_ENCODE_FAILED".utf8)
         self.variablesData = resolved.variables ?? Data("VARIABLES_ENCODE_FAILED".utf8)
+        // [XUI-14] Same rule as `apply`: the insert path does NOT park a full copy of the record
+        // on the row. On INSERT a refusal writes a deliberately-unreadable MARKER rather than
+        // stale bytes, so the in-memory record is the only readable copy and is kept.
+        self._cachedRecord = Self.retainsInMemoryRecord(resolved) ? record : nil
         if resolved.nodeResults == nil || resolved.variables == nil {
             logger.fault(
                 "[PERSISTENCE] Workflow run \(record.id) ('\(record.workflowName)') was inserted with "
@@ -125,7 +129,6 @@ final class WorkflowRunRecordSD {
                 + "damaged, instead of silently claiming the run had no nodes or no variables."
             )
         }
-        self._cachedRecord = record
     }
 
     // MARK: - Off-main encoding
@@ -142,6 +145,26 @@ final class WorkflowRunRecordSD {
         let variables: Data?
     }
 
+    /// Whether the row must hold on to the in-memory record (register XUI-14).
+    ///
+    /// ⚠️ NORMALLY FALSE, and that is the row's whole point: parking a full record here kept a
+    /// second copy of every run finalized in the session — traces included — alive for the app's
+    /// lifetime, because the row stays reachable through `ConversationSD.workflowRuns` and nothing
+    /// ever nils it. `XUI-11` dropped the traces from the view model's mirror and this quietly kept
+    /// them, so for THIS session's runs that strip freed nothing.
+    ///
+    /// ⚠️ TRUE only when a blob was REFUSED, and then it is not an optimisation but the only
+    /// readable copy of the truth: on update the bytes on disk are the PREVIOUS ones, and on insert
+    /// they are a deliberately-unreadable marker. Dropping it there turns a logged, recoverable
+    /// refusal into silent loss.
+    ///
+    /// Pure and `nonisolated` (WF-UI5) so the rule is one function rather than a condition repeated
+    /// at the insert and update seams — a mutant flipping either one survived the first battery,
+    /// because nothing could reach the rule to test it.
+    nonisolated static func retainsInMemoryRecord(_ blobs: EncodedBlobs) -> Bool {
+        blobs.nodeResults == nil || blobs.variables == nil
+    }
+
     /// Encodes a record's blobs. Touches no instance state, so it is safe to call from
     /// any task — see `WorkflowRunHistoryStore.upsertFinalized(_:forConversation:)`.
     static func encodeBlobs(for record: WorkflowRunRecord) -> EncodedBlobs {
@@ -154,7 +177,22 @@ final class WorkflowRunRecordSD {
     /// Rewrites every column from `newValue` using blobs encoded elsewhere, rather
     /// than re-encoding on the caller's thread.
     func apply(_ newValue: WorkflowRunRecord, blobs: EncodedBlobs) {
-        _cachedRecord = newValue
+        // [XUI-14] ⚠️ The write path no longer PARKS the record here. It used to, and that made
+        // this row hold a second full copy — every node's trace included — of every run finalized
+        // in the session, for the app's lifetime: the row stays reachable through
+        // `ConversationSD.workflowRuns`, and nothing ever nils this. `XUI-11` dropped the traces
+        // from the view model's mirror and this quietly kept them, so for THIS session's runs the
+        // strip freed nothing and only the disk-load path (cold cache) actually paid off.
+        //
+        // ⚠️ Retained ONLY when a blob was refused, below — then the bytes on disk are the
+        // PREVIOUS ones and this is the only copy of the truth, so dropping it would turn a
+        // logged, recoverable refusal into silent loss.
+        //
+        // Nothing in production reads a warm cache: `rowSnapshot` only ever READS `_cachedRecord`
+        // and never fills it, and the one filling accessor (`record`) has no production callers.
+        // A same-session re-read therefore decodes the blob off-main, exactly as a cold row does —
+        // the path WF-UI6 already established does not hitch.
+        _cachedRecord = nil
         // `id` and `conversationID` are intentionally not re-assigned —
         // they're identity fields and should never change post-insert.
         workflowProfileID = newValue.workflowProfileID
@@ -190,6 +228,17 @@ final class WorkflowRunRecordSD {
                 + "the previously-stored value."
             )
         }
+        // [XUI-14] See `retainsInMemoryRecord`: kept ONLY when the bytes on disk no longer
+        // represent the record.
+        if Self.retainsInMemoryRecord(blobs) {
+            _cachedRecord = newValue
+            logger.notice(
+                "[PERSISTENCE] Workflow run \(id) ('\(workflowName)'): retaining the in-memory record "
+                + "because a blob was refused. CONSEQUENCE: this row holds the only complete copy of "
+                + "the run until the app quits; a reader gets the truth rather than the stale bytes, "
+                + "at the cost of that copy staying resident."
+            )
+        }
     }
 
     // MARK: - Helpers
@@ -222,8 +271,12 @@ final class WorkflowRunRecordSD {
         let traceID: String?
     }
 
-    /// Cheap on-main copy — references only; no decoding happens here. Rows written THIS session
-    /// carry `_cachedRecord` and decode for free.
+    /// Cheap on-main copy — references only; no decoding happens here.
+    ///
+    /// ⚠️ `cached` is normally nil (register XUI-14): the write path deliberately stops parking a
+    /// full record on the row, so a same-session re-read decodes the blob off-main like any other.
+    /// It is non-nil only for a row whose blob encode was REFUSED, where the in-memory record is
+    /// the only readable copy — and handing that back is exactly right.
     var rowSnapshot: RowSnapshot {
         RowSnapshot(
             cached: _cachedRecord,
@@ -246,7 +299,7 @@ final class WorkflowRunRecordSD {
             workflowName: snapshot.workflowName,
             timestamp: snapshot.timestamp,
             userInput: snapshot.userInput,
-            nodeResults: decodeNodeResults(from: snapshot.nodeResultsData),
+            nodeResults: decodeNodeResults(from: snapshot.nodeResultsData, runID: snapshot.id, workflowName: snapshot.workflowName),
             finalOutput: snapshot.finalOutput,
             variables: decodeVariables(from: snapshot.variablesData),
             status: status,
@@ -257,7 +310,7 @@ final class WorkflowRunRecordSD {
     }
 
     private func decodeRecord() -> WorkflowRunRecord {
-        let nodeResults = Self.decodeNodeResults(from: nodeResultsData)
+        let nodeResults = Self.decodeNodeResults(from: nodeResultsData, runID: id, workflowName: workflowName)
         let variables = Self.decodeVariables(from: variablesData)
         // ⚠️ No `?? .completed`. `RunStatus.init(rawValue:)` never returns nil now — an unrecognised
         // value becomes `.other(raw)` and is carried verbatim, so a run written by a newer build is
@@ -327,7 +380,11 @@ final class WorkflowRunRecordSD {
         }
     }
 
-    private static func decodeNodeResults(from data: Data) -> [WorkflowRunRecord.WorkflowNodeResultSnapshot] {
+    private static func decodeNodeResults(
+        from data: Data,
+        runID: UUID,
+        workflowName: String
+    ) -> [WorkflowRunRecord.WorkflowNodeResultSnapshot] {
         let decoder = JSONDecoder()
         // ⚠️ THREE shapes, newest first — all three exist on real disks and none may be dropped:
         //   1. the shared `VersionedBlob` envelope (`schemaVersion`/`payload`), written since G19;
@@ -345,19 +402,27 @@ final class WorkflowRunRecordSD {
         // Resilient fallback: decode node-by-node so ONE undecodable node (e.g. a
         // structural change beyond the lossy nodeTimeline) drops only that node
         // instead of erasing the whole run's results.
-        return decodeNodeResultsResiliently(from: data)
+        return decodeNodeResultsResiliently(from: data, runID: runID, workflowName: workflowName)
     }
 
-    private static func decodeNodeResultsResiliently(from data: Data) -> [WorkflowRunRecord.WorkflowNodeResultSnapshot] {
-        // Pull the raw node array whether the blob is a bare array or an envelope.
-        let root = try? JSONSerialization.jsonObject(with: data)
-        let rawNodes: [Any]
-        if let array = root as? [Any] {
-            rawNodes = array
-        } else if let object = root as? [String: Any], let array = object["nodes"] as? [Any] {
-            rawNodes = array
-        } else {
-            logger.error("Node results blob is neither an array nor a versioned envelope — returning [].")
+    /// ⚠️ Takes the run identity so its two logs can name WHICH run lost nodes. Without it the
+    /// only datum was a byte count, and a conversation decodes up to
+    /// `WorkflowRunHistoryStore.maxRecordsPerConversation` records in one pass — so N identical
+    /// id-less lines could not be told apart, and the diagnosis the logs exist to enable was
+    /// impossible. Every sibling log in this file already threads it.
+    private static func decodeNodeResultsResiliently(
+        from data: Data,
+        runID: UUID,
+        workflowName: String
+    ) -> [WorkflowRunRecord.WorkflowNodeResultSnapshot] {
+        guard let rawNodes = Self.rawNodeArray(inBlob: data) else {
+            logger.error(
+                "[PERSISTENCE] Node-results blob for run \(runID) ('\(workflowName)') "
+                + "(\(data.count) bytes) is not a recognised node array "
+                + "— neither a bare array nor a `payload`/`nodes` envelope. CONSEQUENCE: this run's "
+                + "node breakdown renders EMPTY, so the run report shows no steps. The stored bytes "
+                + "are NOT overwritten and stay readable by a build that understands the shape."
+            )
             return []
         }
 
@@ -365,7 +430,12 @@ final class WorkflowRunRecordSD {
         var survivors: [WorkflowRunRecord.WorkflowNodeResultSnapshot] = []
         var dropped = 0
         for element in rawNodes {
-            guard let elementData = try? JSONSerialization.data(withJSONObject: element),
+            // ⚠️ `.fragmentsAllowed` is load-bearing, not tidiness. Without it a SCALAR element (a
+            // bare string or number where an object was expected) makes `JSONSerialization` RAISE
+            // `NSInvalidArgumentException` — an Objective-C exception, which `try?` cannot catch, so
+            // the recovery tier CRASHED the app instead of counting a drop. That is the opposite of
+            // what this whole ladder exists for.
+            guard let elementData = try? JSONSerialization.data(withJSONObject: element, options: .fragmentsAllowed),
                   let snapshot = try? decoder.decode(WorkflowRunRecord.WorkflowNodeResultSnapshot.self, from: elementData) else {
                 dropped += 1
                 continue
@@ -373,9 +443,38 @@ final class WorkflowRunRecordSD {
             survivors.append(snapshot)
         }
         if dropped > 0 {
-            logger.error("Recovered \(survivors.count) node result(s); dropped \(dropped) undecodable node(s).")
+            logger.error(
+                "[PERSISTENCE] Recovered \(survivors.count) of \(rawNodes.count) node result(s) for "
+                + "run \(runID) ('\(workflowName)'); DROPPED \(dropped) that this build cannot decode. CONSEQUENCE: those "
+                + "steps are missing from the run report and its node count is short by \(dropped); "
+                + "every other node, and the run's final output, are intact. The stored bytes are not "
+                + "overwritten, so a build that understands them recovers the full set."
+            )
         }
         return survivors
+    }
+
+    /// Envelope keys a persisted node array can live under, NEWEST FIRST.
+    ///
+    /// ⚠️ `payload` is the CURRENT shared `VersionedBlob` key; `nodes` is this column's bespoke
+    /// legacy envelope. Omitting `payload` made the whole last-resort recovery tier DEAD against
+    /// every blob written since the versioned envelope landed — it recovered the two LEGACY shapes
+    /// and erased the current one, which is exactly backwards.
+    private static let nodeArrayEnvelopeKeys = ["payload", "nodes"]
+
+    /// The raw node array inside any of the three on-disk shapes, or nil if this is not one.
+    ///
+    /// `nonisolated static` and pure so the envelope-key set is testable (WF-UI5) — the defect was a
+    /// one-word mismatch between the encoder and this reader, which is precisely the kind of thing a
+    /// round-trip test pins and a reading does not.
+    nonisolated static func rawNodeArray(inBlob data: Data) -> [Any]? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        if let array = root as? [Any] { return array }
+        guard let object = root as? [String: Any] else { return nil }
+        for key in nodeArrayEnvelopeKeys {
+            if let array = object[key] as? [Any] { return array }
+        }
+        return nil
     }
 
     /// Current persisted shape of `variablesData`.

@@ -99,6 +99,24 @@ final class WorkflowLayoutStore {
     static let shared = WorkflowLayoutStore()
     private init() {}
 
+    // MARK: - Write Generation
+
+    /// Bumped on every write that CHANGES a stored layout — save, repair, delete.
+    ///
+    /// ⚠️ Exists so a cache of OTHER workflows' layouts can tell that one of them changed. A canvas
+    /// validating sub-workflow nesting caches its children's layouts and keyed that cache on the SET
+    /// of child ids alone — which never changes when a child's CONTENT does. Editing a child (adding
+    /// nodes inside it, introducing a cycle) therefore left the parent validating against a stale
+    /// copy for the rest of its session, so the nesting cycle/depth rules — `.error` severity — went
+    /// quietly wrong in both directions.
+    ///
+    /// A monotonic counter rather than per-profile notifications: comparing one `Int` is cheap
+    /// enough for `revalidate()`, which runs on every node drag and inspector keystroke, and a child
+    /// edited through ANY canvas or code path bumps it without anyone having to subscribe. The cost
+    /// of being coarse is an occasional redundant refetch after an unrelated workflow is saved — far
+    /// cheaper than the fetch-per-keystroke the cache exists to avoid.
+    private(set) var writeGeneration: Int = 0
+
     // MARK: - SwiftData Container
 
     private(set) var modelContainer: ModelContainer?
@@ -168,9 +186,25 @@ final class WorkflowLayoutStore {
     }
 
     func load(for profileID: UUID) -> WorkflowLayout {
+        loadWithOutcome(for: profileID).layout
+    }
+
+    /// The layout, plus whether the READ actually succeeded.
+    ///
+    /// ⚠️ `load(for:)` collapses "this workflow has no saved row" and "the fetch threw" into the
+    /// same `.empty`, and a caller that then WRITES cannot tell them apart. That is a data-loss
+    /// path: a transient fetch failure renders an empty, clean canvas with no overlay, and the next
+    /// save overwrites the real graph with it — and, since 2026-08-29, hands the save-time reconcile
+    /// an empty reference set, which hard-deletes every one of that workflow's node configurations
+    /// and their Keychain credentials. The layout overwrite alone was recoverable by re-reading
+    /// disk; the credentials are not.
+    ///
+    /// Callers that only READ can keep using `load(for:)`. Any caller that writes, or that decides
+    /// what to delete, must consult `didFail` first.
+    func loadWithOutcome(for profileID: UUID) -> (layout: WorkflowLayout, didFail: Bool) {
         guard let context = mainContext else {
-            logger.error("load(for:) called before container was configured — returning .empty.")
-            return .empty
+            logger.error("load(for:) called before container was configured — returning .empty. CONSEQUENCE: the caller cannot distinguish this from an empty workflow; a writer must treat it as a FAILED read and refuse to save over it.")
+            return (.empty, true)
         }
 
         let predicate = #Predicate<WorkflowLayoutSD> { $0.workflowProfileID == profileID }
@@ -178,10 +212,12 @@ final class WorkflowLayoutStore {
         descriptor.fetchLimit = 1
 
         do {
-            return try context.fetch(descriptor).first?.layout ?? .empty
+            // A missing row is a SUCCESSFUL read of a workflow that has never been saved — not a
+            // failure. Only a throw is a failure.
+            return (try context.fetch(descriptor).first?.layout ?? .empty, false)
         } catch {
-            logger.error("Failed to fetch layout for \(profileID): \(error.localizedDescription) — returning .empty.")
-            return .empty
+            logger.error("Failed to fetch layout for \(profileID): \(error.localizedDescription) — returning .empty with didFail. CONSEQUENCE: the canvas renders blank; any save or owned-row reconcile for this workflow must be refused until a read succeeds, or a transient error becomes permanent deletion.")
+            return (.empty, true)
         }
     }
 
@@ -268,6 +304,7 @@ final class WorkflowLayoutStore {
             existing.layout = layout    // setter refreshes blob + denormalized counts + updatedAt
             do {
                 try context.save()
+                writeGeneration &+= 1
                 return .saved
             } catch {
                 // Un-mutate THIS row only — never `context.rollback()`, which would discard
@@ -298,6 +335,7 @@ final class WorkflowLayoutStore {
             scratch.insert(WorkflowLayoutSD(workflowProfileID: profileID, layout: layout))
             do {
                 try scratch.save()
+                writeGeneration &+= 1
                 return .saved
             } catch {
                 logger.error(
@@ -373,12 +411,20 @@ final class WorkflowLayoutStore {
                 + "CONSEQUENCE: the previous undecodable bytes are overwritten and unrecoverable; "
                 + "saves for this profile work normally again."
             )
+            writeGeneration &+= 1
             return .saved
         } catch {
+            // ⚠️ ROLL BACK THIS ROW, matching `save(_:for:)`'s [WF-PE3] discipline. Every store
+            // shares `container.mainContext`, so a mutation left pending after a failed save rides
+            // out on the NEXT unrelated `context.save()` from any subsystem — committing a repair
+            // the user was told had failed, at a moment nothing bumps `writeGeneration`, so every
+            // canvas caching this layout keeps validating against the pre-repair copy.
+            context.rollback()
             logger.error(
                 "[PERSISTENCE] Failed to repair layout for \(profileID): "
                 + "\(error.localizedDescription). CONSEQUENCE: the canvas remains unreadable and "
-                + "every save stays refused."
+                + "every save stays refused; the pending repair was rolled back so it cannot be "
+                + "committed later by an unrelated save."
             )
             return .failed(error.localizedDescription)
         }
@@ -401,10 +447,23 @@ final class WorkflowLayoutStore {
             if let existing = try context.fetch(descriptor).first {
                 context.delete(existing)
                 try context.save()
+                // A deleted child is a CHANGE to what a parent's nesting validation sees.
+                writeGeneration &+= 1
                 logger.info("Deleted layout for profile \(profileID).")
             }
         } catch {
-            logger.error("Failed to delete layout for \(profileID): \(error.localizedDescription)")
+            // ⚠️ ROLL BACK, same reason as `repairUnreadableLayout` and `save(_:for:)`. A pending
+            // `context.delete` left on the SHARED mainContext is committed by the next unrelated
+            // save from any subsystem — the layout disappears after this method reported failure,
+            // and at a moment when nothing bumps `writeGeneration`, so every parent canvas caching
+            // this child keeps validating against a layout that no longer exists.
+            context.rollback()
+            logger.error(
+                "[PERSISTENCE] Failed to delete layout for \(profileID): \(error.localizedDescription). "
+                + "CONSEQUENCE: the row is left in place and the pending delete was rolled back, so it "
+                + "cannot be committed later by an unrelated save. Any parent workflow caching this "
+                + "layout keeps a valid copy."
+            )
         }
     }
 }

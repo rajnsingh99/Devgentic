@@ -48,7 +48,11 @@ struct WorkflowValidationPanelView: View {
                 .font(.system(size: 12))
                 .foregroundColor(.orange)
 
-            Text("\(issues.count) issue\(issues.count == 1 ? "" : "s")")
+            // ⚠️ [CVV-8] TWO KEYS, not a concatenated plural letter. The literal DOES bind
+            // `LocalizedStringKey`, so it was extracted — but with the "s" as a `%@` argument no
+            // translator can inflect. Split so the Int emits `%lld` and each key can carry its own
+            // plural variations. Same treatment as the toolbar pill that opens this panel.
+            Text(issues.count == 1 ? "1 issue" : "\(issues.count) issues")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(theme.primaryText)
 
@@ -134,7 +138,9 @@ struct WorkflowValidationPanelView: View {
     private var footer: some View {
         VStack(spacing: 0) {
             Divider()
-            Text("\(errorCount) error\(errorCount == 1 ? "" : "s") must be resolved before running")
+            Text(errorCount == 1
+                 ? "1 error must be resolved before running"
+                 : "\(errorCount) errors must be resolved before running")
                 .font(.system(.caption))
                 .foregroundColor(theme.errorColor)
                 .padding(.horizontal, 12)

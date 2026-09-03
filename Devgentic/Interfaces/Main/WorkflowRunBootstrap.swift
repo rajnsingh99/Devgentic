@@ -193,14 +193,22 @@ final class WorkflowRunTicket {
         }
 
         // In-memory mirror: replace the matching row if present, else insert at the front.
+        //
+        // ⚠️ [XUI-11] THE MIRROR IS TRACE-LESS; `record` IS NOT. The persist below writes `record`,
+        // so stripping the wrong one would mean the traces never reach disk — the run's whole
+        // debugging record, silently, for exactly the failed runs it exists for. The mirror only
+        // ever feeds the history LIST (counts and failure flags) and, for the run on screen,
+        // `displayData` — which reads live timelines from `WorkflowExecutionState` while this run
+        // is still the current one, and re-reads from the store afterwards.
+        let mirrored = record.strippingNodeTimelines()
         if let idx = vm.workflowRunHistory[conversationID]?.firstIndex(where: { $0.id == record.id }) {
-            vm.workflowRunHistory[conversationID]?[idx] = record
+            vm.workflowRunHistory[conversationID]?[idx] = mirrored.record
         } else {
-            vm.workflowRunHistory[conversationID, default: []].insert(record, at: 0)
+            vm.workflowRunHistory[conversationID, default: []].insert(mirrored.record, at: 0)
             Self.trimInMemoryHistory(vm: vm, conversationID: conversationID)
         }
 
-        logger.info("[WF_RUN] Finalizing run \(record.id) '\(self.workflowName)' (origin \(self.origin.rawValue), conv \(self.conversationID)): status=\(record.status.rawValue), \(record.nodeResults.count) node result(s), \(Int(record.duration))s, finalOutput \(record.finalOutput.count) chars.")
+        logger.info("[WF_RUN] Finalizing run \(record.id) '\(self.workflowName)' (origin \(self.origin.rawValue), conv \(self.conversationID)): status=\(record.status.rawValue), \(record.nodeResults.count) node result(s), \(Int(record.duration))s, finalOutput \(record.finalOutput.count) chars; \(mirrored.droppedEvents) node timeline event(s) held on disk only. CONSEQUENCE: reopening this run after its live state is cleared re-reads the trace (one off-main decode); the persisted record below keeps every event.")
 
         // Finalized blobs are large (up to 400 timeline events per node); `upsertFinalized`
         // encodes off-main and hops back for the SwiftData write so completing a big run does not

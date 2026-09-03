@@ -188,6 +188,34 @@ struct WorkflowCanvasView: View {
         UnreadableLayoutInfo.active(unreadableLayout, displayedProfileID: profile.id)
     }
 
+    /// The retry count a node INHERITS from this workflow when it carries none of its own
+    /// (register INS-8).
+    ///
+    /// ⚠️ Reads the LEGACY workflow-level default. The workflow-level retry control was retired, but
+    /// `WorkflowExecutor` still honours a stored `resolvedMaxRetries` for every node whose
+    /// `nodeConfig` is nil — and it logs how many nodes that is. The inspectors need the same number
+    /// or their steppers show 0 for a node the engine will retry.
+    private var inheritedRetryDefault: Int {
+        if case .workflow(let config) = profile.details { return config.resolvedMaxRetries }
+        return 0
+    }
+
+    /// True only when the canvas holds NOTHING the user put there.
+    ///
+    /// ⚠️ ANNOTATIONS COUNT AS CONTENT (register CVV-9). Gated on `nodes` alone, a canvas holding
+    /// only sticky notes still got the "add your first profile" invitation — painted across the
+    /// notes the user had just written. Worse, the placard is hit-testing (its "Add First Profile"
+    /// button has to be), and `nextAvailablePosition()` puts the FIRST note dead centre in the
+    /// viewport, which is exactly where the placard's button sits — so a click meant for the note
+    /// opened the profile picker instead. An annotations-only layout round-trips through save and
+    /// reload intact, so this is not a transient state.
+    ///
+    /// `nonisolated static` and pure for the same reason `UnreadableLayoutInfo.active` is: a
+    /// SwiftUI view's private computed property is unreachable from a test, and this rule IS the fix.
+    nonisolated static func showsEmptyPlacard(nodeCount: Int, annotationCount: Int) -> Bool {
+        nodeCount == 0 && annotationCount == 0
+    }
+
     #if canImport(AppKit) && !targetEnvironment(macCatalyst)
     @State private var scrollMonitor: Any?
     #endif
@@ -261,7 +289,7 @@ struct WorkflowCanvasView: View {
             }
             .background(theme.primaryBackground)
 
-            // Empty State Overlay (when no nodes exist)
+            // Empty State Overlay (when the canvas holds no nodes AND no notes)
             //
             // ⚠️ The unreadable case must win. An undecodable canvas ALSO renders as zero nodes, so
             // without this branch it got the identical "Workflow Canvas / Add profiles to build your
@@ -269,7 +297,10 @@ struct WorkflowCanvasView: View {
             // inviting the user to rebuild a canvas whose every save is being refused.
             if let activeUnreadableLayout {
                 unreadableLayoutOverlay(activeUnreadableLayout)
-            } else if canvasState.nodes.isEmpty {
+            } else if Self.showsEmptyPlacard(
+                nodeCount: canvasState.nodes.count,
+                annotationCount: canvasState.annotations.count
+            ) {
                 emptyStateOverlay
             }
 
@@ -282,6 +313,14 @@ struct WorkflowCanvasView: View {
                             issues: canvasState.validationIssues,
                             onSelectNode: { nodeID in
                                 canvasState.select(nodeID: nodeID)
+                                // [CVC-9] Selecting alone was a tap that appeared to do nothing on
+                                // any graph bigger than the pane: the ring was drawn on a node the
+                                // user could not see, and the panel offers no other way to find it.
+                                // `revealNode` is a no-op when the node is already comfortably on
+                                // screen, so walking the list does not re-frame a small graph.
+                                _ = withAnimation(.easeInOut(duration: 0.25)) {
+                                    canvasState.revealNode(nodeID)
+                                }
                             },
                             onDismiss: {
                                 canvasState.showValidationPanel = false
@@ -341,10 +380,16 @@ struct WorkflowCanvasView: View {
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
                 .allowsHitTesting(false)
-                .task(id: refusal) {
+                .task(id: canvasState.edgeRefusalGeneration) {
                     // Self-clearing so it cannot become permanent chrome. Cancellation-safe: a new
                     // refusal restarts the task and the old sleep is cancelled, so the message never
                     // clears the newer one out from under the user.
+                    //
+                    // ⚠️ Keyed on the GENERATION, not the refusal value (cold-read finding,
+                    // 2026-08-31): keyed on the value, an IDENTICAL repeat — miss, retry, miss
+                    // again, the expected `.missedDrop` pattern — never restarted this task, so
+                    // the first miss's 3s sleep cleared the second miss's banner almost
+                    // immediately after it appeared.
                     try? await Task.sleep(for: .seconds(3))
                     guard !Task.isCancelled else { return }
                     canvasState.lastEdgeRefusal = nil
@@ -392,6 +437,13 @@ struct WorkflowCanvasView: View {
             #if canImport(AppKit) && !targetEnvironment(macCatalyst)
             setupScrollMonitor()
             #endif
+        }
+        // [INS-12] The canvas's validator reads the tool catalogue but had no reason to re-run when
+        // it changed. Observing the generation counter here — in the VIEW, where `@Observable`
+        // tracking works — rather than inside the state, which is mutated from contexts that have no
+        // tracking scope.
+        .onChange(of: UnifiedToolStore.shared.catalogGeneration) { _, generation in
+            canvasState.revalidateForToolCatalogChange(generation: generation)
         }
         .onChange(of: canvasState.hasUnsavedChanges) { _, dirty in
             // Mirror the canvas dirty-state into the nav guard (drives whether navigation defers
@@ -457,20 +509,32 @@ struct WorkflowCanvasView: View {
             canvasState.deleteSelected()
         }
         .sheet(isPresented: $showingProfilePicker) {
-            WorkflowProfilePickerView(
-                profiles: profileService.profiles,
-                existingNodeProfileIDs: Set(canvasState.nodes.compactMap(\.profileID)),
+            WorkflowAddNodeSheet(
+                // ⚠️ `sharedProfiles`: another node's owned row is not a profile the user has
+                // anywhere else, and importing one would copy a config already private to it.
+                profiles: profileService.sharedProfiles,
                 workflowProfileID: profile.id,
-                onSelect: { selectedProfile in
-                    canvasState.addNode(from: selectedProfile)
-                }
+                onCreateFresh: { type, name in addFreshNode(type: type, name: name) },
+                onImport: { source in addImportedNode(from: source) }
             )
         }
         .alert("Clear Canvas?", isPresented: $showingClearAlert) {
             Button("Clear All", role: .destructive) { canvasState.clearCanvas() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This will remove all nodes and connections from the canvas. This cannot be undone.")
+            // [CVC-7] Both of the previous claims were false. `clearCanvas()` opens with
+            // `pushUndoSnapshot()`, so ⌘Z (and the toolbar's Undo pill, which appears in the slot
+            // the Clear pill just vacated) restores the graph immediately. It also removed the
+            // sticky notes without saying so.
+            //
+            // ⚠️ The bound must match `clearCanvas`'s own CONSEQUENCE clause exactly, and it is
+            // NARROWER than "this session" (cold-read finding): `undoStack.removeAll()` lives in
+            // `load(from:)`, which `acceptsDiskReload` skips only while the canvas is DIRTY — and
+            // the next clause here invites the user to end that by saving. Save, then leave and
+            // return to the canvas (the run auto-flip to Execution does exactly this), and the
+            // reload runs and the stack is gone. Saying "during this session" would promise a
+            // recovery the very next remount revokes.
+            Text("This removes every node, connection and sticky note from the canvas. Nothing is written to disk until you save, and Undo (⌘Z) brings them back — until you save and then leave the canvas, or quit.")
         }
         // ⚠️ Confirmation is not ceremony here. Everything up to this point is NON-destructive: the
         // original bytes survive precisely because writes are refused. This button is the only thing
@@ -486,6 +550,12 @@ struct WorkflowCanvasView: View {
             )
         }
         .onChange(of: canvasState.targetConfigNode) { _, node in
+            // ⚠️ COMMIT BEFORE EITHER BRANCH (Phase 2, option C). Both are close routes that bypass
+            // Done: nil means the open node vanished (deleted, canvas cleared); non-nil means a
+            // SECOND node's inspector is superseding the first, whose buffered profile edits would
+            // otherwise be discarded with its hosting view. Done/Cancel cleared the hook already,
+            // so this is a no-op on their closes.
+            NodeInspectorPendingCommit.shared.commitAndClear()
             if let node = node {
                 showInspectorPanel(for: node)
             } else {
@@ -515,14 +585,23 @@ struct WorkflowCanvasView: View {
     /// `NodeInspectorPanelManager.close()`'s own doc comment records what deferring a shared-state
     /// clear cost last time — an undismissable window.
     private func dismissInspectorForTeardown() {
+        // ⚠️ COMMIT FIRST (Phase 2, option C), while the hosting view's state is still alive. This
+        // is the route the Run auto-flip takes — the single most ordinary way a user used to lose
+        // freshly typed instructions — and the "Manage Library…" navigation, and a profile switch.
+        NodeInspectorPendingCommit.shared.commitAndClear()
         let panelWasOnScreen = NodeInspectorPanelManager.shared.isPresented
         NodeInspectorPanelManager.shared.close(firingCallback: false)
         canvasState.canvasDidDisappear(panelWasOnScreen: panelWasOnScreen)
     }
 
     private func showInspectorPanel(for node: WorkflowNode) {
+        // [INS-4] PER KIND, from `WorkflowNodeKind.inspectorMinimumSize` — the same table the
+        // inspector views' own root frames read. One shared 800×520 was passed for all five while
+        // Router declares 680, Action 620, Gate 560 and Profile 540, so the content was laid out
+        // taller than its host window and the clipped strip is the header carrying Cancel and Save.
+        let inspectorMinimum = node.kind.inspectorMinimumSize
         NodeInspectorPanelManager.shared.show(
-            minSize: NSSize(width: 800, height: 520),
+            minSize: NSSize(width: inspectorMinimum.width, height: inspectorMinimum.height),
             theme: theme,
             onClose: { canvasState.targetConfigNode = nil }
         ) {
@@ -536,12 +615,15 @@ struct WorkflowCanvasView: View {
             case .action:
                 ActionNodeInspectorView(
                     node: bindingForNode(node.id),
-                    availableVariables: canvasState.knownVariableNames
+                    availableVariables: canvasState.knownVariableNames,
+                    inheritedRetryDefault: inheritedRetryDefault
                 )
             case .profile:
                 ProfileNodeInspectorView(
                     node: bindingForNode(node.id),
-                    profile: profileService.profiles.first(where: { $0.id == node.profileID })
+                    profile: profileService.profiles.first(where: { $0.id == node.profileID }),
+                    inheritedRetryDefault: inheritedRetryDefault,
+                    endCoalescingRun: { canvasState.endUndoCoalescingRun() }
                 )
                 .environment(profileService)
                 .environment(toastManager)
@@ -595,9 +677,13 @@ struct WorkflowCanvasView: View {
             // Layer 2: Drag Preview Edge (port-aware)
             if let drag = canvasState.edgeDragState,
                let sourcePos = canvasState.outputPortPosition(for: drag.sourceNodeID, portLabel: drag.sourcePortLabel) {
+                let dragColor = canvasState.nodes.first(where: { $0.id == drag.sourceNodeID })?
+                    .kind.portColor(forLabel: drag.sourcePortLabel, in: theme)
+                    ?? (drag.sourcePortLabel == WorkflowEdge.errorPortLabel ? theme.errorColor : theme.accentColor)
                 WorkflowEdgeDragPreview(
                     sourcePoint: sourcePos,
-                    currentPoint: drag.currentPoint
+                    currentPoint: drag.currentPoint,
+                    color: dragColor
                 )
             }
 
@@ -676,6 +762,15 @@ struct WorkflowCanvasView: View {
                 // at exactly (phase − side), covering both phase signs, and ImagePaint anchors its
                 // tiling to that origin, which is what carries the pan phase.
                 .position(x: phaseX + size.width / 2, y: phaseY + size.height / 2)
+                // ⚠️ The grid must NEVER animate its phase (register CVC-9 cold read). Every other
+                // writer of `canvasOffset` is unanimated, so the grid and the content always jumped
+                // in lockstep — but `revealNode` is called inside `withAnimation`, and the phase is
+                // a MODULO of the offset. Over a 3000pt reveal the content would slide 3000pt while
+                // the grid, bounded by one tile, slid at most `side` — and across a wrap boundary it
+                // would animate the OPPOSITE way, so the graph would visibly skate across a
+                // near-stationary floor and snap into register at the end. Suppressing the animation
+                // here keeps the grid where it belongs: instantly in phase with the content.
+                .animation(nil, value: canvasState.canvasOffset)
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
         }
@@ -895,6 +990,19 @@ struct WorkflowCanvasView: View {
         // makes that unrenderable; recomputing here makes it correct rather than merely hidden.
         refreshUnreadableLayoutState()
 
+        // ⚠️ ABOVE the dirty guard, like the overlay refresh: the validator must resolve profiles
+        // for the DISPLAYED workflow whether or not the layout is reloaded, and a canvas that skips
+        // the reload still validates on every edit.
+        //
+        // A closure rather than a snapshot — see `profileLookup`'s note. `profileService` is
+        // app-scoped and outlives every canvas, so capturing it here cannot strand this state.
+        canvasState.profileLookup = { [profileService] in
+            Dictionary(
+                profileService.profiles.map { ($0.id, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+        }
+
         guard canvasState.acceptsDiskReload else {
             logger.info(
                 "[WF_CANVAS] Skipped reloading the layout for profile \(profile.id) — the canvas has "
@@ -905,13 +1013,87 @@ struct WorkflowCanvasView: View {
             return
         }
 
-        let layout = WorkflowLayoutStore.shared.load(for: profile.id)
-        // Set profile map BEFORE load — load() calls revalidate() which needs the map
-        canvasState.resolvedProfileMap = Dictionary(
-            profileService.profiles.map { ($0.id, $0) },
-            uniquingKeysWith: { first, _ in first }
+        let loaded = WorkflowLayoutStore.shared.loadWithOutcome(for: profile.id)
+        canvasState.load(from: loaded.layout)
+        // [CVV-9] Logged once per load, never from `body` — the placard decision itself is a
+        // per-frame render test and logging it there would spam at streaming frequency.
+        if loaded.layout.nodes.isEmpty && !loaded.layout.annotations.isEmpty {
+            logger.info(
+                "[WF_CANVAS] Profile \(profile.id) loaded with 0 nodes and "
+                + "\(loaded.layout.annotations.count) sticky note(s). CONSEQUENCE: the empty-canvas "
+                + "placard is suppressed so it cannot paint over the notes or swallow their clicks; "
+                + "the toolbar's Add Node pill remains the way to add the first node."
+            )
+        }
+        if loaded.didFail {
+            // ⚠️ The canvas now shows an empty graph that may not be empty. Recording it is what
+            // stops the next save from overwriting the real one and collecting every owned row.
+            canvasState.markLoadFailed()
+        }
+    }
+
+    /// Creates a node backed by a BRAND-NEW private profile row.
+    ///
+    /// ⚠️ The node id is minted HERE, before the row, because the row stores `ownerNodeID`. Saving
+    /// the row first and the node second also means a failed save leaves no node pointing at
+    /// nothing — the canvas is simply unchanged.
+    private func addFreshNode(type: ProfileType, name: String) {
+        let nodeID = UUID()
+        // Cheap synchronous read of an already-scanned list. Empty is fine and expected on a machine
+        // with no local models — see `freshProfile`'s note on why that must still create the node.
+        let defaultModel = MLXModelService.shared.installedModels.first?.displayName ?? ""
+        let owned = WorkflowNodeProfileFactory.freshProfile(
+            type: type,
+            name: name,
+            workflowID: profile.id,
+            nodeID: nodeID,
+            defaultMLXModelName: defaultModel
         )
-        canvasState.load(from: layout)
+        persistOwnedProfile(owned, nodeID: nodeID, origin: "fresh \(type.rawValue)")
+    }
+
+    /// Creates a node backed by a one-time COPY of an existing profile.
+    ///
+    /// ⚠️ A sub-workflow node is the exception and stays a REFERENCE: it points at another
+    /// workflow's canvas, which lives in its own layout row. Copying would fork that canvas
+    /// invisibly, so edits to the child would stop reaching parents that "imported" it.
+    private func addImportedNode(from source: BackendProfileModel) {
+        guard source.profileType != .workflow else {
+            logger.info("[WF_CANVAS] Sub-workflow node for '\(source.displayName)' (\(source.id)) added as a REFERENCE, not a copy — its steps live on that workflow's own canvas. CONSEQUENCE: edits to that workflow are seen here, which is the intent for nesting.")
+            canvasState.addNode(from: source)
+            return
+        }
+
+        let nodeID = UUID()
+        let owned = WorkflowNodeProfileFactory.importedProfile(
+            from: source,
+            workflowID: profile.id,
+            nodeID: nodeID
+        )
+        persistOwnedProfile(owned, nodeID: nodeID, origin: "imported from \(source.id)")
+    }
+
+    /// Saves an owned row, then adds the node that owns it.
+    ///
+    /// ⚠️ ORDER MATTERS. The row must exist before the node references it: the executor resolves
+    /// every node's profile up front and refuses the whole run if one is missing, so a node added
+    /// against an unsaved row would block the workflow rather than degrade.
+    private func persistOwnedProfile(_ owned: BackendProfileModel, nodeID: UUID, origin: String) {
+        do {
+            // ⚠️ Validation is LENIENT on insert by design, so a fresh node with no model selected
+            // is created and then flagged on the canvas — rather than being unaddable.
+            try profileService.saveProfile(owned)
+        } catch {
+            logger.error(
+                "[WF_CANVAS] Could NOT create the private profile row for a new node on workflow "
+                + "\(profile.id) (\(origin)): \(error.localizedDescription). CONSEQUENCE: no node is "
+                + "added and the canvas is unchanged — adding one anyway would point it at a row "
+                + "that does not exist, which the executor refuses the entire run over."
+            )
+            return
+        }
+        logger.info("[WF_CANVAS] Added node \(nodeID.uuidString.prefix(8)) on workflow \(profile.id) backed by its OWN profile row \(owned.id.uuidString.prefix(8)) (\(origin)). CONSEQUENCE: the node's settings are scoped to this workflow — editing it changes nothing in the shared profile library.")
+        canvasState.addNode(from: owned, nodeID: nodeID)
     }
 
     /// Re-derives the unreadable-canvas overlay for the DISPLAYED profile.
@@ -1030,8 +1212,11 @@ struct WorkflowCanvasView: View {
         // Two bugs lived here. The layout write is refused when the stored canvas is unreadable, and
         // this method (a) ignored the outcome and (b) called `markSaved()` unconditionally at the
         // end — so the dirty indicator CLEARED and the user was actively told their edit was saved
-        // when it had been discarded. Worse, the `agentProfileIDs` write below still went through,
-        // leaving the profile's agent list describing a canvas that was never persisted.
+        // when it had been discarded. Worse, the profile write that used to follow still went
+        // through, leaving the profile's (then-maintained) agent list describing a canvas that was
+        // never persisted. That list is retired, but the guard matters MORE now, not less: the
+        // owned-row reconcile below deletes node configuration, and must only ever run against a
+        // layout that actually reached disk.
         // A layout saved by a NEWER build is read-only here (WF-PE2): re-encoding on this build
         // would permanently strip every field it does not understand. Distinct from the corruption
         // overlay on purpose — nothing is broken, and steering the user toward the destructive
@@ -1045,7 +1230,7 @@ struct WorkflowCanvasView: View {
             logger.error(
                 "[PERSISTENCE] Canvas edit NOT saved for profile \(profile.id) — the stored layout is "
                 + "from a newer build, so the write was refused. CONSEQUENCE: the unsaved-changes "
-                + "indicator stays LIT, agentProfileIDs is not updated, and the on-canvas notice "
+                + "indicator stays LIT, the workflow profile is not re-saved, and the on-canvas notice "
                 + "tells the user to update the app."
             )
             return
@@ -1058,7 +1243,7 @@ struct WorkflowCanvasView: View {
             logger.error(
                 "[PERSISTENCE] Canvas edit NOT saved for profile \(profile.id) — the stored layout is "
                 + "unreadable so the write was refused. CONSEQUENCE: the unsaved-changes indicator is "
-                + "left LIT and the overlay now tells the user; agentProfileIDs is deliberately not "
+                + "left LIT and the overlay now tells the user; the workflow profile is deliberately not "
                 + "updated either, so the profile does not describe a canvas that was never written."
             )
             return
@@ -1066,8 +1251,9 @@ struct WorkflowCanvasView: View {
 
         // [WF-PE3] The remaining two non-persisting outcomes — `.failed` (the context save threw:
         // disk full, SwiftData error) and `.notConfigured` (no container) — used to FALL THROUGH
-        // here: the profile was rewritten with `agentProfileIDs` recomputed from an in-memory
-        // graph that never reached disk, and the user saw no error at all — just the dirty
+        // here: the profile was rewritten from an in-memory graph that never reached disk (with
+        // the since-retired `agentProfileIDs` recomputed from it), and the user saw no error at
+        // all — just the dirty
         // indicator staying lit, indistinguishable from the app being slow. The store now
         // guarantees `.failed` means "not on disk AND nothing left pending on the shared context"
         // (see `WorkflowLayoutStore.save`'s rollback), so bailing here is sufficient: nothing
@@ -1082,9 +1268,9 @@ struct WorkflowCanvasView: View {
             }
             logger.error(
                 "[PERSISTENCE] Canvas edit NOT saved for profile \(profile.id) — \(reason). "
-                + "CONSEQUENCE: the unsaved-changes indicator stays LIT, agentProfileIDs is not "
-                + "rewritten (the profile must not describe a graph that never reached disk), and "
-                + "the user sees an error toast. The edits remain in memory for another attempt."
+                + "CONSEQUENCE: the unsaved-changes indicator stays LIT, no owned-row reconcile "
+                + "runs (it must never collect against a graph that never reached disk), and the "
+                + "user sees an error toast. The edits remain in memory for another attempt."
             )
             toastManager.show(
                 String(localized: "Couldn't save the workflow — \(reason). Your edits are still here; try saving again."),
@@ -1104,58 +1290,81 @@ struct WorkflowCanvasView: View {
             newerVersionNotice = nil
         }
 
-        // Sync the agents array in ProfileDetails while preserving execution config
-        let referencedProfiles = profileService.profiles.filter { p in
-            layout.nodes.contains(where: { $0.profileID == p.id })
-        }
-        let referencedIDs = referencedProfiles.map(\.id)
-        if case .workflow(var existingConfig) = profile.details {
-            existingConfig.agentProfileIDs = referencedIDs
-            profile.details = .workflow(existingConfig)
+        // ⚠️ SUCCESS PATH ONLY — every non-persisting outcome returned above. `liveNodeIDs` is
+        // taken from the layout that just reached DISK, never from the in-memory canvas: this
+        // deletes configuration, so it must reconcile against what was actually written.
+        //
+        // Collecting here rather than on node delete is what keeps Undo safe — while a node
+        // deletion is still undoable it has not been saved, so its row is untouched.
+        // ⚠️ REFUSED after a failed READ. `didPersist` above proves the write landed; it says
+        // nothing about whether the graph we just wrote was the real one. A transient fetch failure
+        // renders a blank, clean canvas, and reconciling against it would collect every node
+        // configuration for this workflow plus their credentials.
+        if canvasState.lastLoadDidFail {
+            logger.error("[WF_CANVAS] Owned-row reconcile REFUSED for workflow \(profile.id): this canvas was loaded from a failed read, so its node set cannot be trusted as complete. CONSEQUENCE: rows for genuinely deleted nodes are left on disk this save — collected on the next save after a successful load — rather than risking deletion of configurations whose nodes still exist.")
         } else {
-            profile.details = .workflow(WorkflowConfig(agentProfileIDs: referencedIDs))
+        profileService.reconcileOwnedProfiles(
+            forWorkflow: profile.id,
+            // ⚠️ UNION WITH THE UNDO STACK. Saving does not clear it, so a node deleted and saved
+            // is still one ⌘Z from returning — collecting its row here would destroy configuration
+            // the user can still ask for back. See `undoRecoverableProfileIDs`.
+            referencedProfileIDs: Set(layout.nodes.compactMap(\.profileID))
+                .union(canvasState.undoRecoverableProfileIDs)
+        )
         }
+
+        // ⚠️ NO `agentProfileIDs` SYNC ANY MORE (2026-08-29). This used to recompute the workflow
+        // profile's parallel list of referenced agent ids from the layout. The field is retired:
+        // a workflow's nodes own their configuration, so the LAYOUT is the only record of what a
+        // workflow contains — which `ProfileReferenceIndex` and `WorkflowExecutor` already read
+        // directly, and which the composer's node count now reads too.
+        //
+        // ⚠️ The save itself STAYS, but ONLY WHEN THE PROFILE ACTUALLY CHANGED. In the profile
+        // editor this `profile` binding IS `editBuffer.draft`, so this write is how a workflow's own
+        // edits (its name, its execution settings) reach disk — and `rebaseEditBuffer` is what stops
+        // a just-saved workflow from being reported as permanently dirty.
+        //
+        // ⚠️ THE GUARD IS NOT AN OPTIMISATION. Until 2026-08-30 this saved unconditionally, and once
+        // the `agentProfileIDs` sync was retired there was usually nothing left to write — an
+        // on-device pass logged FIVE `[PROFILE_SAVE] ⚠️ REDUNDANT` lines for one short session. Each
+        // costs a write, a WAL entry, and a `lastSelected` bump, and that bump REORDERS the user's
+        // "recently used" list: editing a canvas silently promoted its workflow to the top of every
+        // profile picker. The store detects and logs the redundancy but still performs the write —
+        // not calling it is the only thing that prevents the reorder.
+        //
+        // Compares the same three fields `BackendProfileStore.saveProfile` uses for its own
+        // `unchanged` test, deliberately excluding `lastSelected` (it differs on every fetch).
+        let persisted = profileService.profiles.first { $0.id == profile.id }
+        let profileNeedsWrite = persisted.map {
+            $0.displayName != profile.displayName
+                || $0.details != profile.details
+                || $0.fileContextStrategy != profile.fileContextStrategy
+        } ?? true
+
+        guard profileNeedsWrite else {
+            logger.debug("[WF_CANVAS] Workflow \(profile.id) profile record unchanged after the layout save — no write. CONSEQUENCE: its position in \"recently used\" is preserved, which an unconditional save would have disturbed on every canvas edit.")
+            canvasState.markSaved()
+            return
+        }
+
         do {
             try profileService.saveProfile(profile)
-            // ⚠️ The profile editor binds `profile` straight to `editBuffer.draft`, so this write
-            // IS the draft going to disk — but nothing re-baselined `original`, leaving a
-            // just-saved workflow permanently dirty. Switching profiles then demanded "discard
-            // unsaved changes?" for work that had been saved seconds earlier, and the canvas has
-            // no Save/Revert pill that could clear it: the only exits were a phantom discard or a
-            // relaunch. No-ops when the canvas is hosted outside the editor.
             profileService.rebaseEditBuffer(to: profile)
         } catch {
-            // [WF-PE3 revalidation] This swallow used to hide BOTH arms. Split, because they are
-            // different sentences:
-            //  - An EMPTY `referencedIDs` (a canvas of only Router/Code/Gate nodes) is REFUSED by
-            //    `ProfileValidator`'s blocking empty-list rule on every update — routine for a
-            //    legitimate mid-construction canvas, so no toast: the layout DID persist, only the
-            //    agent-list sync is skipped, and it self-heals on the first save after a profile
-            //    node is added. (Whether the validator SHOULD block an empty list is register B36's
-            //    territory, not this fix's.)
-            //  - Anything else is a real failure worth telling the user about: the canvas is on
-            //    disk but the profile record now lags it.
-            if referencedIDs.isEmpty {
-                logger.notice(
-                    "[WF_CANVAS] Profile sync SKIPPED for workflow \(profile.id): the canvas "
-                    + "references no agent profiles and the validator blocks an empty "
-                    + "agentProfileIDs on update (\(error.localizedDescription)). CONSEQUENCE: the "
-                    + "LAYOUT is saved; the profile's agent list keeps its previous value until a "
-                    + "profile node is added and the next save syncs it."
-                )
-            } else {
-                logger.error(
-                    "[WF_CANVAS] Workflow profile record NOT updated for \(profile.id) after a "
-                    + "successful layout save: \(error.localizedDescription). CONSEQUENCE: the "
-                    + "canvas is on disk but agentProfileIDs still describes the previous graph "
-                    + "until a later save succeeds; the user is told via toast."
-                )
-                toastManager.show(
-                    String(localized: "The workflow canvas was saved, but its profile record couldn't be updated — \(error.localizedDescription)"),
-                    style: .warning,
-                    duration: 5.0
-                )
-            }
+            // The empty-list arm this used to carry is gone with the validator rule that caused it:
+            // a canvas of only Router/Code/Gate nodes is no longer a refused save, it is just a
+            // canvas. Anything reaching here now is a genuine failure worth telling the user about.
+            logger.error(
+                "[WF_CANVAS] Workflow profile record NOT updated for \(profile.id) after a "
+                + "successful layout save: \(error.localizedDescription). CONSEQUENCE: the canvas "
+                + "is on disk, but edits to the workflow's own name or execution settings are not; "
+                + "the user is told via toast."
+            )
+            toastManager.show(
+                String(localized: "The workflow canvas was saved, but its profile record couldn't be updated — \(error.localizedDescription)"),
+                style: .warning,
+                duration: 5.0
+            )
         }
 
         // Unconditional by construction: every non-persisting outcome returned above — the two

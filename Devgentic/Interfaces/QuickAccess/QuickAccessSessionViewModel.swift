@@ -128,7 +128,7 @@ final class QuickAccessSessionViewModel {
         }
         // 3. First bot, then first agent — needs the full list, only reached on first run or when
         //    neither a remembered nor a selected chat profile resolves.
-        let profiles = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
+        let profiles = (try? BackendProfileStore.shared.fetchSharedProfiles()) ?? []
         return profiles.first(where: { $0.profileType == .bot })?.id
             ?? profiles.first(where: { $0.profileType == .agent })?.id
     }

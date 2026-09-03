@@ -32,6 +32,22 @@ struct WorkflowDedicatedView: View {
     @Environment(\.appTheme) private var theme
     @State private var viewMode: ViewMode = .execution
     @State private var selectedHistoricalRunID: UUID?
+
+    /// [XUI-11] The selected run's node traces, re-read from the store because the in-memory
+    /// mirror drops them. Cached here because `displayData` is read during `body` and cannot await.
+    ///
+    /// ⚠️ TRACES ONLY, never the whole record, and that is not a detail. Preferring a re-read
+    /// RECORD over the listed one lets a stale disk row replace an authoritative in-memory one: the
+    /// mirror is written SYNCHRONOUSLY at finalize while the disk write is a fire-and-forget task
+    /// that first awaits an off-main encode, so inside that window the row is still the `.running`
+    /// stub — zero nodes, no output — and a completed run would render as running. `apply` also
+    /// deliberately keeps the PREVIOUS blob when an encode is refused, which makes that shape
+    /// permanent rather than transient. Grafting only the timelines removes the entire class.
+    ///
+    /// It rides the `liveTimelines` parameter `WorkflowRunDisplayData.from(record:)` already takes
+    /// for exactly this job (`liveTimelines?[snapshot.nodeID] ?? snapshot.nodeTimeline ?? []`), so
+    /// there is no second merge rule to keep in step with the first.
+    @State private var hydratedTimelines: (runID: UUID, timelines: [UUID: [TimelineEvent]])?
     @State private var selectedNodeID: UUID?
     /// While true, the selection auto-follows the currently running node. A tap on any non-running
     /// node pins the selection (sets this false); each new run (or conversation switch) re-enables it.
@@ -161,13 +177,74 @@ struct WorkflowDedicatedView: View {
         // can render the agent's reasoning + tool calls. Once `executionState`
         // is cleared (back button, conversation switch, app restart), this
         // falls through to `nil` and only the static output remains.
-        let liveTimelines: [UUID: [TimelineEvent]]? = {
-            guard let state = executionState, state.runRecordID == record.id else { return nil }
-            return state.nodeTimelines
-        }()
+        // [XUI-11/XUI-15] Live memory first, then the traces re-read from the store for this run,
+        // then whatever the snapshot still carries. The listed record stays the source of truth for
+        // every other field.
+        let liveTimelines: [UUID: [TimelineEvent]]? =
+            liveTimelines(forRun: record.id) ??
+            (hydratedTimelines?.runID == record.id ? hydratedTimelines?.timelines : nil)
         // Pass the current layout so the adapter can resolve node kinds and hide
         // the Timeline tab for single-shot nodes (bots etc.).
         return .from(record: record, liveTimelines: liveTimelines, layout: cachedLayout)
+    }
+
+    /// The live state's traces for a run, or nil when it does not have them.
+    ///
+    /// ⚠️ ONE resolver, read by `displayData` AND by the hydration trigger, so the two cannot
+    /// disagree about whether a re-read is needed. ⚠️ The `!isEmpty` test is load-bearing (register
+    /// XUI-15): a settled run whose timelines were dropped still OWNS the live slot, and returning
+    /// its empty map here would SHADOW the hydrated one — `from(record:)` reads
+    /// `liveTimelines?[nodeID] ?? snapshot.nodeTimeline ?? []`, so an empty-but-non-nil map wins
+    /// the `??` and every node renders with no trace.
+    private func liveTimelines(forRun runID: UUID) -> [UUID: [TimelineEvent]]? {
+        guard let state = executionState, state.runRecordID == runID,
+              !state.nodeTimelines.isEmpty else { return nil }
+        return state.nodeTimelines
+    }
+
+    /// [XUI-11] Re-reads the selected run's node traces when the mirror no longer has them.
+    ///
+    /// ⚠️ DRIVEN FROM TWO EDGES, and one of them is not obvious. The predicate depends on
+    /// `executionState`, not only on the selection: a run selected WHILE it was the live one
+    /// correctly skips hydration, because its traces are being served from
+    /// `WorkflowExecutionState`. When the next run then takes that slot, the selection has not
+    /// changed — so a selection-only trigger left the previous run's Timeline tabs permanently
+    /// EMPTY, with no log and no retry, for a trace that rendered fine before this row's fix.
+    /// `.onChange(of: executionState?.runRecordID)` closes it; the predicate is cheap and
+    /// idempotent, so re-asking on that edge costs one comparison.
+    ///
+    /// ⚠️ The live-state slot is replaced by `WorkflowRunBootstrap.begin`, and the new state's
+    /// `isRunning` stays false until its first node dispatches — so the existing
+    /// `.onChange(of: executionState?.isRunning)` observer does NOT fire on that transition and
+    /// cannot be reused for this.
+    private func hydrateTracesIfNeeded(for runID: UUID?) {
+        guard let runID, let listed = runHistory.first(where: { $0.id == runID }),
+              WorkflowRunRecord.needsTraceHydration(
+                  listed, liveTimelinesAvailable: liveTimelines(forRun: runID) != nil)
+        else { return }
+
+        Task { @MainActor in
+            guard let full = await WorkflowRunHistoryStore.shared.loadRecord(id: runID) else {
+                logger.notice("[WORKFLOW] Trace re-read for run \(runID) found no stored row — evicted by the per-conversation window, or its conversation was deleted. CONSEQUENCE: this run's per-node Timeline tabs render empty, which looks identical to a run that never recorded one; its output, status and node list are unaffected.")
+                return
+            }
+            // The user may have moved on during the read; never show one run's trace against
+            // another.
+            guard selectedHistoricalRunID == runID else { return }
+            let timelines = Dictionary(
+                full.nodeResults.compactMap { snapshot in
+                    snapshot.nodeTimeline.map { (snapshot.nodeID, $0) }
+                },
+                uniquingKeysWith: { _, latest in latest }
+            )
+            guard !timelines.isEmpty else { return }
+            // Animated because hydration does not merely lengthen the panel: `bodyIsDuplicated`
+            // and the legacy `nodeRanBeforeSkip` both read timeline PRESENCE, so arriving events
+            // can retract an error paragraph or swap a "Not run" line for a full trace.
+            withAnimation(.easeInOut(duration: 0.15)) {
+                hydratedTimelines = (runID: runID, timelines: timelines)
+            }
+        }
     }
 
     /// Auto-selects the in-flight run's record when it exists but nothing is
@@ -186,8 +263,13 @@ struct WorkflowDedicatedView: View {
         selectedHistoricalRunID = recordID
     }
 
-    /// Index of the historical run currently being viewed (1-based, newest first),
-    /// for the "1/N" badge. Returns 0 when viewing live or when no history exists.
+    /// Index of the currently selected run in `runHistory` (1-based, newest first), for the
+    /// "1/N" badge; `nil` when nothing is selected or the id is not in this workflow's history.
+    ///
+    /// ⚠️ The LIVE run resolves too — its `.running` stub is inserted into `runHistory` at index
+    /// 0 before the stream starts — so this alone cannot distinguish live from archive. The badge
+    /// precedence that decides which wins lives in `Self.runBadge` (register XUI-3; the previous
+    /// doc's "Returns 0 when viewing live" was false on both counts).
     private var historicalRunPosition: (index: Int, total: Int)? {
         guard let id = selectedHistoricalRunID,
               let idx = runHistory.firstIndex(where: { $0.id == id }) else {
@@ -358,7 +440,18 @@ struct WorkflowDedicatedView: View {
                 selectedNodeID = newRunning
             }
         }
+        .onChange(of: executionState?.runRecordID) { _, _ in
+            // [XUI-11] The live binding moved on — a run whose traces were being served from
+            // memory now has none. See `hydrateTracesIfNeeded` for why the `isRunning` observer
+            // above cannot cover this.
+            hydrateTracesIfNeeded(for: selectedHistoricalRunID)
+        }
         .onChange(of: selectedHistoricalRunID) { _, newID in
+            // [XUI-11] Drop the previous run's traces FIRST — keeping them resident for the life of
+            // the view is the residency this row is about.
+            hydratedTimelines = nil
+            hydrateTracesIfNeeded(for: newID)
+
             // Opening a FAILED historical run auto-focuses the first genuinely-failed
             // node — the debugging evidence — instead of the Final Outcome. Skips the
             // "Upstream dependency failed" cascade to land on the node that actually
@@ -566,10 +659,42 @@ struct WorkflowDedicatedView: View {
         }
     }
 
+    /// What the run-position badge shows (register XUI-3). `nonisolated static` and pure — the
+    /// `finalOutcomeTagLabel` shape — because the PRECEDENCE is the defect surface: the live
+    /// run's `.running` stub sits in `runHistory`, so `historicalRunPosition` resolves while
+    /// live and a position-first check made the "Live" badge unreachable dead code — a live run
+    /// wore "1/N" like any archive row. Liveness wins.
+    enum RunPickerBadge: Equatable {
+        case live
+        case position(index: Int, total: Int)
+        case none
+    }
+
+    nonisolated static func runBadge(isLive: Bool, position: (index: Int, total: Int)?) -> RunPickerBadge {
+        if isLive { return .live }
+        if let position { return .position(index: position.index, total: position.total) }
+        return .none
+    }
+
+    /// Whether the picker offers the "Live Run" item (register XUI-3): only while a run is
+    /// actually in flight FOR THIS WORKFLOW, and not while it is already on screen. The item used
+    /// to render whenever ANY selection existed — including with nothing running, where pressing
+    /// it dumped the user into the history list under a label promising a live run.
+    ///
+    /// ⚠️ `liveRunInFlight` must be derived with the PROFILE conjunct (cold-read finding,
+    /// 2026-08-31): `executionState` is CONVERSATION-scoped while this whole view is
+    /// PROFILE-scoped (`runHistory` filters by `workflowProfileID`), so "something is running in
+    /// this conversation" alone advertised workflow A's live run inside workflow B's picker —
+    /// and selecting it dead-ended, because A's record id cannot resolve in B's filtered history.
+    nonisolated static func showsLiveRunItem(liveRunInFlight: Bool, viewingLive: Bool) -> Bool {
+        liveRunInFlight && !viewingLive
+    }
+
     @ViewBuilder
     private func runPositionBadge(data: WorkflowRunDisplayData) -> some View {
-        if let pos = historicalRunPosition {
-            Text("\(pos.index)/\(pos.total)")
+        switch Self.runBadge(isLive: data.isLive, position: historicalRunPosition) {
+        case .position(let index, let total):
+            Text("\(index)/\(total)")
                 .font(.system(size: 11, weight: .semibold, design: .monospaced))
                 .foregroundColor(theme.secondaryText)
                 .padding(.horizontal, 8)
@@ -577,32 +702,61 @@ struct WorkflowDedicatedView: View {
                 .background(Capsule().fill(theme.surfaceOverlay))
                 // VoiceOver reads "1/5" literally, as "one slash five". The badge stays
                 // terse on screen; only what's spoken changes.
-                .accessibilityLabel("Viewing run \(pos.index) of \(pos.total)")
-        } else if data.isLive && !runHistory.isEmpty {
+                .accessibilityLabel("Viewing run \(index) of \(total)")
+        case .live:
             Text("Live")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(theme.successColor)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(Capsule().fill(theme.successColor.opacity(0.12)))
+        case .none:
+            EmptyView()
         }
     }
 
     // MARK: - Run Picker Menu
 
     private var runPickerMenu: some View {
-        Menu {
-            if displayData?.isLive == true || selectedHistoricalRunID != nil {
+        let showsLiveItem = Self.showsLiveRunItem(
+            // The profile conjunct is load-bearing — see `showsLiveRunItem`'s doc.
+            liveRunInFlight: executionState?.isRunning == true
+                && executionState?.runRecordID != nil
+                && executionState?.workflowProfileID == workflowProfileID,
+            viewingLive: displayData?.isLive == true
+        )
+        return Menu {
+            // XUI-3: this item is a JUMP BACK TO THE LIVE RUN, and it used to do the opposite —
+            // `selectedHistoricalRunID = nil` makes `displayData` nil, which drops the user into
+            // the run-history list mid-run with the whole title bar (this picker included) gone,
+            // and nothing re-selects the live run. The live run is ADDRESSED through its record
+            // id (the `.running` stub's — see `displayData`'s doc), so returning to it means
+            // selecting that id, and following the running node again is the point of returning.
+            // "Back to the list" is the title bar's back button, not this item.
+            if showsLiveItem {
                 Button {
-                    selectedHistoricalRunID = nil
-                    selectedNodeID = nil
+                    // ⚠️ The containment guard re-checks at CLICK time what the gate checked at
+                    // render time — a Menu can sit open across a profile switch or the run
+                    // finishing, and assigning an id this view's filtered `runHistory` cannot
+                    // resolve makes `displayData` nil: the history-list dump this item exists to
+                    // prevent.
+                    if let liveID = executionState?.runRecordID,
+                       runHistory.contains(where: { $0.id == liveID }) {
+                        selectedHistoricalRunID = liveID
+                        // Land ON the streaming node, not the Final Outcome row —
+                        // `selectedNodeID = nil` SELECTS that bottom row and scrolls past the
+                        // node that is actually executing, and the follow observer only fires on
+                        // the NEXT node transition. Same shape as the run-start auto-select.
+                        selectedNodeID = currentRunningNodeID
+                        followRunningNode = true
+                    }
                 } label: {
                     Label("Live Run", systemImage: "circle.fill")
                 }
             }
 
             if !runHistory.isEmpty {
-                Divider()
+                if showsLiveItem { Divider() }
 
                 ForEach(runHistory) { record in
                     Button {
@@ -638,7 +792,10 @@ struct WorkflowDedicatedView: View {
                 Image(systemName: "clock.arrow.circlepath")
                     .font(.system(size: 11))
                     .accessibilityHidden(true)
-                Text(selectedHistoricalRunID == nil ? "Live" : "History")
+                // XUI-3: state word from the SELECTION's liveness, not from nil-ness — the live
+                // run is addressed via a non-nil `selectedHistoricalRunID`, so the nil test said
+                // "History" while the live run was on screen and "Live" while nothing ran.
+                Text(displayData?.isLive == true ? "Live" : "History")
                     .font(.system(size: 11, weight: .medium))
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8))
@@ -652,8 +809,9 @@ struct WorkflowDedicatedView: View {
             )
         }
         // "Live" alone doesn't say what the control DOES, and the label has to carry that
-        // — the visible text is one word of state, not a name.
-        .accessibilityLabel(selectedHistoricalRunID == nil
+        // — the visible text is one word of state, not a name. Same liveness source as the
+        // visible word (XUI-3): the two used to disagree with the screen in the same direction.
+        .accessibilityLabel(displayData?.isLive == true
                             ? "Run picker, showing the live run"
                             : "Run picker, showing a past run")
     }

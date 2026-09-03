@@ -43,123 +43,145 @@ struct StickyNoteView: View {
         canvasState.nodeDragOffset(for: note.id) // It's mapped in the same dictionary for unified drag logic
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // --- Header bar with drag handle and colors ---
-            HStack(spacing: 4) {
-                // Dim down the standard drag handle unless hovered
-                Image(systemName: "line.3.horizontal")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(note.color.swiftUIColor.opacity(0.6))
-                    .opacity(isHovering || isSelected ? 1 : 0)
+    // MARK: - Subviews
 
-                Spacer()
+    @ViewBuilder
+    private var headerBar: some View {
+        HStack(spacing: 4) {
+            // Dim down the standard drag handle unless hovered
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(note.color.swiftUIColor.opacity(0.6))
+                .opacity(isHovering || isSelected ? 1 : 0)
 
-                // Color picker
-                if isHovering || isSelected {
-                    HStack(spacing: 4) {
-                        ForEach(StickyNoteColor.allCases, id: \.self) { color in
-                            Circle()
-                                .fill(color.swiftUIColor)
-                                .frame(width: 10, height: 10)
-                                .overlay(
-                                    Circle().stroke(Color.white.opacity(color == note.color ? 0.9 : 0.2), lineWidth: 1.5)
-                                )
-                                .onTapGesture {
-                                    canvasState.updateStickyNoteColor(note.id, color: color)
-                                }
-                        }
+            Spacer()
+
+            // Color picker
+            if isHovering || isSelected {
+                HStack(spacing: 4) {
+                    ForEach(StickyNoteColor.allCases, id: \.self) { color in
+                        Circle()
+                            .fill(color.swiftUIColor)
+                            .frame(width: 10, height: 10)
+                            .overlay(
+                                Circle().stroke(Color.white.opacity(color == note.color ? 0.9 : 0.2), lineWidth: 1.5)
+                            )
+                            .onTapGesture {
+                                canvasState.updateStickyNoteColor(note.id, color: color)
+                            }
                     }
-                    // Small offset to not clash with the dog-ear fold on the right
-                    .padding(.trailing, 16)
                 }
-            }
-            .padding(.horizontal, 8)
-            .padding(.top, 6)
-            .padding(.bottom, 2)
-            // Header is draggable 
-            .contentShape(Rectangle())
-
-            // --- Text content ---
-            if isEditing {
-                TextEditor(text: $editText)
-                    .focused($isTextFocused)
-                    .onAppear { isTextFocused = true }
-                    .onChange(of: isTextFocused) { _, focused in
-                        // Clicking away is a commit, not a discard.
-                        if !focused && isEditing { commitText() }
-                    }
-                    .font(.system(size: 13, weight: .regular, design: .rounded))
-                    .scrollContentBackground(.hidden)
-                    .background(Color.clear)
-                    .foregroundColor(theme.primaryText)
-                    .padding(.horizontal, 6)
-                    .padding(.bottom, 6)
-                    .onSubmit {
-                        commitText()
-                    }
-            } else {
-                // ⚠️ `String(localized:)` on the placeholder (WF-CU8 class). The `note.text` branch
-                // types the whole ternary as `String`, which binds `Text`'s verbatim init — so this
-                // literal never reached the String Catalog and would have shipped untranslated.
-                // Visible wording is byte-identical, and it stays ONE `Text(_: String)` call, so no
-                // view identity changes.
-                Text(note.text.isEmpty ? String(localized: "Double-click to edit...") : note.text)
-                    .font(.system(size: 13, weight: .regular, design: .rounded))
-                    .foregroundColor(note.text.isEmpty ? theme.secondaryText.opacity(0.6) : theme.primaryText)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                // Small offset to not clash with the dog-ear fold on the right
+                .padding(.trailing, 16)
             }
         }
+        .padding(.horizontal, 8)
+        .padding(.top, 6)
+        .padding(.bottom, 2)
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private var textContent: some View {
+        if isEditing {
+            TextEditor(text: $editText)
+                .focused($isTextFocused)
+                .onAppear { isTextFocused = true }
+                .onChange(of: isTextFocused) { _, focused in
+                    // Clicking away is a commit, not a discard.
+                    if !focused && isEditing { commitText() }
+                }
+                .font(.system(size: 13, weight: .regular, design: .rounded))
+                .scrollContentBackground(.hidden)
+                .background(Color.clear)
+                .foregroundColor(theme.primaryText)
+                .padding(.horizontal, 6)
+                .padding(.bottom, 6)
+                .onSubmit {
+                    commitText()
+                }
+        } else {
+            // ⚠️ `String(localized:)` on the placeholder (WF-CU8 class). The `note.text` branch
+            // types the whole ternary as `String`, which binds `Text`'s verbatim init — so this
+            // literal never reached the String Catalog and would have shipped untranslated.
+            // Visible wording is byte-identical, and it stays ONE `Text(_: String)` call, so no
+            // view identity changes.
+            Text(note.text.isEmpty ? String(localized: "Double-click to edit...") : note.text)
+                .font(.system(size: 13, weight: .regular, design: .rounded))
+                .foregroundColor(note.text.isEmpty ? theme.secondaryText.opacity(0.6) : theme.primaryText)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+
+    @ViewBuilder
+    private var notePaperBackground: some View {
+        ZStack {
+            // Main paper body
+            StickyNoteShape()
+                .fill(note.color.swiftUIColor.opacity(0.2))
+            
+            // Dog-ear folded corner
+            StickyNoteFold()
+                .fill(note.color.swiftUIColor.opacity(0.35))
+                .shadow(color: Color.black.opacity(0.1), radius: 1, x: -1, y: 1)
+        }
+        .clipShape(StickyNoteShape())
+    }
+
+    @ViewBuilder
+    private var noteCardContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            headerBar
+            textContent
+        }
         .frame(width: currentSize.width, height: currentSize.height)
-        .background(
-            ZStack {
-                // Main paper body
-                StickyNoteShape()
-                    .fill(note.color.swiftUIColor.opacity(0.2))
-                
-                // Dog-ear folded corner
-                StickyNoteFold()
-                    .fill(note.color.swiftUIColor.opacity(0.35))
-                    .shadow(color: Color.black.opacity(0.1), radius: 1, x: -1, y: 1)
-            }
-            .clipShape(StickyNoteShape())
-        )
+        .background(notePaperBackground)
         .overlay(
             StickyNoteShape()
                 .stroke(
-                    isSelected ? theme.accentColor : note.color.swiftUIColor.opacity(0.5),
-                    lineWidth: isSelected ? 2 : 1
+                    isSelected ? theme.accentColor : note.color.swiftUIColor.opacity(0.4),
+                    lineWidth: isSelected ? 1.75 : 1.0
                 )
         )
-        .shadow(
-            color: note.color.swiftUIColor.opacity(isHovering ? 0.3 : 0.15),
-            radius: isHovering ? 6 : 3, x: 0, y: isHovering ? 4 : 2
-        )
-        .onTapGesture(count: 2) {
-            editText = note.text
-            isEditing = true
-        }
-        .onTapGesture {
-            if isEditing {
-                commitText()
-            } else {
-                canvasState.select(annotationID: note.id)
+    }
+
+    var body: some View {
+        noteCardContent
+            .shadow(
+                color: theme.shadowColor.opacity(isSelected ? 0.20 : (isHovering ? 0.12 : 0.06)),
+                radius: isSelected ? 8 : (isHovering ? 5 : 2.5),
+                x: 0, y: isSelected ? 4 : 2
+            )
+            .shadow(
+                color: isSelected ? theme.accentColor.opacity(0.16) : (isHovering ? note.color.swiftUIColor.opacity(0.15) : Color.clear),
+                radius: 6,
+                x: 0, y: 0
+            )
+            .onTapGesture(count: 2) {
+                editText = note.text
+                isEditing = true
             }
-        }
-        .gesture(isEditing ? nil : dragGesture)
-        .onHover { isHovering = $0 }
-        // Backstop for the unmount path, which no focus change accompanies: switching to the
-        // Execution view (a run does this automatically) tears this view down mid-edit.
-        .onDisappear { if isEditing { commitText() } }
-        
-        // --- Resize Handle ---
-        .overlay(alignment: .bottomTrailing) {
-            if isHovering || isSelected {
-                resizeHandle
+            .onTapGesture {
+                if isEditing {
+                    commitText()
+                } else {
+                    canvasState.select(annotationID: note.id)
+                }
             }
-        }
+            .gesture(isEditing ? nil : dragGesture)
+            .onHover { isHovering = $0 }
+            // Backstop for the unmount path, which no focus change accompanies: switching to the
+            // Execution view (a run does this automatically) tears this view down mid-edit.
+            .onDisappear { if isEditing { commitText() } }
+            
+            // --- Resize Handle ---
+            .overlay(alignment: .bottomTrailing) {
+                if isHovering || isSelected {
+                    resizeHandle
+                }
+            }
         
         // MARK: Accessibility (WF-CU7)
         //
@@ -252,9 +274,11 @@ struct StickyNoteView: View {
                 canvasState.activeNodeDrag = (nodeID: note.id, offset: value.translation)
             }
             .onEnded { value in
-                let newPos = CGPoint(
-                    x: max(0, note.position.x + value.translation.width),
-                    y: max(0, note.position.y + value.translation.height)
+                // Same unbounded rule as a node drag, through the same function — see
+                // `committedDragPosition` for why notes and nodes must not grow separate ones.
+                let newPos = WorkflowCanvasState.committedDragPosition(
+                    origin: note.position,
+                    translation: value.translation
                 )
                 canvasState.activeNodeDrag = nil
                 canvasState.moveStickyNote(note.id, to: newPos)
@@ -276,19 +300,23 @@ struct StickyNoteView: View {
             .gesture(
                 DragGesture(minimumDistance: 1, coordinateSpace: .named("canvasContent"))
                     .onChanged { value in
-                        // Locally compute the bounds to avoid causing the ENTIRE canvas state 
+                        // Locally compute the bounds to avoid causing the ENTIRE canvas state
                         // to evaluate and rerender `WorkflowCanvasState.annotations`.
-                        let newSize = CGSize(
-                            width: max(100, note.size.width + value.translation.width),
-                            height: max(60, note.size.height + value.translation.height)
+                        //
+                        // [CVC-8] The floor comes from `StickyNote.minimumSize`, the same constant
+                        // `resizeStickyNote` clamps to. This preview used to floor at 100×60 against
+                        // a model floor of 120×80, so every release in that band drew a size the
+                        // model refused and the note snapped back on release.
+                        localResizeSize = StickyNote.resizedSize(
+                            from: note.size,
+                            translation: value.translation
                         )
-                        localResizeSize = newSize
                     }
                     .onEnded { value in
                         // Send the mutation up to the brain exactly once on release
-                        let finalSize = CGSize(
-                            width: max(100, note.size.width + value.translation.width),
-                            height: max(60, note.size.height + value.translation.height)
+                        let finalSize = StickyNote.resizedSize(
+                            from: note.size,
+                            translation: value.translation
                         )
                         localResizeSize = nil
                         canvasState.resizeStickyNote(note.id, to: finalSize)

@@ -13,7 +13,14 @@ import SwiftUI
 struct WorkflowPortView: View {
     let portType: PortType
     let nodeColor: Color
+    /// Weak tier (register CVV-2): the graph would ACCEPT this connection — visible port,
+    /// colored ring. Says "you could connect here", not "release now".
     var isCompatibleTarget: Bool = false
+    /// Strong tier: the drop would LAND here right now (nearest in-radius valid port under the
+    /// live drag point). This is what earns the pulse, the 1.35× scale and the glow — the full
+    /// treatment used to fire for every valid node on the canvas while the actual accept region
+    /// was a 20pt circle, so the canvas promised connections the release then refused in silence.
+    var isPrimaryTarget: Bool = false
     var isNodeHovered: Bool = false
 
     // Edge drawing callbacks (only used for output ports)
@@ -30,7 +37,7 @@ struct WorkflowPortView: View {
 
     var body: some View {
         ZStack {
-            if isCompatibleTarget || isHovering {
+            if isPrimaryTarget || isHovering {
                 Circle()
                     .stroke(portProfileColor.opacity(0.35), lineWidth: 1.5)
                     .scaleEffect(pulseIndicator ? 1.6 : 1.1)
@@ -45,14 +52,12 @@ struct WorkflowPortView: View {
                     Circle()
                         .stroke(strokeColor, lineWidth: 1.5)
                 )
-                .shadow(color: glowColor, radius: isCompatibleTarget || isHovering ? 5 : 0)
+                .shadow(color: glowColor, radius: isPrimaryTarget || isHovering ? 5 : 0)
         }
-        .scaleEffect(isHovering || isCompatibleTarget ? 1.35 : 1.0)
-        .opacity(isNodeHovered || isHovering || isCompatibleTarget ? 1.0 : 0.0)
+        .scaleEffect(isHovering || isPrimaryTarget ? 1.35 : 1.0)
+        .opacity(isNodeHovered || isHovering || isCompatibleTarget || isPrimaryTarget ? 1.0 : 0.35)
+        .animation(.easeInOut(duration: 0.15), value: isHovering || isNodeHovered || isCompatibleTarget || isPrimaryTarget)
         .contentShape(Circle().inset(by: -8))
-        // Drag-only affordance with nothing to say. Left visible to VoiceOver it would put an
-        // unlabelled element beside every node and bury the node labels in noise; connection
-        // topology is conveyed by the edges themselves, which are now labelled.
         .accessibilityHidden(true) // Larger hit area
         .onHover { hovering in
             withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
@@ -60,8 +65,8 @@ struct WorkflowPortView: View {
             }
         }
         .gesture(portType == .output ? outputDragGesture : nil)
-        .onChange(of: isCompatibleTarget, initial: true) { _, compatible in
-            if compatible {
+        .onChange(of: isPrimaryTarget, initial: true) { _, primary in
+            if primary {
                 withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: false)) {
                     pulseIndicator = true
                 }
@@ -94,24 +99,27 @@ struct WorkflowPortView: View {
     // MARK: - Colors
 
     private var fillColor: Color {
-        if isCompatibleTarget {
+        if isPrimaryTarget {
             return portProfileColor.opacity(0.3)
         }
         if isHovering {
             return portProfileColor.opacity(0.2)
         }
+        if isCompatibleTarget {
+            return portProfileColor.opacity(0.15)
+        }
         return theme.controlBackground
     }
 
     private var strokeColor: Color {
-        if isCompatibleTarget || isHovering {
+        if isCompatibleTarget || isPrimaryTarget || isHovering {
             return portProfileColor
         }
         return theme.secondaryText.opacity(0.4)
     }
 
     private var glowColor: Color {
-        isCompatibleTarget ? portProfileColor.opacity(0.4) : .clear
+        isPrimaryTarget ? portProfileColor.opacity(0.4) : .clear
     }
 
     private var portProfileColor: Color { nodeColor }

@@ -58,15 +58,15 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
     private func execute(
         _ scenario: WorkflowTestScenario,
         userInput: String = "Test input",
+        attachmentContext: String? = nil,
         startingDepth: Int? = nil
     ) async throws -> [AgentStreamEvent] {
         let executor = WorkflowExecutor(workflowProfileID: UUID())
         let makeStream = {
             executor.executeWorkflow(
                 userInput: userInput,
-                chatHistory: [],
                 conversationID: UUID(),
-                ragContext: nil,
+                attachmentContext: attachmentContext,
                 traceContext: self.traceContext,
                 onTraceUpdate: { _ in },
                 layout: scenario.layout,
@@ -104,14 +104,13 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
     private func makeStream(
         _ scenario: WorkflowTestScenario,
         userInput: String = "Test input",
-        workflowProfileID: UUID = UUID()
+        workflowProfileID: UUID = UUID(),
+        conversationID: UUID = UUID()
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
         let executor = WorkflowExecutor(workflowProfileID: workflowProfileID)
         return executor.executeWorkflow(
             userInput: userInput,
-            chatHistory: [],
-            conversationID: UUID(),
-            ragContext: nil,
+            conversationID: conversationID,
             traceContext: traceContext,
             onTraceUpdate: { _ in },
             layout: scenario.layout,
@@ -129,9 +128,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let executor = WorkflowExecutor(workflowProfileID: UUID())
         let stream = executor.executeWorkflow(
             userInput: userInput,
-            chatHistory: [],
             conversationID: UUID(),
-            ragContext: nil,
             traceContext: traceContext,
             onTraceUpdate: { _ in },
             layout: scenario.layout,
@@ -2179,6 +2176,202 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
                        "the failure must be reported once, after the last attempt — got \(failures.count)")
     }
 
+    // MARK: - Sub-workflow boundary: artifacts + structured JSON cross INTO the child (EXA-4)
+
+    /// ⚠️ Register EXA-4 — a parent upstream's media must reach the CHILD's entry profile node.
+    ///
+    /// Before the fix, the child was started with flattened text only: its entry node computed
+    /// `upstreamArtifacts = []` (no incoming edges), while the sub-workflow node's own envelope
+    /// still forwarded the artifact DOWNSTREAM of itself — media provably flowed around the child
+    /// but never into it, and nothing logged the drop.
+    func testSubWorkflow_UpstreamArtifactsCrossIntoChildEntryProfileNode() async throws {
+        let scenario = WorkflowTestScenario()
+
+        let inner = InnerWorkflowBuilder()
+        let innerBot = inner.addBotNode(name: "Body Bot")
+        inner.save()
+        innerBuilders.append(inner)
+        for (id, profile) in inner.profileMap { scenario.profileMap[id] = profile }
+
+        let producer = scenario.addBotNode(name: "Producer")
+        let nested = scenario.addSubWorkflowNode(name: "Nested Step", workflowProfileID: inner.workflowProfileID)
+        scenario.connect(from: producer, to: nested)
+
+        let artifact = MediaArtifact(kind: .image, reference: .ephemeralData(Data([1])), mimeType: "image/png", label: "chart")
+        mockProvider.scriptStream(for: scenario.profileID(for: producer)!,
+                                  events: [.content("made a chart"), .artifactProduced(artifact)])
+        mockProvider.scriptStream(for: inner.profileID(for: innerBot)!, events: [.content("described it")])
+
+        _ = try await execute(scenario)
+
+        let bodyInvocation = mockProvider.workflowInvocations.first { $0.profileID == inner.profileID(for: innerBot)! }
+        XCTAssertNotNil(bodyInvocation, "the child's body bot must have run")
+        XCTAssertEqual(bodyInvocation?.context.upstreamArtifacts.map(\.id), [artifact.id],
+                       "the parent upstream's artifact must cross the sub-workflow boundary into the child's entry node — media must flow INTO the child, not only around it")
+    }
+
+    /// ⚠️ Register EXA-4, structured half — `{{ input.json.path }}` at the CHILD's entry Code node
+    /// must resolve against the parent upstream's structured output.
+    ///
+    /// `WorkflowTemplate` has no text-parse fallback for `input.json` (the `inputJSON` parameter is
+    /// its only source), so before the fix the literal placeholder survived into the child's output
+    /// — the failure asserted here is exactly the one the register filed.
+    func testSubWorkflow_UpstreamStructuredJSONResolvesInChildEntryCodeNode() async throws {
+        let scenario = WorkflowTestScenario()
+
+        let inner = InnerWorkflowBuilder()
+        inner.addCodeNode(name: "Formatter", template: "City: {{ input.json.city }}")
+        inner.save()
+        innerBuilders.append(inner)
+        for (id, profile) in inner.profileMap { scenario.profileMap[id] = profile }
+
+        let producer = scenario.addBotNode(name: "JSON Producer")
+        let nested = scenario.addSubWorkflowNode(name: "Nested Format", workflowProfileID: inner.workflowProfileID)
+        scenario.connect(from: producer, to: nested)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: producer)!,
+                                  events: [.content("{\"city\":\"NYC\"}")])
+
+        let events = try await execute(scenario)
+
+        let content = WorkflowStreamCollector.contentText(from: events)
+        XCTAssertTrue(content.contains("City: NYC"),
+                      "the parent's structured JSON must resolve at the child's entry Code node — got: \(content)")
+        XCTAssertFalse(content.contains("{{ input.json.city }}"),
+                       "the literal placeholder surviving means structured JSON did not cross the boundary")
+    }
+
+    /// ⚠️ Register EXA-4, forwarding half — a STRUCTURAL entry node inside the child (a Trigger)
+    /// must hand the inherited artifacts downstream through its envelope, exactly as it hands
+    /// upstream media inside a flat graph. Without the envelope-tail forward the seed dies at the
+    /// first structural hop and the bot below the Trigger sees nothing.
+    func testSubWorkflow_ChildEntryTriggerForwardsInheritedArtifactsDownstream() async throws {
+        let scenario = WorkflowTestScenario()
+
+        let inner = InnerWorkflowBuilder()
+        let innerTrigger = inner.addTriggerNode(name: "Body Trigger")
+        let innerBot = inner.addBotNode(name: "Below Bot")
+        inner.connect(from: innerTrigger, to: innerBot)
+        inner.save()
+        innerBuilders.append(inner)
+        for (id, profile) in inner.profileMap { scenario.profileMap[id] = profile }
+
+        let producer = scenario.addBotNode(name: "Producer")
+        let nested = scenario.addSubWorkflowNode(name: "Nested Step", workflowProfileID: inner.workflowProfileID)
+        scenario.connect(from: producer, to: nested)
+
+        let artifact = MediaArtifact(kind: .image, reference: .ephemeralData(Data([2])), mimeType: "image/png", label: "photo")
+        mockProvider.scriptStream(for: scenario.profileID(for: producer)!,
+                                  events: [.content("made a photo"), .artifactProduced(artifact)])
+        mockProvider.scriptStream(for: inner.profileID(for: innerBot)!, events: [.content("saw it")])
+
+        _ = try await execute(scenario)
+
+        let belowInvocation = mockProvider.workflowInvocations.first { $0.profileID == inner.profileID(for: innerBot)! }
+        XCTAssertNotNil(belowInvocation, "the bot below the child's entry Trigger must have run")
+        XCTAssertEqual(belowInvocation?.context.upstreamArtifacts.map(\.id), [artifact.id],
+                       "an entry Trigger inside the child must FORWARD inherited artifacts downstream via its envelope")
+    }
+
+    // MARK: - Sub-workflow boundary: event forwarding (EXC-3)
+
+    /// ⚠️ Register EXC-3, the materially lossy half — a child node's `.tokenUsage` must reach the
+    /// parent's stream. ActiveStreamManager ACCUMULATES the run total additively and the child
+    /// emits no aggregate of its own, so the old `default:` suppression silently excluded ALL
+    /// nested work from the run's token count — the deeper the nesting, the larger the
+    /// under-report, with no ceiling. (Its comment claimed the suppression was deliberate.)
+    func testSubWorkflow_ForwardsChildTokenUsage() async throws {
+        let scenario = WorkflowTestScenario()
+
+        let inner = InnerWorkflowBuilder()
+        let innerBot = inner.addBotNode(name: "Spender")
+        inner.save()
+        innerBuilders.append(inner)
+        for (id, profile) in inner.profileMap { scenario.profileMap[id] = profile }
+
+        _ = scenario.addSubWorkflowNode(name: "Nested Step", workflowProfileID: inner.workflowProfileID)
+
+        mockProvider.scriptStream(for: inner.profileID(for: innerBot)!,
+                                  events: [.content("worked"),
+                                           .tokenUsage(TokenUsage(inputTokens: 100, outputTokens: 50, isEstimated: false))])
+
+        let events = try await execute(scenario)
+
+        let usages = events.compactMap { event -> TokenUsage? in
+            if case .tokenUsage(let usage) = event { return usage }
+            return nil
+        }
+        XCTAssertTrue(usages.contains { $0.inputTokens == 100 && $0.outputTokens == 50 },
+                      "the child node's token usage must cross the sub-workflow boundary — the run total otherwise excludes all nested work. Got \(usages)")
+    }
+
+    /// EXC-3, capability half — a plan/subtask event raised inside the child must reach the
+    /// parent's stream, exactly as the direct profile path forwards it (milestones, cards, and the
+    /// subtask boundary flush all hang off these).
+    func testSubWorkflow_ForwardsChildCapabilityEvents() async throws {
+        let scenario = WorkflowTestScenario()
+
+        let inner = InnerWorkflowBuilder()
+        let innerBot = inner.addBotNode(name: "Planner")
+        inner.save()
+        innerBuilders.append(inner)
+        for (id, profile) in inner.profileMap { scenario.profileMap[id] = profile }
+
+        _ = scenario.addSubWorkflowNode(name: "Nested Plan", workflowProfileID: inner.workflowProfileID)
+
+        mockProvider.scriptStream(for: inner.profileID(for: innerBot)!,
+                                  events: [.subtaskStarted(id: "s1", index: 1, total: 2, description: "step one"),
+                                           .content("planned")])
+
+        let events = try await execute(scenario)
+
+        let sawSubtask = events.contains {
+            if case .subtaskStarted(let id, _, _, _) = $0 { return id == "s1" }
+            return false
+        }
+        XCTAssertTrue(sawSubtask,
+                      "a subtask event inside the child must reach the parent's stream — the old default: swallowed every capability event")
+    }
+
+    /// EXC-3's other edge — the split must not over-forward: the child's OWN orchestration events
+    /// (its per-node completed rows, its progress counter) stay suppressed, or the parent's
+    /// timeline shows the child's nodes as siblings of its own and the progress counter
+    /// double-counts.
+    func testSubWorkflow_StillSuppressesChildOrchestration() async throws {
+        let scenario = WorkflowTestScenario()
+
+        let inner = InnerWorkflowBuilder()
+        let innerBot = inner.addBotNode(name: "Inner Bot")
+        inner.save()
+        innerBuilders.append(inner)
+        for (id, profile) in inner.profileMap { scenario.profileMap[id] = profile }
+
+        let nested = scenario.addSubWorkflowNode(name: "Nested Step", workflowProfileID: inner.workflowProfileID)
+
+        mockProvider.scriptStream(for: inner.profileID(for: innerBot)!, events: [.content("inner")])
+
+        let events = try await execute(scenario)
+
+        // The inner bot ran (its invocation is recorded), but no node-lifecycle event for it may
+        // surface on the parent stream — only the sub-workflow node's own.
+        XCTAssertNotNil(mockProvider.workflowInvocations.first { $0.profileID == inner.profileID(for: innerBot)! })
+        let startedIDs = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+        let completedIDs = WorkflowStreamCollector.nodeCompletedEvents(from: events).map(\.nodeID)
+        XCTAssertEqual(startedIDs, [nested], "only the sub-workflow node itself may announce on the parent stream — got \(startedIDs)")
+        XCTAssertEqual(completedIDs, [nested], "the child's own node-completed rows must stay suppressed — got \(completedIDs)")
+
+        // The counter twins — a leaked child `workflowRunFinished` overwrites the parent's run
+        // verdict at the consumer, and a leaked child progress event corrupts the parent's N/M
+        // counter. Both graphs have one node each, so a leak shows as a COUNT of 2, not a
+        // different payload.
+        let runFinishedCount = events.filter { if case .workflowRunFinished = $0 { return true }; return false }.count
+        XCTAssertEqual(runFinishedCount, 1,
+                       "exactly the PARENT's run verdict may surface — a second one is the child's leaking through")
+        let progressCount = WorkflowStreamCollector.progressEvents(from: events).count
+        XCTAssertEqual(progressCount, 1,
+                       "exactly the parent's one progress tick may surface — got \(progressCount)")
+    }
+
     // MARK: - Node timeout: applies everywhere, counts compute not waiting
 
     /// ⚠️ WF22: structural nodes had NO timeout at all — the race existed only on the profile-stream
@@ -2246,7 +2439,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         // Answer well after the 1s budget would have expired on a wall-clock race.
         let executor = WorkflowExecutor(workflowProfileID: UUID())
         let stream = executor.executeWorkflow(
-            userInput: "Test input", chatHistory: [], conversationID: UUID(), ragContext: nil,
+            userInput: "Test input", conversationID: UUID(),
             traceContext: traceContext, onTraceUpdate: { _ in },
             layout: scenario.layout, profileMap: scenario.profileMap, streamProvider: mockProvider)
 
@@ -4325,6 +4518,69 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertFalse(ctx.input.contains("---"), "the separator line must not come back")
     }
 
+    // MARK: - Structural error handlers receive the failure reason (EXA-3 / EIO-7)
+
+    /// ⚠️ THE FILED BUG. A structural handler wired to an `error` port used to receive the failed
+    /// upstream's bare `output` — "" for every thrown failure — because the structural path joined
+    /// raw outputs instead of using the assembler. The handler now gets the same annotated form the
+    /// profile path gets: `[Upstream node "X" failed: <reason>]`.
+    func testAStructuralErrorHandlerReceivesTheAnnotatedFailure() async throws {
+        let scenario = WorkflowTestScenario()
+        let failing = scenario.addBotNode(name: "Failing Bot")
+        let handler = scenario.addCodeNode(name: "Handler", template: "ALERT: {{ input }}")
+        let sink = scenario.addBotNode(name: "Sink")
+        scenario.connect(from: failing, to: handler, portLabel: WorkflowEdge.errorPortLabel)
+        scenario.connect(from: handler, to: sink)
+
+        mockProvider.scriptError(for: scenario.profileID(for: failing)!, error: NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "the model exploded"]))
+        mockProvider.scriptStream(for: scenario.profileID(for: sink)!, events: [.content("ok")])
+        _ = try await execute(scenario)
+
+        let ctx = try XCTUnwrap(mockProvider.workflowInvocations.first(where: { $0.context.nodeID == sink })?.context)
+        XCTAssertTrue(ctx.input.contains("[Upstream node \"Failing Bot\" failed:"),
+                      "the Code handler's {{ input }} must carry the annotated failure, not \"\" — got: \(ctx.input.prefix(160))")
+    }
+
+    // MARK: - Attachments reach a structural entry node (EXA-6)
+
+    /// A run started with files whose entry node is a Trigger used to carry the query (EXA-1) while
+    /// silently dropping every attachment — the run then read CORRECTLY while answering about
+    /// documents it never received.
+    func testAttachmentsFlowThroughAStructuralEntryNode() async throws {
+        let scenario = WorkflowTestScenario()
+        let trigger = scenario.addTriggerNode(name: "Start")
+        let worker = scenario.addBotNode(name: "Worker")
+        scenario.connect(from: trigger, to: worker)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: worker)!, events: [.content("done")])
+        _ = try await execute(scenario, userInput: "summarize this",
+                              attachmentContext: "ATTACHED-DOC-CONTENT-9b2e")
+
+        let ctx = try XCTUnwrap(mockProvider.workflowInvocations.first(where: { $0.context.nodeID == worker })?.context)
+        XCTAssertTrue(ctx.input.contains("ATTACHED-DOC-CONTENT-9b2e"),
+                      "the Trigger must forward the run's attachments — they have no other route into the graph")
+        XCTAssertTrue(ctx.input.contains("summarize this"), "…alongside the query, not instead of it")
+    }
+
+    /// ⚠️ The over-correction guard: a MID-GRAPH structural node must not receive the run's
+    /// attachments — same rule as the query (WF13's shape).
+    func testMidGraphStructuralNodeReceivesNoRunAttachments() async throws {
+        let scenario = WorkflowTestScenario()
+        let entry = scenario.addBotNode(name: "Entry")
+        let code = scenario.addCodeNode(name: "Pass", template: "{{ input }}")
+        let sink = scenario.addBotNode(name: "Sink")
+        scenario.connect(from: entry, to: code)
+        scenario.connect(from: code, to: sink)
+
+        mockProvider.scriptStream(for: scenario.profileID(for: entry)!, events: [.content("UP")])
+        mockProvider.scriptStream(for: scenario.profileID(for: sink)!, events: [.content("ok")])
+        _ = try await execute(scenario, userInput: "q", attachmentContext: "ATTACHED-DOC-CONTENT-9b2e")
+
+        let ctx = try XCTUnwrap(mockProvider.workflowInvocations.first(where: { $0.context.nodeID == sink })?.context)
+        XCTAssertFalse(ctx.input.contains("ATTACHED-DOC-CONTENT-9b2e"),
+                       "a mid-graph structural node must not be handed the run's attachments")
+    }
+
     // MARK: - Structural entry nodes receive the run's query (EXA-1)
     //
     // `executeStructuralNode` took no `userInput` at all, so a workflow whose ENTRY node was a
@@ -5139,8 +5395,8 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
 
         let executor = WorkflowExecutor(workflowProfileID: pid)
         let stream = executor.executeWorkflow(
-            userInput: "run it", chatHistory: [], conversationID: UUID(),
-            ragContext: nil, traceContext: traceContext, onTraceUpdate: { _ in },
+            userInput: "run it", conversationID: UUID(),
+            traceContext: traceContext, onTraceUpdate: { _ in },
             layout: nil,                       // ← the PRODUCTION path: load from the store
             profileMap: nil, streamProvider: mockProvider
         )
@@ -5166,8 +5422,8 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
     func testMissingLayout_StillReportsEmptyWorkflow() async throws {
         let executor = WorkflowExecutor(workflowProfileID: UUID())   // no row exists for this id
         let stream = executor.executeWorkflow(
-            userInput: "run it", chatHistory: [], conversationID: UUID(),
-            ragContext: nil, traceContext: traceContext, onTraceUpdate: { _ in },
+            userInput: "run it", conversationID: UUID(),
+            traceContext: traceContext, onTraceUpdate: { _ in },
             layout: nil, profileMap: nil, streamProvider: mockProvider
         )
         do {
@@ -5346,6 +5602,125 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertTrue(drained, "a cancelled gate must not leave its suspension parked forever")
+    }
+
+    /// ⚠️ Register EXC-2 — pins the executor's cancel ARM specifically (the service-level scoping
+    /// is pinned by `WorkflowRunScopedDrainTests`). A FOREIGN run's park is hand-planted in the
+    /// SAME conversation the run uses — a single live run plus one planted park is the
+    /// deterministic distillation of the two-concurrent-runs scenario the park-accounting suite
+    /// rejected as unmutatable. Stop cancels the run; its own gate drains (its cancellation
+    /// handler AND the arm both point at it), but the foreign park must SURVIVE — the pre-fix
+    /// `cancel(for: conversationID)` swept it with `approved = false`.
+    func testStop_DoesNotDrainAForeignRunsPark() async throws {
+        let conv = UUID()
+        let foreignToken = UUID(), foreignOp = UUID()
+        let baseline = await ExecutionSuspensionService.shared.pendingSuspensionCount()
+
+        // The foreign run's parked tool confirmation (the register's run-B shape).
+        let foreignTask = Task {
+            await WorkflowRunScope.$token.withValue(foreignToken) {
+                await ExecutionSuspensionService.shared.suspend(for: foreignOp, conversationID: conv)
+            }
+        }
+        var foreignInstalled = false
+        for _ in 0..<200 where !foreignInstalled {
+            if await ExecutionSuspensionService.shared.pendingSuspensionCount() >= baseline + 1 { foreignInstalled = true; break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(foreignInstalled, "the foreign park never installed — every later count in this test is meaningless")
+
+        let scenario = WorkflowTestScenario()
+        let gate = scenario.addGateNode(name: "Approve?", options: ["Yes", "No"])
+        scenario.connect(from: gate, to: scenario.addBotNode(name: "After"))
+
+        let stream = makeStream(scenario, conversationID: conv)
+        let collected = Task { try await StreamCollector.collect(from: stream) }
+
+        var runParked = false
+        for _ in 0..<200 where !runParked {
+            if await ExecutionSuspensionService.shared.pendingSuspensionCount() >= baseline + 2 { runParked = true; break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(runParked, "the run's gate must actually suspend before Stop")
+
+        collected.cancel()
+        _ = try? await collected.value
+
+        // The run's own park drains; the foreign park must NOT. Poll down to baseline+1, then
+        // hold briefly and re-check — the cancel arm runs asynchronously in the stream task, so a
+        // late over-drain must not slip past a single early read.
+        var settled = false
+        for _ in 0..<100 where !settled {
+            if await ExecutionSuspensionService.shared.pendingSuspensionCount() == baseline + 1 { settled = true; break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(settled, "the run's own gate park must drain on Stop")
+        try await Task.sleep(for: .milliseconds(200))
+        let after = await ExecutionSuspensionService.shared.pendingSuspensionCount()
+        XCTAssertEqual(after, baseline + 1,
+                       "the FOREIGN run's park must survive this run's Stop — draining it force-denies a tool the other run's user never answered")
+
+        // Rescue: the foreign run's user approves, and the waiter gets THE USER's answer.
+        await ExecutionSuspensionService.shared.resume(for: foreignOp, approved: true)
+        let foreignResult = await foreignTask.value
+        XCTAssertTrue(foreignResult, "the foreign waiter must receive the user's real answer, not a forced denial")
+    }
+
+    /// ⚠️ EXC-2's mirror image — the arm's POSITIVE duty, without which deleting the whole
+    /// depth-1 drain block passes every other test (the run's own gate drains via its suspend
+    /// cancellation handler, and a foreign park's survival is exactly what arm-deletion produces).
+    /// A TOKEN-LESS park — an MCP-broker consent raised on the transport's task, outside the run's
+    /// task tree — has NO cancellation handler in the run's tree, so the arm's `cancelRun` sweep is
+    /// the ONLY thing that ever resolves it on Stop. Skipping it is a banner standing forever for a
+    /// run that no longer exists ("a HANG, not a warning").
+    func testStop_DrainsTokenlessParksOfItsConversation() async throws {
+        let conv = UUID()
+        let tokenlessOp = UUID()
+        let baseline = await ExecutionSuspensionService.shared.pendingSuspensionCount()
+
+        // Raised with NO run token — the MCP-broker shape.
+        let tokenlessTask = Task {
+            await ExecutionSuspensionService.shared.suspend(for: tokenlessOp, conversationID: conv)
+        }
+        var installed = false
+        for _ in 0..<200 where !installed {
+            if await ExecutionSuspensionService.shared.pendingSuspensionCount() >= baseline + 1 { installed = true; break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(installed, "the token-less park never installed")
+
+        let scenario = WorkflowTestScenario()
+        let gate = scenario.addGateNode(name: "Approve?", options: ["Yes", "No"])
+        scenario.connect(from: gate, to: scenario.addBotNode(name: "After"))
+
+        let stream = makeStream(scenario, conversationID: conv)
+        let collected = Task { try await StreamCollector.collect(from: stream) }
+
+        var runParked = false
+        for _ in 0..<200 where !runParked {
+            if await ExecutionSuspensionService.shared.pendingSuspensionCount() >= baseline + 2 { runParked = true; break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(runParked, "the run's gate must actually suspend before Stop")
+
+        collected.cancel()
+        _ = try? await collected.value
+
+        // BOTH parks must drain: the run's own gate (handler or arm) AND the token-less consent
+        // (the arm is its only resolver). Poll to baseline, with a rescue on failure so a
+        // regression is a red assertion, not a hung runner.
+        var bothDrained = false
+        for _ in 0..<150 where !bothDrained {
+            if await ExecutionSuspensionService.shared.pendingSuspensionCount() == baseline { bothDrained = true; break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        if !bothDrained {
+            await ExecutionSuspensionService.shared.resume(for: tokenlessOp, approved: false)
+        }
+        XCTAssertTrue(bothDrained,
+                      "the root Stop must sweep the conversation's token-less parks — nothing else can ever resolve an MCP consent raised outside the run's task tree")
+        let tokenlessResult = await tokenlessTask.value
+        XCTAssertFalse(tokenlessResult, "a swept consent resolves denied (outcome 'cancelled')")
     }
 
     // MARK: - Group 28: WF-TS1 — the inner-outcome demotion ladder

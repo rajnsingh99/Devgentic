@@ -101,7 +101,7 @@ struct CodeNodeInspectorView: View {
                         number: "2",
                         title: "Placeholders",
                         subtitle: "variable substitution",
-                        description: "{{ input }} = upstream text · {{ input.json.path }} = a field of upstream JSON · {{ var.name }} = a workflow variable.",
+                        description: "{{ input }} = upstream text · {{ input.json.path }} = a field of upstream JSON · {{ input.parsed.path }} = a field of this node's own input, parsed as JSON · {{ var.name }} = a workflow variable.",
                         color: .blue
                     )
                     guideStep(
@@ -277,8 +277,12 @@ struct CodeNodeInspectorView: View {
         )
         node.kind = .code(config)
 
-        // Persist fan-in behaviour on the shared per-node config.
-        if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }
+        // [INS-11] The `if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }` that
+        // stood here is GONE. Its comment claimed to "persist fan-in behaviour", but `joinMode` was
+        // retired 2026-08-13 (decode/encode only) and a Code node has no other per-node config this
+        // panel edits — so the line's only effect was turning `nil` into `.some(defaults)`, which
+        // `replaceNode`'s equality guard cannot absorb. Opening a Code node, changing nothing and
+        // pressing Save therefore dirtied the canvas and burned one of the 25 undo slots.
 
         closeInspector()
     }

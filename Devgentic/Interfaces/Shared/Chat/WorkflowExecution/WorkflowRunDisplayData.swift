@@ -26,6 +26,12 @@ struct WorkflowRunDisplayData {
     let isRunning: Bool
     let nodeResults: [NodeDisplayData]
     let finalOutput: String
+    /// [XUI-7] ⚠️⚠️ **ALWAYS EMPTY, from both factories.** `from(live:)` reads
+    /// `WorkflowExecutionState.variables` and `from(record:)` reads `WorkflowRunRecord.variables`,
+    /// and both of those are the never-populated stub — see the long note on
+    /// `WorkflowExecutionState.variables` for why the engine's real variables never cross the
+    /// stream boundary. Nothing in the app reads THIS field either, so a "Variables" section built
+    /// on it would render a confidently-empty table. Wire the capture first.
     let variables: [String: String]
     let totalNodes: Int
     let workflowError: String?
@@ -518,6 +524,23 @@ extension WorkflowRunDisplayData {
         return nodeRanBeforeSkip(node) ? String(localized: "Skipped") : String(localized: "Not run")
     }
 
+    /// THE status word for a node row — the visible tag AND the VoiceOver label both go through
+    /// here, the same shape as `skipTagLabel` above (register XUI-10).
+    ///
+    /// ⚠️ They used to diverge. The tag applied THREE overrides — awaiting, did-not-run, degraded —
+    /// and the label applied only one, so a node parked on a HITL prompt was TAGGED "Needs your
+    /// input" and ANNOUNCED "Running...". The single state on this screen that is blocking on the
+    /// user was the one state VoiceOver could not learn. An amber "Completed · warnings" row was
+    /// likewise announced as a clean "Completed".
+    func nodeTagLabel(for node: NodeDisplayData, isAwaiting: Bool) -> String {
+        if isAwaiting { return String(localized: "Needs your input") }
+        if nodeDidNotRun(node) { return skipTagLabel(for: node) }
+        if node.status == .completed, node.hasWarnings {
+            return String(localized: "Completed · warnings")
+        }
+        return node.status.label
+    }
+
     /// Whether a skipped node had already started when the skip landed.
     ///
     /// `nil` means the record was written before the fact was persisted. The legacy tier reads the
@@ -535,6 +558,78 @@ extension WorkflowRunDisplayData {
     func notRunMessage(for node: NodeDisplayData) -> String {
         let detail = node.detail.trimmingCharacters(in: .whitespacesAndNewlines)
         return detail.isEmpty ? String(localized: "Not run") : detail
+    }
+
+    /// Whether an expanded row has captured agent evidence worth rendering (register XUI-1).
+    ///
+    /// THE single gate for every arm that renders a settled `AgentTimelineView` — including
+    /// `.skipped` and `.cancelled`. Those two arms used to render only a one-line status while
+    /// the trace captured live (and persisted by `freeze`, up to 400 events) sat unreachable:
+    /// the same run showed an 829ms model call in the Run Report and nothing at all in the
+    /// timeline (observed 2026-08-23). The `expandedContent` guard above the switch was written
+    /// to protect exactly this evidence and was a NO-OP for it — both branches rendered the same
+    /// bare line for a `.skipped` node.
+    func nodeShowsCapturedTrace(_ node: NodeDisplayData) -> Bool {
+        node.supportsTimeline && !node.nodeTimeline.isEmpty
+    }
+
+    /// What the Final Outcome row's expanded panel shows (register XUI-2). Extracted OFF the view
+    /// (the WF-UI5 shape) because the branch ORDER is the defect surface: "no nodes / all
+    /// pending" was tested first, so a run that failed BEFORE its first node dispatched —
+    /// pre-flight validation, unresolvable config, a reconciled orphan — rendered an hourglass
+    /// "Waiting for execution" while its `workflowError` was shown nowhere, directly under a
+    /// "Failed" tag. The terminal error now outranks the empty/pending test.
+    enum FinalOutcomePanel: Equatable {
+        /// Live run, nothing dispatched yet — the honest hourglass.
+        case waiting
+        /// Live run with settled nodes but no final output yet.
+        case progress(synthesising: Bool)
+        /// Terminal (or failing) run with an error and no final output — show the reason.
+        case error(String)
+        /// A terminal reason that is NOT a fault — a Stop, or a run reconciled after a quit.
+        /// Neutral register: same split, same word, as `RunCardBody.reason` on the history card.
+        case reason(String)
+        /// The final output (may be empty only for shapes no real run produces — an empty
+        /// workflow is refused pre-flight, and every cancel/interrupt path writes an error).
+        case output(String)
+    }
+
+    /// - Parameter rowStatus: the Final Outcome ROW's own status (drives the "Synthesising…"
+    ///   spinner wording), not the run status.
+    func finalOutcomePanel(rowStatus: NodeDisplayData.NodeStatus) -> FinalOutcomePanel {
+        // ⚠️ [XUI-13] STATUS-GATED, and FIRST. Every cancel path leaves a `workflowError` behind —
+        // `handleError("Cancelled", cancelled: true)` for a Stop, `reconcileOrphans`' "Interrupted"
+        // for a quit — so the error test below cannot tell the user's own Stop from a fault, and
+        // reported it back to them in error red under the row's own amber "Cancelled" tag. This is
+        // the identical conflation `RunCardBody.of` removed from the history card; the two surfaces
+        // had begun to DISAGREE about whether a Stop was a failure, and this is the half that the
+        // user is more likely to be looking at (the Final Outcome row expands by default).
+        //
+        // ⚠️ The `isCancelledRun` gate is load-bearing, not defensive: without it this branch would
+        // swallow every genuine failure into the neutral register — strictly worse than the bug —
+        // and would re-open XUI-2 by shadowing the error branch it was reordered ahead of.
+        //
+        // ⚠️ Output BEFORE reason, matching `RunCardBody.of`: a stopped run's partial answer is the
+        // useful half and `handleStreamEnd` preserves it deliberately, while the reason is already
+        // stated by the tag above. Ordering them the other way re-creates the half of `XUI-5` that
+        // HID the output. Unlike the card there is no `.none` — falling through to `.waiting`
+        // /`.progress` is correct here, because the timeline row must always render something.
+        //
+        // ⚠️ An EMPTY error string is not an error, and normalising it here is the second half of
+        // making these two surfaces agree: `RunCardBody.of` already does exactly this
+        // (`error.flatMap { $0.isEmpty ? nil : $0 }`), so without it the card silently ignored a
+        // blank message while this panel drew an error-red line with nothing in it.
+        let reason = workflowError.flatMap { $0.isEmpty ? nil : $0 }
+        if isCancelledRun {
+            if !finalOutput.isEmpty { return .output(finalOutput) }
+            if let reason { return .reason(reason) }
+        }
+        // ⚠️ ORDER IS THE FIX (XUI-2): the error branch sat AFTER the empty/pending branch, and a
+        // zero-node failed run satisfies both — the hourglass won and the reason was unreachable.
+        if let reason, finalOutput.isEmpty { return .error(reason) }
+        if nodeResults.isEmpty || nodeResults.allSatisfy({ $0.status == .pending }) { return .waiting }
+        if isRunning && finalOutput.isEmpty { return .progress(synthesising: rowStatus == .running) }
+        return .output(finalOutput)
     }
 
     /// ⚠️ GENUINE failures only. A skipped node is routing, a cancelled node is the user's own

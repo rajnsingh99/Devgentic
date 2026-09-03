@@ -152,28 +152,31 @@ final class Flux2ModelSelectionTests: XCTestCase {
 
 final class WorkflowProfileIDsPruningTrapTests: XCTestCase {
 
-    /// ⚠️ B36 is a doc correction — the DECISION (leave stale ids alone) was always right, the
-    /// stated reason ("cosmetic — feeds only a count") was false. This test converts the correction
-    /// into a guard: it pins the property that makes pruning dangerous, so a future "cleanup" that
-    /// empties the list fails here instead of shipping.
+    /// ⚠️ INVERTED 2026-08-29, and the history is the point. B36 recorded that emptying
+    /// `agentProfileIDs` was dangerous BECAUSE a blocking validator rule fired on an empty list:
+    /// `BackendProfileStore` validates `strict: isUpdate`, so an emptied list made a workflow refuse
+    /// every later update, including a rename. This test used to pin that rule as blocking, so a
+    /// "cleanup" that pruned the list would fail here instead of shipping.
     ///
-    /// `ProfileValidatorTests.testEmptyWorkflowFailsInStrictMode` already asserts that an error is
-    /// produced — but only that one exists with `field == "workflow"`. It would stay green if the
-    /// severity were downgraded to `.advisory`, and it is the **blocking** severity that turns a
-    /// pruned workflow into a permanently unsaveable profile.
-    func testTheEmptyWorkflowRuleIsBlockingNotAdvisory() {
+    /// The field was then RETIRED outright — nothing recomputes it, because a workflow's nodes own
+    /// their configuration and the layout is the only record of what a workflow contains. With no
+    /// writer, the list is empty or stale forever, so keeping the rule would have done permanently
+    /// and to every workflow exactly what B36 feared pruning would do to one.
+    ///
+    /// So the guard is inverted rather than deleted: the danger it names is real, and the thing that
+    /// now prevents it is the rule's ABSENCE. Reinstating the rule is the regression.
+    func testTheEmptyWorkflowRuleStaysRetired() {
         let profile = BackendProfileSnapshot(
             displayName: "Workflow",
             details: .workflow(WorkflowConfig(agentProfileIDs: [])))
 
         let errors = ProfileValidator.validate(profile, strict: true)
-        let workflowErrors = errors.filter { $0.field == "workflow" }
 
-        XCTAssertFalse(workflowErrors.isEmpty, "precondition: the rule fires")
-        XCTAssertTrue(errors.blocking.contains { $0.field == "workflow" },
-                      "this rule must stay BLOCKING — it is why pruning stale agentProfileIDs "
-                      + "would make an emptied workflow refuse every later update, including a "
-                      + "rename. The register called the staleness 'cosmetic'; it is not.")
+        XCTAssertTrue(errors.filter { $0.field == "workflow" }.isEmpty,
+                      "the empty-agentProfileIDs rule must stay retired — nothing maintains that "
+                      + "field any more, so reinstating it makes EVERY workflow permanently "
+                      + "unsaveable, renames included (B36's own failure mode, applied universally)")
+        XCTAssertTrue(errors.blocking.isEmpty, "got: \(errors.blocking.map(\.message))")
     }
 
     /// The asymmetry that makes the trap specifically an UPDATE trap: creation is lenient, so a

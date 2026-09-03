@@ -312,4 +312,204 @@ final class WorkflowRunRollupTests: XCTestCase {
             isRunning: true, settledCount: 0, totalNodeCount: 0)
         XCTAssertEqual(label, "Awaiting inputs · 0/1")
     }
+
+    // MARK: - Final Outcome panel (register XUI-2)
+
+    /// A record with `finalOutput`, which the shared `record(...)` fixture hardcodes empty.
+    private func record(_ status: WorkflowRunRecord.RunStatus,
+                        nodes: [WorkflowRunRecord.WorkflowNodeResultSnapshot],
+                        error: String? = nil,
+                        finalOutput: String) -> WorkflowRunDisplayData {
+        .from(record: WorkflowRunRecord(
+            id: UUID(), conversationID: UUID(), workflowProfileID: UUID(),
+            workflowName: "wf", timestamp: Date(), userInput: "go",
+            nodeResults: nodes, finalOutput: finalOutput, variables: [:],
+            status: status, duration: 3, error: error
+        ))
+    }
+
+    /// ⚠️ THE XUI-2 PIN. A run that failed BEFORE any node dispatched (pre-flight validation,
+    /// unresolvable config) froze with zero node results — and the panel's empty/pending branch
+    /// sat AHEAD of the error branch, so the user saw an hourglass "Waiting for execution"
+    /// directly under a "Failed" tag, with the actual reason nowhere on screen.
+    func testPreflightFailureRecordShowsErrorNotWaiting() {
+        let d = record(.failed, nodes: [], error: "Validation failed: the graph contains a cycle")
+        XCTAssertEqual(d.finalOutcomePanel(rowStatus: .failed),
+                       .error("Validation failed: the graph contains a cycle"))
+    }
+
+    /// The orphan-reconciliation shape: `.cancelled`, error "Interrupted", zero nodes.
+    ///
+    /// ⚠️ UPDATED FOR XUI-13, and the old expectation (`.error("Interrupted")`) WAS THE DEFECT —
+    /// do not restore it or weaken this to a looser assertion. The run ended because the app quit,
+    /// not because anything failed, and `.error` renders in `theme.errorColor` behind a red
+    /// container edge under the row's own amber "Cancelled" tag.
+    func testReconciledOrphanShowsItsInterruptedReasonNotAnError() {
+        let d = record(.cancelled, nodes: [], error: "Interrupted")
+        XCTAssertEqual(d.finalOutcomePanel(rowStatus: .cancelled), .reason("Interrupted"))
+    }
+
+    /// ⚠️ THE XUI-13 PIN. Every cancel path leaves a `workflowError` behind, so the error branch
+    /// could not tell the user's own Stop from a fault and reported it back as one — on the surface
+    /// the user is most likely to be looking at, since the Final Outcome row expands by default.
+    func testAStoppedRunReportsItsReasonInTheNeutralRegister() {
+        let d = record(.cancelled, nodes: [], error: "Cancelled")
+        XCTAssertEqual(d.finalOutcomePanel(rowStatus: .cancelled), .reason("Cancelled"))
+    }
+
+    /// ⚠️ OUTPUT OUTRANKS THE REASON, exactly as on the history card. `handleStreamEnd` preserves
+    /// a stopped run's partial answer deliberately ("a Stop discards no evidence") and the reason
+    /// is already stated by the tag above. Ordering these the other way re-creates the half of
+    /// XUI-5 that HID the output.
+    func testAStoppedRunShowsItsPartialOutputAheadOfTheReason() {
+        let d = record(.cancelled, nodes: [], error: "Cancelled", finalOutput: "half an answer")
+        XCTAssertEqual(d.finalOutcomePanel(rowStatus: .cancelled), .output("half an answer"))
+    }
+
+    /// ⚠️ THE GATE IS LOAD-BEARING. Without the `isCancelledRun` conjunct the neutral branch would
+    /// swallow EVERY genuine failure — strictly worse than the bug it fixes, and it would re-open
+    /// XUI-2 by shadowing the error branch that was reordered ahead of the hourglass.
+    func testAGenuineFailureIsStillReportedAsAnError() {
+        for status: WorkflowRunRecord.RunStatus in [.failed, .completed, .running] {
+            let d = record(status, nodes: [], error: "Boom")
+            XCTAssertEqual(d.finalOutcomePanel(rowStatus: .failed), .error("Boom"), "\(status)")
+        }
+    }
+
+    /// A cancelled run with neither output nor reason falls through to the zero-node arm rather
+    /// than rendering a glyph beside nothing at all.
+    ///
+    /// ⚠️ The EMPTY-STRING half of this failed on the first run and the divergence was real, not a
+    /// bad expectation: `finalOutcomePanel` returned `.error("")` — an error-red line with no text —
+    /// where `RunCardBody.of` on the history card already normalised a blank message away. Making
+    /// the two surfaces agree is the whole point of this row, so the panel was normalised to match
+    /// rather than this assertion loosened. (`.waiting` for a terminal zero-node run is a separate,
+    /// pre-existing wart of the empty/pending arm and is not what this test is about.)
+    func testACancelledRunWithNoReasonAndNoOutputFallsThroughToWaiting() {
+        let d = record(.cancelled, nodes: [], error: nil)
+        XCTAssertEqual(d.finalOutcomePanel(rowStatus: .cancelled), .waiting)
+
+        let empty = record(.cancelled, nodes: [], error: "")
+        XCTAssertEqual(empty.finalOutcomePanel(rowStatus: .cancelled), .waiting)
+    }
+
+    /// The hourglass stays HONEST where it is true: a live run that has dispatched nothing.
+    func testLiveRunWithNothingDispatchedShowsWaiting() {
+        let state = WorkflowExecutionState()
+        state.isRunning = true
+        let d = WorkflowRunDisplayData.from(live: state)
+        XCTAssertEqual(d.finalOutcomePanel(rowStatus: .pending), .waiting)
+    }
+
+    /// Live with settled nodes and no final output yet → progress, whose spinner wording tracks
+    /// the Final Outcome ROW's own status.
+    func testLiveRunWithSettledNodesShowsProgress() {
+        let state = WorkflowExecutionState()
+        state.isRunning = true
+        state.nodeResults = [WorkflowNodeResult(
+            id: UUID(), nodeID: UUID(), profileName: "A", status: .completed,
+            detail: "done", startTime: Date(), endTime: Date()
+        )]
+        let d = WorkflowRunDisplayData.from(live: state)
+        XCTAssertEqual(d.finalOutcomePanel(rowStatus: .running), .progress(synthesising: true))
+        XCTAssertEqual(d.finalOutcomePanel(rowStatus: .pending), .progress(synthesising: false))
+    }
+
+    /// Hand-built display data — the ONLY way to put a `.pending` node into `nodeResults`:
+    /// neither status mapper can emit `.pending` (it exists only as a layout placeholder), so
+    /// record-path fixtures cannot represent the production-dominant live shape, where the
+    /// layout factory seeds every undispatched node as pending from frame one.
+    private func liveDisplayData(nodes: [WorkflowRunDisplayData.NodeDisplayData],
+                                 error: String? = nil,
+                                 finalOutput: String = "") -> WorkflowRunDisplayData {
+        WorkflowRunDisplayData(
+            isLive: true, isRunning: true, nodeResults: nodes, finalOutput: finalOutput,
+            variables: [:], totalNodes: nodes.count, workflowError: error,
+            userInput: "go", timestamp: Date(), status: nil, duration: 1
+        )
+    }
+
+    private func pendingNode() -> WorkflowRunDisplayData.NodeDisplayData {
+        WorkflowRunDisplayData.NodeDisplayData(
+            id: UUID(), nodeID: UUID(), profileName: "P", status: .pending,
+            detail: "", duration: 0, input: nil, inputSourceLabel: nil,
+            nodeTimeline: [], isStreaming: false, supportsTimeline: true
+        )
+    }
+
+    private func completedNode() -> WorkflowRunDisplayData.NodeDisplayData {
+        WorkflowRunDisplayData.NodeDisplayData(
+            id: UUID(), nodeID: UUID(), profileName: "C", status: .completed,
+            detail: "done", duration: 1, input: nil, inputSourceLabel: nil,
+            nodeTimeline: [], isStreaming: false, supportsTimeline: true
+        )
+    }
+
+    /// A live run whose layout placeholders are ALL still pending — the honest hourglass. Kills
+    /// the delete-the-allSatisfy-clause mutant (which would claim "Awaiting node outputs…" at
+    /// run start).
+    func testLiveRunAllPendingPlaceholdersShowsWaiting() {
+        let d = liveDisplayData(nodes: [pendingNode(), pendingNode()])
+        XCTAssertEqual(d.finalOutcomePanel(rowStatus: .pending), .waiting)
+    }
+
+    /// ⚠️ The MIXED settled+pending row — the production-dominant live shape (every real live
+    /// run carries pending placeholders from frame one) and the one that separates `allSatisfy`
+    /// from `contains`: a contains-mutant shows the "Waiting for execution" hourglass for
+    /// essentially the entire run, the exact misreport class XUI-2 was filed against.
+    func testMixedSettledAndPendingShowsProgress() {
+        let d = liveDisplayData(nodes: [completedNode(), pendingNode()])
+        XCTAssertEqual(d.finalOutcomePanel(rowStatus: .running), .progress(synthesising: true))
+    }
+
+    /// The ordinary settled case renders the output.
+    func testCompletedRecordShowsFinalOutput() {
+        let d = record(.completed, nodes: [node(.completed)], finalOutput: "The answer")
+        XCTAssertEqual(d.finalOutcomePanel(rowStatus: .completed), .output("The answer"))
+    }
+
+    /// Parity with the pre-fix behavior: an error alongside a REAL final output still shows the
+    /// output — the error branch only owns runs that produced nothing.
+    func testErrorWithFinalOutputStillShowsOutput() {
+        let d = record(.completed, nodes: [node(.completed), node(.failed)],
+                       error: "one branch failed", finalOutput: "Partial answer")
+        XCTAssertEqual(d.finalOutcomePanel(rowStatus: .completed), .output("Partial answer"))
+    }
+
+    // MARK: - Captured-trace gate (register XUI-1)
+
+    private func displayNode(supportsTimeline: Bool, events: [TimelineEvent]) -> WorkflowRunDisplayData.NodeDisplayData {
+        WorkflowRunDisplayData.NodeDisplayData(
+            id: UUID(), nodeID: UUID(), profileName: "N", status: .skipped,
+            detail: "Skipped by you", duration: 1.2, input: nil, inputSourceLabel: nil,
+            nodeTimeline: events, isStreaming: false,
+            supportsTimeline: supportsTimeline
+        )
+    }
+
+    private var traceEvent: TimelineEvent {
+        .toolExecution(ToolExecutionData(id: UUID(), name: "fs_read", params: "{}",
+                                         output: "ok", isSuccess: true, isExecuting: false))
+    }
+
+    /// ⚠️ THE XUI-1 PIN. A node skipped mid-flight (or cancelled while executing) HAS a captured
+    /// trace — persisted by `freeze` up to 400 events — and the `.skipped`/`.cancelled` arms
+    /// rendered only a one-line status, leaving the evidence unreachable ("an 829ms model call in
+    /// the Run Report and nothing at all in the timeline", 2026-08-23).
+    func testCapturedTraceShowsForTimelineCapableNodeWithEvents() {
+        let d = record(.completed, nodes: [])
+        XCTAssertTrue(d.nodeShowsCapturedTrace(displayNode(supportsTimeline: true, events: [traceEvent])))
+    }
+
+    func testNoTraceForEmptyTimeline() {
+        let d = record(.completed, nodes: [])
+        XCTAssertFalse(d.nodeShowsCapturedTrace(displayNode(supportsTimeline: true, events: [])))
+    }
+
+    /// Single-shot kinds (bot, imageGen, structural transforms) hold only incidental events —
+    /// `supportsTimeline` stays the gate, exactly as on the settled arm.
+    func testNoTraceForSingleShotNodeKind() {
+        let d = record(.completed, nodes: [])
+        XCTAssertFalse(d.nodeShowsCapturedTrace(displayNode(supportsTimeline: false, events: [traceEvent])))
+    }
 }

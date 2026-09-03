@@ -412,7 +412,7 @@ final class ChatOpsBridge {
 
     /// Resolves a default profile for new conversations — prefers agent profiles.
     private func resolveProfile() -> BackendProfileModel? {
-        let profiles = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
+        let profiles = (try? BackendProfileStore.shared.fetchSharedProfiles()) ?? []
 
         // First try the currently selected profile in the UI
         if let vm = viewModel,

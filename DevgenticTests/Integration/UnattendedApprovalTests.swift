@@ -56,9 +56,7 @@ final class UnattendedApprovalTests: XCTestCase {
         let makeStream = {
             executor.executeWorkflow(
                 userInput: "Test input",
-                chatHistory: [],
                 conversationID: self.conversationID,
-                ragContext: nil,
                 traceContext: self.traceContext,
                 onTraceUpdate: { _ in },
                 layout: scenario.layout,
@@ -185,8 +183,8 @@ final class UnattendedApprovalTests: XCTestCase {
         let executor = WorkflowExecutor(workflowProfileID: UUID())
         let makeStream = {
             executor.executeWorkflow(
-                userInput: "Test input", chatHistory: [], conversationID: self.conversationID,
-                ragContext: nil, traceContext: self.traceContext, onTraceUpdate: { _ in },
+                userInput: "Test input", conversationID: self.conversationID,
+                traceContext: self.traceContext, onTraceUpdate: { _ in },
                 layout: scenario.layout, profileMap: scenario.profileMap, streamProvider: self.mockProvider
             )
         }

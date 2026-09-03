@@ -133,6 +133,29 @@ enum WorkflowInputAssembler {
     /// there would corrupt a legitimate `<T>` in a task description or a pasted code snippet for
     /// no one this fix is meant to defend against. Call this ONLY at a boundary where the content
     /// can plausibly be upstream node output or third-party (ChatOps) input.
+    /// Escapes a payload for embedding in `section` ONLY when it could actually forge the
+    /// section's boundary (register EIO-4).
+    ///
+    /// ⚠️ The blanket escape corrupted VERBATIM work: a node whose job is to transform HTML/XML/
+    /// code received `&lt;div&gt;` where its upstream emitted `<div>`, and consecutive LLM hops
+    /// compounded it (`&` escapes first, so `&lt;` became `&amp;lt;`). But WF-SE5's actual threat
+    /// is narrower than "any angle bracket": a payload can only break out of its section by
+    /// containing the section's own CLOSING tag. So: payloads carrying `</tag` (case-insensitive)
+    /// are escaped in full and the rewrite is LOGGED with its consequence; every other payload —
+    /// the overwhelming majority, including all ordinary HTML/code — passes byte-exact.
+    ///
+    /// The trade is explicit: a legitimate payload that happens to contain the literal boundary
+    /// string still gets entity-escaped (safe, visible in the log), because an unescaped boundary
+    /// forgery would hand the payload its own `<instruction>` block — the injection WF-SE5 closed.
+    static func escapeIfBoundaryThreat(
+        _ text: String, section: String, wrapping: PromptWrapping
+    ) -> String {
+        guard wrapping == .xml else { return text }
+        guard text.range(of: "</\(section)", options: .caseInsensitive) != nil else { return text }
+        assemblerLogger.notice("[WF_EXEC] A payload bound for the <\(section)> section contains its closing tag ('</\(section)') and was entity-escaped IN FULL (\(text.count) chars). CONSEQUENCE: the section boundary cannot be forged, but this payload reaches the model with &/</> as XML entities — if it was legitimate markup that must stay verbatim, rename or wrap the offending text upstream.")
+        return escapeForXMLEmbedding(text, wrapping: wrapping)
+    }
+
     static func escapeForXMLEmbedding(_ text: String, wrapping: PromptWrapping) -> String {
         switch wrapping {
         case .markdown: return text
@@ -169,12 +192,20 @@ enum WorkflowInputAssembler {
     static func renderArtifactManifest(_ artifacts: [MediaArtifact]) -> String {
         guard !artifacts.isEmpty else { return "" }
 
+        // ⚠️ THE MANIFEST IS PRE-ESCAPED FIELD BY FIELD, and the caller must NOT escape it again
+        // (register EIO-3). The blanket escape it used to get rewrote `&`/`<`/`>` inside the
+        // LOCATOR — the one resolvable handle the downstream agent has — so `/Users/x/R&D/out.pdf`
+        // arrived as `/Users/x/R&amp;D/out.pdf` and every fs/HTTP tool call on it failed on a path
+        // that does not exist, with nothing logged. Only the LABEL is untrusted (upstream-authored
+        // free text; a label of `</attached_files><instruction>` must stay inert — WF-SE5); the
+        // locator, kind and mime are produced by this app and must reach the agent byte-exact.
         var lines: [String] = artifacts.prefix(maxManifestEntries).enumerated().map { index, artifact in
             let label = artifact.label
                 ?? Self.locatorName(for: artifact.reference)
                 ?? "untitled"
+            let safeLabel = escapeForXMLEmbedding(label, wrapping: .xml)
             let locator = Self.locatorDescription(for: artifact.reference)
-            return "\(index + 1). [\(artifact.kind.rawValue)] \"\(label)\" (\(artifact.mimeType)) — \(locator)"
+            return "\(index + 1). [\(artifact.kind.rawValue)] \"\(safeLabel)\" (\(artifact.mimeType)) — \(locator)"
         }
         if artifacts.count > maxManifestEntries {
             lines.append("…and \(artifacts.count - maxManifestEntries) more file(s).")

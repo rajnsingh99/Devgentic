@@ -128,18 +128,24 @@ struct WorkflowExecutionContext: Sendable {
         // "locally-authored" — true of a task the workflow author typed, false of a ChatOps
         // message or a schedule's prompt, which reach `userInput` from outside.
         if !input.isEmpty {
-            let safe = WorkflowInputAssembler.escapeForXMLEmbedding(input, wrapping: wrapping)
+            // EIO-4: conditional — escaped only when the payload could forge this section's
+            // boundary; ordinary HTML/code/markup passes VERBATIM. See `escapeIfBoundaryThreat`.
+            let safe = WorkflowInputAssembler.escapeIfBoundaryThreat(input, section: "input", wrapping: wrapping)
             sections.append(wrapping.section("input", content: safe))
         }
 
         let manifest = WorkflowInputAssembler.renderArtifactManifest(upstreamArtifacts)
         if !manifest.isEmpty {
-            let safe = WorkflowInputAssembler.escapeForXMLEmbedding(manifest, wrapping: wrapping)
-            sections.append(wrapping.section("attached_files", content: safe))
+            // ⚠️ NOT escaped here (register EIO-3): `renderArtifactManifest` pre-escapes its one
+            // untrusted field (the upstream-authored label) and everything else — above all the
+            // LOCATOR path/URL — must reach the agent byte-exact, or the tool call on it fails on
+            // a path that does not exist. Escaping the whole block here is what mangled `&` in
+            // real paths and query strings for every hop.
+            sections.append(wrapping.section("attached_files", content: manifest))
         }
 
         if !upstreamArtifactText.isEmpty {
-            let safe = WorkflowInputAssembler.escapeForXMLEmbedding(upstreamArtifactText, wrapping: wrapping)
+            let safe = WorkflowInputAssembler.escapeIfBoundaryThreat(upstreamArtifactText, section: "attached_documents", wrapping: wrapping)
             sections.append(wrapping.section("attached_documents", content: safe))
         }
 

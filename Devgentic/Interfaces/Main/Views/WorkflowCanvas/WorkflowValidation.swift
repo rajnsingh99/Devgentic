@@ -51,6 +51,31 @@ struct WorkflowValidationIssue: Identifiable, Hashable, Sendable {
 /// No side effects, no singletons, no async — fully testable in isolation.
 enum WorkflowValidator {
 
+    /// The one sentence shown when a node's backing configuration cannot be resolved.
+    ///
+    /// ⚠️ SHARED because it appears in TWO places — this validator's issue (the panel and the
+    /// toolbar pill) and `ProfileNodeInspectorView`'s card — and they must not drift into
+    /// describing what looks like two different problems. It was reworded once already, on
+    /// 2026-08-29, when node-owned configuration turned a dead end ("Profile not found — it may
+    /// have been deleted") into something the user can actually fix; two literals would have made
+    /// that a two-file change with nothing to catch a miss.
+    ///
+    /// ⚠️ Names a REMEDY, not just a fault. Re-adding the node genuinely repairs a bot/agent node,
+    /// because such a node owns its configuration. A SUB-WORKFLOW node is not covered by this —
+    /// it references another workflow's canvas, so the inspector says something else for that case.
+    static let missingConfigurationMessage =
+        "This node's configuration is missing. Delete it and add the node again."
+
+    /// The sub-workflow counterpart, for a node whose referenced WORKFLOW is gone.
+    ///
+    /// ⚠️ Deliberately does NOT say "delete and re-add". A sub-workflow node's `profileID` is the
+    /// only surviving record of which child workflow that step ran; telling the user to delete the
+    /// node destroys it, and re-adding is impossible once the child is gone. Shared with
+    /// `ProfileNodeInspectorView` for the same anti-drift reason as its sibling.
+    static let missingWorkflowMessage =
+        "The workflow this node runs no longer exists. Point this step at another workflow, or delete the node."
+
+
     /// Validates a workflow layout and returns all configuration issues.
     /// - Parameters:
     ///   - layout: The workflow's node/edge graph.
@@ -99,6 +124,33 @@ enum WorkflowValidator {
             }
         }
 
+        // [EXA-8] A canvas on which NOTHING produces new content. Router, Gate and Trigger all
+        // assign `output = upstreamText`, so such a workflow can only answer with the user's own
+        // message — the run "succeeds" and hands back the question that started it.
+        //
+        // ⚠️ WIDER THAN THE FILED ROW, which named only the Trigger. Trigger nodes cannot be created
+        // by any palette entry in this build, so a Trigger-only canvas is reachable only from a
+        // legacy layout — but a Router-only or Gate-only canvas is buildable TODAY from the palette,
+        // and has exactly the same outcome.
+        //
+        // ⚠️ WARNING, never `.error`: the executor throws `.validationFailed` on any error-severity
+        // issue, and refusing to run a graph the user may have built deliberately is the enforcement
+        // this project has repeatedly decided against. The exhaustive switch is the point — a new
+        // node kind must DECIDE whether it produces content rather than inherit a silent skip.
+        let producesNewContent = layout.nodes.contains { node in
+            switch node.kind {
+            case .profile, .code, .action:                  return true
+            case .condition, .gate, .trigger, .unsupported: return false
+            }
+        }
+        if !producesNewContent {
+            issues.append(WorkflowValidationIssue(
+                nodeName: "Workflow",
+                severity: .warning,
+                message: "No node on this canvas produces new content — Router, Gate and Trigger nodes only pass their input along, so this workflow will answer with your own message. Add a Profile, Code or Action node."
+            ))
+        }
+
         // P0-8: Code-node `outputVariable` collisions that can RACE. Two Code nodes
         // writing the same variable on the SAME execution level run in parallel
         // (`WorkflowState.variables` is a plain dict — last write wins, order
@@ -130,6 +182,10 @@ enum WorkflowValidator {
         // any engine evaluation logic: the P0-8 pass above already collected the Code-node half for
         // its collision check.
         let writtenVariables = Set(outputVariableOwners.keys)
+        // [EXA-5] Execution level of every writer, per variable — the input to
+        // `WorkflowVariableVisibility.resolve`. Derived from the SAME `outputVariableOwners` the
+        // parallel-write rule uses, so the two cannot disagree about who writes what.
+        let variableWriterLevels: [String: [Int]] = outputVariableOwners.mapValues { $0.map(\.level) }
 
         for (varName, owners) in outputVariableOwners {
             for (_, sameLevelOwners) in Dictionary(grouping: owners, by: { $0.level }) where sameLevelOwners.count > 1 {
@@ -394,16 +450,20 @@ enum WorkflowValidator {
                 validateProfileNode(node: node, profileID: profileID, profileMap: profileMap, issues: &issues)
 
             case .condition(let config):
-                validateConditionNode(node: node, config: config, writtenVariables: writtenVariables, edges: layout.edges, issues: &issues)
+                validateConditionNode(node: node, config: config, writtenVariables: writtenVariables, readerLevel: nodeLevel[node.id], variableWriterLevels: variableWriterLevels, edges: layout.edges, issues: &issues)
 
             case .gate(let config):
                 validateGateNode(node: node, config: config, issues: &issues)
 
             case .code(let config):
-                validateCodeNode(node: node, config: config, issues: &issues)
+                // ⚠️ `nodeLevel[node.id]`, NOT `?? -1`: on a cyclic layout `computeExecutionLevels`
+                // returns nil and the map is empty, and the -1 sentinel made every variable on the
+                // canvas report "runs at the same time as this node" while the panel never
+                // mentioned the cycle. nil means "ordering unknown", and the verdict says nothing.
+                validateCodeNode(node: node, config: config, writtenVariables: writtenVariables, readerLevel: nodeLevel[node.id], variableWriterLevels: variableWriterLevels, issues: &issues)
 
             case .action(let config):
-                validateActionNode(node: node, config: config, availableToolSources: availableToolSources, issues: &issues)
+                validateActionNode(node: node, config: config, availableToolSources: availableToolSources, writtenVariables: writtenVariables, readerLevel: nodeLevel[node.id], variableWriterLevels: variableWriterLevels, issues: &issues)
 
             case .trigger:
                 break // Trigger nodes have no user-configurable fields to validate
@@ -468,11 +528,36 @@ enum WorkflowValidator {
     ) {
         // Profile existence check
         if profileMap[profileID] == nil {
+            // ⚠️ WHY THIS RULE STILL EXISTS, now that nodes own their configuration. Its original
+            // case — a node referencing a SHARED profile the user had deleted — is gone: such
+            // workflows were deleted by the owner on 2026-08-29 (pre-release), and the convert-on-
+            // open migration that would have repaired them was deleted with them.
+            //
+            // What survives is the store failing: `WorkflowExecutor` resolves profiles with
+            // `(try? BackendProfileStore.shared.fetchProfiles()) ?? []`, so a fetch that throws
+            // yields an EMPTY map and every profile node becomes unresolvable at once. That is the
+            // live case this guards, and it is why the rule must not be deleted as dead code — a
+            // conclusion an earlier plan reached and adversarial verification refuted.
+            //
+            // ⚠️ Reworded 2026-08-29 because the remedy CHANGED. It used to describe a dead end
+            // ("Profile not found — it may have been deleted"); a node's configuration is now its
+            // own, so deleting and re-adding the node genuinely repairs it.
+            // ⚠️ KIND-SPECIFIC, because the remedy is — and because the advice below is actively
+            // destructive for the wrong kind. A sub-workflow node REFERENCES another workflow's
+            // canvas; "delete it and add the node again" would discard the node's `profileID`, the
+            // only surviving record of which child that step ran, and re-adding is impossible
+            // because the child is gone. `missingConfigurationMessage`'s own doc says this case is
+            // not covered by it, and `ProfileNodeInspectorView` has always branched — the validator
+            // did not, so the panel and the pill gave advice the inspector contradicted.
+            let isSubWorkflow: Bool = {
+                if case .profile(_, .workflow) = node.kind { return true }
+                return false
+            }()
             issues.append(WorkflowValidationIssue(
                 nodeID: node.id,
                 nodeName: node.displayName,
                 severity: .error,
-                message: "Profile not found — it may have been deleted."
+                message: isSubWorkflow ? Self.missingWorkflowMessage : Self.missingConfigurationMessage
             ))
         }
 
@@ -513,6 +598,8 @@ enum WorkflowValidator {
         node: WorkflowNode,
         config: ConditionNodeConfig,
         writtenVariables: Set<String>,
+        readerLevel: Int?,
+        variableWriterLevels: [String: [Int]],
         /// Needed only to tell whether this Router's `error` port is wired — see the Ask-fallback
         /// warning at the bottom.
         edges: [WorkflowEdge],
@@ -584,15 +671,38 @@ enum WorkflowValidator {
                         severity: .error,
                         message: "Rule '\(rule.label)' reads a workflow variable but no variable name is set. Pick the variable in the rule editor."
                     ))
-                } else if !writtenVariables.contains(name) {
-                    // WARNING, not error: the graph still runs, and the set of writers is derived
-                    // from THIS canvas — a deliberately exotic setup should not be hard-blocked.
-                    issues.append(WorkflowValidationIssue(
-                        nodeID: node.id,
-                        nodeName: node.displayName,
-                        severity: .warning,
-                        message: "Rule '\(rule.label)' reads variable '\(name)', but no Code node on this canvas writes it — the rule will compare against an empty string every run."
-                    ))
+                } else {
+                    // [EXA-5, routed through the shared verdict for EXA-10] A rule reads a stored
+                    // NAME rather than a template, so its candidate list is the one name — but the
+                    // DECISION and the WORDING now come from the same two functions the Code and
+                    // Action surfaces use, which is what stops the three drifting apart on the same
+                    // canvas. The variable may be unwritten, or written on this node's own level:
+                    // not a race, a same-level write lands only after the level finishes, so the
+                    // rule compares against an empty string on EVERY run, deterministically.
+                    //
+                    // ⚠️ WARNING, never `.error`. The executor throws `.validationFailed` on any
+                    // error-severity issue, so an error here would refuse to run canvases that run
+                    // today — and a rule that hard-blocks a shape the user may have meant teaches
+                    // people to run past the panel.
+                    // ⚠️ `[name]`, NOT run through `variableCandidates`: a Router rule reads
+                    // `state.variables[key]` with an exact trimmed key and has no dot-path
+                    // fallback, so its candidate list really is the one name. Its CONSEQUENCE is
+                    // its own too — an always-empty comparison, not a leftover placeholder.
+                    let verdict = variableReferenceVerdict(
+                        candidates: [name], writtenVariables: writtenVariables,
+                        readerLevel: readerLevel, variableWriterLevels: variableWriterLevels
+                    )
+                    if let message = variableReferenceMessage(
+                        verdict: verdict, site: .routerRule(label: rule.label),
+                        typedName: name, readerLevel: readerLevel
+                    ) {
+                        issues.append(WorkflowValidationIssue(
+                            nodeID: node.id,
+                            nodeName: node.displayName,
+                            severity: .warning,
+                            message: message
+                        ))
+                    }
                 }
             }
 
@@ -781,9 +891,145 @@ enum WorkflowValidator {
 
     // MARK: - Code Node
 
+    /// Where a `{{ var.… }}` reference was read, which decides how the CONSEQUENCE reads.
+    ///
+    /// ⚠️ The three surfaces share the DECISION but not the sentence, and conflating those was a
+    /// real regression: the first version of this gave a Router rule the template consequence
+    /// ("the placeholder text is left in place"). A Router rule has no placeholder — the engine
+    /// does `state.variables[key] ?? ""` — so the sentence described a mechanism that does not
+    /// exist there, and it dropped the one fact the old Router wording carried, which is that an
+    /// always-empty comparison makes `isEmpty`/`notContains`/`notEquals` match unconditionally.
+    /// Each tail here mirrors that surface's own runtime warning.
+    enum VariableReferenceSite: Equatable {
+        case routerRule(label: String)
+        case codeTemplate
+        case actionArgument(name: String)
+
+        var subject: String {
+            switch self {
+            case .routerRule(let label): return "Rule '\(label)'"
+            case .codeTemplate: return "The template"
+            case .actionArgument(let name): return "Argument '\(name)'"
+            }
+        }
+
+        /// What the user actually gets when the read resolves to nothing, per surface.
+        var emptyReadConsequence: String {
+            switch self {
+            case .routerRule:
+                return "it is compared as an empty string every run, so 'is empty'/'does not contain'/'does not equal' match unconditionally and 'equals'/'contains' never match"
+            case .codeTemplate:
+                return "it resolves to nothing and the literal placeholder text is left in this node's output"
+            case .actionArgument:
+                return "it resolves to nothing and the tool receives the literal placeholder text"
+            }
+        }
+    }
+
+    /// What is wrong with ONE `{{ var.… }}` reference, or nothing (register EXA-10).
+    enum VariableReferenceVerdict: Equatable {
+        case ok
+        /// No Code node on this canvas writes any of the candidate names.
+        case neverWritten
+        /// A writer exists but never runs early enough to be seen — `EXA-5`'s shape. Carries the
+        /// candidate the verdict is ABOUT, so the message cannot name a different one.
+        case writtenTooLate(name: String, earliestWriterLevel: Int)
+    }
+
+    /// THE verdict for a variable reference — Router rules, Code templates and Action bindings all
+    /// go through here, so the three cannot start disagreeing about the same canvas.
+    ///
+    /// ⚠️⚠️ IT MIRRORS THE RESOLVER'S *RUNTIME* SELECTION, and the first version of this did not —
+    /// it took the first candidate written ANYWHERE on the canvas and judged only that candidate's
+    /// levels. `WorkflowTemplate.resolve` takes the first candidate PRESENT IN THE SNAPSHOT, which
+    /// is not the same thing: with `result` written on level 0 and `result.status` written on the
+    /// reader's own level, `{{ var.result.status }}` resolves fine at run time (the same-level
+    /// write is simply absent, so the first-segment JSON-path fallback fires) while the old rule
+    /// warned. **A warning on a canvas that runs is the failure this whole row's doctrine says is
+    /// worse than the bug, and the first attempt shipped one.** So: ANY candidate visible from an
+    /// earlier level makes the reference fine.
+    ///
+    /// ⚠️ `readerLevel` is OPTIONAL, and nil means the layout is cyclic (`computeExecutionLevels`
+    /// returns nil, so every node falls to no level). Ordering is then unknowable and this says
+    /// NOTHING about it — the same opt-out the WF-CC2 contention rule takes, and for the same
+    /// reason: asserting an ordering fault about a run that can never start is noise, and the
+    /// sentinel would have rendered "runs at the same time as this node" for every variable on the
+    /// canvas while the panel never mentioned the actual cycle.
+    ///
+    /// ⚠️ Conservative BY DESIGN. A MISSED warning costs nothing new — the runtime
+    /// unresolved-placeholder logs still fire exactly as they do today; a FALSE warning spends the
+    /// panel's credibility, which is the only asset the whole validator has.
+    nonisolated static func variableReferenceVerdict(
+        candidates: [String],
+        writtenVariables: Set<String>,
+        readerLevel: Int?,
+        variableWriterLevels: [String: [Int]]
+    ) -> VariableReferenceVerdict {
+        guard !candidates.isEmpty else { return .ok }
+        let written = candidates.filter(writtenVariables.contains)
+        guard !written.isEmpty else { return .neverWritten }
+        guard let readerLevel else { return .ok }
+
+        // The resolver reads whichever candidate is actually THERE, so one visible candidate is
+        // enough for the reference to work.
+        var earliest: (name: String, level: Int)?
+        for name in written {
+            switch WorkflowVariableVisibility.resolve(
+                readerLevel: readerLevel, writerLevels: variableWriterLevels[name] ?? []
+            ) {
+            case .visible:
+                return .ok
+            case .writtenTooLate(let level):
+                if earliest == nil || level < earliest!.level { earliest = (name, level) }
+            case .neverWritten:
+                continue
+            }
+        }
+        // Report the candidate CLOSEST to working — its name and its own level, never one name's
+        // level under another name's label.
+        guard let earliest else { return .neverWritten }
+        return .writtenTooLate(name: earliest.name, earliestWriterLevel: earliest.level)
+    }
+
+    /// The sentence a verdict produces. Shared so the three surfaces cannot drift in wording, with
+    /// the CONSEQUENCE supplied per surface (see `VariableReferenceSite`).
+    ///
+    /// ⚠️ `.writtenTooLate` names the candidate the VERDICT matched, not the text the user typed:
+    /// for `{{ var.result.status }}` decided by a writer of `result`, naming `result.status` sent
+    /// the user hunting for a Code node that does not exist.
+    nonisolated static func variableReferenceMessage(
+        verdict: VariableReferenceVerdict, site: VariableReferenceSite,
+        typedName: String, readerLevel: Int?
+    ) -> String? {
+        switch verdict {
+        case .ok:
+            return nil
+        case .neverWritten:
+            return "\(site.subject) reads variable '\(typedName)', but no Code node on this canvas writes it — \(site.emptyReadConsequence)."
+        case .writtenTooLate(let name, let writerLevel):
+            let timing = writerLevel == readerLevel ? "at the same time as this node" : "after this node"
+            return "\(site.subject) reads variable '\(name)', but the Code node that writes it runs \(timing) — so \(site.emptyReadConsequence) on every run. Wire the writing Code node upstream of this one."
+        }
+    }
+
+    /// Every DISTINCT variable reference in one template or binding, in first-appearance order.
+    ///
+    /// ⚠️ De-duplicated per site: `referencedVariableNames` yields one list per PLACEHOLDER, so a
+    /// report template that interpolates `{{ var.summary }}` in a heading and again in the body
+    /// produced two byte-identical rows and a "2 issues" header for one mistake. Ten references
+    /// produced ten. That is the credibility spend this rule exists to avoid, arriving through the
+    /// rule itself.
+    nonisolated static func distinctVariableReferences(in text: String) -> [[String]] {
+        var seen = Set<[String]>()
+        return WorkflowTemplate.referencedVariableNames(in: text).filter { seen.insert($0).inserted }
+    }
+
     private static func validateCodeNode(
         node: WorkflowNode,
         config: CodeNodeConfig,
+        writtenVariables: Set<String>,
+        readerLevel: Int?,
+        variableWriterLevels: [String: [Int]],
         issues: inout [WorkflowValidationIssue]
     ) {
         if config.template.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -793,6 +1039,26 @@ enum WorkflowValidator {
                 severity: .warning,
                 message: "Code template is empty — node will produce no output."
             ))
+        }
+
+        // [EXA-10] Until now a `{{ var.… }}` reference in a TEMPLATE got no design-time signal at
+        // all — not for a same-level write, and not even for a plain typo — while the identical
+        // mistake in a Router rule was warned. The user's only evidence was a runtime log, after
+        // the tokens and side effects were spent.
+        for candidates in distinctVariableReferences(in: config.template) {
+            let verdict = variableReferenceVerdict(
+                candidates: candidates, writtenVariables: writtenVariables,
+                readerLevel: readerLevel, variableWriterLevels: variableWriterLevels
+            )
+            if let message = variableReferenceMessage(
+                verdict: verdict, site: .codeTemplate,
+                typedName: candidates[0], readerLevel: readerLevel
+            ) {
+                issues.append(WorkflowValidationIssue(
+                    nodeID: node.id, nodeName: node.displayName,
+                    severity: .warning, message: message
+                ))
+            }
         }
     }
 
@@ -811,8 +1077,35 @@ enum WorkflowValidator {
         node: WorkflowNode,
         config: ActionNodeConfig,
         availableToolSources: [ToolSource],
+        writtenVariables: Set<String>,
+        readerLevel: Int?,
+        variableWriterLevels: [String: [Int]],
         issues: inout [WorkflowValidationIssue]
     ) {
+        // [EXA-10] Same rule as the Code template, per BINDING — an Action node renders N strings,
+        // not one, and naming the argument matches `WorkflowActionArgs`' runtime line so the two
+        // read as one system. Deliberately BEFORE the `guard let tool` below: a binding that reads
+        // a variable nothing writes is worth saying even on a node whose tool is not chosen yet.
+        for (argName, binding) in config.argumentBindings.sorted(by: { $0.key < $1.key }) {
+            // Deduped PER BINDING, not per node: the same variable in two different arguments is
+            // two facts the user needs, each naming its own argument.
+            for candidates in distinctVariableReferences(in: binding) {
+                let verdict = variableReferenceVerdict(
+                    candidates: candidates, writtenVariables: writtenVariables,
+                    readerLevel: readerLevel, variableWriterLevels: variableWriterLevels
+                )
+                if let message = variableReferenceMessage(
+                    verdict: verdict, site: .actionArgument(name: argName),
+                    typedName: candidates[0], readerLevel: readerLevel
+                ) {
+                    issues.append(WorkflowValidationIssue(
+                        nodeID: node.id, nodeName: node.displayName,
+                        severity: .warning, message: message
+                    ))
+                }
+            }
+        }
+
         guard let tool = config.tool else {
             issues.append(WorkflowValidationIssue(
                 nodeID: node.id,
@@ -843,15 +1136,26 @@ enum WorkflowValidator {
         // time rather than at run time. Native tools are always resolvable, and
         // we skip the check entirely when no catalog was supplied.
         if tool.sourceId != nativeToolSourceID, !availableToolSources.isEmpty {
-            let present = availableToolSources.contains { source in
-                source.id == tool.sourceId && source.tools.contains { $0.name == tool.name }
-            }
+            let source = availableToolSources.first { $0.id == tool.sourceId }
+            let present = source.map { $0.tools.contains { $0.name == tool.name } } ?? false
             if !present {
                 issues.append(WorkflowValidationIssue(
                     nodeID: node.id,
                     nodeName: node.displayName,
                     severity: .warning,
                     message: "Tool '\(tool.name)' isn't currently available — its MCP server may be offline or the tool was removed. The action will fail at run time unless it reconnects."
+                ))
+            } else if let source, !source.isEnabled {
+                // INS-1's gap-inside-the-gap: a DISABLED server stays in the catalog WITH its
+                // tools (the Tool Library needs it visible to re-enable), so the membership test
+                // above passes and no warning ever fired — while the executor's resolver refuses
+                // a disabled source by design and the node fails at run time. Warning, not error,
+                // matching the offline-server precedent: the user may re-enable before running.
+                issues.append(WorkflowValidationIssue(
+                    nodeID: node.id,
+                    nodeName: node.displayName,
+                    severity: .warning,
+                    message: "Tool '\(tool.name)' is on a disabled MCP server ('\(source.serverName)') — the action will fail at run time. Re-enable the server in the Tool Library to run this node."
                 ))
             }
         }

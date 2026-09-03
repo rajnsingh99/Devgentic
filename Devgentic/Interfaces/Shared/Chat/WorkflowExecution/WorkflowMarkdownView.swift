@@ -57,7 +57,12 @@ struct WorkflowMarkdownView: View {
                 .padding(.bottom, theme.spacingSmall)
 
         case .code(let lang, let codeContent, let fileName):
-            CodeBlockView(language: lang, content: codeContent, fileName: fileName)
+            // [XUI-8] The user's code size, not `CodeBlockView`'s 12pt default. This surface's prose
+            // and tables already scaled with `chatFontSize`; only its code blocks did not, so a
+            // reader at 20pt prose got 12pt code in a workflow node and correctly-sized code in the
+            // chat bubble two inches away.
+            CodeBlockView(language: lang, content: codeContent, fileName: fileName,
+                          fontSize: ChatUIConstants.codeFontSize(forChatFontSize: themeManager.chatFontSize))
                 .padding(.bottom, theme.spacingMedium)
                 .frame(maxWidth: .infinity, alignment: .leading)
 

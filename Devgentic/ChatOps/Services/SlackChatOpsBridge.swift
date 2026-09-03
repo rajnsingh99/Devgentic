@@ -459,7 +459,7 @@ final class SlackChatOpsBridge {
     }
 
     private func resolveProfile() -> BackendProfileModel? {
-        let profiles = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
+        let profiles = (try? BackendProfileStore.shared.fetchSharedProfiles()) ?? []
         if let vm = viewModel,
            let selectedID = vm.backendConfiguration.selectedProfileID,
            let profile = profiles.first(where: { $0.id == selectedID }) {

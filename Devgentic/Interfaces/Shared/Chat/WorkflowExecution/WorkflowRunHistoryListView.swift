@@ -61,7 +61,49 @@ struct WorkflowRunHistoryListView: View {
     }
 }
 
-// MARK: - Spoken form
+// MARK: - Card body and spoken form
+
+/// What a run card's third row shows, and in what register (register XUI-5).
+///
+/// ⚠️ Keyed on the run STATUS, not on `error != nil`. EVERY cancel path leaves an `error` behind:
+/// `WorkflowRunRecord.freeze` copies `state.workflowError`, which a Stop has already set to
+/// "Cancelled" (`handleError` writes the message before the cancelled flag is latched), and
+/// `WorkflowRunHistoryStore.reconcileOrphans` stamps "Interrupted" on a run reconciled after a quit.
+/// Both land on a `.cancelled` STATUS, which is why that is the thing to test. Testing the error
+/// alone drew a red warning triangle and two lines of error-coloured text beside the
+/// card's own amber "Cancelled" badge, reporting the user's own Stop back to them as a fault. That
+/// is the same conflation `NodeStatus.color`'s "amber, not red" rule already settled one layer down.
+///
+/// ⚠️ And because the branch was EXCLUSIVE, it also HID the partial output that `handleStreamEnd`
+/// deliberately preserves so that stopping a run discards no evidence.
+enum RunCardBody: Equatable {
+    /// A genuine failure — red glyph, error-coloured text.
+    case failure(String)
+    /// A terminal reason that is NOT a fault (a Stop, a quit). Neutral register.
+    case reason(String)
+    case output(String)
+    case none
+
+    /// Pure and `nonisolated` (WF-UI5): a SwiftUI view's `if` chain is unreachable from a test, and
+    /// this decision is exactly the one that was wrong.
+    nonisolated static func of(
+        status: WorkflowRunRecord.RunStatus,
+        error: String?,
+        finalOutput: String
+    ) -> RunCardBody {
+        let reason = error.flatMap { $0.isEmpty ? nil : $0 }
+        if status == .cancelled {
+            // Output FIRST — a stopped run's partial answer is the useful half, and the reason is
+            // already stated by the amber badge above.
+            if !finalOutput.isEmpty { return .output(finalOutput) }
+            if let reason { return .reason(reason) }
+            return .none
+        }
+        if let reason { return .failure(reason) }
+        if !finalOutput.isEmpty { return .output(finalOutput) }
+        return .none
+    }
+}
 
 /// What VoiceOver says for a run card.
 ///
@@ -95,12 +137,24 @@ enum RunCardSpeech {
         if !record.userInput.isEmpty {
             parts.append(String(localized: "Input: \(spokenPreview(record.userInput))"))
         }
-        // Error wins over output: a failed run's error is what you need, and the card
-        // shows one or the other, never both.
-        if let error = record.error, !error.isEmpty {
-            parts.append(String(localized: "Error: \(spokenPreview(error))"))
-        } else if !record.finalOutput.isEmpty {
-            parts.append(String(localized: "Output: \(spokenPreview(record.finalOutput))"))
+        // [XUI-5] Through the SAME decision the visible row uses. This used to test `error != nil`
+        // independently, and `freeze` sets `error` on every cancel path — so once the row stopped
+        // calling a Stop a failure, VoiceOver still announced "Error: Cancelled" for a run whose card
+        // now showed a neutral stop glyph and its partial output. Fixing only the visual half would
+        // have left the two descriptions of one card contradicting each other, which is the defect
+        // `nodeTagLabel` exists to prevent one screen over.
+        switch RunCardBody.of(status: record.status, error: record.error,
+                              finalOutput: record.finalOutput) {
+        case .failure(let message):
+            parts.append(String(localized: "Error: \(spokenPreview(message))"))
+        case .reason(let message):
+            // Not "Error:" — a Stop is not a fault, and the status word above already said
+            // "Cancelled", so this states the reason without re-classifying it.
+            parts.append(String(localized: "Reason: \(spokenPreview(message))"))
+        case .output(let preview):
+            parts.append(String(localized: "Output: \(spokenPreview(preview))"))
+        case .none:
+            break
         }
 
         var nodes = "\(totalNodes) node\(totalNodes == 1 ? "" : "s")"
@@ -195,28 +249,44 @@ private struct WorkflowRunCardView: View {
                     }
                 }
 
-                // Row 3: Output preview or error
-                if let error = record.error, !error.isEmpty {
+                // Row 3: output preview, a terminal reason, or a genuine failure — decided by
+                // `RunCardBody`, which keys on STATUS rather than on `error != nil` (register XUI-5).
+                switch RunCardBody.of(status: record.status, error: record.error,
+                                      finalOutput: record.finalOutput) {
+                case .failure(let message):
                     HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.triangle")
                             .font(.system(size: 9))
                             .foregroundColor(theme.errorColor.opacity(0.7))
-                        Text(error)
+                        Text(message)
                             .font(.system(size: 11))
                             .foregroundColor(theme.errorColor.opacity(0.8))
                             .lineLimit(2)
                     }
-                } else if !record.finalOutput.isEmpty {
+                case .reason(let message):
+                    // Neutral register: a Stop is not a fault, so no warning glyph and no error tint.
+                    HStack(spacing: 6) {
+                        Image(systemName: "stop.circle")
+                            .font(.system(size: 9))
+                            .foregroundColor(theme.secondaryText)
+                        Text(message)
+                            .font(.system(size: 11))
+                            .foregroundColor(theme.secondaryText)
+                            .lineLimit(2)
+                    }
+                case .output(let preview):
                     HStack(alignment: .top, spacing: 6) {
                         Image(systemName: "text.alignleft")
                             .font(.system(size: 9))
                             .foregroundColor(theme.tertiaryText)
                             .padding(.top, 2)
-                        Text(record.finalOutput)
+                        Text(preview)
                             .font(.system(size: 11))
                             .foregroundColor(theme.tertiaryText)
                             .lineLimit(2)
                     }
+                case .none:
+                    EmptyView()
                 }
 
                 // Bottom strip: Node count + status badge

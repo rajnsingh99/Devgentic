@@ -363,7 +363,20 @@ actor ReActAgentExecutor: Executor {
                                 if let attachments = input.attachmentContext, !attachments.isEmpty {
                                     parts.append(attachments)
                                 }
-                                parts.append(input.userInput)
+                                // ⚠️ NOT on the workflow path (register EIO-2). A workflow node's
+                                // input already rides the user message `compileMessages` built from
+                                // `workflowContext.userMessagePrefix` — `<input>`-wrapped, escaped,
+                                // with the attachment manifest and document sections the system
+                                // prompt's security note refers to. Appending `input.userInput`
+                                // here re-sent the SAME payload raw in a second consecutive user
+                                // turn: 10 KB of upstream became 20 KB per request, in two
+                                // encodings, on every iteration of every retry. Same rationale as
+                                // `includeWorkingMemory: false` / `includeAttachmentContext: false`
+                                // in `NativeStructuredGenerator.compileMessages`, from the other
+                                // side of the seam: each payload gets exactly one carrier.
+                                if input.workflowContext == nil {
+                                    parts.append(input.userInput)
+                                }
                                 return parts.joined(separator: "\n\n")
                             }()
 
@@ -372,9 +385,17 @@ actor ReActAgentExecutor: Executor {
                             // → byte-identical text turn (KV-cache prefix unchanged). A failed
                             // resolve throws → surfaced as an execution error, never dropped.
                             let resolvedUserImages = try await resolveUserImages(input.userPayload)
-                            liveConversationTurns.append(
-                                nativeGen.toolTurnAdapter.userTurn(text: kickoffText, images: resolvedUserImages)
-                            )
+                            // ⚠️ Skip an EMPTY kickoff turn — now reachable, because a workflow
+                            // node with no seeds and no attachments contributes nothing above. The
+                            // prefix user message from `compileMessages` is already the last seeded
+                            // turn, so the request still ends on a user turn; appending an empty
+                            // one would send a blank message some providers reject outright.
+                            // Images keep the turn: they have no other carrier.
+                            if !kickoffText.isEmpty || !resolvedUserImages.isEmpty {
+                                liveConversationTurns.append(
+                                    nativeGen.toolTurnAdapter.userTurn(text: kickoffText, images: resolvedUserImages)
+                                )
+                            }
                             // #22: everything seeded so far (system + history + kickoff) is the
                             // protected prefix — compaction never touches indices below this.
                             nativePrefixCount = liveConversationTurns.count

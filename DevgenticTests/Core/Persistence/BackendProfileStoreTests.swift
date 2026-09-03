@@ -42,6 +42,93 @@ final class BackendProfileStoreTests: XCTestCase {
         context = nil
     }
 
+    // MARK: - Node ownership (workflow nodes own their configuration, Phase 0)
+
+    private func makeBot(_ name: String,
+                         ownerWorkflowID: UUID? = nil,
+                         ownerNodeID: UUID? = nil) -> BackendProfile {
+        BackendProfile(
+            displayName: name,
+            details: .bot(BotConfig(
+                llmConfig: ProviderConfig(apiProvider: .mlx, modelName: "test-model"),
+                instructions: "Be helpful."
+            )),
+            ownerWorkflowID: ownerWorkflowID,
+            ownerNodeID: ownerNodeID
+        )
+    }
+
+    /// A plain profile is not owned — the default must stay nil, because every row that existed
+    /// before schema V3 migrates in with these columns absent.
+    func testProfileIsNotNodeOwnedByDefault() throws {
+        let profile = makeBot("Shared Bot")
+        context.insert(profile)
+        try context.save()
+
+        let fetched = try XCTUnwrap(try context.fetch(FetchDescriptor<BackendProfile>()).first)
+        XCTAssertNil(fetched.ownerWorkflowID)
+        XCTAssertNil(fetched.ownerNodeID)
+        XCTAssertFalse(fetched.snapshot().isNodeOwned)
+    }
+
+    /// The owner ids must survive a real persist/fetch round trip — they are the only thing that
+    /// distinguishes a node's private configuration from a profile the user runs in chat.
+    func testOwnerIdentityRoundTripsThroughPersistence() throws {
+        let workflowID = UUID(), nodeID = UUID()
+        context.insert(makeBot("Node Config", ownerWorkflowID: workflowID, ownerNodeID: nodeID))
+        try context.save()
+
+        let fetched = try XCTUnwrap(try context.fetch(FetchDescriptor<BackendProfile>()).first)
+        XCTAssertEqual(fetched.ownerWorkflowID, workflowID)
+        XCTAssertEqual(fetched.ownerNodeID, nodeID)
+        XCTAssertTrue(fetched.snapshot().isNodeOwned, "a row carrying an ownerNodeID is node-owned")
+    }
+
+    /// ⚠️ `isNodeOwned` keys on `ownerNodeID` ALONE. A row carrying only a workflow id is not a
+    /// node's config, and treating it as one would hide a real profile from the user's library.
+    func testWorkflowIDAloneDoesNotMakeARowNodeOwned() throws {
+        let snapshot = makeBot("Odd One", ownerWorkflowID: UUID(), ownerNodeID: nil).snapshot()
+        XCTAssertFalse(snapshot.isNodeOwned)
+    }
+
+    /// THE FILTER. `fetchSharedProfiles` is what every user-facing picker binds to; an owned row
+    /// leaking through would let a node's private config be run in chat and edited outside its
+    /// workflow.
+    func testFetchSharedProfilesExcludesOwnedRowsButFetchProfilesDoesNot() throws {
+        context.insert(makeBot("Shared A"))
+        context.insert(makeBot("Owned B", ownerWorkflowID: UUID(), ownerNodeID: UUID()))
+        context.insert(makeBot("Shared C"))
+        try context.save()
+
+        let all = try context.fetch(FetchDescriptor<BackendProfile>()).map { $0.snapshot() }
+        XCTAssertEqual(all.count, 3, "precondition: all three rows persisted")
+
+        let shared = all.filter { !$0.isNodeOwned }
+        XCTAssertEqual(Set(shared.map(\.displayName)), ["Shared A", "Shared C"],
+                       "an owned row must not be offered anywhere a shared profile is")
+        XCTAssertEqual(all.count, 3,
+                       "the unfiltered list must still carry it — the executor resolves owned rows BY ID")
+    }
+
+    /// `duplicated(as:)` is copy-by-default, so it carries the owner ids like every other property.
+    /// An import MUST re-stamp them; this pins the behaviour the import path has to account for.
+    func testDuplicatedCarriesOwnerIdsAndMustBeRestamped() throws {
+        let sourceWorkflow = UUID(), sourceNode = UUID()
+        let source = makeBot("Origin", ownerWorkflowID: sourceWorkflow, ownerNodeID: sourceNode).snapshot()
+
+        let copy = source.duplicated(as: source.displayName)
+        XCTAssertNotEqual(copy.id, source.id, "a copy is a new row")
+        XCTAssertEqual(copy.displayName, "Origin", "import keeps the source name (decision #2)")
+        XCTAssertEqual(copy.ownerWorkflowID, sourceWorkflow,
+                       "copy-by-default carries the owner — the import path must re-stamp it")
+        XCTAssertEqual(copy.ownerNodeID, sourceNode)
+
+        var restamped = copy
+        restamped.ownerWorkflowID = UUID()
+        restamped.ownerNodeID = UUID()
+        XCTAssertNotEqual(restamped.ownerNodeID, source.ownerNodeID)
+    }
+
     // MARK: - Insert & Fetch
 
     func testInsertAndFetchBotProfile() throws {

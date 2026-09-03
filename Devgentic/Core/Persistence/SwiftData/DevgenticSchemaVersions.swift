@@ -97,6 +97,8 @@ enum DevgenticSchemaV1: VersionedSchema {
     /// release to be an entity-deletion migration.
     static var models: [any PersistentModel.Type] {
         [
+            // ⚠️ NESTED frozen copy since 2026-08-29 — see the copy's own note. V3 evolved the live
+            // `BackendProfile`, so a shared reference here would make V1 describe the new shape.
             BackendProfile.self,
             MCPToolItem.self,
             MCPToolDefinitionModel.self,
@@ -142,6 +144,38 @@ enum DevgenticSchemaV1: VersionedSchema {
 /// byte for byte, against `SchemaBaselineV1.descriptor` — edit them and that test fails.
 /// Entity names are unaffected by nesting (derived from the bare type name).
 extension DevgenticSchemaV1 {
+
+    /// ⚠️ FROZEN COPY of `BackendProfile` as it shipped in this version — added 2026-08-29 when V3
+    /// evolved the live class with `ownerWorkflowID` / `ownerNodeID`. Before this, both V1 and V2
+    /// listed the live `BackendProfile.self`, so evolving it would have made every declared version
+    /// render the NEW shape: V2 and V3 would hash identically and every container open would crash
+    /// with `NSInvalidArgumentException "Duplicate version checksums detected"` (rule 5b in this
+    /// file's header), and V1 would silently misdescribe what it actually shipped.
+    ///
+    /// `BackendProfile` has NO `@Relationship` of any kind, so its relationship closure is itself —
+    /// unlike the `WorkflowRunRecordSD` closure below, no neighbouring entity needs freezing with it.
+    ///
+    /// Never constructed or fetched; exists only so `Schema(versionedSchema:)` renders this
+    /// version's true shape. `@Transient` members are omitted deliberately — they are not persisted
+    /// and do not participate in the schema.
+    @Model
+    final class BackendProfile {
+        @Attribute(.unique) var id: UUID
+        var displayName: String
+        var lastSelected: Date?
+        var profileTypeRaw: String
+        var fileContextStrategyRaw: String?
+        var providerRaw: String = ""
+        var modelNameRaw: String = ""
+        var configData: Data
+
+        init(id: UUID, displayName: String, profileTypeRaw: String, configData: Data) {
+            self.id = id
+            self.displayName = displayName
+            self.profileTypeRaw = profileTypeRaw
+            self.configData = configData
+        }
+    }
 
     @Model
     final class ConversationSD {
@@ -284,7 +318,7 @@ extension DevgenticSchemaV1 {
     }
 }
 
-// MARK: - V2 (current)
+// MARK: - V2
 
 /// V2, 2026-08-22 (Run-Report Phase 5): adds ONE optional attribute —
 /// `WorkflowRunRecordSD.traceID: String?` — the join key between workflow run history
@@ -292,10 +326,11 @@ extension DevgenticSchemaV1 {
 /// same run cannot be cross-referenced" seam. Same 12 entities, additive-optional
 /// change, migrated `.lightweight` per the safety table in SWIFTDATA_MIGRATION_PLAN.md.
 ///
-/// ⚠️ The model types are unnested and shared with V1's list (see V1's note): with a
-/// lightweight additive change, both versions reference the one evolved class and the
-/// stage describes the transition. Nesting two copies of the model is only required
-/// for changes where the OLD shape must remain constructible (custom stages).
+/// ⚠️ V2's list is NOT shared with V1's, and an earlier version of this note wrongly said it was.
+/// V1 carries nested frozen copies of `BackendProfile` AND the five-entity `WorkflowRunRecordSD`
+/// closure; V2 carries its own frozen `BackendProfile` and the LIVE `devgentic.*` closure classes.
+/// That is what keeps all three version checksums distinct: `WorkflowRunRecordSD` differs between
+/// V1 and V2 (+`traceID`), and `BackendProfile` differs between V2 and V3 (+ the two owner ids).
 enum DevgenticSchemaV2: VersionedSchema {
 
     static var versionIdentifier: Schema.Version { Schema.Version(2, 0, 0) }
@@ -305,7 +340,71 @@ enum DevgenticSchemaV2: VersionedSchema {
         // closure entities reference the evolved production types (V1 lists its frozen
         // nested copies). Only WorkflowRunRecordSD's shape actually differs (+traceID).
         [
+            // ⚠️ NESTED frozen copy since 2026-08-29 — V3 evolved the live class, and a shared
+            // reference here would make V2 and V3 hash identically (rule 5b).
             BackendProfile.self,
+            MCPToolItem.self,
+            MCPToolDefinitionModel.self,
+            PromptModel.self,
+            ScheduledTaskModel.self,
+            devgentic.ConversationSD.self,
+            devgentic.ChatMessageSD.self,
+            devgentic.AttachedTextFileSD.self,
+            devgentic.AttachedImageFileSD.self,
+            DownloadRecord.self,
+            WorkflowLayoutSD.self,
+            devgentic.WorkflowRunRecordSD.self,
+        ]
+    }
+}
+
+// MARK: - V2 frozen model copies
+
+/// ⚠️ FROZEN V2 SHAPE. Identical to V1's copy — `BackendProfile` did not change between V1 and V2;
+/// both need their own copy purely so neither renders V3's evolved shape. See the V1 copy's note
+/// and rule 5b in this file's header.
+extension DevgenticSchemaV2 {
+
+    @Model
+    final class BackendProfile {
+        @Attribute(.unique) var id: UUID
+        var displayName: String
+        var lastSelected: Date?
+        var profileTypeRaw: String
+        var fileContextStrategyRaw: String?
+        var providerRaw: String = ""
+        var modelNameRaw: String = ""
+        var configData: Data
+
+        init(id: UUID, displayName: String, profileTypeRaw: String, configData: Data) {
+            self.id = id
+            self.displayName = displayName
+            self.profileTypeRaw = profileTypeRaw
+            self.configData = configData
+        }
+    }
+}
+
+// MARK: - V3 (current)
+
+/// V3, 2026-08-29 (workflow nodes own their configuration): adds TWO optional attributes to
+/// `BackendProfile` — `ownerWorkflowID: UUID?` and `ownerNodeID: UUID?` — marking a row as a
+/// workflow node's private configuration rather than a shared profile. Same 12 entities,
+/// additive-optional change, migrated `.lightweight` per the safety table in
+/// SWIFTDATA_MIGRATION_PLAN.md.
+///
+/// ⚠️ This is the version that forced V1 and V2 to carry their own frozen `BackendProfile` copies:
+/// both listed the live class, which would have rendered this shape in every version and collided
+/// V2 with V3 on the version checksum at container open. See rule 5b in this file's header.
+enum DevgenticSchemaV3: VersionedSchema {
+
+    static var versionIdentifier: Schema.Version { Schema.Version(3, 0, 0) }
+
+    static var models: [any PersistentModel.Type] {
+        // The LIVE top-level classes. Only `BackendProfile`'s shape differs from V2
+        // (+ownerWorkflowID, +ownerNodeID); V1 and V2 list frozen copies of it.
+        [
+            devgentic.BackendProfile.self,
             MCPToolItem.self,
             MCPToolDefinitionModel.self,
             PromptModel.self,
@@ -325,21 +424,23 @@ enum DevgenticSchemaV2: VersionedSchema {
 
 /// The store's migration plan.
 ///
-/// ⚠️ `stages` is EMPTY, and that is correct — not an omission. `MigrationStage` has exactly two
-/// cases, `.lightweight(fromVersion:toVersion:)` and `.custom(...)`, and both require a FROM and a
-/// TO version. With one declared version there is no stage to express. The planning doc's original
-/// instruction to "pass a SchemaMigrationPlan with a single stage" is not expressible; following it
-/// literally by inventing a fictitious V2 is what produces `NSCocoaErrorDomain 134504`
-/// ("Cannot use staged migration with an unknown model version") on every existing store.
+/// ⚠️ THREE versions and TWO stages as of 2026-08-29 (V1 → V2 → V3). Staged migration IS engaged,
+/// and this comment previously claimed the opposite — that `stages` was empty and the plan behaved
+/// "identically to `migrationPlan: nil`". It was true when written, with one declared version, and
+/// was left behind by both the V2 and V3 changes. Whether staged migration engages is exactly what
+/// decides if an existing store opens, so a stale claim here sends anyone debugging a container
+/// failure down the wrong path.
 ///
-/// With `schemas: [V1]` and no stages, SwiftData never engages staged migration, so this behaves
-/// identically to `migrationPlan: nil` today. Its value is that the scaffolding — and the frozen
-/// V1 record — are in place before the first change that needs them.
+/// ⚠️ The historical warning still holds and is why versions are only ever ADDED: `MigrationStage`
+/// requires a FROM and a TO, so a stage cannot be expressed against a version that does not exist.
+/// Inventing a fictitious version to satisfy the planning doc's "pass a plan with a single stage"
+/// is what produces `NSCocoaErrorDomain 134504` ("Cannot use staged migration with an unknown model
+/// version") on every existing store.
 enum DevgenticMigrationPlan: SchemaMigrationPlan {
 
     /// ⚠️ ASCENDING version order is load-bearing. See the V2 procedure in this file's header.
     static var schemas: [any VersionedSchema.Type] {
-        [DevgenticSchemaV1.self, DevgenticSchemaV2.self]
+        [DevgenticSchemaV1.self, DevgenticSchemaV2.self, DevgenticSchemaV3.self]
     }
 
     static var stages: [MigrationStage] {
@@ -347,7 +448,10 @@ enum DevgenticMigrationPlan: SchemaMigrationPlan {
             // Additive optional attribute (WorkflowRunRecordSD.traceID) — the canonical
             // lightweight case. ⚠️ willMigrate/didMigrate do NOT run for .lightweight
             // stages (verified, see the header) — do not attach logic here later.
-            .lightweight(fromVersion: DevgenticSchemaV1.self, toVersion: DevgenticSchemaV2.self)
+            .lightweight(fromVersion: DevgenticSchemaV1.self, toVersion: DevgenticSchemaV2.self),
+            // Additive optional attributes (BackendProfile.ownerWorkflowID / .ownerNodeID) —
+            // the same canonical lightweight case.
+            .lightweight(fromVersion: DevgenticSchemaV2.self, toVersion: DevgenticSchemaV3.self)
         ]
     }
 }

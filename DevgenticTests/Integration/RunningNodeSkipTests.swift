@@ -74,9 +74,7 @@ final class RunningNodeSkipTests: XCTestCase {
         // `withValue(1)` nested-depth wrap dodged the root start-clear, which no longer exists.)
         return executor.executeWorkflow(
             userInput: userInput,
-            chatHistory: [],
             conversationID: self.conversationID,
-            ragContext: nil,
             traceContext: self.traceContext,
             onTraceUpdate: { _ in },
             layout: scenario.layout,

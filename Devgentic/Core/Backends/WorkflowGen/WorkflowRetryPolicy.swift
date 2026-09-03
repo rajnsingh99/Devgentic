@@ -61,6 +61,28 @@ enum WorkflowRetryPolicy {
         return max((maxNodeRetries ?? fallbackRetries) + 1, 1)
     }
 
+    /// How many attempts a bot/agent node gets from `executeProfileNodeWithRetry`.
+    ///
+    /// ⚠️ THE CLAMP IS THE POINT (register EXC-8). That loop was `for attempt in 0...maxRetries`, and
+    /// a `ClosedRange` whose lowerBound exceeds its upperBound TRAPS — it does not yield an empty
+    /// range — so a negative count ABORTS THE APP on an ordinary bot/agent dispatch. Neither feeder
+    /// value is clamped on the way in: `WorkflowNodeConfig.init(from:)` decodes `maxNodeRetries` with
+    /// a bare `decodeIfPresent(...) ?? 0`, and `BackendProfile`'s workflow arm decodes
+    /// `defaultMaxRetries` the same way, so one negative in an externally-written blob arms EVERY
+    /// node that carries no count of its own.
+    ///
+    /// ⚠️ Clamped HERE, at the read, rather than at either decode boundary. There are two of those,
+    /// in two files, and clamping both would still leak — `WorkflowNodeConfig`'s memberwise init and
+    /// `materialised(inheritedRetryDefault:)` bypass `init(from:)` entirely, and `resolvedMaxRetries`
+    /// is a computed property any future writer can feed. A decode clamp would also silently rewrite
+    /// the user's stored blob on the next save.
+    ///
+    /// Same guarantee, same shape and the same reason as `structuralAttempts` above — which has
+    /// carried this clamp, and a test naming the corrupt-stored-value case, since it was written.
+    nonisolated static func profileAttempts(maxNodeRetries: Int?, fallbackRetries: Int) -> Int {
+        max((maxNodeRetries ?? fallbackRetries) + 1, 1)
+    }
+
     /// Whether a node's result ENDS the attempt loop in `executeProfileNodeWithRetry`.
     ///
     /// Extracted here for the same reason the rest of this file was: the decision lived as four

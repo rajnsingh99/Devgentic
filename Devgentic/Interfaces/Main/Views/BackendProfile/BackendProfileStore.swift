@@ -46,6 +46,20 @@ protocol BackendProfileStoreProtocol {
     /// Fetches all stored backend profiles as snapshot value types.
     func fetchProfiles() throws -> [BackendProfileSnapshot]
 
+    /// The shared library — every profile a picker may offer. See the extension default's doc.
+    ///
+    /// ⚠️ A protocol REQUIREMENT, not just an extension convenience, and the difference is the
+    /// whole fix. `BackendProfileService.profileStore` is protocol-typed; an extension method not
+    /// listed here is STATICALLY dispatched, so the production store's query-level override would
+    /// be silently bypassed in favour of the capped in-memory filter for every call that matters.
+    func fetchSharedProfiles() throws -> [BackendProfileSnapshot]
+
+    /// One workflow's node-owned rows. Same requirement rationale as `fetchSharedProfiles`.
+    func fetchOwnedProfiles(forWorkflow workflowID: UUID) throws -> [BackendProfileSnapshot]
+
+    /// Exactly the rows named by `ids`. Same requirement rationale as `fetchSharedProfiles`.
+    func fetchProfiles(ids: Set<UUID>) throws -> [BackendProfileSnapshot]
+
     /// Fetches a single profile by ID, or nil if not found.
     func fetchProfile(byId id: UUID) throws -> BackendProfileSnapshot?
 
@@ -65,6 +79,41 @@ protocol BackendProfileStoreProtocol {
 }
 
 extension BackendProfileStoreProtocol {
+
+    /// The profiles a user may CHOOSE — everything except workflow-node-owned rows.
+    ///
+    /// ⚠️ The store-level twin of `BackendProfileService.sharedProfiles`, and it exists because
+    /// several pickers bypass the service entirely and call `fetchProfiles()` directly (QuickAccess,
+    /// the ChatOps bridges, the composer popover). Without it each of those would have to re-derive
+    /// the rule, which is exactly how `.code` profiles leaked into pickers one call site at a time.
+    ///
+    /// Offering an owned row here would let a workflow node's private configuration be run in chat
+    /// and edited outside the workflow that owns it.
+    /// ⚠️ DEFAULTS FOR TEST DOUBLES ONLY. Each of these filters the result of `fetchProfiles()`,
+    /// which in the PRODUCTION store is capped at 500 rows sorted by `lastSelected` — so a default
+    /// running against the real store inherits that window. That was the defect: owned node rows
+    /// and shared profiles competed for the same 500 slots, and past the cap the reconcile stopped
+    /// collecting, workflow deletion orphaned rows, and the executor's profile map went short —
+    /// blocking runs over rows that exist on disk. `BackendProfileStore` overrides all three with
+    /// query-level predicates; these bodies survive so in-memory doubles keep working unmodified.
+    func fetchSharedProfiles() throws -> [BackendProfileSnapshot] {
+        try fetchProfiles().filter { !$0.isNodeOwned }
+    }
+
+    func fetchProfiles(ids: Set<UUID>) throws -> [BackendProfileSnapshot] {
+        try fetchProfiles().filter { ids.contains($0.id) }
+    }
+
+    /// The private profile rows belonging to one workflow's nodes.
+    ///
+    /// ⚠️ Keyed on `ownerWorkflowID` so this never has to load or decode a layout blob — which is
+    /// the whole reason that id is stored alongside `ownerNodeID`. The delete cascade and the
+    /// save-time reconcile both run at moments where decoding every workflow's graph would be
+    /// wasteful, and the reconcile in particular runs on every canvas save.
+    func fetchOwnedProfiles(forWorkflow workflowID: UUID) throws -> [BackendProfileSnapshot] {
+        try fetchProfiles().filter { $0.ownerWorkflowID == workflowID && $0.isNodeOwned }
+    }
+
     /// Call this — the four-argument requirement exists only so the compiler can fill in the
     /// caller. Defaults live here rather than on the requirement because a Swift protocol cannot
     /// carry default parameter values, and every call site spelling out `#fileID` would defeat
@@ -207,6 +256,71 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
             return models.map { $0.snapshot() }
         } catch {
             logger.error("Failed to fetch Backend Profiles: \(error.localizedDescription)")
+            throw ProfileStoreError.fetchFailed(underlying: error)
+        }
+    }
+
+    /// Query-level shared-library fetch: the predicate excludes node-owned rows BEFORE the 500-row
+    /// window is applied.
+    ///
+    /// ⚠️ The cap stays — 500 is a genuine UI bound for a picker — but it now counts only SHARED
+    /// profiles. Filtering after the fetch made owned rows compete for the same window: every
+    /// workflow node adds a row, `saveProfile` stamps `lastSelected` on each, and a few busy
+    /// workflows pushed the user's real library out of the most-recently-touched 500 — profiles
+    /// vanishing from pickers while plainly existing on disk.
+    func fetchSharedProfiles() throws -> [BackendProfileSnapshot] {
+        guard let context = mainContext else { throw ProfileStoreError.containerNotConfigured }
+        do {
+            var descriptor = FetchDescriptor<BackendProfile>(
+                predicate: #Predicate { $0.ownerNodeID == nil },
+                sortBy: [SortDescriptor(\.lastSelected, order: .reverse)]
+            )
+            descriptor.fetchLimit = 500
+            return try context.fetch(descriptor).map { $0.snapshot() }
+        } catch {
+            logger.error("Failed to fetch shared Backend Profiles: \(error.localizedDescription)")
+            throw ProfileStoreError.fetchFailed(underlying: error)
+        }
+    }
+
+    /// Query-level owned-row fetch, UNCAPPED — deliberately.
+    ///
+    /// ⚠️ No `fetchLimit`, and that is the fix, not an oversight. The result is bounded by ONE
+    /// workflow's node count (a canvas holds dozens of nodes, not thousands), so a cap protects
+    /// nothing — while the old shape (filtering the capped, `lastSelected`-sorted global fetch)
+    /// meant an owned row older than the 500 most-recently-touched rows was INVISIBLE to the
+    /// save-time reconcile (its node's config never collected) and to the workflow-delete cascade
+    /// (the row and its Keychain credential orphaned forever).
+    func fetchOwnedProfiles(forWorkflow workflowID: UUID) throws -> [BackendProfileSnapshot] {
+        guard let context = mainContext else { throw ProfileStoreError.containerNotConfigured }
+        do {
+            let descriptor = FetchDescriptor<BackendProfile>(
+                predicate: #Predicate { $0.ownerWorkflowID == workflowID }
+            )
+            return try context.fetch(descriptor).map { $0.snapshot() }
+        } catch {
+            logger.error("Failed to fetch owned profiles for workflow \(workflowID): \(error.localizedDescription)")
+            throw ProfileStoreError.fetchFailed(underlying: error)
+        }
+    }
+
+    /// Query-level by-ids fetch, UNCAPPED — bounded by the caller's id set.
+    ///
+    /// ⚠️ This is what `WorkflowExecutor` resolves a run's profile map through. It used to filter
+    /// the capped global fetch, so a workflow whose node rows had aged past the 500-row window had
+    /// those nodes reported as "Profile not found — it may have been deleted" and the ENTIRE run
+    /// refused at pre-flight — for rows sitting on disk the whole time.
+    func fetchProfiles(ids: Set<UUID>) throws -> [BackendProfileSnapshot] {
+        guard let context = mainContext else { throw ProfileStoreError.containerNotConfigured }
+        do {
+            // #Predicate cannot capture a Set — materialize to Array for `contains`.
+            let idList = Array(ids)
+            let descriptor = FetchDescriptor<BackendProfile>(
+                predicate: #Predicate { idList.contains($0.id) }
+            )
+            return try context.fetch(descriptor).map { $0.snapshot() }
+        } catch {
+            logger.error("Failed to fetch \(ids.count) profile(s) by id: \(error.localizedDescription)")
             throw ProfileStoreError.fetchFailed(underlying: error)
         }
     }
@@ -505,11 +619,20 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
                 let unchanged = existing.displayName == snapshot.displayName
                     && existing.details == snapshot.details
                     && existing.fileContextStrategy == snapshot.fileContextStrategy
+                    && existing.ownerWorkflowID == snapshot.ownerWorkflowID
+                    && existing.ownerNodeID == snapshot.ownerNodeID
 
                 existing.displayName = snapshot.displayName
                 existing.lastSelected = now
                 existing.details = snapshot.details
                 existing.fileContextStrategy = snapshot.fileContextStrategy
+                // ⚠️ Carried on UPDATE, not just on insert. Omitting these here would silently
+                // orphan an owned row the first time the node inspector saved it: the row would
+                // keep working but stop being reconcilable or cascade-deletable, and would
+                // reappear in the shared picker. Included in `unchanged` above for the same reason
+                // every other assigned field is — so a re-stamp is not reported as a no-op.
+                existing.ownerWorkflowID = snapshot.ownerWorkflowID
+                existing.ownerNodeID = snapshot.ownerNodeID
 
                 if unchanged {
                     logger.notice("""
@@ -526,7 +649,9 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
                     displayName: snapshot.displayName,
                     lastSelected: now,
                     details: snapshot.details,
-                    fileContextStrategy: snapshot.fileContextStrategy
+                    fileContextStrategy: snapshot.fileContextStrategy,
+                    ownerWorkflowID: snapshot.ownerWorkflowID,
+                    ownerNodeID: snapshot.ownerNodeID
                 )
                 context.insert(newModel)
                 logger.info("[PROFILE_SAVE] Inserted '\(snapshot.displayName)' (\(snapshot.id.uuidString)) from \(caller)")

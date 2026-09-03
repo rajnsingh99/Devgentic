@@ -235,8 +235,13 @@ struct ToolLibraryContainerView: View {
     }
 
     /// Profiles that actually have a tools list to write into.
+    ///
+    /// ⚠️ `sharedProfiles` — this is a user-facing chooser. A workflow node's own row is an agent,
+    /// so the unfiltered list offered every node's private configuration for tool editing here,
+    /// outside the workflow that scopes it. `currentProfile` below stays on the unfiltered list
+    /// because it resolves BY ID and must keep finding an owned row.
     private var toolCapableProfiles: [BackendProfileModel] {
-        profileService.profiles.filter { profile in
+        profileService.sharedProfiles.filter { profile in
             switch profile.details {
             case .agent, .code: return true
             default:            return false

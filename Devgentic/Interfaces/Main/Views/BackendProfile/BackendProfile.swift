@@ -401,7 +401,25 @@ struct AgentDelegationConfig: Codable, Hashable, Sendable {
 
 /// Configuration for a Workflow profile (DAG of agent references + execution defaults).
 struct WorkflowConfig: Codable, Hashable, Sendable {
-    /// References to agent profiles by UUID — resolved at execution time.
+    /// RETIRED 2026-08-29 — no longer recomputed, and read by nothing that matters.
+    ///
+    /// ⚠️ It was a parallel list of the profile ids a workflow's nodes referenced, resynced from the
+    /// layout on every canvas save. Two things ended it: a workflow's nodes now OWN their
+    /// configuration, so there is no shared profile to list; and the layout was always the real
+    /// record — `ProfileReferenceIndex` and `WorkflowExecutor` both deliberately read it instead,
+    /// because this list "is not kept in step".
+    ///
+    /// ⚠️ THE PROPERTY AND ITS CODING KEY STAY — but NOT to protect user data. Devgentic is
+    /// pre-release and the pre-ownership workflows this once guarded were deleted by the owner on
+    /// 2026-08-29, so there are no stale lists left to preserve. It stays because removing a key
+    /// from `ProfileDetails` means touching its 7-step migration ladder and the newer-build refusal,
+    /// which is more risk than an inert `[UUID]` costs. Any value still present is dead weight.
+    ///
+    /// ⚠️ Do NOT reintroduce a blocking validation rule on it. One existed ("Workflow must reference
+    /// at least one agent profile") and register B36 records why it was dangerous even while the
+    /// field WAS maintained: `BackendProfileStore` validates `strict: isUpdate`, so an empty list
+    /// makes every update of that workflow throw — including a rename. With nothing maintaining the
+    /// field, such a rule would make every workflow permanently unsaveable.
     var agentProfileIDs: [UUID]
 
     // MARK: - Execution Defaults (nil = use hardcoded system defaults)

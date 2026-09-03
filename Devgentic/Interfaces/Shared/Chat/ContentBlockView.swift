@@ -148,7 +148,7 @@ struct ContentBlockView: View, Equatable {
     /// cells), but it now MOVES with `chatFontSize` instead of being pinned at 12pt —
     /// a reader at 20pt prose was getting 12pt code with no way to change it.
     private var codeFontSize: CGFloat {
-        max(10, themeManager.chatFontSize - 2)
+        ChatUIConstants.codeFontSize(forChatFontSize: themeManager.chatFontSize)
     }
 
     // MARK: - Equatable Memoization

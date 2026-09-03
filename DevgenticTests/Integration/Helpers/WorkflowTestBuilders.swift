@@ -317,6 +317,13 @@ final class InnerWorkflowBuilder {
         scenario.addCodeNode(name: name, template: template, outputVariable: outputVariable)
     }
 
+    /// Adds a Trigger node to the inner workflow (register EXA-4: lets a test put a structural
+    /// pass-through at a sub-workflow BODY's entry, where inherited artifacts must forward).
+    @discardableResult
+    func addTriggerNode(name: String = "Trigger") -> UUID {
+        scenario.addTriggerNode(name: name)
+    }
+
     /// Adds a Gate node to the inner workflow.
     ///
     /// ⚠️ Added when the Loop node was retired (2026-08-15): `LoopHITLForwardingTests` was the only

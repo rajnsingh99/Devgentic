@@ -52,9 +52,7 @@ final class UserNodeSkipTests: XCTestCase {
         let makeStream = {
             executor.executeWorkflow(
                 userInput: userInput,
-                chatHistory: [],
                 conversationID: self.conversationID,
-                ragContext: nil,
                 traceContext: self.traceContext,
                 onTraceUpdate: { _ in },
                 layout: scenario.layout,

@@ -106,8 +106,19 @@ struct WorkflowState: Sendable {
 
     /// Sets a shared variable (for Code nodes).
     mutating func setVariable(_ key: String, value: String) {
-        wfStateLogger.info("Variable set: '\(key)' = \(String(value.prefix(200))) (\(value.count) chars)")
-        variables[key] = value
+        // ⚠️ TRIMMED KEY (register EIO-5). `WorkflowValidation` compares TRIMMED names on both
+        // sides when it lints "does a Code node write this variable?", but the runtime stored the
+        // raw key — so an `outputVariable` saved as " status" passed validation against a Router
+        // rule reading "status", then wrote key " status" and the rule's lookup found nothing:
+        // `.equals`/`.contains` never matched and `.isEmpty`/`.notContains` matched EVERYTHING,
+        // silently routing the wrong branch. Trimming at the single write boundary makes runtime
+        // and validator agree by construction; readers keep exact-match lookups.
+        let normalizedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalizedKey != key {
+            wfStateLogger.notice("Variable name '\(key)' carries surrounding whitespace — stored under trimmed key '\(normalizedKey)'. CONSEQUENCE: readers using the trimmed name (which is what validation checks) resolve it; the untrimmed spelling would have silently resolved to nothing.")
+        }
+        wfStateLogger.info("Variable set: '\(normalizedKey)' = \(String(value.prefix(200))) (\(value.count) chars)")
+        variables[normalizedKey] = value
     }
 
     /// Sets which output ports are active for a node (used by condition nodes).

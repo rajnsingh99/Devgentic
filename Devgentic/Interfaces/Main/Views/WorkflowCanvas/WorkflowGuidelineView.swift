@@ -126,19 +126,26 @@ struct WorkflowGuidelineView: View {
     private var nodesSection: some View {
         section("The nodes", icon: "square.grid.2x2", expanded: true) {
             nodeDoc("Profile", color: ProfileType.bot.displayColor, icon: "person.crop.circle",
-                    "Runs a Bot or Agent profile. The card takes the profile's OWN colour — blue for a Bot, green for an Agent — so this swatch shows the Bot case. What it does is the profile's system instructions; what it acts on is its input — the message that started the run for entry nodes, upstream output below them. Supports per-node Retries and a Hard Timeout. An agent's tool confirmations pause the run just like a Gate.")
+                    "Runs a Bot or Agent profile. The card takes the profile's OWN colour — blue for a Bot, green for an Agent — so this swatch shows the Bot case. What it does is the profile's system instructions; what it acts on is its input — the message that started the run for entry nodes, upstream output below them. Supports per-node retries and its own Per-Node Timeout. An agent's tool confirmations pause the run just like a Gate.")
             nodeDoc("Sub-workflow", color: ProfileType.workflow.displayColor, icon: "point.3.connected.trianglepath.dotted",
-                    "A Profile node bound to another Workflow profile — it runs that workflow's canvas as a child. Text-only handoff: the child gets this node's input as its message; variables and artifacts do not cross in (artifacts produced inside do flow out). Nesting is limited to 3 levels and cycles are blocked at design time. ⚠️ This node's Hard Timeout bounds the child's ENTIRE run — size it for the whole child, not one step.")
+                    "A Profile node bound to another Workflow profile — it runs that workflow's canvas as a child. Text-only handoff: the child gets this node's input as its message; variables and artifacts do not cross in (artifacts produced inside do flow out). Nesting is limited to 3 levels and cycles are blocked at design time. ⚠️ This node's Per-Node Timeout bounds the child's ENTIRE run — size it for the whole child, not one step.")
             nodeDoc("Router", color: theme.nodeIdentityColor(for: .router), icon: "arrow.triangle.branch",
                     "Matches the input against labelled rules, top to bottom; each rule's label is an output port. Exactly one match routes there. Anything else — SEVERAL rules matching, or NONE — is decided by one setting, 'When Routing Can't Decide': ask you to pick, route to a rule of your choosing, end the workflow here, or fail onto the error port. Unattended runs (scheduled or chat-bridge) never pause; an Ask uses its 'If nobody can answer' fallback instead. An optional AI Classifier (local MLX model) can name a branch when no pattern rule matched, and its answer follows the same rules — one label routes, none or several fall to the setting. ⚠️ A classifier that could not RUN fails the node regardless of that setting.")
             nodeDoc("Gate", color: theme.nodeIdentityColor(for: .gate), icon: "hand.raised",
-                    "Pauses the run and asks you to choose. Each option is its own output port — the chosen option's branch runs. An optional timeout fails the node (onto its error port) if nobody answers; without one the gate waits indefinitely. Parallel branches keep running while it waits, and the wait never counts against any timeout. ⚠️ In scheduled workflows always set a timeout — see 'Attended vs unattended' below.")
+                    // [CVV-7, cold-read] "without one the gate waits indefinitely" is true only on
+                    // an ATTENDED run. Unattended with no timeout, the executor refuses up front
+                    // and fails the node onto its error port rather than parking to an empty room.
+                    "Pauses the run and asks you to choose. Each option is its own output port — the chosen option's branch runs. An optional timeout fails the node (onto its error port) if nobody answers; without one the gate waits indefinitely on an attended run. Parallel branches keep running while it waits, and the wait never counts against any timeout. ⚠️ A scheduled run can never answer a gate, so it ends on the error port either way — wire that port. A timeout does not rescue it; it only delays the same failure, and one longer than the run's overall budget cancels the whole run. See 'Attended vs unattended' below.")
             nodeDoc("Code", color: theme.nodeIdentityColor(for: .code), icon: "chevron.left.forwardslash.chevron.right",
                     "A deterministic text transform — no AI involved. Write a template using {{ input }}, {{ input.json.path }} for a field of JSON output, and {{ var.name }}; optionally store the result in a variable for later nodes. ⚠️ A placeholder that can't be resolved (e.g. a misspelled variable) is left in the output verbatim — check spelling; the validator does not lint Code templates. Never retries; failure routes to the error port.")
             nodeDoc("Action", color: theme.nodeIdentityColor(for: .action), icon: "bolt.horizontal.fill",
                     "Calls one tool directly — no AI, deterministic. Bind each argument to a literal or a placeholder. Supports Retries (a tool call that threw is retried; a tool that RETURNED an error is not, because its side effect may already have happened) and a per-attempt timeout. Tools marked as requiring confirmation pause the run for your approval.")
+            // [CVV-7] ⚠️ The last clause was an instruction to do something the app does not offer:
+            // no palette entry constructs a `.trigger` node, and `kind: .trigger` appears in zero
+            // production files. The kind renders and executes correctly, so canvases built earlier
+            // still work — the doc now says that instead of inviting the user to add one.
             nodeDoc("Trigger", color: theme.nodeIdentityColor(for: .trigger), icon: "bolt",
-                    "An entry-point marker. It has no configuration and no error port, and passes its input straight through — as the first node it hands the run's message to whatever follows, so use it to make a starting point explicit without changing what the next node receives.")
+                    "An entry-point marker. It has no configuration and no error port, and passes its input straight through — as the first node it hands the run's message to whatever follows, so it makes a starting point explicit without changing what the next node receives. Canvases built in earlier versions may contain one; there is no palette entry for adding a new one.")
             nodeDoc("Sticky note", color: StickyNoteColor.yellow.swiftUIColor, icon: "note.text",
                     "Annotation only — invisible to execution. Document your graph for whoever opens it next.")
         }
@@ -147,8 +154,26 @@ struct WorkflowGuidelineView: View {
     private var unattendedSection: some View {
         section("Attended vs unattended runs", icon: "person.fill.questionmark", expanded: true) {
             para("A run is attended when you start it from the app; it is unattended when the scheduler or a chat bridge (Telegram / Discord / Slack) starts it. Anything that waits for a human behaves differently:")
-            tableRow("Router — several rules match", "Pauses and asks you", "Never pauses — first matching rule wins automatically")
-            tableRow("Gate", "Banner appears; waits for your choice", "Scheduled: no banner is shown — an unanswered gate waits until the run's deadline cancels the WHOLE run, so always set a gate timeout. Chat bridge: answerable remotely via buttons, but there is no automatic deadline")
+            // ⚠️ [CVV-7, cold-read] Both rows described RETIRED engine behaviour and contradicted the
+            // Router and Gate nodeDocs above. Verified line by line against the executor before
+            // rewriting, per this file's header rule.
+            //
+            // Router: "first matching rule wins automatically" is the LEGACY arm only — the
+            // executor gates it on `config.decisionPolicy == nil` and its own comment says "LEGACY
+            // PATH ONLY (2026-08-17)". Any Router saved from today's inspector carries a policy
+            // (the inspector's default is `.ask(fallback: .failNode)`), and unattended an Ask falls
+            // through to that fallback, which FAILS the node.
+            tableRow("Router — can't decide", "Follows 'When Routing Can't Decide' — with the default (Ask) a banner asks you to pick", "Never pauses — applies that setting's 'If nobody can answer' action, which by default fails the node onto its error port. A Router saved before this setting existed instead takes the first matching rule when SEVERAL match, and follows its own no-match behaviour when NONE does")
+            // Gate: an unanswered scheduled gate no longer waits for the run deadline. When no gate
+            // timeout is set and nobody can be reached, the executor refuses immediately and fails
+            // the node onto its error port — deliberately, so a recovery branch can handle it.
+            // A CONFIGURED timeout is left alone, and a chat bridge counts as reachable.
+            // ⚠️ A gate timeout does NOT auto-decide — the executor's timeout arm sets
+            // `output = "Gate not answered (timed out)"` and `status = .failed(...)` with
+            // `activePorts` unset, so NO option branch is taken. Unattended, a gate therefore
+            // always ends on its error port; the timeout only changes WHEN. Saying "which
+            // auto-decides" would repeat the very defect register row INS-3 is filed against.
+            tableRow("Gate", "Banner appears; waits for your choice", "Scheduled: no banner is shown, and the node ends up on its ERROR port either way — immediately if no gate timeout is set (nobody could answer), or when the timeout elapses if one is. No option branch is ever taken, so wire the error port. Chat bridge: answerable remotely via buttons, but there is no automatic deadline")
             tableRow("Tool confirmation", "Banner appears; waits", "Same as Gate — nothing on screen for scheduled runs")
             para("Scheduled runs have a fixed overall time budget, counted from the moment the run starts — a long-running workflow eats into it before any pause begins. Chat-bridge runs have no overall deadline.")
         }
@@ -157,15 +182,18 @@ struct WorkflowGuidelineView: View {
     private var timeoutsSection: some View {
         section("Timeouts and retries", icon: "clock.arrow.circlepath") {
             bullet("Each node gets a compute budget (default 120 seconds) — EXCEPT a Sub-workflow node, which has none by default (see below). Time spent waiting for a human — a gate, a confirmation, a routing question — never counts against it.")
-            bullet("Profile and Action nodes expose a per-node Hard Timeout to raise or lower their own budget. On expiry the node fails onto its error port and any partial result is discarded.")
+            // [CVV-7] The control is labelled "Per-Node Timeout" on a Profile node and "Timeout" on
+            // an Action node. "Hard Timeout" is the MODEL property name and appears on no screen.
+            bullet("Profile and Action nodes can raise or lower that budget from their inspector — ‘Per-Node Timeout’ on a Profile node, ‘Timeout’ on an Action node. On expiry the node fails onto its error port and any partial result is discarded.")
             bullet("Only Profile and Action nodes retry; Router, Code and Gate never do. ⚠️ Retrying a Profile node re-runs its whole agent turn — including tool side effects it already performed.")
-            bullet("A Sub-workflow node has NO outer budget by default — its child canvas is already bounded, node by node, on its own terms. Setting its Hard Timeout adds a ceiling over the child's ENTIRE run (not one step); with retries configured, every attempt shares that ONE ceiling rather than each getting its own.")
+            bullet("A Sub-workflow node has NO outer budget by default — its child canvas is already bounded, node by node, on its own terms. Setting its Per-Node Timeout adds a ceiling over the child's ENTIRE run (not one step); with retries configured, every attempt shares that ONE ceiling rather than each getting its own.")
         }
     }
 
     private var dataSection: some View {
         section("Data, variables and files", icon: "shippingbox") {
             bullet("{{ input }} is the upstream text; if an upstream produced JSON, {{ input.json.path }} reads a field from it.")
+            bullet("{{ input.parsed.path }} parses this node's OWN input as JSON — use it when the JSON arrived as text, including at an entry node reading what you typed in chat. {{ input.json }} needs a node upstream that actually produced JSON; {{ input.parsed }} needs only text that looks like it.")
             bullet("Variables are written ONLY by Code nodes (their Output Variable). Routers can test them; Code and Action nodes can substitute them.")
             bullet("Files and images produced by nodes flow downstream as attachments: later nodes see a manifest naming each file, and agents with file tools can read them.")
             bullet("Knowledge-base and attachment text from your message ride into the entry nodes as part of the input.")
@@ -174,28 +202,47 @@ struct WorkflowGuidelineView: View {
 
     private var savingSection: some View {
         section("Saving and running", icon: "square.and.arrow.down") {
-            bullet("⚠️ There is no autosave. Save writes the canvas; Revert returns to the last save. Unsaved edits survive switching screens and are offered for saving when you quit.")
-            bullet("⚠️ Run executes the last SAVED graph, not your unsaved edits — save before running. If you run anyway, the run says so in its own timeline, so a result that doesn't match your canvas is never a mystery.")
-            bullet("Undo covers the last 25 structural edits (add / delete / rewire). Node moves are not undoable.")
+            // [CVV-7] "Save"/"Revert" named no control — the pills are "Save Changes" and "Discard
+            // Changes", renamed precisely because "Revert" read as a sibling of Undo. And Discard
+            // is itself undoable now (`revert()` re-arms the stack with the pre-revert graph).
+            bullet("⚠️ There is no autosave. Save Changes writes the canvas; Discard Changes throws away everything since the last save — and is itself one Undo away. Unsaved edits survive switching screens and are offered for saving when you quit.")
+            // [CVV-7] There is no button called "Run" — a run starts from the composer's send
+            // button. The semantic claim was right; only the control name was invented.
+            bullet("⚠️ A run executes the last SAVED graph, not your unsaved edits — save before you start one. If you start one anyway, the run says so in its own timeline, so a result that doesn't match your canvas is never a mystery.")
+            // [CVV-7] Both halves of the old sentence were false. Moves ARE undoable (`moveNode`
+            // and `moveStickyNote` each push one snapshot per completed drag, pinned by four tests),
+            // and undo covers far more than "structural" edits — every inspector change goes
+            // through `replaceNode`, which pushes too. The coalescing rule is the half users most
+            // need and cannot infer.
+            // ⚠️ SCOPED to what the undo stack actually holds (cold-read finding). `undo()` restores
+            // `nodes`, `edges` and `annotations` and nothing else. A node's PROFILE fields — model,
+            // instructions, tools, knowledge — are written straight to the profile row by
+            // `profileService.saveProfile`, so they are on disk before Done returns and Undo cannot
+            // touch them. "Editing anything in an inspector" over-claimed in the direction that
+            // costs data: a user who overtyped their system prompt would press ⌘Z, get a layout
+            // snapshot back, and find the prompt gone for good.
+            bullet("Undo (⌘Z, or the Undo button) steps back through the last 25 canvas edits — adding, deleting, rewiring, moving a node or a note, a node's own name and workflow settings, and even Clear Canvas or Discard Changes.")
+            bullet("⚠️ Undo does NOT cover a node's PROFILE — its model, instructions, tools or knowledge. Those are saved to the profile itself, and not only when you press Done: deleting the node, opening another node's inspector, or starting a run — which switches away from the canvas — all save them too. Cancel is the one way to throw them away. The canvas cannot take them back.")
+            bullet("A run of typing in one inspector field counts as a single step, so that is 25 edits, not 25 keystrokes. Pause for a few seconds, switch to another node, or make any structural change, and the next edit starts its own step.")
             bullet("The validation panel lists everything that would block a run — a graph with errors refuses to start before spending any tokens.")
         }
     }
 
     // MARK: - Building blocks
 
-    private func section(_ title: String, icon: String, expanded: Bool = false,
+    private func section(_ title: LocalizedStringKey, icon: String, expanded: Bool = false,
                          @ViewBuilder content: @escaping () -> some View) -> some View {
         GuidelineSection(title: title, icon: icon, initiallyExpanded: expanded, theme: theme, content: content)
     }
 
-    private func para(_ text: String) -> some View {
+    private func para(_ text: LocalizedStringKey) -> some View {
         Text(text)
             .font(.system(size: 12))
             .foregroundColor(theme.secondaryText)
             .fixedSize(horizontal: false, vertical: true)
     }
 
-    private func bullet(_ text: String) -> some View {
+    private func bullet(_ text: LocalizedStringKey) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Text("•")
                 .font(.system(size: 12, weight: .bold))
@@ -209,6 +256,11 @@ struct WorkflowGuidelineView: View {
 
     /// A monospaced mini-diagram. Horizontal scroll keeps long lines intact instead of wrapping
     /// them into nonsense; the box makes it read as an illustration, not body text.
+    /// ⚠️ `String`, NOT `LocalizedStringKey`, and deliberately so: this is monospaced ASCII art whose
+    /// alignment IS its meaning. Translating it would reflow the box drawing into nonsense, and the
+    /// extractor would offer a translator a diagram they cannot safely touch. Every OTHER copy
+    /// helper in this file takes a `LocalizedStringKey` (register CVV-8) — this is the one
+    /// exception, recorded here so it does not read as an oversight.
     private func diagram(_ art: String) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             Text(art)
@@ -226,7 +278,7 @@ struct WorkflowGuidelineView: View {
         )
     }
 
-    private func nodeDoc(_ name: String, color: Color, icon: String, _ text: String) -> some View {
+    private func nodeDoc(_ name: LocalizedStringKey, color: Color, icon: String, _ text: LocalizedStringKey) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: icon)
                 .font(.system(size: 13, weight: .medium))
@@ -246,7 +298,7 @@ struct WorkflowGuidelineView: View {
     }
 
     /// Attended-vs-unattended comparison row.
-    private func tableRow(_ situation: String, _ attended: String, _ unattended: String) -> some View {
+    private func tableRow(_ situation: LocalizedStringKey, _ attended: LocalizedStringKey, _ unattended: LocalizedStringKey) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(situation)
                 .font(theme.fontCaption.weight(.semibold))
@@ -261,7 +313,7 @@ struct WorkflowGuidelineView: View {
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(theme.controlBackground.opacity(0.6)))
     }
 
-    private func labeledCell(_ label: String, _ text: String, color: Color) -> some View {
+    private func labeledCell(_ label: LocalizedStringKey, _ text: LocalizedStringKey, color: Color) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
                 .font(.system(size: 9, weight: .bold))
@@ -277,7 +329,7 @@ struct WorkflowGuidelineView: View {
 
 /// One collapsible section of the guide. A separate view so each keeps its own disclosure state.
 private struct GuidelineSection<Content: View>: View {
-    let title: String
+    let title: LocalizedStringKey
     let icon: String
     let initiallyExpanded: Bool
     let theme: any Theme

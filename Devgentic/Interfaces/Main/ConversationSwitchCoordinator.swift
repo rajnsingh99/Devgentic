@@ -119,6 +119,8 @@ final class ConversationSwitchCoordinator {
         let conversationID = vm.selectedConversationID
         let currentProfileID = backendConfiguration.selectedProfileID
 
+        releaseTracesForConversationsLeftBehind(vm: vm, keeping: conversationID)
+
         loadTask = Task { [weak self] in
             // Brief debounce so rapid selections only run the latest.
             try? await Task.sleep(nanoseconds: 250_000_000)
@@ -222,15 +224,93 @@ final class ConversationSwitchCoordinator {
     /// newer than anything on disk and must survive. Keyed by id, in-memory wins.
     private func applyLoadedRunHistory(_ records: [WorkflowRunRecord], for conversationID: UUID, vm: MainApplicationViewModel) {
         guard !records.isEmpty else { return }
+
         let inMemory = vm.workflowRunHistory[conversationID] ?? []
+        let result = Self.mergeLoadedHistory(existing: inMemory, loaded: records)
+        vm.workflowRunHistory[conversationID] = result.merged
+
         if inMemory.isEmpty {
-            vm.workflowRunHistory[conversationID] = records
-            logger.info("[WORKFLOW] Loaded \(records.count) persisted run(s) for conversation \(conversationID.uuidString.prefix(8)).")
-            return
+            logger.info("[WORKFLOW] Loaded \(records.count) persisted run(s) for conversation \(conversationID.uuidString.prefix(8)); \(result.droppedEvents) node timeline event(s) left on disk. CONSEQUENCE: opening one of these runs re-reads its trace (one off-main decode); nothing is lost and the list itself needs none of it.")
+        } else {
+            logger.info("[WORKFLOW] Merged \(records.count) persisted run(s) with \(inMemory.count) already in memory for conversation \(conversationID.uuidString.prefix(8)) — \(result.merged.count) total, \(result.droppedEvents) node timeline event(s) left on disk; the in-memory rows are a run started during the load and win on id.")
         }
-        let inMemoryIDs = Set(inMemory.map(\.id))
-        let merged = inMemory + records.filter { !inMemoryIDs.contains($0.id) }
-        vm.workflowRunHistory[conversationID] = merged
-        logger.info("[WORKFLOW] Merged \(records.count) persisted run(s) with \(inMemory.count) already in memory for conversation \(conversationID.uuidString.prefix(8)) — \(merged.count) total; the in-memory rows are a run started during the load and win on id.")
+    }
+
+    /// [XUI-15] Frees the per-node traces of SETTLED runs in every conversation except the one
+    /// now on screen.
+    ///
+    /// ⚠️ `workflowExecutionStates` has the same never-evicted-per-conversation shape `XUI-11` was
+    /// filed for, one level over — and after `XUI-11` it holds essentially ALL of the app's
+    /// resident trace events, at `ChatMessage.maxTimelineEvents` (500), which is 25% ABOVE the
+    /// persisted cap. It was freed only by a Back press in the run view or by deleting the
+    /// conversation, so a user who navigates by SWITCHING conversations — the ordinary way — kept
+    /// one full run's trace per workflow conversation for the whole session.
+    ///
+    /// ⚠️ A SWEEP, not a "previous conversation" drop. `handleSelectionChange` does not track what
+    /// was left, and a state can be stranded by paths that never touch the selection at all
+    /// (a scheduled or ChatOps run finishing off-screen). Walking the map is O(conversations that
+    /// ran a workflow this session) once per switch, and it cannot miss one.
+    ///
+    /// ⚠️ Runs BEFORE the debounce, deliberately: it releases memory rather than reading state, so
+    /// it must not be cancelled along with the load task if the user keeps clicking.
+    /// The execution states whose conversation is no longer on screen.
+    ///
+    /// ⚠️ Extracted because the loop that used it lives on a method taking a
+    /// `MainApplicationViewModel`, which claims global singletons and cannot be built in a test —
+    /// so an inverted keep-test (sweeping the CURRENT conversation instead of the others, freeing
+    /// the traces of the run the user is looking at) survived the first mutation battery with
+    /// nothing able to reach it. Same shape, and same reason, as `mergeLoadedHistory`.
+    ///
+    /// A nil `current` means no conversation is selected, so every state is left behind.
+    @MainActor
+    static func statesLeftBehind(
+        in states: [UUID: WorkflowExecutionState], keeping current: UUID?
+    ) -> [WorkflowExecutionState] {
+        states.compactMap { $0.key == current ? nil : $0.value }
+    }
+
+    private func releaseTracesForConversationsLeftBehind(
+        vm: MainApplicationViewModel, keeping current: UUID?
+    ) {
+        var releasedEvents = 0
+        var releasedConversations = 0
+        for state in Self.statesLeftBehind(in: vm.workflowExecutionStates, keeping: current) {
+            let released = state.releaseSettledTraces()
+            if released > 0 {
+                releasedEvents += released
+                releasedConversations += 1
+            }
+        }
+        guard releasedConversations > 0 else { return }
+        logger.info("[WORKFLOW] Released \(releasedEvents) live node timeline event(s) across \(releasedConversations) conversation(s) left behind by this switch. CONSEQUENCE: returning to one of those runs re-reads its trace from the store (one off-main decode); the run's identity, status and HITL wiring are untouched, and a run still in flight is skipped.")
+    }
+
+    /// What the in-memory mirror becomes after a disk load: existing rows first, then the loaded
+    /// ones that are not already present, all of them without their node traces.
+    ///
+    /// ⚠️ [XUI-11] THIS IS THE LEAK, and it is the reason the strip lives here rather than only at
+    /// finalize. This path brings in up to `WorkflowRunHistoryStore.maxRecordsPerConversation`
+    /// fully decoded records — each node carrying up to 400 timeline events, tool rows holding
+    /// whole outputs — on FIRST VISIT to a conversation, and nothing ever removes the key again.
+    /// The history list reads only counts and failure flags; `WorkflowRunDisplayData.from(record:)`
+    /// is the sole reader of a snapshot's trace and runs for the ONE selected run, which re-reads
+    /// it (`WorkflowRunHistoryStore.loadRecord(id:)`).
+    ///
+    /// ⚠️ MERGE, never replace, and in-memory wins on id: a run started while the decode was in
+    /// flight is newer than anything on disk. That rule predates this row and is not incidental —
+    /// see the load-once guard's comment for what happens when this path gets its ordering wrong.
+    ///
+    /// `nonisolated static` and pure (WF-UI5): the coordinator's method mutates a view model that
+    /// claims global singletons, so this is the only shape in which the rule can be tested — and
+    /// a mutant that stopped stripping here survived the first battery precisely because it wasn't.
+    nonisolated static func mergeLoadedHistory(
+        existing: [WorkflowRunRecord], loaded: [WorkflowRunRecord]
+    ) -> (merged: [WorkflowRunRecord], droppedEvents: Int) {
+        let stripped = loaded.map { $0.strippingNodeTimelines() }
+        let droppedEvents = stripped.reduce(0) { $0 + $1.droppedEvents }
+        guard !existing.isEmpty else { return (stripped.map(\.record), droppedEvents) }
+        let existingIDs = Set(existing.map(\.id))
+        return (existing + stripped.map(\.record).filter { !existingIDs.contains($0.id) },
+                droppedEvents)
     }
 }

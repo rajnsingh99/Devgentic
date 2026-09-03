@@ -50,8 +50,26 @@ struct WorkflowNodeView: View {
                 .scaleEffect(shouldPulse && runPulse ? 1.18 : 1.0)
                 .offset(x: -6, y: -6)
                 .animation(.easeInOut(duration: 0.15), value: runStatus)
-                .onAppear {
-                    guard shouldPulse else { return }
+                // [CVV-4] Arm AND disarm on the DECISION changing, not on the badge appearing.
+                //
+                // ⚠️ `.onAppear` could never work here. `WorkflowRunDisplayData.buildNodesFromLayout`
+                // pre-populates a `.pending` placeholder for every layout node, so this `Image` is
+                // inserted the moment the canvas is — long before the node starts. `onAppear` fired
+                // once, with `shouldPulse == false`, the guard dropped the arming, and the later
+                // `.pending → .running` transition only UPDATED the same view, so nothing re-ran it.
+                // The result: the pulse effectively never started during a live run.
+                //
+                // The unconditional reset is load-bearing twice — it ends the in-flight
+                // `repeatForever` when the node settles, and it guarantees the arming write is a
+                // real `false → true` change. Without it a RETRIED node (a `.failed` row reopened
+                // as `.running`) would find `runPulse` already true, so SwiftUI would coalesce the
+                // write, animate nothing, and leave the badge statically enlarged.
+                //
+                // `initial: true` preserves the one case `.onAppear` got right: entering the canvas
+                // mid-run on a node that is already `.running`.
+                .onChange(of: shouldPulse, initial: true) { _, pulsing in
+                    runPulse = false
+                    guard pulsing else { return }
                     withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) {
                         runPulse = true
                     }
@@ -66,8 +84,12 @@ struct WorkflowNodeView: View {
 
     /// Only the node executing RIGHT NOW pulses. A historical run's `.running` node is a node that
     /// never settled — animating it would claim work is still happening in a run that has ended.
+    ///
+    /// ⚠️ Delegates to `WorkflowCanvasRunOverlay.badgeShouldPulse` so the rule is truth-tableable
+    /// (WF-UI5) — a `View`'s private computed property is unreachable from a test, and this rule is
+    /// exactly what CVV-4 got wrong.
     private var shouldPulse: Bool {
-        runIsLive && runStatus == .running
+        WorkflowCanvasRunOverlay.badgeShouldPulse(status: runStatus, isLive: runIsLive)
     }
 
     /// Drag offset sourced from centralized state — survives parent re-renders.
@@ -84,64 +106,65 @@ struct WorkflowNodeView: View {
                     y: node.position.y + nodeSize.height / 2
                 )
 
-            // Output Port(s) (right side) — single for most nodes, multi for condition
+            // Output Port(s) (right side) — single for most nodes, multi for condition / gate / error ports
             ForEach(Array(outputPortEntries.enumerated()), id: \.offset) { index, entry in
-                // ⚠️ The label is an OVERLAY, not a sibling in the layout.
-                //
-                // It used to sit in an `HStack` with the port, and the whole stack was centred at
-                // `node.x + width + 12`. So the port CIRCLE was pushed right by half the label's
-                // width while `outputPortPosition` — which every edge anchors to — kept returning
-                // `node.x + width`. The drawn port and the edge endpoint disagreed by
-                // `12 + labelWidth/2 + 1`: about 13pt on the default port, 23pt on `error`, 33pt on
-                // a long Condition rule. Since the `error` port made profile/action/code/loop nodes
-                // multi-port, that also left a node's two circles 10pt out of vertical alignment
-                // with EACH OTHER, and long labels drawn on top of the node card.
-                //
-                // As an overlay the label cannot move the port, so any label length is safe.
-                ZStack {
-                    WorkflowPortView(
-                        portType: .output,
-                        nodeColor: profileColor,
-                        isCompatibleTarget: false,
-                        isNodeHovered: isHovering,
-                        onDragStarted: { startPos in
-                            canvasState.edgeDragState = EdgeDragState(
-                                sourceNodeID: node.id,
-                                sourcePortLabel: entry.label.isEmpty ? nil : entry.label,
-                                currentPoint: startPos
-                            )
-                        },
-                        onDragUpdated: { point in
-                            canvasState.edgeDragState?.currentPoint = point
-                        },
-                        onDragEnded: { endPoint in
-                            if let targetID = canvasState.findInputPortTarget(near: endPoint, excluding: node.id) {
-                                let portLabel = entry.label.isEmpty ? nil : entry.label
-                                _ = canvasState.addEdge(sourceNodeID: node.id, targetNodeID: targetID, sourcePortLabel: portLabel)
-                            }
-                            canvasState.edgeDragState = nil
+                let portColor = node.kind.portColor(forLabel: entry.label, in: theme)
+
+                WorkflowPortView(
+                    portType: .output,
+                    nodeColor: portColor,
+                    isCompatibleTarget: false,
+                    isNodeHovered: isHovering,
+                    onDragStarted: { startPos in
+                        canvasState.edgeDragState = EdgeDragState(
+                            sourceNodeID: node.id,
+                            sourcePortLabel: entry.label.isEmpty ? nil : entry.label,
+                            currentPoint: startPos
+                        )
+                    },
+                    onDragUpdated: { point in
+                        canvasState.edgeDragState?.currentPoint = point
+                    },
+                    onDragEnded: { endPoint in
+                        let portLabel = entry.label.isEmpty ? nil : entry.label
+                        if let targetID = canvasState.findInputPortTarget(near: endPoint, excluding: node.id) {
+                            _ = canvasState.addEdge(sourceNodeID: node.id, targetNodeID: targetID, sourcePortLabel: portLabel)
+                        } else {
+                            // CVV-2: the miss was the one silent non-event left on this path —
+                            // no edge, no banner, no log. The state decides whether it was a
+                            // real miss or an aborted drag (release near the source port).
+                            canvasState.recordMissedEdgeDrop(from: node.id, sourcePortLabel: portLabel, at: endPoint)
                         }
-                    )
-                    // Label hangs to the RIGHT of the circle without displacing it. `fixedSize`
-                    // keeps it from being compressed, and the overlay is unbounded so a long
-                    // Condition rule label extends outward instead of over the node card.
-                    if outputPortEntries.count > 1 {
-                        Text(entry.label)
-                            .font(.system(size: 8, weight: .medium))
-                            .foregroundColor(profileColor)
+                        canvasState.edgeDragState = nil
+                    }
+                )
+                .overlay(alignment: .leading) {
+                    // Label badge hangs strictly to the RIGHT of the port circle with a 6pt gap.
+                    // Background capsule protects text from wire-clipping and background dots.
+                    if !entry.label.isEmpty {
+                        // [CVV-3] The badge text is CAPPED; `entry.label` stays raw everywhere it
+                        // is used as a routing identity above. A Gate option has no length cap at
+                        // any layer, and `.fixedSize()` below defeats any view-level truncation.
+                        Text(WorkflowCanvasState.portBadgeText(entry.label))
+                            .font(.system(size: 9, weight: .semibold, design: .rounded))
+                            .lineLimit(1)
+                            .foregroundColor(portColor)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule()
+                                    .fill(theme.primaryBackground.opacity(0.92))
+                                    .overlay(
+                                        Capsule()
+                                            .stroke(portColor.opacity(0.35), lineWidth: 0.75)
+                                    )
+                            )
                             .fixedSize()
-                            // ⚠️ Also visible whenever a run is on screen. "Which branch did it
-                            // take?" is the question the canvas is uniquely able to answer, and it
-                            // is unanswerable if the user has to hover each port to learn its name.
                             .opacity(isHovering || canvasState.edgeDragState != nil || runStatus != nil ? 1.0 : 0.0)
-                            .alignmentGuide(.leading) { _ in 0 }
-                            .offset(x: WorkflowCanvasState.portRadius + 5)
+                            .offset(x: WorkflowCanvasState.portRadius * 2 + 6)
                             .allowsHitTesting(false)
                     }
                 }
-                // ⚠️ EXACTLY `outputPortPosition`'s answer — no `+12`. These two numbers are the
-                // same point expressed twice (drawn here, anchored there); when they drifted, every
-                // edge visibly stopped short of the circle it was supposed to leave.
                 .position(
                     x: node.position.x + nodeSize.width,
                     y: entry.y
@@ -153,6 +176,7 @@ struct WorkflowNodeView: View {
                 portType: .input,
                 nodeColor: profileColor,
                 isCompatibleTarget: isCompatibleDropTarget,
+                isPrimaryTarget: isPrimaryDropTarget,
                 isNodeHovered: isHovering
             )
             .position(
@@ -249,12 +273,16 @@ struct WorkflowNodeView: View {
             runStatusBadge
         }
         .shadow(
-            // ⚠️ `theme.shadowColor`, not `Color.black` (WF-CU10). The token exists precisely so
-            // pale themes get a softer shadow — OneLight overrides it — and this card was the one
-            // elevated surface on the canvas bypassing it.
-            color: isSelected ? profileColor.opacity(0.35) : theme.shadowColor.opacity(isHovering ? 0.12 : 0.06),
-            radius: isSelected ? 12 : (isHovering ? 6 : 3),
+            // Natural elevation shadow
+            color: theme.shadowColor.opacity(isSelected ? 0.22 : (isHovering ? 0.12 : 0.06)),
+            radius: isSelected ? 8 : (isHovering ? 6 : 3),
             x: 0, y: isSelected ? 4 : 2
+        )
+        .shadow(
+            // Subtle, restrained color halo for selected nodes (avoids overpowering diffuse bloom)
+            color: isSelected ? profileColor.opacity(0.16) : Color.clear,
+            radius: 6,
+            x: 0, y: 0
         )
         .scaleEffect(isHovering ? 1.02 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isHovering)
@@ -331,9 +359,13 @@ struct WorkflowNodeView: View {
                 canvasState.activeNodeDrag = (nodeID: node.id, offset: value.translation)
             }
             .onEnded { value in
-                let newPosition = CGPoint(
-                    x: max(0, node.position.x + value.translation.width),
-                    y: max(0, node.position.y + value.translation.height)
+                // ⚠️ Goes through `committedDragPosition` even though it is now plain addition:
+                // it is the ONE place a bound would go, and the preview reads the same rule. Doing
+                // the arithmetic inline here is how the preview and the commit drifted apart for
+                // months (register CVC-10).
+                let newPosition = WorkflowCanvasState.committedDragPosition(
+                    origin: node.position,
+                    translation: value.translation
                 )
                 canvasState.activeNodeDrag = nil
                 canvasState.moveNode(node.id, to: newPosition)
@@ -378,7 +410,12 @@ struct WorkflowNodeView: View {
     private var nodeKindLabel: String {
         switch node.kind {
         case .profile(_, let pType): return pType.localizedTitleString
-        case .condition:          return String(localized: "Router")
+        case .condition(let config):
+            if node.displayName.caseInsensitiveCompare("Router") == .orderedSame || node.displayName.caseInsensitiveCompare("Condition") == .orderedSame {
+                let count = config.rules.count
+                return count == 0 ? String(localized: "Conditional branch") : (count == 1 ? String(localized: "1 rule") : String(localized: "\(count) rules"))
+            }
+            return String(localized: "Router")
         case .code:               return String(localized: "Code")
         case .gate:               return String(localized: "Gate")
         case .trigger:            return String(localized: "Trigger")
@@ -403,10 +440,10 @@ struct WorkflowNodeView: View {
 
     /// Whether this node is a valid drop target for the current edge drag.
     /// ⚠️ Asks the SAME predicate `addEdge` will use, rather than only excluding the source node.
-    /// This highlight pulses, glows and scales the input port to say "drop here, this is valid" —
-    /// and it used to say that for a drop that would create a cycle or duplicate an existing
-    /// connection, both of which were then refused in silence. Promising a connection the canvas
-    /// will refuse is worse than not highlighting at all.
+    /// This highlight used to be the FULL "drop here" treatment for every valid node on the
+    /// canvas — while the drop itself only lands within `inputPortHitRadius` of a port. It now
+    /// drives the WEAK tier (visible port, colored ring — "you could connect here"); the full
+    /// pulse belongs to `isPrimaryDropTarget`.
     private var isCompatibleDropTarget: Bool {
         guard let drag = canvasState.edgeDragState else { return false }
         return canvasState.edgeRefusalReason(
@@ -414,6 +451,16 @@ struct WorkflowNodeView: View {
             targetNodeID: node.id,
             sourcePortLabel: drag.sourcePortLabel
         ) == nil
+    }
+
+    /// The ONE node the drop would actually land on right now (register CVV-2): valid AND the
+    /// nearest input port within the accept radius of the live drag point. This is what earns
+    /// the full pulse/scale/glow — the same test `onDragEnded` runs at release, so the pulse can
+    /// no longer promise a connection the 20pt radius will refuse. Tracks the pointer live:
+    /// `edgeDragState.currentPoint` is written on every drag tick and the state is `@Observable`.
+    private var isPrimaryDropTarget: Bool {
+        guard let drag = canvasState.edgeDragState, isCompatibleDropTarget else { return false }
+        return canvasState.findInputPortTarget(near: drag.currentPoint, excluding: drag.sourceNodeID) == node.id
     }
 
 }
@@ -463,11 +510,11 @@ struct ProfileNodeCard: View {
         )
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(color.opacity(0.06))
+                .fill(color.opacity(isSelected ? 0.09 : 0.05))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(isSelected ? color : theme.surfaceOverlayStrong, lineWidth: isSelected ? 2 : 1)
+                .stroke(isSelected ? color : theme.surfaceOverlayStrong, lineWidth: isSelected ? 1.75 : 1)
         )
     }
 }
@@ -497,18 +544,13 @@ struct ConditionNodeCard: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // ⚠️ ONE `.background` with the tint as an `.overlay` INSIDE it (WF-CU10). Chained
-        // `.background` calls stack progressively FURTHER BACK, and `theme.controlBackground` is
-        // opaque in every theme — so the gradient declared as a SECOND `.background` below it was
-        // painted behind an opaque fill and never rendered at all. That, not a design decision, is
-        // why a border was this card's only colour.
         .background(
             WorkflowHexagon()
                 .fill(theme.controlBackground)
                 .overlay(
                     WorkflowHexagon().fill(
                         LinearGradient(
-                            colors: [color.opacity(0.12), color.opacity(0.04)],
+                            colors: [color.opacity(isSelected ? 0.14 : 0.08), color.opacity(isSelected ? 0.05 : 0.02)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
@@ -516,14 +558,9 @@ struct ConditionNodeCard: View {
                 )
         )
         .overlay(
-                    // ⚠️ Unselected border is a THEME token, matching what ProfileNodeCard and CodeNodeCard
-            // already do. `color.opacity(0.5)` measured 1.17:1 against OneLight's `#f0f0f0` card —
-            // invisible — which made selection a 0.5→1.0 opacity step of an already-invisible hue.
-            // Neutral → identity colour is a change the eye can actually see; the lineWidth step
-            // stays as a non-colour cue.
             WorkflowHexagon()
                 .stroke(isSelected ? color : theme.surfaceOverlayStrong,
-                        lineWidth: isSelected ? 2.5 : 1.5)
+                        lineWidth: isSelected ? 1.75 : 1.0)
         )
     }
 }
@@ -576,13 +613,13 @@ struct CodeNodeCard: View {
             // ⚠️ ORDER SWAPPED (WF-CU10). Chained `.background` calls stack progressively FURTHER
             // BACK, and `theme.controlBackground` is opaque in every theme — so the tint, declared
             // second, was painted behind an opaque fill and never rendered at all.
-            .background(color.opacity(0.04))
+            .background(color.opacity(isSelected ? 0.08 : 0.04))
             .background(theme.controlBackground)
         }
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isSelected ? color : theme.surfaceOverlayStrong, lineWidth: isSelected ? 2 : 1)
+                .stroke(isSelected ? color : theme.surfaceOverlayStrong, lineWidth: isSelected ? 1.75 : 1)
         )
     }
 }
@@ -602,34 +639,30 @@ struct GateNodeCard: View {
                 .foregroundColor(.white)
                 .frame(width: 36, height: 36)
                 .background(Circle().fill(color))
-                .shadow(color: color.opacity(0.4), radius: 4)
+                .shadow(color: color.opacity(0.35), radius: 3)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(theme.fontSubheadline.weight(.heavy))
                     .foregroundColor(theme.primaryText)
                     .lineLimit(1)
-                Text("Halts execution for approval")
+                Text(String(localized: "Human approval required"))
                     .font(.system(.caption2))
                     .foregroundColor(theme.secondaryText)
+                    .lineLimit(1)
             }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // ⚠️ ONE `.background` with the tint as an `.overlay` INSIDE it (WF-CU10). Chained
-        // `.background` calls stack progressively FURTHER BACK, and `theme.controlBackground` is
-        // opaque in every theme — so the gradient declared as a SECOND `.background` below it was
-        // painted behind an opaque fill and never rendered at all. That, not a design decision, is
-        // why a border was this card's only colour.
         .background(
             Capsule()
                 .fill(theme.controlBackground)
                 .overlay(
                     Capsule().fill(
                         LinearGradient(
-                            colors: [color.opacity(0.15), color.opacity(0.04)],
+                            colors: [color.opacity(isSelected ? 0.18 : 0.12), color.opacity(isSelected ? 0.06 : 0.03)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
@@ -637,10 +670,8 @@ struct GateNodeCard: View {
                 )
         )
         .overlay(
-            // Gate keeps its identity hue unselected — at 0.8 opacity and lineWidth 2 it clears
-            // the 3:1 component bar on both light and dark cards with the new ramp.
             Capsule()
-                .stroke(isSelected ? color : color.opacity(0.8), lineWidth: isSelected ? 3 : 2)
+                .stroke(isSelected ? color : theme.surfaceOverlayStrong, lineWidth: isSelected ? 1.75 : 1.0)
         )
     }
 }
@@ -655,11 +686,6 @@ struct TriggerNodeCard: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            // ⚠️ Was `.white` on a `.gray` chevron FILL — 3.26:1 in light, worse in dark. The title
-            // is real TEXT, so it takes the 4.5:1 bar and failed in BOTH appearances (WF-CU10).
-            // Fixed structurally rather than by adding a "foreground-on-fill" token: no card fills
-            // a shape with the identity colour any more, so there is nothing to compute a safe
-            // foreground against.
             Image(systemName: iconName)
                 .font(.system(size: 14))
                 .foregroundColor(color)
@@ -674,16 +700,12 @@ struct TriggerNodeCard: View {
         .background(
             WorkflowChevron()
                 .fill(theme.controlBackground)
-                .overlay(WorkflowChevron().fill(color.opacity(0.15)))
+                .overlay(WorkflowChevron().fill(color.opacity(isSelected ? 0.20 : 0.12)))
         )
         .overlay(
-            // ⚠️ Was `isSelected ? .white : .clear` — a white ring on a grey chevron on a near-white
-            // canvas, so a selected Trigger was indistinguishable from an unselected one. Selection
-            // is a UI-state indicator (3:1 bar) and NOTHING else conveyed it here, unlike node TYPE
-            // which shape + icon + label already carry three ways.
             WorkflowChevron()
                 .stroke(isSelected ? color : theme.surfaceOverlayStrong,
-                        lineWidth: isSelected ? 2.5 : 1.5)
+                        lineWidth: isSelected ? 1.75 : 1.0)
         )
     }
 }
@@ -698,10 +720,6 @@ struct ActionNodeCard: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            // ⚠️ Was `.white` on a SOLID `color` tile — 2.57:1 against systemTeal, failing even
-            // the 3:1 graphical-object bar, and unfixable by the light ramp alone because the DARK
-            // arm keeps systemTeal. Glyph-on-tint matches ConditionNodeCard's already-correct
-            // treatment (WF-CU10).
             Image(systemName: iconName)
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundColor(color)
@@ -733,28 +751,18 @@ struct ActionNodeCard: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // ⚠️ ONE `.background` with the tint as an `.overlay` INSIDE it (WF-CU10). Chained
-        // `.background` calls stack progressively FURTHER BACK, and `theme.controlBackground` is
-        // opaque in every theme — so the gradient declared as a SECOND `.background` below it was
-        // painted behind an opaque fill and never rendered at all. That, not a design decision, is
-        // why a border was this card's only colour.
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(theme.controlBackground)
                 .overlay(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(color.opacity(0.06))
+                        .fill(color.opacity(isSelected ? 0.10 : 0.06))
                 )
         )
         .overlay(
-                    // ⚠️ Unselected border is a THEME token, matching what ProfileNodeCard and CodeNodeCard
-            // already do. `color.opacity(0.5)` measured 1.17:1 against OneLight's `#f0f0f0` card —
-            // invisible — which made selection a 0.5→1.0 opacity step of an already-invisible hue.
-            // Neutral → identity colour is a change the eye can actually see; the lineWidth step
-            // stays as a non-colour cue.
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(isSelected ? color : theme.surfaceOverlayStrong,
-                        lineWidth: isSelected ? 2 : 1.5)
+                        lineWidth: isSelected ? 1.75 : 1.0)
         )
     }
 }
@@ -762,31 +770,52 @@ struct ActionNodeCard: View {
 // MARK: - Custom Shapes
 
 struct WorkflowHexagon: Shape {
+    var cornerRadius: CGFloat = 8
+
     func path(in rect: CGRect) -> Path {
         var path = Path()
         let angleWidth = rect.width * 0.15
-        
-        path.move(to: CGPoint(x: angleWidth, y: 0))
-        path.addLine(to: CGPoint(x: rect.width - angleWidth, y: 0))
-        path.addLine(to: CGPoint(x: rect.width, y: rect.height / 2))
-        path.addLine(to: CGPoint(x: rect.width - angleWidth, y: rect.height))
-        path.addLine(to: CGPoint(x: angleWidth, y: rect.height))
-        path.addLine(to: CGPoint(x: 0, y: rect.height / 2))
+        let r = min(cornerRadius, angleWidth * 0.6, rect.height * 0.15)
+
+        let p0 = CGPoint(x: angleWidth, y: 0)
+        let p1 = CGPoint(x: rect.width - angleWidth, y: 0)
+        let p2 = CGPoint(x: rect.width, y: rect.height / 2)
+        let p3 = CGPoint(x: rect.width - angleWidth, y: rect.height)
+        let p4 = CGPoint(x: angleWidth, y: rect.height)
+        let p5 = CGPoint(x: 0, y: rect.height / 2)
+
+        path.move(to: CGPoint(x: rect.width / 2, y: 0))
+        path.addArc(tangent1End: p1, tangent2End: p2, radius: r)
+        path.addArc(tangent1End: p2, tangent2End: p3, radius: r)
+        path.addArc(tangent1End: p3, tangent2End: p4, radius: r)
+        path.addArc(tangent1End: p4, tangent2End: p5, radius: r)
+        path.addArc(tangent1End: p5, tangent2End: p0, radius: r)
+        path.addArc(tangent1End: p0, tangent2End: p1, radius: r)
         path.closeSubpath()
         return path
     }
 }
 
 struct WorkflowChevron: Shape {
+    var cornerRadius: CGFloat = 6
+
     func path(in rect: CGRect) -> Path {
         var path = Path()
         let tailInset = rect.width * 0.15
-        
-        path.move(to: CGPoint(x: 0, y: 0))
-        path.addLine(to: CGPoint(x: rect.width - tailInset, y: 0))
-        path.addLine(to: CGPoint(x: rect.width, y: rect.height / 2))
-        path.addLine(to: CGPoint(x: rect.width - tailInset, y: rect.height))
-        path.addLine(to: CGPoint(x: 0, y: rect.height))
+        let r = min(cornerRadius, tailInset * 0.6, rect.height * 0.15)
+
+        let p0 = CGPoint(x: 0, y: 0)
+        let p1 = CGPoint(x: rect.width - tailInset, y: 0)
+        let p2 = CGPoint(x: rect.width, y: rect.height / 2)
+        let p3 = CGPoint(x: rect.width - tailInset, y: rect.height)
+        let p4 = CGPoint(x: 0, y: rect.height)
+
+        path.move(to: CGPoint(x: 0, y: rect.height / 2))
+        path.addArc(tangent1End: p0, tangent2End: p1, radius: r)
+        path.addArc(tangent1End: p1, tangent2End: p2, radius: r)
+        path.addArc(tangent1End: p2, tangent2End: p3, radius: r)
+        path.addArc(tangent1End: p3, tangent2End: p4, radius: r)
+        path.addArc(tangent1End: p4, tangent2End: p0, radius: r)
         path.closeSubpath()
         return path
     }

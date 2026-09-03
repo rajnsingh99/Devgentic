@@ -37,7 +37,10 @@ struct ProfileSidebarListView: View {
 
     /// Code profiles are hidden from the sidebar — managed by CodeSessionManager.
     private var filteredProfiles: [BackendProfileModel] {
-        var result = profileService.profiles.filter { $0.profileType != .code }
+        // ⚠️ `sharedProfiles`, not `profiles` — a workflow node's owned configuration row must
+        // never appear in the library sidebar. The `.code` filter stays: it is a different
+        // exclusion (an internal profile type), and both must hold.
+        var result = profileService.sharedProfiles.filter { $0.profileType != .code }
 
         // Type filter
         if let selectedTypeFilter {
@@ -119,13 +122,15 @@ struct ProfileSidebarListView: View {
             // and selecting it routes to a detail view built from a snapshot the store no longer
             // agrees with. Same principle as A47 itself — "we could not read this" must never
             // render identically to "this is what you have".
-            if let loadError = profileService.lastLoadError, !profileService.profiles.isEmpty {
+            // `sharedProfiles`, matching the list this banner sits above — keyed on the
+            // unfiltered list it could claim a stale list while the sidebar rendered nothing.
+            if let loadError = profileService.lastLoadError, !profileService.sharedProfiles.isEmpty {
                 staleListBanner(loadError)
             }
 
             // Profile list
             if filteredProfiles.isEmpty {
-                if profileService.profiles.isEmpty {
+                if profileService.sharedProfiles.isEmpty {
                     // ⚠️ "We could not read your profiles" and "you have none yet" rendered
                     // IDENTICALLY before this. At launch `loadProfiles()` runs from `init`, where
                     // there is no prior list to fall back on, so a fetch failure showed a first-run
@@ -207,7 +212,7 @@ struct ProfileSidebarListView: View {
         }
         .sheet(isPresented: $isAddingProfile) {
             AddBackendProfileView(
-                existingProfileNames: profileService.profiles.map(\.displayName)
+                existingProfileNames: profileService.sharedProfiles.map(\.displayName)
             ) { newProfile in
                 // ⚠️ Deliberately NOT caught here (register A64). The throw is what keeps the sheet
                 // open with the user's name and type intact; swallowing it into a toast is exactly
@@ -243,7 +248,7 @@ struct ProfileSidebarListView: View {
         .sheet(item: $profileToDuplicate) { source in
             DuplicateProfileSheet(
                 sourceProfile: source,
-                existingProfileNames: profileService.profiles.map(\.displayName)
+                existingProfileNames: profileService.sharedProfiles.map(\.displayName)
             ) { duplicate in
                 do {
                     try profileService.saveProfile(duplicate)

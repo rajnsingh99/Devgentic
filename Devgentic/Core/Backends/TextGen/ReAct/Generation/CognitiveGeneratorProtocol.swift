@@ -592,7 +592,7 @@ enum PromptBuilder {
             // conversation and stays raw, so a legitimate `<div>` in pasted HTML still reads as
             // `<div>`, not `&lt;div&gt;`.
             let safeAttachments = context.workflowContext != nil
-                ? WorkflowInputAssembler.escapeForXMLEmbedding(attachments, wrapping: wrapping)
+                ? WorkflowInputAssembler.escapeIfBoundaryThreat(attachments, section: "attachments", wrapping: wrapping)
                 : attachments
             userContent += wrapping.section("attachments", content: safeAttachments)
         }

@@ -84,15 +84,25 @@ final class StoreOpenDiagnosticsTests: XCTestCase {
         XCTAssertFalse(diagnosis.summary.isEmpty)
     }
 
-    /// The realistic case: the committed fixture was written when `CodeViewerSessionSD` existed.
-    /// Classifying it against today's 12-entity schema must NAME the retired entity — that is the
+    /// The realistic case: the pre-V1 legacy fixture was written when `CodeViewerSessionSD`
+    /// existed. Classifying it against today's schema must NAME the retired entity — that is the
     /// diagnosis a developer or support engineer actually needs.
+    ///
+    /// ⚠️ The LEGACY fixture, not `devgentic-schema-v1-fixture`. This test originally read the V1
+    /// fixture, which at the time was the pre-V1 artifact carrying the retired entity. When V2
+    /// landed (2026-08-22) that artifact was renamed `devgentic-pre-v1-legacy-fixture` and a true
+    /// V1 store — today's 12 entities exactly, no retired one — was regenerated under the old
+    /// name; this test kept pointing at the old name and started (correctly) getting
+    /// `.entityShapeChanged` from a store whose entity SET now matches the code's.
     func testEntityPresentInStoreButNotInCodeIsNamed() throws {
-        let fixture = try XCTUnwrap(
-            Bundle(for: StoreOpenDiagnosticsTests.self)
-                .url(forResource: "devgentic-schema-v1-fixture", withExtension: "store"),
-            "Fixture store missing — see SchemaMigrationTests.testRegenerateCheckedInFixtureStore."
-        )
+        guard let fixture = Bundle(for: StoreOpenDiagnosticsTests.self)
+            .url(forResource: SchemaMigrationTests.legacyFixtureBaseName, withExtension: "store") else {
+            // Same convention as testPreV1StoreIsRefusedLoudlyUnderStagedMigration: the legacy
+            // artifact is irreplaceable by design (the retired type is gone), so its absence is
+            // "not checked", never a red suite.
+            throw XCTSkip("No checked-in pre-V1 legacy fixture found "
+                          + "(\(SchemaMigrationTests.legacyFixtureBaseName).store).")
+        }
 
         let diagnosis = StoreOpenDiagnostics.classify(
             storeURL: fixture,
@@ -128,12 +138,19 @@ final class StoreOpenDiagnosticsTests: XCTestCase {
 
     /// When the entity sets match, the incompatibility is INSIDE an entity — metadata cannot
     /// narrow it further, and the diagnosis must say so rather than guessing.
+    ///
+    /// Uses the pre-V1 LEGACY fixture (see the pointer-drift warning on
+    /// `testEntityPresentInStoreButNotInCodeIsNamed`): its entity set is today's plus the retired
+    /// `CodeViewerSessionSD`, so passing exactly that set makes the sets EQUAL while the store's
+    /// pre-freeze `ConversationSD` shape still differs — the precise "same names, different
+    /// insides" case this diagnosis exists for.
     func testMatchingEntitySetsReportShapeChange() throws {
-        let fixture = try XCTUnwrap(
-            Bundle(for: StoreOpenDiagnosticsTests.self)
-                .url(forResource: "devgentic-schema-v1-fixture", withExtension: "store")
-        )
-        // The fixture's own entity set = today's 12 plus the retired one.
+        guard let fixture = Bundle(for: StoreOpenDiagnosticsTests.self)
+            .url(forResource: SchemaMigrationTests.legacyFixtureBaseName, withExtension: "store") else {
+            throw XCTSkip("No checked-in pre-V1 legacy fixture found "
+                          + "(\(SchemaMigrationTests.legacyFixtureBaseName).store).")
+        }
+        // The legacy fixture's own entity set = today's entities plus the retired one.
         var storedEntities = Set(DevgenticSchema.schema.entities.map(\.name))
         storedEntities.insert("CodeViewerSessionSD")
 

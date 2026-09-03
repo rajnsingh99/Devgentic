@@ -153,25 +153,23 @@ struct ProfileValidator {
             case .imageGen(let config):
                 errors.append(contentsOf: validateLLMConfig(config.llmConfig))
 
-            case .workflow(let config):
-                // ⚠️ register B36 — DO NOT "clean up" `agentProfileIDs` by pruning ids whose
-                // profiles were deleted. This rule is `.blocking` (the init's default severity),
-                // and `BackendProfileStore` validates with `strict: isUpdate` — so pruning the last
-                // dead id empties the list and makes every subsequent UPDATE of that workflow
-                // throw, including a rename. The profile becomes permanently unsaveable.
+            case .workflow:
+                // ⚠️ NO RULE. A blocking "Workflow must reference at least one agent profile."
+                // lived here, keyed on `WorkflowConfig.agentProfileIDs` being empty. That field is
+                // RETIRED (2026-08-29): nothing recomputes it any more, because a workflow's nodes
+                // now own their configuration and the layout is the only record of what a workflow
+                // contains.
                 //
-                // The register recorded the staleness as "cosmetic — feeds only a count", which is
-                // false: the popover count, the support dump (which prints each raw UUID with no
-                // liveness check) and this rule all read the field. A stale id is harmless; an
-                // emptied list is not. A30's own fix deliberately reads each workflow's LAYOUT
-                // instead — see `ProfileReferenceIndex` — precisely because this list is not kept
-                // in step, and that is a reason not to TRUST it, not a reason to rewrite it.
-                if config.agentProfileIDs.isEmpty {
-                    errors.append(ProfileValidationError(
-                        field: "workflow",
-                        message: "Workflow must reference at least one agent profile."
-                    ))
-                }
+                // ⚠️ Keeping the rule while the field stopped being maintained would have made
+                // every workflow permanently unsaveable — `BackendProfileStore` validates with
+                // `strict: isUpdate`, so an empty list throws on every UPDATE including a rename.
+                // Register B36 recorded exactly that failure mode as the reason never to PRUNE the
+                // list; retiring the field makes the rule unsatisfiable rather than merely fragile.
+                //
+                // The condition it was reaching for — "this workflow has nothing to run" — belongs
+                // to `WorkflowValidator`, which reads the actual layout and already reports an
+                // empty canvas before a run.
+                break
 
             case .code(let config):
                 errors.append(contentsOf: validateLLMConfig(config.llmConfig))

@@ -72,6 +72,85 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
     // takes that on, a field here would be silently dropped at `decodeRecord` and every "the record
     // persists it" comment would be false. The flag lives on `WorkflowExecutionState` only.
 
+    // MARK: - [XUI-11] In-memory trace residency
+
+    /// A copy of this record with every node's `nodeTimeline` dropped, plus the number of events
+    /// discarded — for the caller's log.
+    ///
+    /// ⚠️ **IN-MEMORY ONLY. Never call this on a record that is about to be PERSISTED.** The traces
+    /// are the debugging evidence a failed run is kept for; the point is that memory does not have
+    /// to hold twenty runs' worth of them for every conversation the user happens to visit, not
+    /// that they stop existing. `WorkflowRunHistoryStore` keeps the full record, and the run view
+    /// re-reads the one run being looked at.
+    ///
+    /// ⚠️ Why the traces and not the records: `MainApplicationViewModel.workflowRunHistory` is
+    /// keyed by conversation and only ever GROWS — nothing removes a key except deleting the
+    /// conversation — but evicting keys is the dangerous fix. `loadedRunHistoryConversationIDs` is
+    /// a monotone Set private to `ConversationSwitchCoordinator` while the dictionary lives on the
+    /// view model and is cleared from `ConversationManagementCoordinator`; drop a key without
+    /// clearing that Set and the conversation's history is EMPTY until relaunch, a failure that
+    /// file already records happening once. And `WorkflowRunTicket.finalize` inserts on a miss, so
+    /// evicting mid-run silently rebuilds the key as a one-element array — with "not the selected
+    /// conversation" no help as a predicate, because scheduled, ChatOps, QuickAccess and Jarvis
+    /// runs all start in conversations that are not on screen. Dropping traces touches no key, so
+    /// none of that applies.
+    ///
+    /// The traces are also where the bytes are: the history LIST reads only `nodeResults.count`
+    /// and the failure flags, and `WorkflowRunDisplayData.from(record:)` — the sole reader of
+    /// `snapshot.nodeTimeline` — runs only for the single selected run.
+    func strippingNodeTimelines() -> (record: WorkflowRunRecord, droppedEvents: Int) {
+        var dropped = 0
+        var copy = self
+        copy.nodeResults = nodeResults.map { snapshot in
+            guard let events = snapshot.nodeTimeline, !events.isEmpty else { return snapshot }
+            dropped += events.count
+            return WorkflowNodeResultSnapshot(
+                id: snapshot.id, nodeID: snapshot.nodeID, profileName: snapshot.profileName,
+                status: snapshot.status, detail: snapshot.detail, duration: snapshot.duration,
+                input: snapshot.input, inputSourceLabel: snapshot.inputSourceLabel,
+                nodeTimeline: nil, hasWarnings: snapshot.hasWarnings,
+                ranBeforeSkip: snapshot.ranBeforeSkip
+            )
+        }
+        return (copy, dropped)
+    }
+
+    /// Whether opening this record needs its traces re-read from the store (register XUI-11).
+    ///
+    /// ⚠️ There is deliberately NO "traces were elided" FLAG, and the honest reasons are narrower
+    /// than they first look. It is NOT that `[WF-CS4]` forbids it: that note is about PERSISTENCE,
+    /// and a flag defaulting to false on every disk read would be exactly right, since a record
+    /// that came off disk has its traces. The real costs are that `WorkflowRunRecord` is
+    /// `Equatable` and `Codable`, so two otherwise-identical records would compare unequal and the
+    /// synthesized coder would gain a key; and that a second structure holding the ids instead is
+    /// the shape that produced the `loadedRunHistoryConversationIDs` bug. Neither is fatal, and a
+    /// flag remains the option to reach for if the cost below ever matters.
+    ///
+    /// The cost below, stated accurately: a run whose nodes genuinely recorded nothing answers
+    /// "yes" forever, so it re-reads once PER SELECTION rather than once. That is an indexed
+    /// single-row fetch (`WorkflowRunRecordSD.id` is `@Attribute(.unique)`) plus an off-main decode
+    /// of a blob that, for a run with no traces, is small by construction — and it is paid only by
+    /// workflows whose nodes record nothing, which are the ones with nothing to decode. The
+    /// alternative error is a false NEGATIVE: an empty Timeline tab on a failed run, indistinguish-
+    /// able from a run that never recorded one, losing exactly the evidence traces are kept for.
+    ///
+    /// `nonisolated static` and pure (WF-UI5): the view's own `if` chain is unreachable from a test.
+    nonisolated static func needsTraceHydration(
+        _ record: WorkflowRunRecord, liveTimelinesAvailable: Bool
+    ) -> Bool {
+        // ⚠️ [XUI-15] ASKS WHETHER THE TRACES ARE IN MEMORY, not whether this is the live run.
+        // Those were the same question until `WorkflowExecutionState.nodeTimelines` began being
+        // dropped for settled runs in conversations the user has left: a run can now still OWN the
+        // live slot — same `runRecordID`, HITL wiring intact — while holding none of its trace. A
+        // predicate keyed on identity would have skipped hydration for exactly those runs and left
+        // their Timeline tabs empty, which is the defect XUI-11's own cold read caught in the
+        // identity-keyed version of this line.
+        guard !liveTimelinesAvailable else { return false }
+        guard record.status != .running else { return false }
+        guard !record.nodeResults.isEmpty else { return false }
+        return record.nodeResults.allSatisfy { $0.nodeTimeline?.isEmpty ?? true }
+    }
+
     // MARK: - Run Status
 
     /// ⚠️ Hand-written `RawRepresentable` so an unrecognised status is PRESERVED, not reinterpreted —
@@ -297,6 +376,30 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
     // MARK: - Factory
 
     /// Freezes a live WorkflowExecutionState into a persistent record.
+    /// Trace events retained per node in a FROZEN record (register XUI-6).
+    ///
+    /// Deliberately BELOW the live cap (`ChatMessage.maxTimelineEvents` = 500), and the asymmetry is
+    /// the reason: a live trace exists once, in one `WorkflowExecutionState`, while a persisted one
+    /// is decoded for up to `WorkflowRunHistoryStore.maxRecordsPerConversation` records per
+    /// conversation and held in the view model's in-memory mirror.
+    ///
+    /// ⚠️ The TAIL is kept, not the head. On a failure the most recent events are the diagnostic
+    /// ones; keeping the head would preserve the setup and discard the evidence.
+    static let maxPersistedNodeTimelineEvents = 400
+
+    /// The events a frozen record keeps for one node, and how many it discarded.
+    ///
+    /// Pure and `nonisolated` (WF-UI5) so BOTH the count and the DIRECTION are assertable — the
+    /// direction is the half a reader cannot verify by inspection, and the half that matters.
+    /// ⚠️ The `>` here is an EQUIVALENT-MUTANT site, recorded so nobody spends time on it: `>=`
+    /// behaves identically, because at exactly the cap the fall-through returns `suffix(cap)` — every
+    /// event — and computes `dropped = 0`. The early return is a short-circuit, not a boundary.
+    nonisolated static func cappedNodeTimeline(_ events: [TimelineEvent]) -> (kept: [TimelineEvent], dropped: Int) {
+        guard events.count > maxPersistedNodeTimelineEvents else { return (events, 0) }
+        return (Array(events.suffix(maxPersistedNodeTimelineEvents)),
+                events.count - maxPersistedNodeTimelineEvents)
+    }
+
     static func freeze(
         from state: WorkflowExecutionState,
         conversationID: UUID,
@@ -308,6 +411,10 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
     ) -> WorkflowRunRecord {
         var unsettledNodes = 0
         var closedToolRows = 0
+        // [XUI-6] Accumulated across the node map so the truncation is reported ONCE per freeze
+        // rather than per node. `freeze` runs exactly once per run, so this is not per-frame code.
+        var droppedTraceEvents = 0
+        var truncatedNodes: [String] = []
         let nodeSnapshots = state.nodeResults.map { result in
             // Compute per-node input from edge topology (Tier 2)
             var inputText: String? = nil
@@ -366,13 +473,25 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
                 nodeTimeline: {
                     guard var events = state.nodeTimelines[result.nodeID], !events.isEmpty else { return nil }
                     closedToolRows += DanglingToolRowCloser.close(&events, outcome: .failed)
-                    return Array(events.suffix(400))
+                    let (kept, dropped) = Self.cappedNodeTimeline(events)
+                    if dropped > 0 {
+                        droppedTraceEvents += dropped
+                        truncatedNodes.append("\(result.nodeID.uuidString.prefix(8)) '\(result.profileName)' -\(dropped)")
+                    }
+                    return kept
                 }(),
                 hasWarnings: result.hasWarnings ? true : nil,
                 // Explicit, never defaulted: freeze REPLACES the whole struct, so an omitted
                 // argument here silently persists the wrong answer for every historical run.
                 ranBeforeSkip: result.ranBeforeSkip
             )
+        }
+
+        if droppedTraceEvents > 0 {
+            // [XUI-6] The cap is a deliberate bound; the DEFECT was that it was silent. A user
+            // looking at a long agent node's trace in the run report could not tell the earliest
+            // events had been discarded, and neither could a support bundle.
+            logger.notice("[WORKFLOW] freeze() capped the persisted trace of \(truncatedNodes.count) node(s) for '\(workflowName)' at \(Self.maxPersistedNodeTimelineEvents) events each, DROPPING \(droppedTraceEvents) event(s) in total: [\(truncatedNodes.joined(separator: ", "))]. CONSEQUENCE: the run report shows only the LAST \(Self.maxPersistedNodeTimelineEvents) events for those nodes — the earliest reasoning steps and tool calls are gone from the record, though they were visible live. The tail is kept deliberately: on a failure the most recent events are the diagnostic ones.")
         }
 
         if unsettledNodes > 0 || closedToolRows > 0 {

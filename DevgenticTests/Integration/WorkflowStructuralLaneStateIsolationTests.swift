@@ -51,9 +51,7 @@ final class WorkflowStructuralLaneStateIsolationTests: XCTestCase {
         let executor = WorkflowExecutor(workflowProfileID: UUID())
         let stream = executor.executeWorkflow(
             userInput: userInput,
-            chatHistory: [],
             conversationID: UUID(),
-            ragContext: nil,
             traceContext: traceContext,
             onTraceUpdate: { _ in },
             layout: scenario.layout,

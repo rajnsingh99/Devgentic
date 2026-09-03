@@ -112,6 +112,40 @@ final class WorkflowRunHistoryStore {
         }.value
     }
 
+    /// ONE run record by id, with the decode off the main actor — the hydration read for XUI-11.
+    ///
+    /// The in-memory mirror drops node traces (`strippingNodeTimelines`) because holding twenty
+    /// runs' worth for every conversation the user visits is where the residency goes; this reads
+    /// the full record back for the single run actually being looked at. `fetchLimit = 1` on an
+    /// id predicate, then the same `RowSnapshot` → detached-decode path `loadFinalized` uses.
+    ///
+    /// Returns nil when the row is gone (deleted conversation, evicted by the sliding window) —
+    /// the caller then keeps the trace-less copy it already has rather than blanking the run.
+    func loadRecord(id: UUID) async -> WorkflowRunRecord? {
+        guard let context = mainContext else {
+            logger.error("loadRecord(id:) called before container was configured — returning nil. CONSEQUENCE: the run opens without its per-node trace; its output and status are unaffected.")
+            return nil
+        }
+
+        var descriptor = FetchDescriptor<WorkflowRunRecordSD>(
+            predicate: #Predicate<WorkflowRunRecordSD> { $0.id == id }
+        )
+        descriptor.fetchLimit = 1
+
+        let snapshot: WorkflowRunRecordSD.RowSnapshot
+        do {
+            guard let row = try context.fetch(descriptor).first else { return nil }
+            snapshot = row.rowSnapshot
+        } catch {
+            logger.error("[PERSISTENCE] Failed to re-read run \(id) for its node traces: \(error.localizedDescription). CONSEQUENCE: the run's Timeline tabs render empty; its output, status and node list are unaffected, and a reopen retries.")
+            return nil
+        }
+
+        return await Task.detached(priority: .userInitiated) {
+            WorkflowRunRecordSD.decodeRecord(from: snapshot)
+        }.value
+    }
+
     /// Inserts or updates a run record under the given conversation, keyed by `record.id`.
     ///
     /// Workflow runs are persisted twice during their lifecycle:

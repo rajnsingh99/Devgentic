@@ -309,10 +309,10 @@ final class MainApplicationViewModel {
 
     /// Writes every dirty cached canvas to disk. Returns the profiles it could NOT persist.
     ///
-    /// Mirrors `WorkflowCanvasView.saveLayout()` — store write first, `agentProfileIDs` synced only
+    /// Mirrors `WorkflowCanvasView.saveLayout()` — store write first, owned-row reconcile only
     /// once the bytes are down, `markSaved()` only once both succeeded — because a partial save is
-    /// worse than none: an `agentProfileIDs` list describing a canvas that was never written is a
-    /// profile that lies about itself.
+    /// worse than none: collecting a node's configuration against a canvas that was never written
+    /// would delete the config of nodes that still exist.
     ///
     /// ⚠️ Callers at an exit point must treat a non-empty `failed` as a REFUSAL to continue. Quitting
     /// after a failed save destroys the very work the user asked to keep.
@@ -380,38 +380,31 @@ final class MainApplicationViewModel {
                 continue
             }
 
-            // Same ordering rule as the canvas's own save: the profile's agent list is only allowed
-            // to describe a layout that is actually on disk.
-            if var profile = profileService.profiles.first(where: { $0.id == profileID }) {
-                let referencedIDs = profileService.profiles
-                    .filter { p in layout.nodes.contains(where: { $0.profileID == p.id }) }
-                    .map(\.id)
-                if case .workflow(var existingConfig) = profile.details {
-                    existingConfig.agentProfileIDs = referencedIDs
-                    profile.details = .workflow(existingConfig)
-                } else {
-                    profile.details = .workflow(WorkflowConfig(agentProfileIDs: referencedIDs))
-                }
-                do {
-                    try profileService.saveProfile(profile)
-                } catch {
-                    // The LAYOUT is already safe, which is the work the user cares about. Only the
-                    // derived agent list is stale, and the next canvas save recomputes it — so this
-                    // is logged, not escalated into a refusal to quit.
-                    logger.error(
-                        "[WF_CANVAS] Exit-time save: workflow \(profileID)'s layout WAS persisted, but "
-                        + "re-saving the profile to sync agentProfileIDs failed: \(error.localizedDescription). "
-                        + "CONSEQUENCE: the graph is safe; the profile's agent list is stale until the "
-                        + "next save from the canvas."
-                    )
-                }
+            // Same ordering rule as the canvas's own save, and for the same reason: this is past
+            // `outcome.didPersist`, so the nodes named here are the ones that reached disk.
+            // Same refusal as the canvas save — a state loaded from a failed read cannot be
+            // trusted to name every node this workflow has.
+            if state.lastLoadDidFail {
+                logger.error("[WF_CANVAS] Exit-time owned-row reconcile REFUSED for workflow \(profileID): its canvas was loaded from a failed read. CONSEQUENCE: rows for deleted nodes are left on disk rather than risking deletion of configurations whose nodes still exist.")
             } else {
-                logger.error(
-                    "[WF_CANVAS] Exit-time save: workflow \(profileID)'s layout WAS persisted, but no "
-                    + "matching profile is in the store, so agentProfileIDs could not be synced. "
-                    + "CONSEQUENCE: the graph is safe; the profile's agent list is stale."
-                )
+            profileService.reconcileOwnedProfiles(
+                forWorkflow: profileID,
+                // Same union as the canvas save — see `undoRecoverableProfileIDs`. A cached state
+                // reaching the quit drain can still hold an undo stack.
+                referencedProfileIDs: Set(layout.nodes.compactMap(\.profileID))
+                    .union(state.undoRecoverableProfileIDs)
+            )
             }
+
+            // ⚠️ NO PROFILE RE-SAVE HERE ANY MORE (2026-08-29). This block existed solely to
+            // recompute `WorkflowConfig.agentProfileIDs` from the layout; that field is retired,
+            // because a workflow's nodes own their configuration and the layout is the only record
+            // of what a workflow contains.
+            //
+            // Nothing replaces it: unlike the canvas's own save, this drain has no editor draft to
+            // flush — it runs over cached canvas STATES whose views may not even be mounted, and
+            // the profile row it would have re-saved was never edited here. The layout write above
+            // plus the reconcile is the whole job.
 
             state.markSaved()
             // The drain runs over states whose views may not be mounted, so no `onChange` will fire

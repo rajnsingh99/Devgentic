@@ -580,7 +580,7 @@ struct ChatInputAreaView: View {
                 // so navigation needs *a* profile: the selected one, else the first that
                 // exists. `ToolLibraryContainerView` renders nothing for an id it cannot
                 // find, so an invented UUID would be a dead button.
-                if let profileID = backendConfiguration.selectedProfileID ?? profileService.profiles.first?.id {
+                if let profileID = backendConfiguration.selectedProfileID ?? profileService.sharedProfiles.first?.id {
                     router.navigate(to: .toolLibrary(profileID: profileID))
                 } else {
                     logger.warning("""

@@ -73,7 +73,7 @@ struct ProfileSelectorPopover: View {
         .padding(.bottom, 10)
         .frame(width: popoverWidth, height: 440)
         .onAppear {
-            profiles = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
+            profiles = (try? BackendProfileStore.shared.fetchSharedProfiles()) ?? []
             // Land on the current selection's type so the highlighted row is visible immediately.
             if let id = configuration.selectedProfileID,
                let current = profiles.first(where: { $0.id == id }),
@@ -210,8 +210,11 @@ struct ProfileSelectorPopover: View {
         switch profile.details {
         case .bot(let config): return config.llmConfig.modelName
         case .agent(let config): return config.llmConfig.modelName
-        case .workflow(let config):
-            let count = config.agentProfileIDs.count
+        case .workflow:
+            // ⚠️ Reads the LAYOUT's denormalized count, not `WorkflowConfig.agentProfileIDs`. That
+            // field is retired, and it was never right for this label anyway: it only ever counted
+            // PROFILE nodes, so a workflow of Routers, Code, Gates and Actions reported "0 nodes".
+            let count = WorkflowLayoutStore.shared.storedCounts(for: profile.id).nodes
             return count == 1 ? "1 node" : "\(count) nodes"
         case .imageGen(let config): return config.llmConfig.modelName
         case .code(let config): return config.llmConfig.modelName

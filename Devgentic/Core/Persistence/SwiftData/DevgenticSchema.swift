@@ -50,7 +50,7 @@ enum DevgenticSchema {
     /// `structuralFingerprint` unchanged, so the launch-sweep gate would have reported `.run` on
     /// precisely the launch a schema change happened. Guarded by
     /// `SchemaMigrationTests.testProductionSchemaTracksTheDeclaredCurrentVersion`.
-    static var currentVersion: any VersionedSchema.Type { DevgenticSchemaV2.self }
+    static var currentVersion: any VersionedSchema.Type { DevgenticSchemaV3.self }
 
     /// The entity list of the CURRENT schema version.
     ///
@@ -78,8 +78,9 @@ enum DevgenticSchema {
 
     /// The migration plan passed to the container.
     ///
-    /// ⚠️ Currently one version and ZERO stages — see `DevgenticMigrationPlan` for why that is
-    /// correct rather than incomplete.
+    /// ⚠️ THREE versions and TWO lightweight stages (V1 → V2 → V3) — staged migration is engaged.
+    /// This said "one version and ZERO stages" until 2026-08-29, pointing readers at a comment that
+    /// repeated the same stale claim.
     static var migrationPlan: any SchemaMigrationPlan.Type { DevgenticMigrationPlan.self }
 
     /// Filename of the on-disk store, in Application Support.
@@ -309,25 +310,40 @@ extension DevgenticSchema {
         return DuplicateReport(offendingColumns: offending)
     }
 
+    private static let preflightLogger = DGLogger(category: "DevgenticSchema")
+
     /// Count of values appearing more than once in `column`, or nil if the query could not run.
     ///
-    /// Opens the store READ-ONLY (`immutable=1`) so a pre-flight can never modify the thing it is
-    /// inspecting, and so it works on a store another process has open.
+    /// Opens the store READ-ONLY so a pre-flight can never modify the thing it is inspecting.
+    /// Two connection modes, in order:
+    ///
+    /// 1. A plain read-only connection. This attaches to the store's WAL, so rows that are
+    ///    committed but not yet checkpointed into the main file ARE counted — the state of any
+    ///    store that is currently open elsewhere (the running app, a live `ModelContainer`) or
+    ///    was copied with a hot `-wal`. SQLite builds a private in-memory WAL index when it
+    ///    cannot write the `-shm`, so this works without write access to the sidecars.
+    /// 2. `immutable=1`, only if the plain connection could not produce an answer (read-only
+    ///    media, missing sidecar permissions). ⚠️ This mode is WAL-BLIND: it reads the main file
+    ///    only, so committed rows still sitting in the `-wal` are invisible to it. It used to be
+    ///    the ONLY mode, which made the pre-flight report a just-written store as duplicate-free
+    ///    whenever the writing connection had not yet closed and checkpointed — a false "clean"
+    ///    from the one tool whose job is to say "this constraint would brick user data"
+    ///    (caught by `testDuplicateReportSeesRowsWhileTheWritingContainerIsStillOpen`).
     private static func sqliteDuplicateCount(storeURL: URL, table: String, column: String) -> Int? {
         // Identifiers cannot be bound as parameters, so they are validated instead — these come from
         // developer-supplied schema names, but a typo that happened to contain SQL should fail
         // loudly here rather than execute.
         let identifier = /^[A-Za-z_][A-Za-z0-9_]*$/
         guard table.wholeMatch(of: identifier) != nil,
-              column.wholeMatch(of: identifier) != nil else { return nil }
-
-        var handle: OpaquePointer?
-        let uri = "file:\(storeURL.path)?immutable=1"
-        guard sqlite3_open_v2(uri, &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK else {
-            sqlite3_close(handle)
+              column.wholeMatch(of: identifier) != nil else {
+            preflightLogger.error(
+                "[PREFLIGHT] Duplicate scan REFUSED non-identifier name \(table).\(column) — "
+                + "identifiers are interpolated into SQL and anything else must not execute. "
+                + "CONSEQUENCE: the column is absent from the report; fix the name, or the "
+                + "pre-flight has not vouched for it."
+            )
             return nil
         }
-        defer { sqlite3_close(handle) }
 
         let sql = """
             SELECT COUNT(*) FROM (
@@ -336,6 +352,29 @@ extension DevgenticSchema {
               GROUP BY \(column) HAVING COUNT(*) > 1
             )
             """
+
+        for uri in ["file:\(storeURL.path)", "file:\(storeURL.path)?immutable=1"] {
+            if let count = sqliteScalar(uri: uri, sql: sql) { return count }
+        }
+        preflightLogger.error(
+            "[PREFLIGHT] Duplicate scan could not evaluate \(table).\(column) at \(storeURL.path) — "
+            + "the store could not be opened read-only, or the query failed, on both connection "
+            + "modes (plain and immutable=1). A missing store or a table this schema never wrote "
+            + "also lands here. CONSEQUENCE: the column is treated as duplicate-free in the "
+            + "report; a .unique constraint on it could still brick existing stores."
+        )
+        return nil
+    }
+
+    /// Runs a single-scalar read-only query against `uri`, or nil if it could not run there.
+    private static func sqliteScalar(uri: String, sql: String) -> Int? {
+        var handle: OpaquePointer?
+        guard sqlite3_open_v2(uri, &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK else {
+            sqlite3_close(handle)
+            return nil
+        }
+        defer { sqlite3_close(handle) }
+
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(statement) }

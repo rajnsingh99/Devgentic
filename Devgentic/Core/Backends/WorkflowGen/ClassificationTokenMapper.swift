@@ -100,7 +100,10 @@ struct ClassificationTokenMapper: Sendable {
     func isExplicitNoMatch(_ response: String) -> Bool {
         guard fallbackIsNoMatchSentinel else { return false }
         guard parseResponse(response) == nil else { return false }
-        return response.uppercased().contains(fallbackToken)
+        // [EIO-10] The SAME boundary test `parse` uses. This sibling was left on bare containment in
+        // the first pass, so the two sentinel checks could disagree about the same reply — one seeing
+        // a sentinel embedded in a word that the other refused.
+        return Self.firstStandaloneOccurrence(of: fallbackToken, in: response.uppercased()) != nil
     }
 
     // MARK: - Prompt Building
@@ -175,9 +178,14 @@ struct ClassificationTokenMapper: Sendable {
         // port), and without this such a pair would manufacture a phantom self-ambiguity.
         var earliestByLabel: [String: String.Index] = [:]
         for (token, label) in tokenToLabel {
-            guard let r = uppercased.range(of: token) else { continue }
-            if let existing = earliestByLabel[label], existing <= r.lowerBound { continue }
-            earliestByLabel[label] = r.lowerBound
+            // [EIO-10] STANDALONE occurrence, not bare containment. A 4-character token can appear
+            // INSIDE a longer alphanumeric run in ordinary prose — the reply "MENTION the refund"
+            // contains the token "MENT" — so a plain `range(of:)` let the model's own wording
+            // manufacture a routing decision it never made, or a second candidate that turned a
+            // clean answer into a phantom `.ambiguous`.
+            guard let idx = Self.firstStandaloneOccurrence(of: token, in: uppercased) else { continue }
+            if let existing = earliestByLabel[label], existing <= idx { continue }
+            earliestByLabel[label] = idx
         }
 
         let ordered = earliestByLabel
@@ -189,10 +197,40 @@ struct ClassificationTokenMapper: Sendable {
 
         // ⚠️ The sentinel is consulted ONLY when no real token was found. A reply carrying a real
         // token AND the sentinel routes on the real token — today's semantics, preserved exactly.
-        if fallbackIsNoMatchSentinel, uppercased.contains(fallbackToken) {
+        // The sentinel gets the same boundary treatment, for the same reason.
+        if fallbackIsNoMatchSentinel,
+           Self.firstStandaloneOccurrence(of: fallbackToken, in: uppercased) != nil {
             return .explicitNoMatch
         }
         return .unreadable
+    }
+
+    /// The first occurrence of `token` in `haystack` that is NOT embedded in a longer alphanumeric
+    /// run (register EIO-10).
+    ///
+    /// ⚠️ The boundary predicate is ASCII alphanumeric — wider than `tokenCharacters` (which omits
+    /// I, O, 0 and 1, so a membership test would still accept "MENT" inside "MENTION") but NARROWER
+    /// than `Character.isLetter`, which is true for every Unicode letter and would break CJK replies
+    /// that place a token directly against a character with no space. Punctuation, whitespace,
+    /// non-ASCII letters and the string ends all count as boundaries.
+    ///
+    /// `nonisolated static` and pure so the rule is truth-tableable on its own (WF-UI5).
+    nonisolated static func firstStandaloneOccurrence(
+        of token: String,
+        in haystack: String
+    ) -> String.Index? {
+        guard !token.isEmpty else { return nil }
+        var from = haystack.startIndex
+        while let r = haystack.range(of: token, range: from..<haystack.endIndex) {
+            let precededByTokenChar = r.lowerBound > haystack.startIndex
+                && haystack[haystack.index(before: r.lowerBound)].isASCIITokenCharacter
+            let followedByTokenChar = r.upperBound < haystack.endIndex
+                && haystack[r.upperBound].isASCIITokenCharacter
+            if !precededByTokenChar && !followedByTokenChar { return r.lowerBound }
+            guard r.lowerBound < haystack.endIndex else { return nil }
+            from = haystack.index(after: r.lowerBound)
+        }
+        return nil
     }
 
     // MARK: - Token Generation
@@ -210,4 +248,17 @@ struct ClassificationTokenMapper: Sendable {
         // Fallback: extremely unlikely (36^4 = 1.6M combinations)
         return String((0..<4).map { _ in tokenCharacters.randomElement()! })
     }
+}
+
+private extension Character {
+    /// Boundary test for `ClassificationTokenMapper.firstStandaloneOccurrence` (register EIO-10).
+    ///
+    /// ⚠️ ASCII ONLY, deliberately. `Character.isLetter` is true for EVERY Unicode letter — CJK,
+    /// Kana, Hangul, Thai, Devanagari — but a token is drawn from an ASCII alphabet
+    /// (`tokenCharacters`), so a token can never be part of a CJK "word". Using the Unicode-wide
+    /// test made a Japanese or Chinese reply that placed the token directly against a CJK character
+    /// (no space, which is normal in those scripts) fail to match, silently turning a decided
+    /// classification into `.unreadable`. The boundary that matters is "could this be the same TOKEN",
+    /// and only ASCII alphanumerics can be.
+    var isASCIITokenCharacter: Bool { isASCII && (isLetter || isNumber) }
 }
