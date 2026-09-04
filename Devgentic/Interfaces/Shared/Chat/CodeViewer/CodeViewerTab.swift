@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import CodeEditSourceEditor
 
 /// How the Code Viewer panel occupies the window.
 ///
@@ -24,6 +25,43 @@ enum CodeViewerPresentation: String {
     case full
 }
 
+/// Per-tab editor VIEW state — cursor positions, scroll offset, find-panel text — for the
+/// Code Viewer's `SourceEditor`.
+///
+/// Lives here rather than in `CodeViewerTab` for two reasons:
+///
+/// 1. **It must outlive the panel.** The document is keyed `.id(document.id)`, so SwiftUI
+///    discards the editor's controller on every tab switch and every live-write refresh,
+///    and minimizing unmounts the panel entirely. State held by the view (or by the
+///    controller) dies with it, which is why the editor used to land back at line 1 every
+///    time — and why the floating pill's "reopens the panel where it left off" was true of
+///    the tab SET and false of the position.
+/// 2. **It must not be observed.** The editor writes back a cursor position on every
+///    keystroke and arrow key. Putting that in the `@Observable` `codeViewerTabs` array
+///    would invalidate the root window body, the panel body and every tab chip on each
+///    caret move — the exact churn the Code Viewer is already too heavy for.
+///
+/// Keyed by TAB id, not snippet id: a tab keeps its identity across content refreshes, and
+/// resuming the caret in the same tab after the agent rewrote the file is the point.
+@MainActor
+final class CodeViewerEditorStateStore {
+    private var statesByTab: [UUID: SourceEditorState] = [:]
+
+    /// The stored state, or a fresh one — a tab that has never been shown starts at the top.
+    func state(for tabID: UUID) -> SourceEditorState { statesByTab[tabID] ?? SourceEditorState() }
+
+    func setState(_ state: SourceEditorState, for tabID: UUID) { statesByTab[tabID] = state }
+
+    /// Drops state for tabs the user CLOSED. Deliberately not called on a conversation
+    /// switch: those tabs are stashed, not closed, and must come back where they were.
+    func forget(tabIDs: [UUID]) {
+        for id in tabIDs { statesByTab.removeValue(forKey: id) }
+    }
+
+    /// Number of tabs with retained editor state — for tests and leak checks only.
+    var retainedTabCount: Int { statesByTab.count }
+}
+
 /// One open document in the Code Viewer's tab strip.
 ///
 /// The Code Viewer moved from a single `(snippets, currentIndex)` selection to a set of
@@ -35,8 +73,10 @@ enum CodeViewerPresentation: String {
 struct CodeViewerTab: Identifiable, Equatable {
     let id: UUID
 
-    /// The code this tab displays. Replaced in place (new `snippet.id`) after a successful
-    /// save so the panel's snippet-id-keyed reload picks up the saved content.
+    /// The code this tab displays. Replaced in place (new `snippet.id`, which is what drives
+    /// the panel's snippet-id-keyed reload) when an AGENT write lands on this file, or when
+    /// a re-open finds the source block's content has moved on. NOT on a save — see
+    /// `isDirty`, which exists precisely so a save doesn't have to touch this.
     var snippet: CodeSnippet
 
     /// The linked source filename, when the block was resolved to a user-attached file (or
@@ -66,10 +106,27 @@ struct CodeViewerTab: Identifiable, Equatable {
     /// tab phantom-dirty forever.
     var lastSavedBuffer: String? = nil
 
-    /// Exact bytes last written to the source file — the drift-guard baseline for the
-    /// NEXT save. Without this, the guard compares against attach-time content forever
-    /// and refuses every save after the first as "drift" (it's our own prior write).
+    /// The bytes this tab last KNEW to be on disk — the drift-guard baseline for the NEXT
+    /// save. Normally that is our own last write; without it the guard compares against
+    /// attach-time content forever and refuses every save after the first as "drift"
+    /// (it's our own prior write).
+    ///
+    /// It is also set from `preWriteDisk` when an agent write is REJECTED, because nothing
+    /// was written and the pre-write snapshot is then exactly what is on disk. Leaving it
+    /// nil there made the guard fall back to `snippet.code` — the PROPOSAL, which by
+    /// definition is not on disk — so every ⌘S on a rejected tab was refused as drift.
     var lastSavedDisk: String? = nil
+
+    /// The target file's content as of the moment an agent write STARTED: the UI's
+    /// best-effort pre-read (`handleAgentWriteBegan`), replaced by the executor's
+    /// authoritative snapshot when the completion carries one.
+    ///
+    /// Held separately from `lastSavedDisk` and only promoted on REJECTION: on success the
+    /// agent's proposal IS what landed on disk, and seeding the guard with the pre-write
+    /// bytes there would refuse the user's next save as drift against our own agent's write.
+    /// Nil when the file was unreadable/over the cap — the tab then keeps the old
+    /// (proposal) baseline and a save on a rejected write is still refused; the log says so.
+    var preWriteDisk: String? = nil
 
 
     /// Live-agent state: `.active` while the agent's write is in flight (pulsing chip dot,
@@ -110,8 +167,18 @@ struct CodeViewerTab: Identifiable, Equatable {
     /// `effectiveCode` to the pristine block — so the just-saved text vanished on the next
     /// tab reload and a subsequent ⌘S wrote the ORIGINAL back over the file. Keeping the
     /// buffer and comparing it here is what makes "saved" and "clean" the same state
-    /// without minting a new `snippet.id` (which would rebuild the editor and lose the
-    /// cursor). Found by the 2026-07-26 re-scope audit; pre-existed in `applyChanges`.
+    /// without minting a new `snippet.id`.
+    ///
+    /// ⚠️ [CF-13] That parenthetical used to read "which would rebuild the editor and lose
+    /// the cursor" — no longer true. `CodeViewerEditorStateStore` is keyed by TAB id, so it
+    /// survives the panel's `.id(document.id)` teardown, and `SourceEditor` restores the
+    /// caret in `makeNSViewController` and the scroll offset on the first update. The
+    /// remaining reason is IDENTITY, not the caret: `snippet.code` is what dedup
+    /// (`denotesSameBlock`), click-to-tab and re-open focusing all compare against (see the
+    /// "Editing state" note above), so re-pointing it at the saved text would move the
+    /// anchor. The teardown and re-highlight on every ⌘S are waste on top of that.
+    ///
+    /// Found by the 2026-07-26 re-scope audit; pre-existed in `applyChanges`.
     var isDirty: Bool {
         guard let editedCode else { return false }
         return editedCode != (lastSavedBuffer ?? snippet.code)

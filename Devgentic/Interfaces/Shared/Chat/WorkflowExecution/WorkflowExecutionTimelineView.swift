@@ -13,8 +13,12 @@
 //  Short runs top-align and leave space below — intentional (standard for execution logs); the
 //  content scrolls once it outgrows the viewport.
 //
-//  Prototype seam: rendered when `WorkflowDedicatedView.executionLayout == .timelineA`; switch back
-//  to `.original` to restore the classic strip + output layout (both paths stay compiled).
+//  ⚠️ THE ONLY execution layout — there is no fallback to fall back to. This was once one arm of a
+//  `WorkflowDedicatedView.executionLayout` prototype switch, and this header promised "both paths
+//  stay compiled"; the `.original` strip + output layout and its four views were DELETED 2026-07-17
+//  after shipping timeline-only, taking the property and the enum with them. The sibling note at
+//  `WorkflowDedicatedView`'s call site says the same thing; this one had been left claiming the
+//  opposite ever since.
 //
 
 import SwiftUI
@@ -31,6 +35,17 @@ struct WorkflowExecutionTimelineView: View {
     /// Conversation this run belongs to — required for the per-node Skip toggle (D2.1), whose
     /// store keys on it (sound under the one-root-run-per-conversation invariant). `nil` hides
     /// the button entirely: a surface that cannot identify the run must not offer to change it.
+    /// ⚠️ [CF-53] Also threaded into every `AgentTimelineView` below, so a workflow node's
+    /// "Open in viewer" whose disk read outlives a conversation switch is dropped instead of
+    /// landing a tab in whatever conversation is open when it returns.
+    ///
+    /// ⚠️ This is `MainApplicationViewModel.selectedConversationID` — the SIDEBAR selection —
+    /// which LEADS `ChatHistoryViewModel`'s load by the 250 ms debounce in
+    /// `ConversationSwitchCoordinator`. During that window it already names the incoming
+    /// conversation while the chat view model still names the outgoing one, so an open clicked
+    /// inside the debounce is dropped even though it was still safe. That is the harmless
+    /// direction (a logged drop the user can repeat, rather than a tab landing in the wrong
+    /// conversation) and is why the mismatch is not treated as an error.
     var conversationID: UUID? = nil
     /// True while another send/stream is in flight. The pill stays VISIBLE but disabled with an
     /// honest tooltip — it used to be fully enabled during a stream and the click was dropped
@@ -74,6 +89,21 @@ struct WorkflowExecutionTimelineView: View {
         // exactly like the other two run-level exceptions to a node-shaped status.
         if isCompletedWithWarnings { return String(localized: "Completed with warnings") }
         return status.label
+    }
+
+    /// [CF-60] Whether the timeline scrolls to `selection` for this `.onChange` delivery.
+    ///
+    /// `nonisolated static` and pure (the WF-UI5 shape) because the `ScrollViewReader` closure is
+    /// SwiftUI runtime behaviour no unit test can reach, while the rule inside it is exactly the
+    /// thing that was wrong.
+    ///
+    /// ⚠️ The CONSTRUCTION pass scrolls only for an EXPLICIT node selection. `nil` means the Final
+    /// Outcome row, which is the resting selection every "back" press leaves behind and the one a
+    /// freshly-opened historical run inherits — honouring it here would scroll every run the user
+    /// opens straight past its own timeline to the last row. A real change to `nil` still scrolls:
+    /// that one the user (or a completing run) asked for.
+    nonisolated static func shouldScrollToSelection(_ selection: UUID?, isInitial: Bool) -> Bool {
+        isInitial ? selection != nil : true
     }
 
     /// Readable measure for prose inside expanded panels — full-width error/output
@@ -170,9 +200,27 @@ struct WorkflowExecutionTimelineView: View {
                     .padding(.bottom, 32)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                .onChange(of: selectedNodeID) { _, newValue in
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        proxy.scrollTo(newValue.map { AnyHashable($0) } ?? AnyHashable(Self.finalOutcomeAnchor), anchor: .top)
+                // ⚠️ [CF-60] `initial: true` is load-bearing, not tidiness. The failed-run
+                // auto-focus lives on WorkflowDedicatedView and assigns `selectedNodeID` in the
+                // SAME update that makes `displayData` non-nil — so this view is CONSTRUCTED with
+                // the id already in place, a change-only observer saw no change, and the node the
+                // user was sent to debug stayed below the fold. (Selecting another run while the
+                // timeline is already on screen scrolled fine, because the view persists.)
+                .onChange(of: selectedNodeID, initial: true) { oldValue, newValue in
+                    // `initial: true` delivers the current value as BOTH parameters; a real change
+                    // never can, because `onChange` only fires on inequality.
+                    let isInitial = oldValue == newValue
+                    guard Self.shouldScrollToSelection(newValue, isInitial: isInitial) else { return }
+                    let target = newValue.map { AnyHashable($0) } ?? AnyHashable(Self.finalOutcomeAnchor)
+                    // Unanimated on the construction pass: there is no previous offset to travel
+                    // from, and animating one at appear time reads as the view sliding under the
+                    // user rather than opening where it should.
+                    if isInitial {
+                        proxy.scrollTo(target, anchor: .top)
+                    } else {
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            proxy.scrollTo(target, anchor: .top)
+                        }
                     }
                 }
             }
@@ -300,6 +348,53 @@ struct WorkflowExecutionTimelineView: View {
         }
     }
 
+    /// [CF-56] Which override a node row's colour takes.
+    ///
+    /// `nonisolated static` and theme-free (the WF-UI5 shape) precisely because the defect was a
+    /// SECOND, independent derivation of this rule: `expandedContent` re-derived its panel edge
+    /// from the raw status and applied only `.notRun`, so a degraded node got a green success frame
+    /// under its own amber "Completed · warnings" tag. Returning a ROLE rather than a `Color` is
+    /// what makes the rule testable without a `Theme`.
+    ///
+    /// ⚠️ The awaiting override is NOT here: it is a live-run, HITL-only property of the row rather
+    /// than of the node's recorded status, it is not available on the record path at all, and the
+    /// call site applies it last (see `rowColor`) exactly as the spine always did.
+    ///
+    /// ⚠️ The header's progress segments apply the same three overrides in their own palette
+    /// (`segmentColor` + a 0.35-alpha muted arm) and deliberately do not route through here — a
+    /// 5pt capsule is not a status dot.
+    enum NodeColorRole: Equatable {
+        /// Never executed — muted, never the failure red.
+        case notRun
+        /// Completed on a best-effort answer (circuit breaker / iteration budget) — amber, matching
+        /// the "Completed · warnings" tag.
+        case degraded
+        /// The node's own status colour.
+        case status
+    }
+
+    nonisolated static func nodeColorRole(
+        status: WorkflowRunDisplayData.NodeDisplayData.NodeStatus,
+        hasWarnings: Bool,
+        isNotRun: Bool
+    ) -> NodeColorRole {
+        if isNotRun { return .notRun }
+        // ⚠️ The `.completed` conjunct is load-bearing for the same reason it is on `nodeTagLabel`:
+        // a node decoded from a newer build (`.unknown`) can carry `hasWarnings`, and amber there
+        // would claim a degraded COMPLETION this build cannot classify.
+        if hasWarnings, status == .completed { return .degraded }
+        return .status
+    }
+
+    private func nodeColor(for role: NodeColorRole,
+                           status: WorkflowRunDisplayData.NodeDisplayData.NodeStatus) -> Color {
+        switch role {
+        case .notRun:   return theme.secondaryText.opacity(0.6)
+        case .degraded: return theme.warningColor
+        case .status:   return status.color(theme)
+        }
+    }
+
     // MARK: - Node step row
 
     @ViewBuilder
@@ -307,15 +402,20 @@ struct WorkflowExecutionTimelineView: View {
         let isSelected = selectedNodeID == node.nodeID
         let isAwaiting = awaitingNodeIDs.contains(node.nodeID)
         let notRun = isNotRun(node)
-        // Degraded success: completed on a best-effort answer → amber instead of green.
-        let degraded = node.hasWarnings && node.status == .completed
-        let statusColor = notRun
-            ? theme.secondaryText.opacity(0.6)
-            : (degraded ? theme.warningColor : node.status.color(theme))
+        // [CF-56] ONE decision for which override this row's colour takes — see `nodeColorRole`.
+        let statusColor = nodeColor(
+            for: Self.nodeColorRole(status: node.status, hasWarnings: node.hasWarnings, isNotRun: notRun),
+            status: node.status)
+        // ⚠️ [CF-56] THE row's colour, awaiting override included — rendered by the spine here AND
+        // by the expanded panel's edge below, which used to re-derive its own from the raw status
+        // and so dropped every override but did-not-run: a green success frame under this row's own
+        // amber "Completed · warnings" tag, an accent-blue one under "Needs your input". Same shape
+        // and same fix as XUI-13 on the Final Outcome row — computed once, passed down.
+        let rowColor = isAwaiting ? theme.warningColor : statusColor
         let isHovered = hoveredRowKey == AnyHashable(node.nodeID)
 
         HStack(alignment: .top, spacing: 14) {
-            spineColumn(color: isAwaiting ? theme.warningColor : statusColor,
+            spineColumn(color: rowColor,
                         isActive: node.status == .running || isAwaiting,
                         isTerminalFill: !notRun && (node.status == .completed || node.status == .failed),
                         isLast: false)
@@ -335,7 +435,7 @@ struct WorkflowExecutionTimelineView: View {
 
                 // Collapsed one-line preview: pre-terminal rows show their incoming task/input,
                 // terminal unselected rows show a snippet of their output.
-                if !isSelected, let preview = collapsedPreview(for: node) {
+                if !isSelected, let preview = Self.collapsedPreview(for: node) {
                     Text(preview)
                         .font(.system(.caption))
                         .foregroundColor(theme.tertiaryText)
@@ -402,7 +502,7 @@ struct WorkflowExecutionTimelineView: View {
                 }
 
                 if isSelected {
-                    expandedContent(for: node)
+                    expandedContent(for: node, edgeColor: rowColor)
                         .padding(.top, 6)
                 }
             }
@@ -434,23 +534,46 @@ struct WorkflowExecutionTimelineView: View {
         .accessibilityAction { selectedNodeID = node.nodeID }
     }
 
-    private func collapsedPreview(for node: WorkflowRunDisplayData.NodeDisplayData) -> String? {
+    /// Bounds the one-line collapsed preview (register CF-58). `detail` is a node's entire model
+    /// output and `input` is the concatenation of every upstream node's entire output; both were
+    /// handed to a `lineLimit(1)` `Text` whole, on every body pass, hover transitions included.
+    ///
+    /// - Parameter limit: 200 characters, chosen to sit ABOVE what the row can actually show —
+    ///   this timeline is capped at `ViewLayout.maxContentWidth` and the preview is a single
+    ///   `.caption` line, which fits roughly 180 characters at that width. The cap therefore
+    ///   removes nothing the user could have read. Signature mirrors the sibling
+    ///   `RunCardSpeech.spokenPreview(_:limit:)`, which bounds the SPOKEN half of the same idea.
+    ///
+    /// ⚠️ Bounds what reaches `Text`, not what reaches this function: the trim below is still
+    /// linear in the source string. That is a memcpy; laying out and diffing a multi-kilobyte
+    /// string on every body pass was not.
+    nonisolated private static func boundedPreview(_ text: String, limit: Int = 200) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        // `index(offsetBy:limitedBy:)` rather than `count > limit`: counting graphemes over a
+        // 128 KB detail is itself the O(n) walk this row is about. This one stops at the cap.
+        guard let cut = trimmed.index(trimmed.startIndex, offsetBy: limit,
+                                      limitedBy: trimmed.endIndex),
+              cut < trimmed.endIndex else { return trimmed }
+        return String(trimmed[..<cut]) + "…"
+    }
+
+    nonisolated static func collapsedPreview(for node: WorkflowRunDisplayData.NodeDisplayData) -> String? {
         switch node.status {
         case .pending, .running:
-            let input = node.input?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return input.isEmpty ? nil : input
+            // ⚠️ `input` is the concatenation of every upstream node's ENTIRE output, so this arm
+            // is the larger of the two — see `boundedPreview`.
+            return boundedPreview(node.input ?? "")
         case .skipped:
             // ⚠️ The REASON, not the input. This arm used to fall through to the input preview,
             // and for legacy records the detail underneath printed the raw engine sentence
             // "Upstream dependency failed" directly below a grey "Not run" tag — restoring the
             // exact failure wording the tag exists to suppress.
-            let detail = node.detail.trimmingCharacters(in: .whitespacesAndNewlines)
-            return detail.isEmpty ? nil : detail
+            return boundedPreview(node.detail)
         // `.unknown` is a FINISHED node (newer-build status) — its detail is real; show it like
         // any settled node rather than the input preview a pending node gets.
         case .completed, .failed, .cancelled, .unknown:
-            let detail = node.detail.trimmingCharacters(in: .whitespacesAndNewlines)
-            return detail.isEmpty ? nil : detail
+            return boundedPreview(node.detail)
         }
     }
 
@@ -663,10 +786,72 @@ struct WorkflowExecutionTimelineView: View {
         return (body, suggestion.isEmpty ? nil : suggestion)
     }
 
+    /// [CF-59] Memo key for `errorBodyIsDuplicated`.
+    ///
+    /// ⚠️ `traceLength` is what makes it safe to cache a TRACE-dependent answer: an appended event
+    /// can flip the answer from false to true — trace hydration replaces the whole array, and the
+    /// last events of a run can land after the node has settled — and both always change the count.
+    /// Keying on the node id alone would pin the first answer for the life of the process.
+    ///
+    /// ⚠️ `traceTailID` is what makes it safe to cache it ACROSS RUNS, and `nodeID` alone is not:
+    /// `nodeID` is the persistent LAYOUT node id (the same stability `WorkflowNodeSkipStore` relies
+    /// on to key a skip preference), so a Re-run — or the same workflow run in another conversation
+    /// — presents the identical node id to a process-lifetime cache. With only `body` and
+    /// `traceLength` varying, a node that fails the same way twice with the same event count is an
+    /// outright cache hit, and the two answers are NOT interchangeable: the second run's trace tail
+    /// may or may not echo the sentence. A stale `true` suppresses the red error paragraph entirely
+    /// — a "Failed" node whose expanded panel never says why — and a stale `false` prints the
+    /// sentence twice, which is the duplication this predicate exists to remove. Event ids are
+    /// generated per event (and persisted, so a hydrated trace keeps its own), so the tail id
+    /// changes with the run while staying stable within it.
+    ///
+    /// ⚠️ NOT keyed on event CONTENT, and that is a deliberate limit rather than an oversight: a
+    /// trailing `.toolExecution` row mutated IN PLACE (same id, same count, new output) keeps the
+    /// previous answer. That needs a row still being written after its node has settled to
+    /// `.failed`, which `DanglingToolRowCloser` rules out — and hashing four 32 KB outputs per body
+    /// pass would reinstate exactly the cost this memo exists to remove.
+    private struct DuplicationKey: Hashable {
+        let nodeID: UUID
+        let body: String
+        let traceLength: Int
+        /// The last event's id — nil for an empty trace. See the run-scoping note above.
+        let traceTailID: UUID?
+    }
+
+    /// Bounded because nothing evicts on run or conversation change; 64 is far more than the
+    /// selected-and-failed nodes one sitting produces, and dropping the map costs exactly one
+    /// recomputation on the next body pass.
+    @MainActor private static var duplicationCache: [DuplicationKey: Bool] = [:]
+
+    /// Memoised `isDuplicatedInTimeline` (register CF-59).
+    ///
+    /// The predicate lowercases, splits and rejoins up to four 32 KB `.toolExecution` outputs, and
+    /// its only call site is inside `expandedContent`'s `@ViewBuilder` — so it ran on EVERY body
+    /// pass of the timeline, and `hoveredRowKey` is `@State` on this view, meaning every hover
+    /// transition anywhere in the list paid for it. The answer only changes when the node's error
+    /// text or its trace does, which is exactly what `DuplicationKey` carries.
+    ///
+    /// MainActor-isolated static, mirroring `AsyncHighlightedCodeView.monoFont`: the only callers
+    /// are view bodies, already on the main actor.
+    @MainActor
+    static func errorBodyIsDuplicated(nodeID: UUID, body: String, events: [TimelineEvent]) -> Bool {
+        let key = DuplicationKey(nodeID: nodeID, body: body, traceLength: events.count,
+                                 traceTailID: events.last?.id)
+        if let cached = duplicationCache[key] { return cached }
+        let answer = isDuplicatedInTimeline(body, events: events)
+        if duplicationCache.count >= 64 { duplicationCache.removeAll(keepingCapacity: true) }
+        duplicationCache[key] = answer
+        return answer
+    }
+
     /// True when the error body is already told by the tail of the node's timeline (e.g. the
     /// circuit-breaker's LOOP GUARD card carries the same sentence) — showing it again below the
     /// trace is pure duplication.
-    private func isDuplicatedInTimeline(_ body: String, events: [TimelineEvent]) -> Bool {
+    ///
+    /// ⚠️ Call `errorBodyIsDuplicated` from view code, never this — see its note on why the raw
+    /// predicate must not run per body pass. `nonisolated static` so the memo above can be the
+    /// only caller that is not a test.
+    nonisolated static func isDuplicatedInTimeline(_ body: String, events: [TimelineEvent]) -> Bool {
         func normalize(_ s: String) -> String {
             s.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
         }
@@ -701,11 +886,14 @@ struct WorkflowExecutionTimelineView: View {
     /// Inline detail for the selected node — reuses the exact rendering pipeline the output panel
     /// used (AgentTimelineView + WorkflowMarkdownView), but embedded in the timeline so the active
     /// step is the hero. No inner ScrollView: the outer timeline scroll owns scrolling.
+    /// - Parameter edgeColor: the ROW's already-overridden colour. ⚠️ Never re-derive it from
+    ///   `node.status` here (register CF-56, and XUI-13 for the identical fix on the Final Outcome
+    ///   row): every override — did-not-run, degraded success, awaiting input — is applied once at
+    ///   the call site, and re-deriving here silently dropped all but the first.
     @ViewBuilder
-    private func expandedContent(for node: WorkflowRunDisplayData.NodeDisplayData) -> some View {
-        let statusColor = isNotRun(node) ? theme.secondaryText.opacity(0.6) : node.status.color(theme)
-
-        detailContainer(edgeColor: statusColor) {
+    private func expandedContent(for node: WorkflowRunDisplayData.NodeDisplayData,
+                                 edgeColor: Color) -> some View {
+        detailContainer(edgeColor: edgeColor) {
             // ⚠️ Only a node that NEVER STARTED gets the bare one-line treatment. A node the user
             // skipped MID-FLIGHT has a real trace — reasoning, tool calls, the model response —
             // which is captured live AND persisted by `freeze`. Suppressing it here is why the
@@ -725,7 +913,8 @@ struct WorkflowExecutionTimelineView: View {
                             events: node.nodeTimeline,
                             isStreaming: node.isStreaming,
                             chatFidelity: true,
-                            streamingStartedAt: displayData.timestamp
+                            streamingStartedAt: displayData.timestamp,
+                            conversationID: conversationID
                         )
                     } else {
                         inlineStatusLine(message: "Generating output…", showsSpinner: true)
@@ -754,7 +943,8 @@ struct WorkflowExecutionTimelineView: View {
                             AgentTimelineView(
                                 events: node.nodeTimeline,
                                 isStreaming: false,
-                                chatFidelity: true
+                                chatFidelity: true,
+                                conversationID: conversationID
                             )
                         }
                         inlineStatusLine(message: notRunMessage(for: node), showsSpinner: false)
@@ -766,7 +956,8 @@ struct WorkflowExecutionTimelineView: View {
                             AgentTimelineView(
                                 events: node.nodeTimeline,
                                 isStreaming: false,
-                                chatFidelity: true
+                                chatFidelity: true,
+                                conversationID: conversationID
                             )
                         }
                         inlineStatusLine(message: String(localized: "Cancelled before this node finished."), showsSpinner: false)
@@ -778,9 +969,12 @@ struct WorkflowExecutionTimelineView: View {
                 case .completed, .failed, .unknown:
                     let isError = node.status == .failed
                     let (errorBody, suggestion) = isError ? splitDetail(node.detail) : (node.detail, nil)
+                    // [CF-59] Through the memo, never the raw predicate: this line is evaluated on
+                    // every body pass of the timeline, hover transitions included.
                     let bodyIsDuplicated = isError
                         && node.supportsTimeline
-                        && isDuplicatedInTimeline(errorBody, events: node.nodeTimeline)
+                        && Self.errorBodyIsDuplicated(nodeID: node.nodeID, body: errorBody,
+                                                      events: node.nodeTimeline)
 
                     VStack(alignment: .leading, spacing: 14) {
                         if !node.detail.isEmpty {
@@ -795,7 +989,8 @@ struct WorkflowExecutionTimelineView: View {
                                 events: node.nodeTimeline,
                                 isStreaming: false,
                                 chatFidelity: true,
-                                finalContentText: node.detail
+                                finalContentText: node.detail,
+                                conversationID: conversationID
                             )
                         }
 
@@ -943,8 +1138,10 @@ struct WorkflowExecutionTimelineView: View {
 
 // MARK: - Copy chip
 
-/// Local mirror of the output panel's copy affordance (that one is private to WorkflowOutputView,
-/// which this prototype leaves untouched for easy revert).
+/// The timeline's copy affordance. It was duplicated from an identical one private to
+/// `WorkflowOutputView`, deliberately, so the prototype arm could be reverted without touching that
+/// view — and `WorkflowOutputView` was then deleted with the rest of the strip + output layout, so
+/// there is nothing left to mirror and this is the only copy.
 private struct TimelineCopyChip: View {
     let target: String
     @Environment(\.appTheme) private var theme

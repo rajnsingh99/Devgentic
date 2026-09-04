@@ -149,6 +149,21 @@ enum AgentStreamEvent: Sendable {
     /// A workflow node was cancelled mid-flight. Distinct from failure: the user asked for it.
     case workflowNodeCancelled(nodeID: UUID, profileName: String)
 
+    /// [CF-30] A failed attempt WILL be retried, emitted before the retry back-off begins.
+    ///
+    /// ⚠️ Its whole purpose is to be delivered BEFORE a Stop can arrive. The executor already
+    /// yields `.workflowNodeCancelled` when the back-off sleep is cancelled, but that event can
+    /// never be acted on: `ActiveStreamManager`'s consumer calls `try Task.checkCancellation()`
+    /// at the top of the loop body, so once the task is cancelled it throws before switching on
+    /// whatever was yielded. Anything the UI must know about a cancelled retry therefore has to
+    /// be recorded while the run is still healthy — which is what this is.
+    ///
+    /// Carries no delay: the UI must NOT render "retrying" from it. WF-CC4 deliberately moved
+    /// that claim to AFTER the sleep so an attempt cancelled mid-delay never says it is retrying
+    /// when it never will. This only marks the row as retry-pending so `settleInFlightWork` can
+    /// settle it as cancelled rather than leaving a genuine-looking failure behind.
+    case workflowNodeRetryScheduled(nodeID: UUID, profileName: String, attemptsRemaining: Int)
+
     /// Overall workflow progress update.
     case workflowProgress(completed: Int, total: Int)
 

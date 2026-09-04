@@ -84,6 +84,12 @@ struct WorkflowCanvasRunOverlay: Equatable {
         return status.didRun
     }
 
+    /// Whether the run decided anything about the branch through this node. Unknown reason ⇒ true,
+    /// preserving the older behaviour for any skip whose reason did not survive decoding.
+    private func branchWasDecided(_ nodeID: UUID) -> Bool {
+        skipReason[nodeID]?.decidedTheBranch ?? true
+    }
+
     /// Whether this edge carried the run.
     ///
     /// The rule, and its limits:
@@ -101,9 +107,11 @@ struct WorkflowCanvasRunOverlay: Equatable {
         guard let source = nodeStatus[sourceID], let target = nodeStatus[targetID] else {
             return .undetermined
         }
-        // A skip only kills the edge when the branch below it is genuinely dead.
-        if (source == .skipped && !carriedTheRun(sourceID))
-            || (target == .skipped && !carriedTheRun(targetID)) { return .notTaken }
+        // A skip only kills the edge when the branch below it is genuinely dead AND the run
+        // actually decided something about it. A `.notReached` node is neither: the run ended
+        // before it, so its edges stay neutral — see `decidedTheBranch` (CF-29).
+        if (source == .skipped && !carriedTheRun(sourceID) && branchWasDecided(sourceID))
+            || (target == .skipped && !carriedTheRun(targetID) && branchWasDecided(targetID)) { return .notTaken }
         // `.undetermined` is still reachable and still important: a target that has not started
         // yet (`.pending`) must stay neutral during a live run rather than claim the edge fired.
         if carriedTheRun(sourceID) && carriedTheRun(targetID) { return .fired }

@@ -1001,6 +1001,15 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         DanglingToolRowCloser.close(&timelineEvents, outcome: outcome)
     }
 
+    /// `closeDanglingToolRows`, returning the rows it settled so the caller can react to WHICH
+    /// tools were abandoned. Used by [CF-9] to post the `AgentLiveWriteEvent.completed` that a
+    /// cancelled or thrown run never emits, which is what left a live Code Viewer tab stuck
+    /// showing "Agent is writing this file" for the rest of the session.
+    @discardableResult
+    func closeDanglingToolRowsReporting(outcome: ExecutionOutcome?) -> [DanglingToolRowCloser.ClosedRow] {
+        DanglingToolRowCloser.closeReporting(&timelineEvents, outcome: outcome)
+    }
+
     /// [G1 resume] Prepares persisted capability cards for a resumed run: drops dangling
     /// (still-executing / output-less) tool rows inside nested step/attempt timelines and
     /// closes any card the interruption left unfinished — the resumed continuation streams

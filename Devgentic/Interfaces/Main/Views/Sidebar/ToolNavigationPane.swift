@@ -162,7 +162,7 @@ struct ToolNavigationPane: View {
                     }
                 } label: {
                     Text(section.title)
-                        .font(.system(size: 11, weight: isSelected ? .bold : .medium))
+                        .font(theme.fontCaption2.weight(isSelected ? .bold : .medium))
                         .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 5)
@@ -356,9 +356,9 @@ struct ToolNavigationPane: View {
 
     private func colour(for state: MCPConnectionState) -> Color {
         switch state {
-        case .connected:                 return .green
-        case .connecting, .reconnecting: return .orange
-        case .error:                     return .red
+        case .connected:                 return theme.successColor
+        case .connecting, .reconnecting: return theme.warningColor
+        case .error:                     return theme.errorColor
         case .disconnected:              return theme.secondaryText.opacity(0.4)
         }
     }
@@ -474,12 +474,12 @@ struct ToolSidebarRow: View {
         Button(action: action) {
             HStack(spacing: 8) {
                 Image(systemName: icon)
-                    .font(.system(size: 12, weight: isSelected ? .bold : .medium))
+                    .font(theme.fontCaption.weight(isSelected ? .bold : .medium))
                     .foregroundColor(isSelected ? theme.accentColor : (isHovered ? theme.accentColor : theme.secondaryText))
                     .frame(width: 18)
 
                 Text(label)
-                    .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                    .font(theme.fontCaption.weight(isSelected ? .semibold : .regular))
                     .foregroundColor(isSelected ? theme.primaryText : (isHovered ? theme.primaryText : theme.primaryText.opacity(0.85)))
                     .lineLimit(1)
 
@@ -487,7 +487,7 @@ struct ToolSidebarRow: View {
 
                 if let count {
                     Text("\(count)")
-                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .font(theme.fontCodeCaption.weight(.bold))
                         .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -503,35 +503,20 @@ struct ToolSidebarRow: View {
 
                 if showChevron {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 8, weight: .semibold))
+                        .font(theme.fontCaption2.weight(.semibold))
                         .foregroundColor(isSelected ? theme.accentColor : theme.tertiaryText)
                 }
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 8)
             .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isSelected
-                        ? theme.accentColor.opacity(0.12)
-                        : (isHovered ? theme.surfaceOverlayStrong : Color.clear)
-                    )
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(
-                        isSelected
-                        ? theme.accentColor.opacity(0.4)
-                        : (isHovered ? theme.secondaryText.opacity(0.25) : Color.clear),
-                        lineWidth: 1
-                    )
-            )
-            .scaleEffect(isHovered ? 1.02 : 1.0)
+            .sidebarRowBackground(isSelected: isSelected, isHovering: isHovered)
         }
         .buttonStyle(.plain)
         .onHover { hovering in
-            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+            withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering
             }
         }
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSelected)
     }
 }

@@ -134,7 +134,9 @@ final class DanglingToolRowTests: XCTestCase {
         XCTAssertEqual(closed, 1)
         guard case .toolExecution(let data) = message.timelineEvents[0] else { XCTFail(); return }
         XCTAssertFalse(data.isExecuting, "A persisted row must never claim to still be executing (TL-1)")
-        XCTAssertEqual(data.isSuccess, false)
+        // [CF-51] `isSuccess` stays nil on a CANCELLED close — a user Stop is not a tool
+        // failure, so the row must not read as one. `failureCategory` still carries the cause.
+        XCTAssertNil(data.isSuccess)
         XCTAssertEqual(data.failureCategory, .cancelled)
         XCTAssertEqual(data.output, "Cancelled before the tool finished.")
     }

@@ -217,6 +217,12 @@ struct WorkflowDedicatedView: View {
     /// `isRunning` stays false until its first node dispatches — so the existing
     /// `.onChange(of: executionState?.isRunning)` observer does NOT fire on that transition and
     /// cannot be reused for this.
+    ///
+    /// ⚠️ [CF-57] The read is attempted at most TWICE, and the loop below is deliberately inline
+    /// rather than a recursive call: everything after the first `await` may touch only `@State`
+    /// (`selectedHistoricalRunID`, `hydratedTimelines`). Re-entering this method would read
+    /// `runHistory` and `executionState`, i.e. `@Environment`, from a continuation the view is no
+    /// longer installed for.
     private func hydrateTracesIfNeeded(for runID: UUID?) {
         guard let runID, let listed = runHistory.first(where: { $0.id == runID }),
               WorkflowRunRecord.needsTraceHydration(
@@ -224,43 +230,118 @@ struct WorkflowDedicatedView: View {
         else { return }
 
         Task { @MainActor in
-            guard let full = await WorkflowRunHistoryStore.shared.loadRecord(id: runID) else {
-                logger.notice("[WORKFLOW] Trace re-read for run \(runID) found no stored row — evicted by the per-conversation window, or its conversation was deleted. CONSEQUENCE: this run's per-node Timeline tabs render empty, which looks identical to a run that never recorded one; its output, status and node list are unaffected.")
+            // 0 = the first read, 1 = the single retry for the write race described below. Bounded
+            // at one on purpose: the race is narrow, while the many runs that legitimately hold no
+            // trace (a bot-only workflow records none) must not re-read the store in a loop.
+            for attempt in 0...1 {
+                guard let full = await WorkflowRunHistoryStore.shared.loadRecord(id: runID) else {
+                    logger.notice("[WORKFLOW] Trace re-read for run \(runID) found no stored row — evicted by the per-conversation window, or its conversation was deleted. CONSEQUENCE: this run's per-node Timeline tabs render empty, which looks identical to a run that never recorded one; its output, status and node list are unaffected.")
+                    return
+                }
+                // The user may have moved on during the read; never show one run's trace against
+                // another.
+                guard selectedHistoricalRunID == runID else { return }
+                let timelines = Dictionary(
+                    full.nodeResults.compactMap { snapshot in
+                        snapshot.nodeTimeline.map { (snapshot.nodeID, $0) }
+                    },
+                    uniquingKeysWith: { _, latest in latest }
+                )
+                if !timelines.isEmpty {
+                    // Animated because hydration does not merely lengthen the panel:
+                    // `bodyIsDuplicated` and the legacy `nodeRanBeforeSkip` both read timeline
+                    // PRESENCE, so arriving events can retract an error paragraph or swap a
+                    // "Not run" line for a full trace.
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        hydratedTimelines = (runID: runID, timelines: timelines)
+                    }
+                    return
+                }
+
+                // [CF-57] This used to `return` silently, and it is not the same failure as the
+                // missing row above. `needsTraceHydration` has already established that the LISTED
+                // record is finalized — it comes from the in-memory mirror, written SYNCHRONOUSLY
+                // by `finalize` — while the disk row is written by a fire-and-forget task that
+                // first awaits an off-main encode. Inside that window the re-read returns the
+                // `.running` stub: zero nodes, no trace. Hydration is re-armed only by the two
+                // `.onChange` triggers below, so losing that race left the run trace-less with
+                // nothing in the log to say why.
+                let runTag = runID.uuidString.prefix(8)
+                if full.status == .running, attempt == 0 {
+                    logger.notice("[WORKFLOW] Trace re-read for run \(runTag) came back as the .running stub (\(full.nodeResults.count) stored node(s) vs \(listed.nodeResults.count) in the finalized listed record) — the disk write for this run has not landed yet. Retrying once in 600ms. CONSEQUENCE if the retry also loses the race: this run's per-node Timeline tabs render empty until the run is selected again.")
+                    try? await Task.sleep(for: .milliseconds(600))
+                    guard selectedHistoricalRunID == runID else { return }
+                    continue
+                }
+                logger.info("[WORKFLOW] Trace re-read for run \(runTag) (attempt \(attempt + 1), stored status '\(full.status.label)') returned \(full.nodeResults.count) node(s), none carrying a timeline. CONSEQUENCE: this run's per-node Timeline tabs render empty — on screen indistinguishable from a run that never recorded a trace, which for a bot-only workflow is exactly what it is; output, status and node list are unaffected.")
                 return
-            }
-            // The user may have moved on during the read; never show one run's trace against
-            // another.
-            guard selectedHistoricalRunID == runID else { return }
-            let timelines = Dictionary(
-                full.nodeResults.compactMap { snapshot in
-                    snapshot.nodeTimeline.map { (snapshot.nodeID, $0) }
-                },
-                uniquingKeysWith: { _, latest in latest }
-            )
-            guard !timelines.isEmpty else { return }
-            // Animated because hydration does not merely lengthen the panel: `bodyIsDuplicated`
-            // and the legacy `nodeRanBeforeSkip` both read timeline PRESENCE, so arriving events
-            // can retract an error paragraph or swap a "Not run" line for a full trace.
-            withAnimation(.easeInOut(duration: 0.15)) {
-                hydratedTimelines = (runID: runID, timelines: timelines)
             }
         }
     }
 
     /// Auto-selects the in-flight run's record when it exists but nothing is
-    /// currently selected — covers two paths:
+    /// currently selected — covers three paths:
     ///   1. A run just started and we need to surface the live view.
     ///   2. The view appeared (mount or conversation switch) and there's
     ///      already a running execution from before this view mounted.
+    ///   3. [CF-54] The workflow profile switched under this view and the
+    ///      selection was just reset — the new workflow's own live run, if any,
+    ///      should come up the same way.
     /// We deliberately skip auto-select when `selectedHistoricalRunID` is
     /// already non-nil so user choices (including an explicit back press
     /// followed by selecting a different historical row) are respected.
+    ///
+    /// ⚠️ THE PROFILE CONJUNCT IS LOAD-BEARING, exactly as in `runPickerMenu` (XUI-3):
+    /// `executionState` is CONVERSATION-scoped while this view is PROFILE-scoped, so a run of
+    /// workflow A live in this conversation must NOT be selected while the view shows B — its
+    /// id cannot resolve in B's filtered `runHistory`, `displayData` goes nil, and the stale
+    /// non-nil selection then blocks every later auto-select. The decision is a pure static so
+    /// that rule can be pinned; the `@State` write here is the only part a test cannot reach.
     private func autoSelectLiveRunIfNeeded() {
-        guard selectedHistoricalRunID == nil,
-              let state = executionState,
-              state.isRunning,
-              let recordID = state.runRecordID else { return }
-        selectedHistoricalRunID = recordID
+        switch Self.liveRunAutoSelection(
+            currentSelection: selectedHistoricalRunID,
+            liveRunID: executionState?.runRecordID,
+            liveRunIsRunning: executionState?.isRunning == true,
+            liveRunProfileID: executionState?.workflowProfileID,
+            viewProfileID: workflowProfileID
+        ) {
+        case .select(let recordID):
+            selectedHistoricalRunID = recordID
+        case .liveRunBelongsToAnotherWorkflow(let recordID):
+            logger.notice("[WORKFLOW] Not auto-selecting live run \(recordID.uuidString.prefix(8)) — it belongs to workflow \((executionState?.workflowProfileID).map { String($0.uuidString.prefix(8)) } ?? "<none>") and this view shows \(workflowProfileID.uuidString.prefix(8)). CONSEQUENCE: this workflow's history list stays on screen; the live run is reachable by switching the profile picker back to its own workflow.")
+        case .keep:
+            break
+        }
+    }
+
+    /// What `autoSelectLiveRunIfNeeded` should do (register CF-54). `nonisolated static` and
+    /// pure — the `runBadge` / WF-UI5 shape — because the profile rule is the defect surface and
+    /// the caller is a `@State` write no unit test can reach.
+    enum LiveRunAutoSelection: Equatable {
+        /// Nothing is selected and THIS workflow's own run is in flight — select it.
+        case select(UUID)
+        /// A run is in flight in this conversation but belongs to ANOTHER workflow. Selecting it
+        /// would assign an id this view's profile-filtered `runHistory` cannot resolve.
+        case liveRunBelongsToAnotherWorkflow(UUID)
+        /// Respect what is there: a selection already exists, or nothing is running.
+        case keep
+    }
+
+    nonisolated static func liveRunAutoSelection(
+        currentSelection: UUID?,
+        liveRunID: UUID?,
+        liveRunIsRunning: Bool,
+        liveRunProfileID: UUID?,
+        viewProfileID: UUID
+    ) -> LiveRunAutoSelection {
+        guard currentSelection == nil, liveRunIsRunning, let liveRunID else { return .keep }
+        // A nil profile on the live state never happens after `WorkflowRunBootstrap.begin`, which
+        // always stamps it; treated as "not this workflow" so a malformed state cannot hijack
+        // the selection — the same reading `runPickerMenu`'s conjunct gives it.
+        guard liveRunProfileID == viewProfileID else {
+            return .liveRunBelongsToAnotherWorkflow(liveRunID)
+        }
+        return .select(liveRunID)
     }
 
     /// Index of the currently selected run in `runHistory` (1-based, newest first), for the
@@ -335,10 +416,19 @@ struct WorkflowDedicatedView: View {
     }
 
     var body: some View {
+        // [CF-55] ONE build per body pass. `displayData` constructs a whole `WorkflowRunDisplayData`
+        // on every read — for a live run that is a topological sort of the layout plus a join of
+        // every node's entire upstream output — and `body` re-runs on every streamed workflow
+        // event (`nodeTimelines` is `@Observable`, mutated per tool and reasoning event). It used
+        // to be read here for the canvas overlay AND, separately, by `executionContent` and three
+        // times inside the run picker: four to five rebuilds per event, each copying every node's
+        // output on the main actor. Everything below takes this one value (or just its `isLive`)
+        // as a parameter; the only other mention of `displayData` in this file is its definition.
+        let data = displayData
         ZStack {
             switch viewMode {
             case .execution:
-                executionContent
+                executionContent(data: data)
 
             case .canvas:
                 ZStack {
@@ -347,15 +437,15 @@ struct WorkflowDedicatedView: View {
                         // `viewMode` flips to `.execution` automatically when a run starts, which
                         // tears this subtree down — and while the state lived in the canvas view,
                         // that flip destroyed every unsaved edit silently.
-                        // ⚠️ `runOverlay` is derived from the ALREADY-COMPUTED `displayData`, never
-                        // from a fresh fetch. `displayData` is read during `body`, and `body`
-                        // re-evaluates on every streamed event — the header on `cachedLayout`
-                        // records what an uncached load here cost last time.
+                        // ⚠️ `runOverlay` is derived from the ALREADY-COMPUTED `data` at the top of
+                        // `body`, never from a fresh fetch. `displayData` is read during `body`,
+                        // and `body` re-evaluates on every streamed event — the header on
+                        // `cachedLayout` records what an uncached load here cost last time.
                         WorkflowCanvasView(
                             profile: binding,
                             editGuard: viewModel.workflowEditGuard,
                             canvasState: viewModel.workflowCanvasState(for: binding.wrappedValue.id),
-                            runOverlay: WorkflowCanvasRunOverlay(displayData: displayData)
+                            runOverlay: WorkflowCanvasRunOverlay(displayData: data)
                         )
                     } else {
                         Text("Workflow profile not found")
@@ -383,10 +473,34 @@ struct WorkflowDedicatedView: View {
             // layout — reload it (and revalidate) rather than trusting the cache.
             if newMode == .execution { refreshLayoutAndValidation() }
         }
-        .onChange(of: workflowProfileID) { _, _ in
+        .onChange(of: workflowProfileID) { oldID, newID in
             // A different workflow entirely — its layout has nothing to do with the
-            // cached one.
+            // cached one, and neither does the selection.
+            //
+            // [CF-54] This view is NOT re-created on a profile switch: `MainApplicationView`'s
+            // `chatArea` builds `WorkflowDedicatedView(workflowProfileID:conversationID:)` with
+            // no `.id(profileID)`, so every `@State` here survives while `runHistory` silently
+            // re-filters to the new workflow. The retained `selectedHistoricalRunID` then fails
+            // to resolve (correct — the history list shows), but `selectedNodeID` kept a node id
+            // from the OLD graph, and the `.onChange(of: selectedHistoricalRunID)` below writes
+            // `selectedNodeID` only for a failed run — so the next run picked from the new
+            // workflow's list opened with every row collapsed and no Final Outcome panel. Same
+            // reset as the conversation handler below, for the same reason.
+            selectedHistoricalRunID = nil
+            selectedNodeID = nil
+            followRunningNode = true
+            hydratedTimelines = nil
             refreshLayoutAndValidation()
+            autoSelectLiveRunIfNeeded()
+            // ⚠️ If that selected THIS workflow's live run, land on the node that is actually
+            // executing — `selectedNodeID = nil` SELECTS the Final Outcome row (nil is not "no
+            // selection" here), which scrolls past the streaming node and shows a "Waiting for
+            // execution" placeholder until the NEXT node transition moves focus. Same landing the
+            // run-start observer and the picker's "Live Run" item already perform (XUI-3).
+            if selectedHistoricalRunID != nil, executionState?.isRunning == true {
+                selectedNodeID = currentRunningNodeID
+            }
+            logger.info("[WORKFLOW] Workflow profile switched \(oldID.uuidString.prefix(8)) → \(newID.uuidString.prefix(8)) (conversation \(conversationID.map { String($0.uuidString.prefix(8)) } ?? "none")) — dropped the previous workflow's run and node selection. CONSEQUENCE: a run opened from the new workflow's history lands on its Final Outcome panel instead of a node id that belongs to the old graph.")
         }
         .onChange(of: conversationID) { _, _ in
             // Switching to a different conversation invalidates any selection
@@ -405,15 +519,41 @@ struct WorkflowDedicatedView: View {
                 // (inserted by MessagingCoordinator before the stream starts).
                 // Focus the running node (the `currentRunningNodeID` observer
                 // moves focus as execution progresses); re-enable auto-follow.
-                followRunningNode = true
-                selectedNodeID = currentRunningNodeID
-                if let recordID = executionState?.runRecordID {
+                //
+                // ⚠️ Through the SAME profile-guarded decision `autoSelectLiveRunIfNeeded` uses,
+                // and this is the path that matters most: `executionState` is CONVERSATION-scoped
+                // while this whole view is PROFILE-scoped (`runHistory` filters by
+                // `workflowProfileID`). A run started for workflow A while the picker shows
+                // workflow B used to assign A's record id here unguarded — an id B's filtered
+                // history cannot resolve, so `displayData` went nil and the user was dumped into
+                // the history list mid-run. This is the XUI-3 cross-profile leak on the primary
+                // auto-select path; the profile-switch handler alone did not cover it, because
+                // `isRunning` only flips when A's FIRST NODE dispatches, which is after the
+                // switch has already been handled.
+                //
+                // `currentSelection: nil` is passed deliberately: a run STARTING is exactly the
+                // event that should take over the view, so the "only when nothing is selected"
+                // gate does not apply here — only the profile conjunct does.
+                switch Self.liveRunAutoSelection(
+                    currentSelection: nil,
+                    liveRunID: executionState?.runRecordID,
+                    liveRunIsRunning: true,
+                    liveRunProfileID: executionState?.workflowProfileID,
+                    viewProfileID: workflowProfileID
+                ) {
+                case .select(let recordID):
+                    followRunningNode = true
+                    selectedNodeID = currentRunningNodeID
                     selectedHistoricalRunID = recordID
-                }
-                if viewMode == .canvas {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        viewMode = .execution
+                    if viewMode == .canvas {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            viewMode = .execution
+                        }
                     }
+                case .liveRunBelongsToAnotherWorkflow(let recordID):
+                    logger.notice("[WORKFLOW] A run started in this conversation (record \(recordID.uuidString.prefix(8))) but belongs to workflow \((executionState?.workflowProfileID).map { String($0.uuidString.prefix(8)) } ?? "<none>"), not the \(self.workflowProfileID.uuidString.prefix(8)) this view shows — not auto-selecting it. CONSEQUENCE: this workflow's own view is left as it was instead of being dumped into the history list by an id its filtered history cannot resolve; the run is reachable by switching the profile picker to its workflow.")
+                case .keep:
+                    break
                 }
             } else if isRunning == false,
                       executionState?.workflowError == nil,
@@ -471,9 +611,11 @@ struct WorkflowDedicatedView: View {
 
     // MARK: - Execution Content
 
-    private var executionContent: some View {
+    /// - Parameter data: the run model built ONCE at the top of `body` (CF-55). Never read
+    ///   `displayData` in here — that is the rebuild this parameter exists to remove.
+    private func executionContent(data: WorkflowRunDisplayData?) -> some View {
         VStack(spacing: 0) {
-            if let data = displayData {
+            if let data {
                 // Title bar
                 executionTitleBar(data: data)
 
@@ -611,7 +753,7 @@ struct WorkflowDedicatedView: View {
             reportButton(data: data)
 
             if !runHistory.isEmpty || !data.isLive {
-                runPickerMenu
+                runPickerMenu(isLive: data.isLive)
             }
 
             viewModeSegmentedControl
@@ -717,13 +859,17 @@ struct WorkflowDedicatedView: View {
 
     // MARK: - Run Picker Menu
 
-    private var runPickerMenu: some View {
+    /// - Parameter isLive: whether the run on screen is the live one — `data.isLive` from the
+    ///   title bar, i.e. the single `displayData` build at the top of `body` (CF-55). This menu
+    ///   used to read `displayData` three times of its own, rebuilding the whole run model each
+    ///   time, for one Bool.
+    private func runPickerMenu(isLive: Bool) -> some View {
         let showsLiveItem = Self.showsLiveRunItem(
             // The profile conjunct is load-bearing — see `showsLiveRunItem`'s doc.
             liveRunInFlight: executionState?.isRunning == true
                 && executionState?.runRecordID != nil
                 && executionState?.workflowProfileID == workflowProfileID,
-            viewingLive: displayData?.isLive == true
+            viewingLive: isLive
         )
         return Menu {
             // XUI-3: this item is a JUMP BACK TO THE LIVE RUN, and it used to do the opposite —
@@ -792,10 +938,11 @@ struct WorkflowDedicatedView: View {
                 Image(systemName: "clock.arrow.circlepath")
                     .font(.system(size: 11))
                     .accessibilityHidden(true)
-                // XUI-3: state word from the SELECTION's liveness, not from nil-ness — the live
-                // run is addressed via a non-nil `selectedHistoricalRunID`, so the nil test said
-                // "History" while the live run was on screen and "Live" while nothing ran.
-                Text(displayData?.isLive == true ? "Live" : "History")
+                // XUI-3: state word from the SELECTION's liveness (`isLive`, the run on screen),
+                // not from nil-ness — the live run is addressed via a non-nil
+                // `selectedHistoricalRunID`, so the nil test said "History" while the live run
+                // was on screen and "Live" while nothing ran.
+                Text(isLive ? "Live" : "History")
                     .font(.system(size: 11, weight: .medium))
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8))
@@ -811,7 +958,7 @@ struct WorkflowDedicatedView: View {
         // "Live" alone doesn't say what the control DOES, and the label has to carry that
         // — the visible text is one word of state, not a name. Same liveness source as the
         // visible word (XUI-3): the two used to disagree with the screen in the same direction.
-        .accessibilityLabel(displayData?.isLive == true
+        .accessibilityLabel(isLive
                             ? "Run picker, showing the live run"
                             : "Run picker, showing a past run")
     }

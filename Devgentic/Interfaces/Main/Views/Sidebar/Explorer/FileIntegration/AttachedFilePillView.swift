@@ -25,12 +25,11 @@ struct AttachedFilePillView: View {
 
     // MARK: - Modern Styling Constants
     private var pillBackgroundColor: Color {
-        // Adapts to light/dark mode automatically
-        isHovering ? Color.primary.opacity(0.08) : Color.primary.opacity(0.05)
+        isHovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay
     }
     
     private var pillBorderColor: Color {
-        isHovering ? Color.primary.opacity(0.15) : Color.primary.opacity(0.08)
+        isHovering ? theme.secondaryText.opacity(0.3) : theme.dividerColor.opacity(0.6)
     }
 
     private var pillCornerRadius: CGFloat = 10.0
@@ -72,20 +71,20 @@ struct AttachedFilePillView: View {
                     .frame(width: 28, height: 28)
 
                 Image(systemName: displayIconName)
-                    .font(.system(.caption, weight: displayIconFontWeight))
+                    .font(theme.fontCaption.weight(displayIconFontWeight))
                     .foregroundColor(theme.accentColor)
             }
 
             // File Name and Type
             VStack(alignment: .leading, spacing: 1) {
                 Text(displayName)
-                    .font(.system(.caption, weight: .medium))
+                    .font(theme.fontCaption.weight(.medium))
                     .foregroundColor(theme.primaryText)
                     .lineLimit(1)
                     .truncationMode(.middle)
 
                 Text(fileItem.fileTypeDescription.uppercased())
-                    .font(.system(size: 9, weight: .semibold)) // Fixed size: intentional (badge/chip text)
+                    .font(theme.fontCodeCaption.weight(.semibold))
                     .foregroundColor(theme.secondaryText)
                     .lineLimit(1)
             }
@@ -96,8 +95,8 @@ struct AttachedFilePillView: View {
             // Hidden by default, becomes prominent on pill hover, red on button hover
             Button(action: onRemove) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold)) // Fixed size: intentional (small remove icon)
-                    .foregroundColor(isRemoveButtonHovering ? .white : theme.secondaryText)
+                    .font(theme.fontCaption2.weight(.bold))
+                    .foregroundColor(isRemoveButtonHovering ? (theme.isDark ? theme.primaryBackground : .white) : theme.secondaryText)
                     .frame(width: 20, height: 20)
                     .background(
                         Circle()
@@ -178,7 +177,7 @@ struct AttachedFilePillView_Previews: PreviewProvider {
             )
         }
         .padding(30)
-        .background(AppThemes.DefaultTheme().primaryBackground) // Preview-only
+        .background(AppThemes.MaterialTheme().primaryBackground) // Preview-only
         .previewLayout(.sizeThatFits)
         .frame(width: 350)
     }

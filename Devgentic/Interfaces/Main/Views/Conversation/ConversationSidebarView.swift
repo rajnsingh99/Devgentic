@@ -45,19 +45,19 @@ struct SidebarGroupHeaderView: View {
     var body: some View {
         HStack(spacing: 0) {
             Image(systemName: "chevron.right")
-                .font(.system(size: 9, weight: .semibold)) // Fixed size: intentional (small disclosure chevron)
+                .font(theme.fontCaption2.weight(.semibold))
                 .foregroundColor(theme.secondaryText.opacity(0.5))
                 .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isExpanded)
                 .frame(width: 16)
 
             Text(title)
-                .font(.system(.caption, weight: .semibold))
+                .font(theme.fontCaption.weight(.semibold))
                 .foregroundColor(theme.secondaryText)
                 .padding(.leading, 2)
 
             Text("\(count)")
-                .font(.system(.caption2, weight: .medium))
+                .font(theme.fontCaption2.weight(.medium))
                 .foregroundColor(theme.tertiaryText)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 1)

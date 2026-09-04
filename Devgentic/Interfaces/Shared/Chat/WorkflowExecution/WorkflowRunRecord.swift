@@ -400,6 +400,11 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
                 events.count - maxPersistedNodeTimelineEvents)
     }
 
+    /// - Parameter layout: the graph that actually RAN (`WorkflowRunTicket.layoutSnapshot`, a
+    ///   start-time capture — never a re-read of the canvas). It decides three things: each node's
+    ///   `input` preview, the ORDER of the snapshots, and which layout nodes are filled in as
+    ///   `skipped(.notReached)` because the run ended before reaching them (CF-29). Nil falls back
+    ///   to arrival order over the started nodes only — there is nothing to reconstruct from.
     static func freeze(
         from state: WorkflowExecutionState,
         conversationID: UUID,
@@ -415,19 +420,64 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
         // rather than per node. `freeze` runs exactly once per run, so this is not per-frame code.
         var droppedTraceEvents = 0
         var truncatedNodes: [String] = []
-        let nodeSnapshots = state.nodeResults.map { result in
-            // Compute per-node input from edge topology (Tier 2)
-            var inputText: String? = nil
-            var sourceLabel: String? = nil
-            if let layout {
-                let upstreamEdges = layout.edges.filter { $0.targetNodeID == result.nodeID }
-                let upstreamNodeIDs = Set(upstreamEdges.map(\.sourceNodeID))
-                let upstreamResults = state.nodeResults.filter { upstreamNodeIDs.contains($0.nodeID) }
-                if !upstreamResults.isEmpty {
-                    inputText = upstreamResults.map(\.detail).joined(separator: "\n\n")
-                    sourceLabel = upstreamResults.map(\.profileName).joined(separator: ", ")
+        // [CF-29/CF-31] Built once. Both the not-reached fill below and the pass-through input
+        // resolution look nodes up by id; a per-node linear scan of `nodeResults` inside a map over
+        // `nodeResults` is the quadratic shape this replaces. `uniquingKeysWith` rather than
+        // `uniqueKeysWithValues` because this is the LAST gate before the record becomes permanent:
+        // a duplicated nodeID must degrade to "the later row wins", never trap the app here.
+        let resultByNodeID = Dictionary(state.nodeResults.map { ($0.nodeID, $0) },
+                                        uniquingKeysWith: { _, latest in latest })
+
+        // Per-node input from edge topology (Tier 2), and the label naming where it came from.
+        func derivedInput(for nodeID: UUID) -> (text: String?, sourceLabel: String?) {
+            guard let layout else { return (nil, nil) }
+            // ⚠️ [CF-31] EDGE-DECLARATION order, multiplicity preserved — built exactly the way
+            // `WorkflowRunDisplayData.buildNodesFromLayout` builds it, because these two lists ARE
+            // the parity. It used to be `Set(edges…)` plus a filter over `state.nodeResults`, i.e.
+            // event-ARRIVAL order with a repeated source collapsed: identical on a chain, but for a
+            // fan-in node on a parallel level the joined text and its `inputSourceLabel` came out
+            // in a DIFFERENT order once the record factory took over from the live one, and an
+            // upstream wired into two ports lost a contribution outright.
+            // ⚠️ That divergence is in the DATA, not on screen — see the note below on why
+            // nothing renders a record's `input` today. It is fixed here because a record is the
+            // durable artefact: a consumer added later would otherwise inherit a frozen value that
+            // silently disagreed with what the run displayed while it was live.
+            // It is also the O(1) lookup instead of a scan of `nodeResults` per node.
+            let upstreamResults = layout.edges
+                .filter { $0.targetNodeID == nodeID }
+                .map(\.sourceNodeID)
+                .compactMap { resultByNodeID[$0] }
+            guard !upstreamResults.isEmpty else { return (nil, nil) }
+            // [CF-31] `upstreamInputContribution`, NOT `\.detail` — see that function for why a
+            // user-skipped upstream's detail is the one string the downstream node did NOT get.
+            // ⚠️ The empty filter and the nil fall-back are new WITH it: a pass-through can now
+            // resolve to "" where a skip sentence never could.
+            //
+            // ⚠️ THE ONE THING THE TWO FACTORIES STILL DO DIFFERENTLY, stated so the next reader
+            // does not have to find it: for a node with NO settled upstream (a source node, or one
+            // whose upstreams have not reported yet) the live factory falls back to
+            // `state.userInput` / "User input", and this returns `(nil, nil)`. Everything reachable
+            // above — which upstreams count, in what order, how many times, and what text each
+            // contributes — is now identical. Nothing renders a RECORD's `input` today (its only
+            // reader is `WorkflowExecutionTimelineView.collapsedPreview`, and only in the
+            // `.pending`/`.running` arm, which a frozen record has no rows for), so a future
+            // consumer inherits parity on the upstream join and this one documented gap.
+            let combined = upstreamResults
+                .map {
+                    WorkflowExecutionState.upstreamInputContribution(
+                        of: $0, resultsByNodeID: resultByNodeID,
+                        edges: layout.edges, userInput: userInput)
                 }
-            }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n\n")
+            return (combined.isEmpty ? nil : combined,
+                    upstreamResults.map(\.profileName).joined(separator: ", "))
+        }
+
+        func snapshot(for result: WorkflowNodeResult) -> WorkflowNodeResultSnapshot {
+            let derived = derivedInput(for: result.nodeID)
+            let inputText = derived.text
+            let sourceLabel = derived.sourceLabel
 
             // Defensive settle. `WorkflowExecutionState.settleInFlightWork` (called from
             // `handleError`) is the primary repair, but freeze is the LAST gate before the
@@ -485,6 +535,86 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
                 // argument here silently persists the wrong answer for every historical run.
                 ranBeforeSkip: result.ranBeforeSkip
             )
+        }
+
+        // [CF-29] A layout node the run never reached — no `started`, so no result ever arrived.
+        //
+        // ⚠️ `.skipped(.notReached)`, which `didNotRun` answers true for and `isGenuineFailure`
+        // answers false for. That is the whole safety of this fill: the run's `RunStatus`
+        // derivation below, the history card's red "N failed" badge and the dedicated view's
+        // auto-focus all key off `isGenuineFailure`, so filling the pipeline back in cannot turn
+        // a stopped run into a failed one. What it DOES change is `nodeResults.count` — the
+        // history card's step total and `from(record:)`'s `totalNodes` — which is the point: the
+        // denominator now stays the graph's, instead of collapsing to however many nodes happened
+        // to start before the user pressed Stop.
+        //
+        // ⚠️ THE READER THAT AUDIT ORIGINALLY MISSED, recorded so the next fill does not miss it
+        // again: the CANVAS. `WorkflowCanvasRunOverlay` reasons about EDGES from what each endpoint
+        // did, and before this fill an unreached node had no snapshot at all, so its edges fell
+        // through to `.undetermined` — "we did not get there". A `.skipped` row re-entered that
+        // logic through a different door and drew every edge below the Stop at 0.28 opacity,
+        // announced to VoiceOver as "this branch was not taken": an assertion about ROUTING on a
+        // run the user had simply stopped. The overlay now asks `NodeSkipReason.decidedTheBranch`,
+        // which is false for `.notReached` alone. Any new synthesized status must answer that
+        // question too — a row invented here is indistinguishable, downstream, from one the engine
+        // reported.
+        func notReachedSnapshot(for node: WorkflowNode) -> WorkflowNodeResultSnapshot {
+            let derived = derivedInput(for: node.id)
+            return WorkflowNodeResultSnapshot(
+                id: node.id,
+                nodeID: node.id,
+                profileName: node.displayName,
+                status: .skipped(.notReached),
+                detail: NodeSkipReason.notReached.displayText,
+                duration: 0,
+                input: derived.text,
+                inputSourceLabel: derived.sourceLabel,
+                nodeTimeline: nil,
+                hasWarnings: nil,
+                // It never started, so it cannot have run before the skip. Stated, not defaulted:
+                // nil would send the display to its legacy duration/timeline heuristic instead.
+                ranBeforeSkip: false
+            )
+        }
+
+        // [CF-29] The record is built in the LAYOUT's topological order with the unreached nodes
+        // filled in — the same walk `WorkflowRunDisplayData.buildNodesFromLayout` does for the live
+        // view, and deliberately so. `WorkflowDedicatedView.displayData` swaps the live factory for
+        // the record factory the instant `finalize()` replaces the `.running` mirror row, so a
+        // record built from event-arrival order alone made the four "Waiting" rows a user was
+        // looking at VANISH at that instant — a Stop at step 2 of 6 became a 2-row pipeline
+        // forever — and let rows on a parallel level swap position between the two views.
+        var notReachedNodes: [String] = []
+        let nodeSnapshots: [WorkflowNodeResultSnapshot]
+        if let layout, !layout.nodes.isEmpty {
+            let order = layout.topologicalSort() ?? layout.nodes.map(\.id)
+            let nodeByID = Dictionary(layout.nodes.map { ($0.id, $0) },
+                                      uniquingKeysWith: { first, _ in first })
+            var placed: Set<UUID> = []
+            var ordered: [WorkflowNodeResultSnapshot] = []
+            for nodeID in order {
+                guard let layoutNode = nodeByID[nodeID] else { continue }
+                placed.insert(nodeID)
+                if let result = resultByNodeID[nodeID] {
+                    ordered.append(snapshot(for: result))
+                } else {
+                    notReachedNodes.append("\(nodeID.uuidString.prefix(8)) '\(layoutNode.displayName)'")
+                    ordered.append(notReachedSnapshot(for: layoutNode))
+                }
+            }
+            // A result whose node is no longer in the layout is APPENDED, never dropped — the same
+            // policy `WorkflowRunDisplayData.orphanedLiveResults` and `from(record:)` already
+            // apply: evidence is not hidden because the canvas moved on.
+            ordered += state.nodeResults.filter { !placed.contains($0.nodeID) }.map { snapshot(for: $0) }
+            nodeSnapshots = ordered
+        } else {
+            // No layout snapshot for this run: arrival order, started nodes only — exactly what
+            // this function did before CF-29. There is nothing to fill in from.
+            nodeSnapshots = state.nodeResults.map { snapshot(for: $0) }
+        }
+
+        if !notReachedNodes.isEmpty {
+            logger.info("[WORKFLOW] freeze() recorded \(notReachedNodes.count) node(s) of '\(workflowName)' that this run never reached, as skipped(.notReached): [\(notReachedNodes.joined(separator: ", "))]. CONSEQUENCE: the historical run keeps the pipeline shape the live view showed — those rows read 'Not run', are never counted as failures, and the step total stays the graph's rather than the number of nodes that happened to start.")
         }
 
         if droppedTraceEvents > 0 {

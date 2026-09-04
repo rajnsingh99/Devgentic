@@ -196,12 +196,12 @@ struct DownloadSidebarView: View {
     private func sectionHeader(_ title: LocalizedStringKey, count: Int) -> some View {
         HStack(spacing: 6) {
             Text(title)
-                .font(.system(.caption2, weight: .semibold))
+                .font(theme.fontCaption2.weight(.semibold))
                 .foregroundColor(theme.secondaryText)
                 .textCase(.uppercase)
                 .tracking(0.5)
             Text("(\(count))")
-                .font(.system(.caption2))
+                .font(theme.fontCaption2)
                 .foregroundColor(theme.tertiaryText)
             Spacer()
         }
@@ -428,7 +428,7 @@ private struct ActiveDownloadRowView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovering = false
 
-    private var tint: Color { record.backend?.tintColor ?? .blue }
+    private var tint: Color { record.backend?.tintColor ?? theme.accentColor }
     private var icon: String { record.backend?.icon ?? "arrow.down.circle" }
 
     /// Live speed/ETA snapshot for this record. Reading the observable
@@ -454,7 +454,7 @@ private struct ActiveDownloadRowView: View {
                 Spacer()
 
                 Text("\(Int(record.progress * 100))%")
-                    .font(.system(.caption2, weight: .bold).monospacedDigit())
+                    .font(theme.fontCaption2.weight(.bold).monospacedDigit())
                     .foregroundColor(tint)
 
                 if isHovering {
@@ -462,7 +462,7 @@ private struct ActiveDownloadRowView: View {
                         DownloadManager.shared.cancelDownload(record)
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .font(.system(.caption))
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
                     }
                     .buttonStyle(.plain)
@@ -478,16 +478,13 @@ private struct ActiveDownloadRowView: View {
                 .controlSize(.small)
 
             Text(DownloadSpeedFormatter.compactLine(snapshot: speedSnapshot))
-                .font(.system(.caption2, design: .monospaced))
+                .font(theme.fontCodeCaption)
                 .foregroundColor(theme.tertiaryText)
                 .lineLimit(1)
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(isHovering ? theme.surfaceOverlay : Color.clear)
-        )
+        .padding(.vertical, 7)
+        .sidebarRowBackground(isHovering: isHovering)
         .onHover { hovering in
             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { isHovering = hovering }
         }
@@ -507,13 +504,13 @@ private struct HistoryDownloadRowView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovering = false
 
-    private var tint: Color { record.backend?.tintColor ?? .blue }
+    private var tint: Color { record.backend?.tintColor ?? theme.accentColor }
     private var icon: String { record.backend?.icon ?? "arrow.down.circle" }
 
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: icon)
-                .font(.system(.caption))
+                .font(theme.fontCaption)
                 .foregroundColor(tint.opacity(0.7))
                 .frame(width: 20)
 
@@ -521,11 +518,11 @@ private struct HistoryDownloadRowView: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(record.displayName)
-                    .font(.system(.caption, weight: .medium))
+                    .font(theme.fontCaption.weight(.medium))
                     .foregroundColor(theme.primaryText)
                     .lineLimit(1)
                 subtitle
-                    .font(.caption2)
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.tertiaryText)
                     .lineLimit(1)
             }
@@ -534,10 +531,7 @@ private struct HistoryDownloadRowView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(isHovering ? theme.surfaceOverlay : Color.clear)
-        )
+        .sidebarRowBackground(isHovering: isHovering)
         .onHover { hovering in
             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { isHovering = hovering }
         }

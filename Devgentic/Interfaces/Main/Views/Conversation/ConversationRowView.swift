@@ -62,8 +62,7 @@ struct ConversationRowView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 6)
         .padding(.vertical, 6)
-        .background(backgroundView)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .sidebarRowBackground(isSelected: isSelected, isHovering: isHovering)
         .contentShape(Rectangle())
         .onTapGesture {
             if !isRenaming {
@@ -132,34 +131,12 @@ struct ConversationRowView: View {
             if let onDelete = onDelete {
                 HoverActionButton(
                     icon: "trash",
-                    tint: .red.opacity(0.7),
+                    tint: theme.errorColor.opacity(0.85),
                     action: onDelete
                 )
             }
         }
     }
-
-    // MARK: - Background
-    @ViewBuilder
-    private var backgroundView: some View {
-        if isSelected {
-            // Selected state — neutral accent tint.
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(theme.accentColor.opacity(0.08))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(theme.accentColor.opacity(0.15), lineWidth: 0.5)
-                )
-                .shadow(color: theme.accentColor.opacity(0.05), radius: 4, x: 0, y: 0)
-        } else if isHovering {
-            // Subtle hover plate
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(theme.surfaceOverlay)
-        } else {
-            Color.clear
-        }
-    }
-
 }
 
 // MARK: - Preview Provider
@@ -271,7 +248,7 @@ struct ConversationRowView_Previews: PreviewProvider {
             }
             .padding()
             .frame(width: 300)
-            .background(AppThemes.DefaultTheme().primaryBackground)
+            .background(AppThemes.MaterialTheme().primaryBackground)
         }
     }
 }

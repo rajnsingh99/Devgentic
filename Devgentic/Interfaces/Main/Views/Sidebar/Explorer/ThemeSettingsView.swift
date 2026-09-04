@@ -80,6 +80,7 @@ struct ThemeSettingsView: View {
                                 AccentColorCircle(
                                     accent: accent,
                                     isSelected: themeManager.selectedAccentColor == accent,
+                                    baseAccentColor: themeManager.baseTheme.accentColor,
                                     appTheme: theme
                                 ) {
                                     withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
@@ -179,32 +180,14 @@ struct ThemeSettingsView: View {
                             .tint(theme.accentColor)
                         }
 
-                        // Live Preview
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("PREVIEW")
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                .tracking(1.4)
-                                .foregroundColor(theme.tertiaryText)
-
-                            Text("The quick brown fox jumps over the lazy dog. This is how your chat messages will look with the current font settings.")
-                                .font(.system(size: themeManager.chatFontSize, weight: .regular))
-                                .foregroundColor(theme.primaryText)
-                                .lineSpacing(themeManager.chatLineSpacing)
-                                .padding(14)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .fill(theme.surfaceOverlay.opacity(0.5))
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .strokeBorder(theme.secondaryText.opacity(0.18), lineWidth: 1)
-                                )
-                        }
-
-                        // Reset Button
+                        // Reset Button & Preview Hint
                         HStack {
+                            Text("Changes immediately update the live conversation preview below.")
+                                .font(.system(size: 11))
+                                .foregroundColor(theme.secondaryText.opacity(0.8))
+
                             Spacer()
+
                             Button {
                                 withAnimation(.easeInOut(duration: 0.2)) {
                                     themeManager.applyChatFontSize(15)
@@ -234,13 +217,13 @@ struct ThemeSettingsView: View {
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundColor(theme.accentColor)
 
-                            Text("CODE VIEWER THEME")
+                            Text("CODE SYNTAX THEME")
                                 .font(.system(size: 10, weight: .bold, design: .monospaced))
                                 .tracking(1.8)
                                 .foregroundColor(theme.secondaryText)
                         }
                         
-                        Text("Select a specialized syntax highlighting theme for the code editor.")
+                        Text("Select a specialized syntax highlighting theme for code blocks and the editor.")
                             .font(theme.fontSubheadline)
                             .foregroundColor(theme.secondaryText)
                     }
@@ -260,6 +243,13 @@ struct ThemeSettingsView: View {
                         }
                     }
                 }
+
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.25))
+                    .frame(height: 1)
+
+                // MARK: - Live Preview Section
+                InteractiveMiniChatPreviewView()
             }
             .padding(28)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -377,10 +367,10 @@ struct CodeViewerPreviewCard: View {
     var previewTheme: any Theme {
         switch override {
         case .default: return currentAppTheme
-        case .oneLight: return AppThemes.OneLightTheme()
-        case .oneDark: return AppThemes.OneDarkTheme()
+        case .material: return AppThemes.MaterialTheme()
         case .cosmicDark: return AppThemes.CosmicDarkTheme()
-        case .dracula: return AppThemes.DraculaTheme()
+        case .oneLight: return AppThemes.OneLightTheme()
+        case .solarizedLight: return AppThemes.SolarizedLightTheme()
         }
     }
 
@@ -464,6 +454,7 @@ struct CodeViewerPreviewCard: View {
 struct AccentColorCircle: View {
     let accent: AppAccentColor
     let isSelected: Bool
+    let baseAccentColor: Color
     let appTheme: any Theme
     let action: () -> Void
 
@@ -475,7 +466,7 @@ struct AccentColorCircle: View {
                 ZStack {
                     if accent == .default {
                         Circle()
-                            .fill(appTheme.accentColor)
+                            .fill(baseAccentColor)
                             .frame(width: 32, height: 32)
                         
                         Image(systemName: "arrow.triangle.2.circlepath")
@@ -483,9 +474,9 @@ struct AccentColorCircle: View {
                             .foregroundColor(.white)
                     } else {
                         Circle()
-                            .fill(accent.color ?? appTheme.accentColor)
+                            .fill(accent.color ?? baseAccentColor)
                             .frame(width: 32, height: 32)
-                            .shadow(color: (accent.color ?? appTheme.accentColor).opacity(isHovered ? 0.6 : 0.2), radius: isHovered ? 6 : 3)
+                            .shadow(color: (accent.color ?? baseAccentColor).opacity(isHovered ? 0.6 : 0.2), radius: isHovered ? 6 : 3)
                     }
 
                     if isSelected {
@@ -516,6 +507,285 @@ struct AccentColorCircle: View {
             }
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Interactive Mini-Chat Preview
+
+struct InteractiveMiniChatPreviewView: View {
+    @Environment(ThemeManager.self) private var themeManager
+    @Environment(\.appTheme) private var theme
+
+    @State private var selectedLanguage: PreviewLanguage = .swift
+    @State private var customUserMessage: String? = nil
+    @State private var inputDraft: String = ""
+
+    enum PreviewLanguage: String, CaseIterable {
+        case swift = "Swift"
+        case python = "Python"
+        case typescript = "TypeScript"
+
+        var codeSnippet: String {
+            switch self {
+            case .swift:
+                return """
+                func formatCurrency(_ amount: Double) -> String {
+                    let formatter = NumberFormatter()
+                    formatter.numberStyle = .currency
+                    return formatter.string(from: NSNumber(value: amount)) ?? "$0.00"
+                }
+                """
+            case .python:
+                return """
+                def format_currency(amount: float) -> str:
+                    \"\"\"Format numeric amount as localized currency.\"\"\"
+                    return f"${amount:,.2f}"
+                """
+            case .typescript:
+                return """
+                function formatCurrency(amount: number): string {
+                    return new Intl.NumberFormat('en-US', {
+                        style: 'currency',
+                        currency: 'USD'
+                    }).format(amount);
+                }
+                """
+            }
+        }
+
+        var defaultUserMessage: String {
+            switch self {
+            case .swift:
+                return "How do I format currency and numbers in Swift?"
+            case .python:
+                return "How do I format numbers as currency in Python?"
+            case .typescript:
+                return "How do I format currency in TypeScript?"
+            }
+        }
+
+        var assistantMessage: String {
+            switch self {
+            case .swift:
+                return "Here is an idiomatic helper using NumberFormatter:"
+            case .python:
+                return "Here is a clean Python format string implementation:"
+            case .typescript:
+                return "You can use the native Intl.NumberFormat API:"
+            }
+        }
+
+        var fileName: String {
+            switch self {
+            case .swift: return "CurrencyFormatter.swift"
+            case .python: return "format_currency.py"
+            case .typescript: return "formatCurrency.ts"
+            }
+        }
+    }
+
+    private var activeUserMessage: String {
+        customUserMessage ?? selectedLanguage.defaultUserMessage
+    }
+
+    private var codeFontSize: CGFloat {
+        ChatUIConstants.codeFontSize(forChatFontSize: themeManager.chatFontSize)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Section Header
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: "bubble.left.and.bubble.right.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(theme.accentColor)
+
+                    Text("LIVE CONVERSATION PREVIEW")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .tracking(1.8)
+                        .foregroundColor(theme.secondaryText)
+
+                    Spacer()
+
+                    // Language Selector Pills
+                    HStack(spacing: 6) {
+                        ForEach(PreviewLanguage.allCases, id: \.self) { lang in
+                            Button {
+                                withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
+                                    selectedLanguage = lang
+                                    customUserMessage = nil
+                                }
+                            } label: {
+                                Text(lang.rawValue)
+                                    .font(.system(size: 11, weight: selectedLanguage == lang ? .bold : .medium))
+                                    .foregroundColor(selectedLanguage == lang ? theme.accentColor : theme.secondaryText)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .background(
+                                        Capsule()
+                                            .fill(selectedLanguage == lang ? theme.accentColor.opacity(0.15) : theme.surfaceOverlay)
+                                    )
+                                    .overlay(
+                                        Capsule()
+                                            .stroke(selectedLanguage == lang ? theme.accentColor.opacity(0.3) : Color.clear, lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                Text("Interactive preview reflecting your theme, accent color, chat font size, line spacing, and code syntax palette.")
+                    .font(theme.fontSubheadline)
+                    .foregroundColor(theme.secondaryText)
+            }
+
+            // Preview Conversation Window Canvas
+            VStack(spacing: 16) {
+                // Top Mini Window Bar
+                HStack(spacing: 6) {
+                    Circle().fill(Color.red.opacity(0.7)).frame(width: 8, height: 8)
+                    Circle().fill(Color.yellow.opacity(0.7)).frame(width: 8, height: 8)
+                    Circle().fill(Color.green.opacity(0.7)).frame(width: 8, height: 8)
+                    Spacer()
+                    Text("Live Preview • \(theme.displayName) • \(selectedLanguage.rawValue)")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(theme.secondaryText.opacity(0.7))
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
+
+                Divider()
+                    .background(theme.dividerColor.opacity(0.3))
+
+                // Chat Messages Canvas
+                VStack(spacing: 16) {
+                    // 1. User Message (Trailing)
+                    HStack(alignment: .top, spacing: 10) {
+                        Spacer(minLength: 40)
+
+                        Text(activeUserMessage)
+                            .font(themeManager.chatFont)
+                            .lineSpacing(themeManager.chatLineSpacing)
+                            .foregroundColor(theme.primaryText)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .glassEffect(.regular, in: .rect(cornerRadius: 16))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16)
+                                    .stroke(theme.accentColor.opacity(0.2), lineWidth: 1)
+                            )
+
+                        Image(systemName: "person.circle.fill")
+                            .font(.system(size: 24))
+                            .foregroundColor(theme.accentColor.opacity(0.85))
+                            .padding(.top, 2)
+                    }
+
+                    // 2. Assistant Message (Leading)
+                    HStack(alignment: .top, spacing: 10) {
+                        // Bot Avatar
+                        ZStack {
+                            Circle()
+                                .fill(theme.accentColor.opacity(0.18))
+                                .frame(width: 26, height: 26)
+
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(theme.accentColor)
+                        }
+                        .padding(.top, 2)
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Devgentic")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(theme.accentColor)
+
+                            Text(selectedLanguage.assistantMessage)
+                                .font(themeManager.chatFont)
+                                .lineSpacing(themeManager.chatLineSpacing)
+                                .foregroundColor(theme.primaryText)
+
+                            // 3. Fenced Code Block
+                            CodeBlockView(
+                                language: selectedLanguage.rawValue.lowercased(),
+                                content: selectedLanguage.codeSnippet,
+                                fileName: selectedLanguage.fileName,
+                                fontSize: codeFontSize
+                            )
+                        }
+
+                        Spacer(minLength: 20)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+
+                Divider()
+                    .background(theme.dividerColor.opacity(0.3))
+
+                // Interactive Test Composer
+                HStack(spacing: 8) {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 12))
+                        .foregroundColor(theme.secondaryText)
+
+                    TextField("Type custom text to preview your font and bubble...", text: $inputDraft)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12))
+                        .foregroundColor(theme.primaryText)
+                        .onSubmit(sendCustomMessage)
+
+                    if customUserMessage != nil {
+                        Button {
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
+                                customUserMessage = nil
+                                inputDraft = ""
+                            }
+                        } label: {
+                            Text("Reset")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(theme.secondaryText)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Button(action: sendCustomMessage) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 22))
+                            .foregroundColor(inputDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? theme.secondaryText.opacity(0.3) : theme.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(inputDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(theme.surfaceOverlay.opacity(0.4))
+                .cornerRadius(10)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 12)
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(theme.secondaryBackground.opacity(0.6))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
+            )
+            .shadow(color: theme.shadowColor.opacity(0.2), radius: 8, x: 0, y: 4)
+        }
+    }
+
+    private func sendCustomMessage() {
+        let trimmed = inputDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+            customUserMessage = trimmed
+            inputDraft = ""
+        }
     }
 }
 

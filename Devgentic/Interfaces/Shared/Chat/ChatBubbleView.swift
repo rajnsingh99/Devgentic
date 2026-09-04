@@ -291,7 +291,14 @@ struct AgentMessageActionsView: View {
         } else {
             guard let content = message.currentAgentContent,
                   let text = content.textContent, !text.isEmpty else { return }
-            speechService.speak(text, messageID: message.id)
+            // [CF-21] Tell the session whether a Code Viewer exists here at all. This same view is
+            // rendered in the QuickAccess panel, whose view model is built WITHOUT `ownsCodeViewer`
+            // — so the code-block hand-off announced "Here is the code in the panel view" and then
+            // opened nothing, and with pause-on-code enabled it then held playback waiting for a
+            // panel that could never appear. `SpeechService` announces a skip instead when this is
+            // false; `canPresentCodeViewer` is the view model's own answer.
+            speechService.speak(text, messageID: message.id,
+                                canPresentCodeViewer: chatHistoryViewModel.canPresentCodeViewer)
         }
     }
 }

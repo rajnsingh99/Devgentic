@@ -163,8 +163,8 @@ final class WorkflowExecutionState {
     /// Keyed by nodeID, populated by ActiveStreamManager when sourceNodeID is present.
     var nodeTimelines: [UUID: [TimelineEvent]] = [:]
 
-    /// Drops this run's per-node traces once it has settled, keeping the state object itself
-    /// (register XUI-15). Returns the number of events released, for the caller's log.
+    /// Drops this run's per-node traces once they have been PERSISTED, keeping the state object
+    /// itself (register XUI-15). Returns the number of events released, for the caller's log.
     ///
     /// ⚠️ THE STATE OBJECT SURVIVES ON PURPOSE. `workflowExecutionStates` is keyed by conversation
     /// and holds `runRecordID`, `isRunning` and the HITL wiring; evicting the ENTRY is the
@@ -176,13 +176,31 @@ final class WorkflowExecutionState {
     /// Jarvis run continues in a conversation that is not on screen, and its trace is being
     /// appended to as it goes. Dropping it mid-flight would delete the evidence of a run in
     /// progress and leave the events after the drop looking like the whole story.
+    ///
+    /// ⚠️ REFUSES UNTIL THE RECORD IS FROZEN (register CF-28), and "settled" is NOT that.
+    /// `isRunning` goes false inside `handleStreamEnd`/`handleError`, but the freeze that copies
+    /// these timelines into the persisted record runs only after the stream's
+    /// `await finalizeMessage` and a further main-queue hop — see `hasFrozenRecord`. Inside that
+    /// window the store holds only the `.running` stub, so a release here is not "re-read later"
+    /// but LOST: `WorkflowRunRecord.freeze` reads `nodeTimelines` per node and persists nil for
+    /// an absent one, and XUI-11/XUI-14 removed every other in-memory copy. The refusal is
+    /// logged with the run id because the switch sweep that calls this cannot tell "nothing to
+    /// release" from "kept on purpose".
     @discardableResult
     func releaseSettledTraces() -> Int {
-        guard !isRunning else { return 0 }
-        let released = nodeTimelines.values.reduce(0) { $0 + $1.count }
-        guard released > 0 else { return 0 }
+        let resident = nodeTimelines.values.reduce(0) { $0 + $1.count }
+        guard resident > 0 else { return 0 }
+        let runID = runRecordID.map { String($0.uuidString.prefix(8)) } ?? "<no id>"
+        guard !isRunning else {
+            workflowLogger.debug("[WORKFLOW] Run \(runID) is still in flight — keeping \(resident) live node timeline event(s) resident. CONSEQUENCE: its trace keeps growing in memory until it settles and is frozen; nothing is dropped.")
+            return 0
+        }
+        guard hasFrozenRecord else {
+            workflowLogger.notice("[WORKFLOW] Run \(runID) has settled but its record is not yet frozen — keeping \(resident) live node timeline event(s) resident. CONSEQUENCE: nothing is released until finalize() copies the trace into the record; dropping it now would persist every node with no timeline, permanently, with nothing in the store to re-read.")
+            return 0
+        }
         nodeTimelines = [:]
-        return released
+        return resident
     }
 
     // [HITL/P6] Workflow HITL moved to the unified InteractionCenter; the per-run
@@ -216,6 +234,33 @@ final class WorkflowExecutionState {
     /// resolve "the in-progress history row" back to this live state.
     var runRecordID: UUID?
 
+    /// [CF-28] True once `WorkflowRunRecord.freeze` has copied this state — timelines included —
+    /// into the record that `WorkflowRunTicket.finalize()` persists. Set only through
+    /// `markRecordFrozen()`, which `finalize()` calls on BOTH of its paths: the natural one
+    /// (stream `onComplete`) and the quit-time `forceFinalizeActiveRuns`, which is the same
+    /// `finalize()`.
+    ///
+    /// ⚠️ THIS IS NOT `!isRunning`, AND THE GAP BETWEEN THEM IS A DATA-LOSS WINDOW. `isRunning`
+    /// goes false inside `handleStreamEnd` → `handleFinalOutput`/`handleError`, while
+    /// `ActiveStreamManager` is still inside its consume task. The freeze runs only after that
+    /// task's `await finalizeMessage(...)` — a genuine suspension, it awaits
+    /// `TraceRecorder.endTrace` — and then `onComplete()` → a `DispatchQueue.main.async` hop in
+    /// every coordinator → `workflowTicket?.finalize()`. Main-actor work landing in that window
+    /// (the conversation-switch sweep's `releaseSettledTraces()` was the one that shipped) sees a
+    /// settled run whose traces exist ONLY here: the store still holds the `.running` stub, and
+    /// `freeze` persists `nodeTimeline: nil` for every node missing from `nodeTimelines`. So
+    /// "may these traces be dropped?" has to mean "have they been captured?", which is this
+    /// flag — not "has the run stopped?".
+    private(set) var hasFrozenRecord = false
+
+    /// Called by `WorkflowRunTicket.finalize()` the moment `WorkflowRunRecord.freeze` returns —
+    /// before the (fire-and-forget, off-main-encoded) persist task even starts. That is the
+    /// right instant: `freeze` has COPIED the timelines into the record VALUE the persist task
+    /// encodes, so the live copy plays no further part regardless of when the write lands.
+    func markRecordFrozen() {
+        hasFrozenRecord = true
+    }
+
     /// The run's observability traceID, stamped by ActiveStreamManager the moment the
     /// trace is minted (Run-Report Phase 5). Rides into the persisted WorkflowRunRecord
     /// so run history and the trace store finally share a join key (old Seam 4).
@@ -235,6 +280,10 @@ final class WorkflowExecutionState {
     // MARK: - Event Ingestion
 
     func handleNodeStarted(nodeID: UUID, profileName: String, index: Int, total: Int) {
+        // [CF-30] Any resolution supersedes a pending retry. `handleNodeFailed` clears it too:
+        // the failure of attempt N arrives BEFORE the retry-scheduled for attempt N+1, so clearing
+        // here and re-adding there is what makes a terminal failure leave the flag off.
+        retryPendingNodeIDs.remove(nodeID)
         totalNodes = total
         isRunning = true
 
@@ -269,6 +318,10 @@ final class WorkflowExecutionState {
     }
 
     func handleNodeCompleted(nodeID: UUID, profileName: String, summary: String, hasWarnings: Bool = false) {
+        // [CF-30] Any resolution supersedes a pending retry. `handleNodeFailed` clears it too:
+        // the failure of attempt N arrives BEFORE the retry-scheduled for attempt N+1, so clearing
+        // here and re-adding there is what makes a terminal failure leave the flag off.
+        retryPendingNodeIDs.remove(nodeID)
         if let idx = nodeResults.firstIndex(where: { $0.nodeID == nodeID }) {
             nodeResults[idx] = WorkflowNodeResult(
                 id: nodeResults[idx].id, nodeID: nodeID, profileName: profileName,
@@ -287,6 +340,10 @@ final class WorkflowExecutionState {
     }
 
     func handleNodeFailed(nodeID: UUID, profileName: String, error: String, suggestion: String? = nil) {
+        // [CF-30] Any resolution supersedes a pending retry. `handleNodeFailed` clears it too:
+        // the failure of attempt N arrives BEFORE the retry-scheduled for attempt N+1, so clearing
+        // here and re-adding there is what makes a terminal failure leave the flag off.
+        retryPendingNodeIDs.remove(nodeID)
         // Fold the actionable remediation into `detail` so it rides the existing
         // node-detail plumbing and surfaces in every run card (live + persisted)
         // with no adapter/snapshot changes.
@@ -366,7 +423,29 @@ final class WorkflowExecutionState {
     /// A node stopped mid-flight by the user. Distinct from failure — the user asked for it, and
     /// showing it as a red "Failed" row under an amber "Cancelled" run pill reported the user's own
     /// action back to them as a fault.
+    /// [CF-30] Nodes whose last attempt FAILED but which the executor has already committed to
+    /// retrying. Set by `handleNodeRetryScheduled` before the back-off begins, cleared the moment
+    /// the node reaches any other resolution.
+    ///
+    /// ⚠️ `@ObservationIgnored`: nothing renders this, and a run that retries several nodes would
+    /// otherwise invalidate every observing view for a value none of them read. Its only consumer
+    /// is `settleInFlightWork`.
+    @ObservationIgnored private(set) var retryPendingNodeIDs: Set<UUID> = []
+
+    /// [CF-30] The executor has decided to retry this node and is about to wait out the back-off.
+    ///
+    /// Records ONLY the pending-retry fact. The row keeps the `.failed` status and detail of the
+    /// attempt that just ended — WF-CC4 established that a node must not claim to be retrying
+    /// until the retry actually starts, because a Stop during the delay means it never will.
+    func handleNodeRetryScheduled(nodeID: UUID, profileName: String, attemptsRemaining: Int) {
+        retryPendingNodeIDs.insert(nodeID)
+    }
+
     func handleNodeCancelled(nodeID: UUID, profileName: String) {
+        // [CF-30] Any resolution supersedes a pending retry. `handleNodeFailed` clears it too:
+        // the failure of attempt N arrives BEFORE the retry-scheduled for attempt N+1, so clearing
+        // here and re-adding there is what makes a terminal failure leave the flag off.
+        retryPendingNodeIDs.remove(nodeID)
         let detail = String(localized: "Cancelled before the node finished.")
         if let idx = nodeResults.firstIndex(where: { $0.nodeID == nodeID }) {
             nodeResults[idx] = WorkflowNodeResult(
@@ -382,6 +461,66 @@ final class WorkflowExecutionState {
             ))
         }
     }
+
+    // MARK: - Input Preview Resolution
+
+    /// The text an upstream node actually CONTRIBUTES to a downstream node's displayed input.
+    ///
+    /// ⚠️ [CF-31] For every status but ONE this is simply `detail`. The exception is
+    /// `.skipped(.byUser)`: `handleNodeSkipped` stores the skip SENTENCE as that node's detail
+    /// ("Skipped by you — its input was passed downstream unchanged."), while the engine forwards
+    /// the node's own INPUT downstream — `WorkflowExecutor`'s user-skip arm builds `passThrough`
+    /// from the node's upstream envelopes, or from the run's own query at an entry node. Reading
+    /// `detail` therefore showed the node that is RUNNING RIGHT NOW the skip sentence where its
+    /// input belongs: the one string it is guaranteed not to have received. Every other skip
+    /// reason keeps `detail`, because `NodeSkipReason.keepsDownstreamAlive` is false for all of
+    /// them — nothing below them ever runs to preview anything.
+    ///
+    /// ⚠️ A PREVIEW, not a byte-for-byte reconstruction. `WorkflowInputAssembler.compileForWorkflow`
+    /// has its own separators and status filter; this mirrors the surrounding preview code's
+    /// "\n\n" join so the live factory and `freeze` keep agreeing with each other. What it fixes
+    /// is the SOURCE of the text, which is the half that was wrong.
+    ///
+    /// `nonisolated static` and pure (WF-UI5): both factories call it, and the pass-through
+    /// recursion — the part a reader cannot verify by inspection — is what the test pins.
+    ///
+    /// - Parameter resultsByNodeID: every result of the run, so the walk back up the edges costs
+    ///   a lookup rather than a scan.
+    /// - Parameter userInput: the run's own input, forwarded verbatim by a skipped ENTRY node.
+    nonisolated static func upstreamInputContribution(
+        of result: WorkflowNodeResult,
+        resultsByNodeID: [UUID: WorkflowNodeResult],
+        edges: [WorkflowEdge],
+        userInput: String,
+        visited: Set<UUID> = []
+    ) -> String {
+        guard case .skipped(.byUser) = result.status else { return result.detail }
+        // A layout is a DAG by construction (`WorkflowLayout.topologicalSort` returns nil on a
+        // cycle) — but this walks EDGES, not that sorted order, so a corrupt layout must not
+        // recurse forever. Chained user skips are the normal case here, not the exotic one.
+        guard !visited.contains(result.nodeID) else {
+            workflowLogger.error("[WORKFLOW] Input preview for node \(result.nodeID.uuidString.prefix(8)) ('\(result.profileName)') hit a CYCLE walking back through user-skipped upstreams. CONSEQUENCE: this node's contribution falls back to its skip sentence, so one downstream input preview reads wrong; the run itself is unaffected — the engine forwarded the real text.")
+            return result.detail
+        }
+        var seen = visited
+        seen.insert(result.nodeID)
+
+        let upstreamIDs = edges.filter { $0.targetNodeID == result.nodeID }.map(\.sourceNodeID)
+        let upstreamResults = upstreamIDs.compactMap { resultsByNodeID[$0] }
+        // Mirrors the engine's own rule: with no upstream envelopes the skip forwards the run's
+        // input ("An entry node's input is the user's query itself — forwarding '' there would
+        // hand downstream a blank task").
+        guard !upstreamResults.isEmpty else { return userInput }
+        return upstreamResults
+            .map {
+                upstreamInputContribution(of: $0, resultsByNodeID: resultsByNodeID,
+                                          edges: edges, userInput: userInput, visited: seen)
+            }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+    }
+
+    // MARK: - Progress
 
     func handleProgress(completed: Int, total: Int) {
         completedNodes = completed
@@ -458,7 +597,18 @@ final class WorkflowExecutionState {
             : "Interrupted before the node finished."
 
         var settledNodes = 0
-        for i in nodeResults.indices where nodeResults[i].status == .running {
+        // [CF-30] `.running` OR retry-pending. A node whose attempt failed and whose retry the
+        // executor had already committed to is, from the user's point of view, still in flight —
+        // the run was going to keep working on it. Leaving it `.failed` put a red "1 failed"
+        // badge beside the run's own amber "Cancelled" pill for a failure the user pre-empted and
+        // the engine had not given up on. `handleNodeStarted` already reopens such a row once the
+        // retry actually STARTS (WF-RU12); this covers the back-off window before that, which is
+        // unreachable any other way because the executor's cancel event cannot be delivered.
+        let settleable: (WorkflowNodeResult) -> Bool = { [retryPendingNodeIDs] result in
+            result.status == .running
+                || (result.status == .failed && retryPendingNodeIDs.contains(result.nodeID))
+        }
+        for i in nodeResults.indices where settleable(nodeResults[i]) {
             let previous = nodeResults[i]
             nodeResults[i] = WorkflowNodeResult(
                 id: previous.id,
@@ -492,15 +642,16 @@ final class WorkflowExecutionState {
         return (settledNodes, closedRows)
     }
 
-    func reset() {
-        nodeResults = []
-        finalOutput = ""
-        completedNodes = 0
-        totalNodes = 0
-        isRunning = false
-        workflowError = nil
-        nodeTimelines = [:]
-        completedAt = nil
-        runRecordID = nil
-    }
+    // [CF-33] ⚠️ THERE IS DELIBERATELY NO `reset()`. One existed, with zero production callers,
+    // and it cleared ten of this class's eighteen stored properties — leaving `wasCancelled`,
+    // `completedDespiteNodeFailure`, `ranWithUnsavedCanvasEdits`, `traceID`, `startedAt`,
+    // `userInput`, `workflowProfileID` and `variables` behind. `WorkflowRunRecord.freeze` returns
+    // `.cancelled` whenever `state.wasCancelled` and stamps `traceID: state.traceID`, so the first
+    // caller it ever got would have persisted the NEXT run as "Cancelled", pointing at the
+    // PREVIOUS run's trace, with the previous run's start time.
+    //
+    // Every run gets a fresh state at `WorkflowRunBootstrap.begin`, which is the shape that makes
+    // the whole class of stale-field bugs unrepresentable. If a reuse path is ever genuinely
+    // wanted, add the property to the initializer FIRST so a new field cannot be forgotten here —
+    // do not resurrect a hand-written list.
 }

@@ -100,7 +100,7 @@ struct ChatHeaderView_Previews: PreviewProvider {
              )
         }
         .padding()
-        .background(AppThemes.DefaultTheme().primaryBackground) // Preview-only
+        .background(AppThemes.MaterialTheme().primaryBackground) // Preview-only
         .previewLayout(.sizeThatFits)
     }
 }

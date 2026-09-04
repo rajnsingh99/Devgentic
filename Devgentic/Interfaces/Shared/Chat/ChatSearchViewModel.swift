@@ -47,12 +47,20 @@ class ChatSearchViewModel {
         didSet {
             if searchQuery != oldValue {
                 currentMatchIndex = 0
-                debouncedQuerySubject.send(searchQuery)
+                currentMatchUnreachable = false
+                    debouncedQuerySubject.send(searchQuery)
             }
         }
     }
     var matches: [SearchMatch] = []
     var currentMatchIndex: Int = 0
+
+    /// The active match was found in the stored history but sits beyond the resident
+    /// window's cap, so navigation cannot scroll to it. Set by the chat view's scroll
+    /// attempt (it owns the residency question); cleared on the next successful scroll, on
+    /// any query edit, and on dismiss — so the search bar can say "older than the loaded
+    /// history" instead of showing "3 of 12" while the transcript visibly does nothing (CF-35).
+    var currentMatchUnreachable: Bool = false
 
     /// THE query both sides measure. `searchQuery` is the user's raw text (the TextField binds
     /// straight to it); this is what is actually searched for.
@@ -127,7 +135,8 @@ class ChatSearchViewModel {
             matches = []
             matchedQuery = nil
             currentMatchIndex = 0
-            return
+            currentMatchUnreachable = false
+                return
         }
 
         // Re-anchor on the SAME match across re-runs (membership changes re-run this) — but ONLY
@@ -188,6 +197,7 @@ class ChatSearchViewModel {
         matches = []
         matchedQuery = nil
         currentMatchIndex = 0
+        currentMatchUnreachable = false
     }
 
     func toggleSearch() {

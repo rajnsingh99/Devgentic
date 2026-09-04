@@ -49,6 +49,7 @@ struct ChatInputAreaView: View {
     /// Injected at the `WindowGroup`, which is this view's only call site.
     @Environment(ToastManager.self) private var toastManager
     @Environment(\.appTheme) private var theme
+    @Environment(ThemeManager.self) private var themeManager
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // MARK: - UI State
@@ -62,7 +63,9 @@ struct ChatInputAreaView: View {
     @State private var contextUsage: ContextWindowUsage?
 
     // MARK: - Layout Constants
-    private let textEditorMinHeight: CGFloat = 32
+    private var textEditorMinHeight: CGFloat {
+        max(32, themeManager.chatFontSize + 14)
+    }
     private let textEditorMaxHeight: CGFloat = 200
 
     private var isInputEnabled: Bool {
@@ -73,9 +76,9 @@ struct ChatInputAreaView: View {
     // MARK: - Typography
     private var defaultTypingAttributes: [NSAttributedString.Key: Any] {
         let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.lineSpacing = 4
+        paragraphStyle.lineSpacing = themeManager.chatLineSpacing
         return [
-            .font: ComposerStyle.editorNSFont, // [UI audit gap 4] single source (was hardcoded 14)
+            .font: NSFont.systemFont(ofSize: themeManager.chatFontSize),
             .foregroundColor: NSColor.labelColor,
             .paragraphStyle: paragraphStyle
         ]
@@ -83,7 +86,7 @@ struct ChatInputAreaView: View {
     
     // Separate property for placeholder font to avoid creating mutable objects during view updates
     private var placeholderFont: Font {
-        Font.system(size: ComposerStyle.editorFontSize) // [UI audit gap 4] matches the editor
+        themeManager.chatFont
     }
 
     // MARK: - Dynamic UI Properties
@@ -448,6 +451,8 @@ struct ChatInputAreaView: View {
                 },
                 minHeight: textEditorMinHeight,
                 maxHeight: textEditorMaxHeight,
+                fontSize: themeManager.chatFontSize,
+                lineSpacing: themeManager.chatLineSpacing,
                 
                 // CRITICAL: Bind to VM State, NOT local state
                 showPromptSuggestions: $inputViewModel.promptSuggestionState.isShowing,

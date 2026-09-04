@@ -235,6 +235,9 @@ final class ChatOpsBridge {
         }
 
         let convID = vm.createConversationForScheduledTask(profileID: profile, title: "Telegram Chat")
+        // [CF-39] Record the provenance now, while it is a FACT. The placeholder used to infer it
+        // by matching this title back, which a rename silently defeats.
+        RemoteConversationOriginStore.record(.telegram, for: convID)
         config.activeConversationID = convID
 
         // Auto-navigate Mac UI to the new conversation

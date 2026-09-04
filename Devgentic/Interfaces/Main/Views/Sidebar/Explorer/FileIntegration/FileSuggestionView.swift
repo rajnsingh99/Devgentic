@@ -220,6 +220,6 @@ struct FileSuggestionView_Previews: PreviewProvider {
         }
         .padding()
         .frame(width: 450)
-        .background(AppThemes.DefaultTheme().primaryBackground)
+        .background(AppThemes.MaterialTheme().primaryBackground)
     }
 }

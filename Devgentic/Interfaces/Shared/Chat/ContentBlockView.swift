@@ -8,6 +8,7 @@
 //  Step 5: Equatable Conformance for High-Performance Memoization.
 
 import SwiftUI
+import AppKit
 import os
 
 private let logger = DGLogger(category: "ContentBlockView")
@@ -144,6 +145,15 @@ struct ContentBlockView: View, Equatable {
     /// re-rendering unchanged blocks, and state changes re-run `body` regardless.
     @State private var resolvedFileLinks: [String: String] = [:]
 
+    /// Why the last tap on a file reference in this block opened nothing, or nil.
+    ///
+    /// The open can fail after the span was verified — the file moves, loses read
+    /// permission, or stops being UTF-8 text — and until this existed the failure was a log
+    /// line only: the link stayed underlined and tapping it did nothing visible, forever,
+    /// because `resolvedFileLinks` re-verifies on `.task(id: text)` and a settled block's
+    /// text never changes again. Cleared on the next successful open.
+    @State private var fileOpenFailureReason: String?
+
     /// Code sits a step below body prose (the same convention `MarkdownTableView` uses for
     /// cells), but it now MOVES with `chatFontSize` instead of being pinned at 12pt —
     /// a reader at 20pt prose was getting 12pt code with no way to change it.
@@ -178,7 +188,19 @@ struct ContentBlockView: View, Equatable {
                 }
                 .accessibilityLabel("\(lang) code block, \(CodeSnippet.lineCount(codeBlockContent: codeContent)) lines. Tap to open in viewer.")
             } else {
-                CodeBlockView(language: lang, content: codeContent, fileName: fileName, fontSize: codeFontSize)
+                // The inline Viewer button gets the SAME origin identity the card branch
+                // above passes through `openMessageInCodeViewer`, so re-opening a block
+                // refreshes its tab instead of appending a second one. The ordinal is
+                // resolved in the closure — on the click, not on every streamed body pass.
+                CodeBlockView(language: lang, content: codeContent, fileName: fileName, fontSize: codeFontSize,
+                              originMessageID: message.id,
+                              resolveOriginBlockIndex: { [message] in
+                                  // The message's text is read HERE, not in the capture list:
+                                  // reading an @Observable property inside `body` would make
+                                  // every settled block a dependency of the streaming text and
+                                  // defeat the `.equatable()` memoization this file is built on.
+                                  Self.codeBlockOrdinal(forContent: codeContent, in: message)
+                              })
                     .padding(.bottom, theme.spacingMedium)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityLabel("\(lang) code block")
@@ -246,7 +268,11 @@ struct ContentBlockView: View, Equatable {
                 .transaction { $0.animation = nil }
 
         case .image(let url, let altText):
-            if let imageUrl = URL(string: url) {
+            // A reference that names a FILE goes to disk, not to URLSession — see
+            // `localImagePath`. Every agent-produced chart lands here.
+            if let localPath = Self.localImagePath(forSource: url) {
+                LocalMarkdownImageView(path: localPath, altText: altText)
+            } else if let imageUrl = URL(string: url) {
                 AsyncImage(url: imageUrl) { phase in
                     switch phase {
                     case .success(let image):
@@ -350,18 +376,26 @@ struct ContentBlockView: View, Equatable {
     @ViewBuilder
     private func renderTextView(text: String, font: Font? = nil, weight: Font.Weight = .regular) -> some View {
         let resolvedFont = font ?? themeManager.chatFont
-        HStack(alignment: .bottom, spacing: 0) {
-            Text(createStyledString(from: text, font: resolvedFont, weight: weight))
-                .lineSpacing(themeManager.chatLineSpacing)
-                .textSelection(.enabled)
-                // Smooth out text updates slightly to avoid harsh token jitter
-                .animation(.linear(duration: 0.05), value: text.count)
+        VStack(alignment: .leading, spacing: theme.spacingXXSmall) {
+            HStack(alignment: .bottom, spacing: 0) {
+                Text(createStyledString(from: text, font: resolvedFont, weight: weight))
+                    .lineSpacing(themeManager.chatLineSpacing)
+                    .textSelection(.enabled)
+                    // Smooth out text updates slightly to avoid harsh token jitter
+                    .animation(.linear(duration: 0.05), value: text.count)
 
-            // Phase 5: The Blinking Cursor
-            if message.isStreaming && isLastBlock {
-                BlinkingCursor()
-                    .padding(.leading, 2)
-                    .padding(.bottom, 4) // Align with baseline
+                // Phase 5: The Blinking Cursor
+                if message.isStreaming && isLastBlock {
+                    BlinkingCursor()
+                        .padding(.leading, 2)
+                        .padding(.bottom, 4) // Align with baseline
+                }
+            }
+
+            // The one route these spans offer can fail after they were verified. Say so
+            // under the block the tap happened in.
+            if let fileOpenFailureReason {
+                fileOpenFailureCaption(fileOpenFailureReason)
             }
         }
         // Existence checking is a `stat` per candidate and can hang for seconds on an
@@ -375,9 +409,38 @@ struct ContentBlockView: View, Equatable {
             guard let path = FileReferenceResolver.path(fromLinkURL: url) else {
                 return .systemAction
             }
-            openFileReference(path)
+            openFileReference(path, inBlockText: text)
             return .handled
         })
+    }
+
+    /// The "that didn't open" caption under a block whose file reference was tapped.
+    /// Same shape as the agent timeline's row-level failure surface, at prose scale.
+    @ViewBuilder
+    private func fileOpenFailureCaption(_ reason: String) -> some View {
+        HStack(alignment: .center, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(theme.errorColor)
+            Text(reason)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(theme.primaryText.opacity(0.85))
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(theme.errorColor.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(theme.errorColor.opacity(0.2), lineWidth: 0.5)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(String(localized: "Could not open file. \(reason)"))
+        .transition(.opacity)
     }
 
     /// Resolves which inline-code spans in `text` are openable files, off the main thread.
@@ -420,21 +483,58 @@ struct ContentBlockView: View, Equatable {
     /// Reads the file and hands it to the Code Viewer. Mirrors `AgentTimelineView.openInViewer`
     /// — same off-main read, same explicit failure path. A file can be moved or deleted
     /// between the verification above and the tap.
-    private func openFileReference(_ path: String) {
+    ///
+    /// `blockText` is this block's own text, re-verified after a failure so a link that has
+    /// gone dead reverts to plain inline code instead of staying underlined and inert: the
+    /// standing `.task(id: text)` never fires again for a settled block.
+    private func openFileReference(_ path: String, inBlockText blockText: String) {
         let viewModel = chatHistoryViewModel
         Task {
-            let content = await Task.detached(priority: .userInitiated) {
-                try? String(contentsOfFile: path, encoding: .utf8)
+            // `try?` discarded the real error, so "moved", "no permission" and "not UTF-8"
+            // were indistinguishable in the log and invisible on screen.
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<String, Error> in
+                do { return .success(try String(contentsOfFile: path, encoding: .utf8)) }
+                catch { return .failure(error) }
             }.value
-            guard let content, !content.isEmpty else {
-                logger.warning("[CodeViewer] File-reference open of '\(path)' failed — unreadable, empty, or gone since it was verified; nothing opened.")
-                return
+
+            switch result {
+            case .failure(let error):
+                fileOpenFailureReason = Self.openFailureText(for: error, path: path)
+                logger.warning("[CodeViewer] File-reference open of '\(path)' failed — \(error.localizedDescription). Surfaced under the block; nothing opened, and the reference is being re-verified so a dead link stops looking tappable.")
+                await verifyFileReferences(in: blockText)
+            case .success(let content) where content.isEmpty:
+                // Readable but empty: opening a blank tab looks like a bug, so say so.
+                fileOpenFailureReason = String(localized: "This file is now empty — nothing to show.")
+                logger.warning("[CodeViewer] File-reference open of '\(path)' read 0 bytes — the file is empty now; nothing opened, reason shown under the block.")
+            case .success(let content):
+                fileOpenFailureReason = nil
+                viewModel.openTimelineFileInCodeViewer(
+                    fileName: (path as NSString).lastPathComponent,
+                    filePath: path,
+                    content: content
+                )
             }
-            viewModel.openTimelineFileInCodeViewer(
-                fileName: (path as NSString).lastPathComponent,
-                filePath: path,
-                content: content
-            )
+        }
+    }
+
+    /// Turns a read error into something the user can act on. `CocoaError` codes are checked
+    /// rather than the message, so the distinction survives localization.
+    ///
+    /// Deliberately a local copy of `AgentTimelineView.openFailureText` rather than a shared
+    /// helper: the two surfaces are being fixed independently and hoisting one file's private
+    /// static into the other is a bigger change than either row asked for. Keep the wording
+    /// in step if one of them changes.
+    nonisolated static func openFailureText(for error: Error, path: String) -> String {
+        let name = (path as NSString).lastPathComponent
+        switch (error as? CocoaError)?.code {
+        case .fileNoSuchFile, .fileReadNoSuchFile:
+            return String(localized: "\(name) has been moved or deleted since it was linked.")
+        case .fileReadNoPermission:
+            return String(localized: "Devgentic doesn't have permission to read \(name).")
+        case .fileReadInapplicableStringEncoding:
+            return String(localized: "\(name) isn't UTF-8 text, so it can't be shown here.")
+        default:
+            return String(localized: "Couldn't open \(name): \(error.localizedDescription)")
         }
     }
 
@@ -544,6 +644,104 @@ struct ContentBlockView: View, Equatable {
         )
     }
 
+    /// The filesystem path a markdown image reference names, or nil when it is a genuine URL
+    /// that belongs on the `AsyncImage` path. Absolute for every shape but `./` and `../` —
+    /// see the warning below.
+    ///
+    /// `URL(string:)` happily returns a SCHEME-LESS URL for `/abs/chart.png`, `./out/chart.png`
+    /// and `~/chart.png`, and `AsyncImage` loads through URLSession, which rejects anything
+    /// without a scheme — so those references could only ever reach the "Failed to load image"
+    /// card. Confirmed for all three shapes.
+    ///
+    /// Only the shapes an author writes when they mean a path are claimed. A bare relative
+    /// reference ("images/a.png") reads equally as a relative URL, so it stays on the remote
+    /// path exactly as before rather than being guessed at.
+    ///
+    /// ⚠️ `./` and `../` ARE claimed — nothing else could have loaded them — but they are
+    /// returned verbatim, and nothing here can resolve them: `expandingTildeInPath` is a no-op
+    /// on them and the app has no base directory for a chat transcript. `FileManager` then
+    /// resolves them against the PROCESS working directory ("/" for a Finder-launched app),
+    /// not against the agent's workspace, so they normally miss. `localImageFailureText` is
+    /// what keeps that honest — the chip must not tell the reader a file that exists is gone.
+    nonisolated static func localImagePath(forSource source: String) -> String? {
+        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        // The scheme test tolerates a nil URL and falls through. NOTE: a space does NOT make
+        // `URL(string:)` fail — it percent-encodes it ("/Users/a b/x.png" → "/Users/a%20b/x.png"),
+        // which is the reason the claim below is taken from the SOURCE STRING and never from a
+        // round trip through `URL`: the encoded form names no file on disk.
+        if let url = URL(string: trimmed), let scheme = url.scheme {
+            // A `file:` URL names a local file too; read it directly instead of round-tripping.
+            return scheme.caseInsensitiveCompare("file") == .orderedSame ? url.path : nil
+        }
+        guard trimmed.hasPrefix("/") || trimmed.hasPrefix("~/")
+                || trimmed.hasPrefix("./") || trimmed.hasPrefix("../") else { return nil }
+        return (trimmed as NSString).expandingTildeInPath
+    }
+
+    /// The chip caption for a local image reference that produced no picture.
+    ///
+    /// Three outcomes, not two. "This file is no longer here." is a confident, specific claim,
+    /// and for a RELATIVE reference it is not one we can make: `./out/chart.png` is claimed as
+    /// a path because nothing else could ever have loaded it, but there is no base to resolve
+    /// it against, so `FileManager` uses the process working directory — "/" for a
+    /// Finder-launched app, never the agent's workspace. The read then misses a file that is
+    /// on disk, and the chip (which shows only the last path component) gave the reader no way
+    /// to see that Devgentic had looked somewhere else entirely.
+    nonisolated static func localImageFailureText(path: String, fileExists: Bool) -> String {
+        if fileExists {
+            return String(localized: "This file isn't an image Devgentic can display.")
+        }
+        if !(path as NSString).isAbsolutePath {
+            return String(localized: "This path is relative, and Devgentic can't tell which folder it starts from.")
+        }
+        return String(localized: "This file is no longer here.")
+    }
+
+    /// The ordinal of a rendered code block, resolved against the text the bubble is
+    /// ACTUALLY showing.
+    ///
+    /// `displayedContent`, not `content`: the blocks on screen come from
+    /// `ChatBubbleView.contentToDisplay`, and after a Retry the two diverge — the streaming
+    /// path writes only `variants[selected]` while `content` keeps the ORIGINAL answer. Read
+    /// against `content`, a regenerated message's blocks are not found at all, the ordinal is
+    /// nil, and the inline button falls back to exact-code dedup — which is precisely the
+    /// duplicate-tab defect CF-5 filed.
+    ///
+    /// ⚠️ `ChatHistoryViewModel.openMessageInCodeViewer` enumerates `message.displayedContent`
+    /// too (ChatHistoryViewModel.swift, `switch message.displayedContent`), so the inline path
+    /// and the card path number the same blocks on a regenerated message as on any other. That
+    /// agreement is what makes the shared `(message.id, ordinal)` origin key safe: if the two
+    /// ever read different expressions again, they would stamp the same key onto DIFFERENT
+    /// code and a card open would overwrite an inline tab's contents.
+    nonisolated static func codeBlockOrdinal(forContent content: String, in message: ChatMessage) -> Int? {
+        codeBlockOrdinal(forContent: content, in: message.displayedContent)
+    }
+
+    /// Where a code block sits among its message's code blocks, numbered the way
+    /// `openMessageInCodeViewer` numbers them — enumerated over `CodeSnippetExtractor.extract`
+    /// for markdown, and index 0 for a single `.codeBlock` message.
+    ///
+    /// The two numberings must agree, because a block that crosses the 50-line card threshold
+    /// while it streams is opened from the inline button before the threshold and from the
+    /// card after it; disagreeing ordinals would leave the user with two tabs for one block,
+    /// the older holding the truncated fragment.
+    ///
+    /// Two byte-identical blocks in one message resolve to the same ordinal (`firstIndex`).
+    /// They share a tab, which is what content-equality dedup already did for them.
+    nonisolated static func codeBlockOrdinal(forContent content: String, in messageContent: MessageContent) -> Int? {
+        let normalized = CodeSnippet.normalizedCode(content)
+        guard !normalized.isEmpty else { return nil }
+        switch messageContent {
+        case .codeBlock(_, let code):
+            return CodeSnippet.normalizedCode(code) == normalized ? 0 : nil
+        case .markdownText(let text):
+            return CodeSnippetExtractor.extract(from: text).firstIndex { $0.code == normalized }
+        default:
+            return nil
+        }
+    }
+
     /// The heading's TRUE level, not the font bucket.
     ///
     /// `fontForHeading` collapses h3–h6 into one size, but the document structure is still
@@ -575,6 +773,126 @@ struct ContentBlockView: View, Equatable {
         case 2: return .semibold
         default: return .semibold
         }
+    }
+}
+
+// MARK: - Local Markdown Image
+
+/// A markdown image whose source names a file on disk instead of a URL.
+///
+/// `AsyncImage` cannot render one — see `ContentBlockView.localImagePath` — so every chart an
+/// agent wrote to disk and then referenced showed the "Failed to load image" card. Reads and
+/// decodes off-main through `ImageDownsampler`, the same bounded ImageIO path attached images
+/// use, so a 12 MB PNG costs a thumbnail rather than a full bitmap on the render thread.
+///
+/// When the file is missing or isn't decodable it shows a FILE CHIP naming it, not a generic
+/// failure card: "this file isn't here any more" is actionable, "failed to load image" is not.
+/// The three reasons a chip can carry — including the one for a relative reference the app has
+/// no base for — live in `ContentBlockView.localImageFailureText`.
+private struct LocalMarkdownImageView: View {
+    let path: String
+    let altText: String?
+
+    @Environment(\.appTheme) private var theme
+    @State private var image: NSImage?
+    @State private var failureReason: String?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
+                    .overlay(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium).stroke(theme.dividerColor, lineWidth: 1))
+                    .accessibilityLabel(altText?.isEmpty == false ? altText! : String(localized: "Image"))
+                    .accessibilityAddTraits(.isImage)
+            } else if let failureReason {
+                fileChip(failureReason)
+            } else {
+                HStack {
+                    Spacer()
+                    VStack {
+                        ProgressView()
+                        if let alt = altText, !alt.isEmpty {
+                            Text(alt).font(.caption).foregroundColor(theme.secondaryText).padding(.top, 4)
+                        }
+                    }
+                    Spacer()
+                }
+                .frame(height: ChatUIConstants.imagePlaceholderMinHeight)
+                .background(theme.controlBackground)
+                .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
+            }
+        }
+        .padding(.vertical, theme.spacingSmall)
+        .frame(maxWidth: ChatUIConstants.imageMaxWidth, alignment: .leading)
+        .task(id: path) { await load() }
+    }
+
+    /// The chip that replaces a picture we could not produce. Names the file, because the
+    /// path is the only thing the reader can act on.
+    private func fileChip(_ reason: String) -> some View {
+        let name = (path as NSString).lastPathComponent
+        return HStack(alignment: .center, spacing: theme.spacingXSmall) {
+            Image(systemName: "doc.richtext")
+                .font(.system(size: 16))
+                .foregroundColor(theme.secondaryText)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(theme.primaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(reason)
+                    .font(.caption)
+                    .foregroundColor(theme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(theme.controlBackground)
+        .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
+        .help(path)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(String(localized: "Image \(name) could not be shown. \(reason)"))
+    }
+
+    private func load() async {
+        let target = path
+        let decoded = await Task.detached(priority: .userInitiated) { () -> NSImage? in
+            guard let data = FileManager.default.contents(atPath: target) else { return nil }
+            // Retina headroom over the display cap, the same doubling attached thumbnails use.
+            return ImageDownsampler.thumbnail(from: data, maxDimension: ChatUIConstants.imageMaxWidth * 2)
+        }.value
+
+        guard !Task.isCancelled else { return }
+        if let decoded {
+            image = decoded
+            failureReason = nil
+            return
+        }
+
+        // Only reached when there is nothing to draw, so the extra stat costs nothing that
+        // matters and turns one useless card into three distinguishable ones — see
+        // `ContentBlockView.localImageFailureText` for why "relative" is one of them.
+        let exists = await Task.detached(priority: .utility) {
+            FileManager.default.fileExists(atPath: target)
+        }.value
+        guard !Task.isCancelled else { return }
+        image = nil
+        let cause: String
+        if exists {
+            cause = "unreadable, or not a decodable image"
+        } else if (target as NSString).isAbsolutePath {
+            cause = "no file at that path"
+        } else {
+            cause = "relative reference with no base — read against the process working directory '\(FileManager.default.currentDirectoryPath)', which is not the agent's workspace"
+        }
+        failureReason = ContentBlockView.localImageFailureText(path: target, fileExists: exists)
+        logger.warning("[MEDIA] Local markdown image '\(target)' rendered no picture — \(cause); showing a file chip in its place.")
     }
 }
 

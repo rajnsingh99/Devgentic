@@ -217,14 +217,21 @@ struct ImageLightbox: View {
 extension View {
     /// Opens `ImageLightbox` in a sheet when `isPresented`. Both image renderers attach
     /// this so zoom behaves identically wherever an image appears.
+    ///
+    /// [CF-25] `onDismiss` is how a caller that decoded the full-size bitmap ONLY for this
+    /// sheet gets to drop it again. Without it there was no dismissal hook at all, so
+    /// `AttachedImageCardView` held every opened photo's pixels in row state for as long as the
+    /// conversation stayed on screen. Callers whose image is the one the bubble itself renders
+    /// (`MediaArtifactImageView`) leave it nil — that bitmap is not the sheet's to release.
     func imageLightbox(
         isPresented: Binding<Bool>,
         image: NSImage?,
         altText: String?,
         data: Data?,
-        mimeType: String? = nil
+        mimeType: String? = nil,
+        onDismiss: (() -> Void)? = nil
     ) -> some View {
-        sheet(isPresented: isPresented) {
+        sheet(isPresented: isPresented, onDismiss: onDismiss) {
             if let image {
                 ImageLightbox(image: image, altText: altText, data: data, mimeType: mimeType)
             }

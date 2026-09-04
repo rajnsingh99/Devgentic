@@ -47,6 +47,28 @@ struct ChatHistoryView: View {
     /// clicking the pill at the top always did.
     private static let autoLoadTopThreshold: CGFloat = 60
 
+    /// What the top-of-transcript pagination slot shows (CF-36). `nonisolated static` and
+    /// pure — the WF-UI5 shape — because the residency cap is the defect surface:
+    /// `canLoadMorePages` deliberately stays TRUE at the cap (the store really has more, and
+    /// the history resolver depends on that distinction), so a pill keyed on it alone stayed
+    /// enabled forever while `loadMoreMessages` returned before it ever set `isLoadingPage`.
+    /// The cap wins over everything but "nothing left to load": it is the state the user
+    /// can actually act on (search reaches what scroll-back no longer does).
+    enum LoadEarlierAffordance: Equatable {
+        /// History is exhausted — nothing to show.
+        case hidden
+        /// The interactive pill; spinner while a page is in flight.
+        case button(loading: Bool)
+        /// Non-interactive note: scroll-back stopped at the residency cap.
+        case capNotice
+    }
+
+    nonisolated static func loadEarlierAffordance(canLoadMore: Bool, atCap: Bool, isLoading: Bool) -> LoadEarlierAffordance {
+        guard canLoadMore else { return .hidden }
+        if atCap { return .capNotice }
+        return .button(loading: isLoading)
+    }
+
     // MARK: - Speech Service
     private var speechService = SpeechService.shared
 
@@ -79,40 +101,73 @@ struct ChatHistoryView: View {
                     ScrollView {
                         LazyVStack(spacing: 0) {
 
-                            // MARK: - Load-Earlier Pill
+                            // MARK: - Load-Earlier Pill / Cap Notice
                             // Visible affordance + loading indicator for history pagination.
                             // Mostly informational: scrolling near the top auto-loads the next
                             // page (see the onScrollGeometryChange below) — the old gray caption
                             // text read as a label, not a control, and went unnoticed.
-                            if mainAppViewModel.selectedConversationID != nil && chatHistoryViewModel.canLoadMorePages {
-                                Button {
-                                    loadPreviousPage(proxy: proxy)
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        if chatHistoryViewModel.isLoadingPage {
-                                            ProgressView()
-                                                .controlSize(.small)
-                                            Text("Loading earlier messages…")
-                                        } else {
-                                            Image(systemName: "clock.arrow.circlepath")
-                                                .font(.system(.caption, weight: .semibold))
-                                            Text("Load earlier messages")
+                            //
+                            // Which of the three states renders is decided by the pure
+                            // `loadEarlierAffordance`. At the residency cap the pill used to stay
+                            // enabled and inert — `loadMoreMessages` returns before it ever sets
+                            // `isLoadingPage`, so not even a spinner flashed — under a tooltip
+                            // promising auto-load (CF-36).
+                            if mainAppViewModel.selectedConversationID != nil {
+                                switch Self.loadEarlierAffordance(
+                                    canLoadMore: chatHistoryViewModel.canLoadMorePages,
+                                    atCap: chatHistoryViewModel.hasReachedResidencyCap,
+                                    isLoading: chatHistoryViewModel.isLoadingPage
+                                ) {
+                                case .hidden:
+                                    EmptyView()
+                                case .button(let loading):
+                                    Button {
+                                        loadPreviousPage(proxy: proxy)
+                                    } label: {
+                                        HStack(spacing: 6) {
+                                            if loading {
+                                                ProgressView()
+                                                    .controlSize(.small)
+                                                Text("Loading earlier messages…")
+                                            } else {
+                                                Image(systemName: "clock.arrow.circlepath")
+                                                    .font(.system(.caption, weight: .semibold))
+                                                Text("Load earlier messages")
+                                            }
                                         }
+                                        .font(theme.fontCaption.weight(.medium))
+                                        .foregroundColor(theme.secondaryText)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        // MARK: Liquid Glass
+                                        .glassEffect(.regular, in: .capsule)
+                                        .contentShape(Capsule())
                                     }
-                                    .font(theme.fontCaption.weight(.medium))
-                                    .foregroundColor(theme.secondaryText)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
-                                    // MARK: Liquid Glass
-                                    .glassEffect(.regular, in: .capsule)
-                                    .contentShape(Capsule())
+                                    .buttonStyle(.plain)
+                                    .disabled(loading)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.bottom, theme.spacingMedium)
+                                    .help("Older messages load automatically when you scroll to the top")
+                                    .accessibilityLabel(loading ? "Loading earlier messages" : "Load earlier messages")
+                                case .capNotice:
+                                    // Deliberately NOT a control — there is nothing it could do.
+                                    // A plain caption with no glass capsule, so it doesn't read as
+                                    // a button either.
+                                    // ⚠️ "found, not jumped to" — not "searchable", which the
+                                    // sibling CF-35 fix makes untrue for exactly these messages:
+                                    // ⌘F reaches the store and COUNTS a match past the cap, but
+                                    // Next/Previous cannot scroll to one. Promising searchability
+                                    // here would send the user after a match they can never read.
+                                    Text("Older messages aren't loaded here, to keep memory in check — ⌘F still finds them, but can't jump to them.")
+                                        .font(theme.fontCaption)
+                                        .foregroundColor(theme.tertiaryText)
+                                        .multilineTextAlignment(.center)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.horizontal, 12)
+                                        .padding(.bottom, theme.spacingMedium)
+                                        .help("Scroll-back stops at \(ChatHistoryViewModel.maxResidentMessages) messages to bound memory. Older messages stay in the conversation and are reachable through search.")
+                                        .accessibilityLabel("Older messages are not loaded here to keep memory in check; search still finds them but cannot scroll to them")
                                 }
-                                .buttonStyle(.plain)
-                                .disabled(chatHistoryViewModel.isLoadingPage)
-                                .frame(maxWidth: .infinity)
-                                .padding(.bottom, theme.spacingMedium)
-                                .help("Older messages load automatically when you scroll to the top")
-                                .accessibilityLabel(chatHistoryViewModel.isLoadingPage ? "Loading earlier messages" : "Load earlier messages")
                             }
 
                             if mainAppViewModel.selectedConversationID != nil {
@@ -167,7 +222,8 @@ struct ChatHistoryView: View {
                     // page without hunting for a button (the pill above stays as the
                     // visible affordance + loading indicator). Guards: content revealed,
                     // no conversation load in flight; loadPreviousPage itself no-ops
-                    // while a page is loading or at the end of history.
+                    // while a page is loading, at the end of history, or at the residency
+                    // cap — the same guard the pill goes through (CF-36).
                     .onScrollGeometryChange(for: CGFloat.self) { scrollGeometry in
                         scrollGeometry.contentOffset.y
                     } action: { _, offsetY in
@@ -242,15 +298,32 @@ struct ChatHistoryView: View {
                         // Closing search RELEASES the corpus. It used to live until the
                         // conversation changed, so one ⌘F pinned the whole projection for the
                         // rest of the session.
-                        guard isActive else {
-                            chatHistoryViewModel.releaseSearchCorpus()
-                            return
-                        }
-                        Task {
-                            await chatHistoryViewModel.prepareSearchCorpus()
-                            if !searchViewModel.effectiveQuery.isEmpty {
-                                searchViewModel.performSearch(in: chatHistoryViewModel.searchCorpus)
-                            }
+                        guard !isActive else { return }
+                        chatHistoryViewModel.releaseSearchCorpus()
+                    }
+                    // [CF-38] The fetch is STRUCTURED to this view, not an unstructured `Task`.
+                    // Both ways out of an open search cancel a `.task(id:)` — Esc flips the id,
+                    // and an interface-mode switch tears the view down — and
+                    // `prepareSearchCorpus` refuses to publish into a cancelled task, so
+                    // neither ordering can resurrect the corpus behind the release. The
+                    // unstructured Task outlived the view: it captured this view's
+                    // `searchViewModel` (still `isSearchActive`, because teardown has no false
+                    // transition to release on — see `.onDisappear` below), so a fetch in
+                    // flight at teardown wrote the full projection back with no chat view
+                    // mounted and nothing left able to free it, which is the CH31/AD6/CF-38
+                    // retention shape reached through the disappear ordering.
+                    .task(id: searchViewModel.isSearchActive) {
+                        guard searchViewModel.isSearchActive else { return }
+                        await chatHistoryViewModel.prepareSearchCorpus()
+                        // Cancelled means search closed or this view went away — the release
+                        // for that already ran and the fetch above published nothing, so
+                        // there is nothing to undo. ⚠️ Deliberately NOT a release: a fast
+                        // ⌘F → Esc → ⌘F can land this stale continuation AFTER the next
+                        // fetch published, and releasing here would free the corpus the
+                        // open search bar is about to scan.
+                        guard !Task.isCancelled, searchViewModel.isSearchActive else { return }
+                        if !searchViewModel.effectiveQuery.isEmpty {
+                            searchViewModel.performSearch(in: chatHistoryViewModel.searchCorpus)
                         }
                     }
                     // `ChatHistoryView` is built in two mutually-exclusive places
@@ -387,15 +460,31 @@ struct ChatHistoryView: View {
     /// Loads the next (older) page and re-anchors the previously-oldest message to
     /// the viewport top so prepending rows doesn't jump the scroll position.
     /// Shared by the pill button and the near-top auto-load trigger; safe to call
-    /// eagerly — no-ops while a page is in flight or when history is exhausted.
+    /// eagerly — no-ops while a page is in flight, when history is exhausted, or once
+    /// the resident window has hit its cap.
+    ///
+    /// The cap guard and the "only re-anchor if a page landed" check are one fix (CF-36):
+    /// at the cap `loadMoreMessages` returns without appending, and an unconditional
+    /// `scrollTo` afterwards re-anchored the oldest row to the top on EVERY near-top
+    /// scroll tick — yanking the viewport back down each time the user tried to scroll up.
     private func loadPreviousPage(proxy: ScrollViewProxy) {
         guard !chatHistoryViewModel.isLoadingPage,
               chatHistoryViewModel.canLoadMorePages,
+              !chatHistoryViewModel.hasReachedResidencyCap,
               !chatHistoryViewModel.currentChatMessages.isEmpty else { return }
 
         let anchorID = chatHistoryViewModel.currentChatMessages.last?.id
+        let countBefore = chatHistoryViewModel.currentChatMessages.count
         Task {
             await chatHistoryViewModel.loadMoreMessages()
+            // A page landed only if the window GREW and its oldest row changed. Count alone
+            // is also satisfied by a new message arriving at the newest end during the
+            // await, and re-anchoring on that would produce the same yank.
+            let messages = chatHistoryViewModel.currentChatMessages
+            guard messages.count > countBefore, messages.last?.id != anchorID else {
+                logger.debug("[PAGINATION] No older page appended (\(messages.count) resident; cap reached: \(chatHistoryViewModel.hasReachedResidencyCap); more in store: \(chatHistoryViewModel.canLoadMorePages)) — viewport left where it is.")
+                return
+            }
             if let anchorID {
                 DispatchQueue.main.async {
                     proxy.scrollTo(anchorID, anchor: .top)
@@ -408,19 +497,38 @@ struct ChatHistoryView: View {
     /// Scrolls to the active search match, paging older messages in first when the match
     /// lives outside the rendered window. Without the page-in, a store-backed match that
     /// isn't resident has no view to scroll to and the jump silently does nothing.
+    ///
+    /// Reachability is decided BEFORE any paging (CF-35): a match past the residency cap can
+    /// never be made resident, and walking the store to discover that froze the main actor
+    /// for seconds on one debounced keystroke. Unreachable is a user-visible state —
+    /// `currentMatchUnreachable` drives the search bar's caption — not a bare return.
     private func scrollToCurrentMatch(proxy: ScrollViewProxy) {
         guard let targetID = searchViewModel.currentMatchMessageID else { return }
 
         if chatHistoryViewModel.currentChatMessages.contains(where: { $0.id == targetID }) {
+            searchViewModel.currentMatchUnreachable = false
             withAnimation(motionSafe(.easeInOut(duration: 0.3))) {
                 proxy.scrollTo(targetID, anchor: .center)
             }
             return
         }
 
+        guard chatHistoryViewModel.isMatchReachable(messageID: targetID) else {
+            searchViewModel.currentMatchUnreachable = true
+            logger.info("[SEARCH] Match \(targetID.uuidString.prefix(8)) is past the resident window's cap — no page-in attempted; the search bar shows it as older than the loaded history.")
+            return
+        }
+
         Task {
             let reachable = await chatHistoryViewModel.ensureMessageIsResident(targetID)
-            guard reachable else { return }
+            // The user may have moved on (Next/Previous, a query edit) while pages loaded;
+            // a stale attempt must neither scroll away from nor relabel the CURRENT match.
+            guard searchViewModel.currentMatchMessageID == targetID else { return }
+            guard reachable else {
+                searchViewModel.currentMatchUnreachable = true
+                return
+            }
+            searchViewModel.currentMatchUnreachable = false
             // Let the newly-loaded rows lay out before scrolling to one of them.
             await Task.yield()
             withAnimation(motionSafe(.easeInOut(duration: 0.3))) {
@@ -478,6 +586,81 @@ struct ScrollToBottomFAB: View {
 
 // MARK: - Empty Conversation Placeholder
 
+extension ChatHistoryView {
+
+    /// A conversation the user can also answer from somewhere else. Drives the empty-state
+    /// icon and its "reply from …" line, so it has to name the service that copy names.
+    enum RemoteOrigin: Equatable, CaseIterable {
+        case telegram, discord, slack
+
+        /// How the copy refers to the service. Proper nouns — deliberately not localized.
+        var serviceName: String {
+            switch self {
+            case .telegram: return "Telegram"
+            case .discord:  return "Discord"
+            case .slack:    return "Slack"
+            }
+        }
+
+        /// The title the service's bridge stamps on the conversation it creates.
+        ///
+        /// ⚠️ These literals are duplicated from the bridges by necessity — each passes its own
+        /// string to `createConversationForScheduledTask(profileID:title:)` and none of them
+        /// share a constant: `ChatOpsBridge.swift` (Telegram), `DiscordChatOpsBridge.swift`,
+        /// `SlackChatOpsBridge.swift`. A bridge that changes its title silently loses the hint.
+        var bridgeTitle: String {
+            switch self {
+            case .telegram: return "Telegram Chat"
+            case .discord:  return "Discord Chat"
+            case .slack:    return "Slack Chat"
+            }
+        }
+    }
+
+    /// Best-effort origin for a conversation, from the only signal that exists today: the title
+    /// its ChatOps bridge stamped on it at creation.
+    ///
+    /// ⚠️ A HEURISTIC, knowingly. `userDefinedTitle` is user-editable, so renaming a Telegram
+    /// conversation drops the hint and naming a local one "Discord Chat" fakes it. It is only
+    /// ever consulted for decoration on an EMPTY conversation — an icon and a line of guidance —
+    /// so a wrong answer costs one misleading sentence and nothing else. It must never gate an
+    /// action. The real fix is a persisted origin on `ConversationSD`; until then this at least
+    /// covers all three bridges rather than only Telegram (CF-39).
+    nonisolated static func remoteOrigin(forConversationTitle title: String?) -> RemoteOrigin? {
+        guard let title else { return nil }
+        return RemoteOrigin.allCases.first { $0.bridgeTitle == title }
+    }
+
+    /// The origin to show: the one the bridge RECORDED at creation, falling back to the title
+    /// guess above.
+    ///
+    /// ⚠️ The recorded answer is authoritative and survives a rename, which is the half the title
+    /// heuristic cannot do. The fallback is kept ONLY for conversations created before origins
+    /// were recorded — dropping it would silently degrade every existing remote conversation to
+    /// the local hint. It carries the heuristic's false positive with it (a local conversation
+    /// the user names "Discord Chat"), unchanged from before and still costing one sentence.
+    nonisolated static func remoteOrigin(forConversationID id: UUID?, title: String?) -> RemoteOrigin? {
+        if let id, let recorded = RemoteConversationOriginStore.origin(for: id) {
+            switch recorded {
+            case .telegram: return .telegram
+            case .discord:  return .discord
+            case .slack:    return .slack
+            }
+        }
+        return remoteOrigin(forConversationTitle: title)
+    }
+
+    /// The guidance line under the title. Names the service the icon promises instead of telling
+    /// every remote user their conversation came from Telegram (CF-39), and says "reply from
+    /// <service>" rather than "reply from your phone" — Slack ChatOps is not a phone.
+    nonisolated static func placeholderSubtitle(for origin: RemoteOrigin?) -> String {
+        guard let origin else {
+            return String(localized: "Start the conversation by typing a message below.")
+        }
+        return String(localized: "This conversation was started from \(origin.serviceName).\nType here or reply from \(origin.serviceName).")
+    }
+}
+
 /// Shown when a conversation is selected but has no messages yet.
 /// Provides contextual guidance so the user knows the conversation is ready for input.
 private struct EmptyConversationPlaceholder: View {
@@ -485,43 +668,55 @@ private struct EmptyConversationPlaceholder: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(MainApplicationViewModel.self) private var mainAppViewModel
 
-    /// Whether this conversation was created from a remote source (Telegram, Discord).
-    private var isRemoteConversation: Bool {
-        guard let convID = mainAppViewModel.selectedConversationID,
-              let entity = mainAppViewModel.persistenceService.getConversation(withId: convID) else { return false }
-        return entity.userDefinedTitle == "Telegram Chat"
+    /// Everything the placeholder needs out of the store — resolved by ONE fetch.
+    private struct Resolved {
+        let title: String
+        let origin: ChatHistoryView.RemoteOrigin?
     }
 
-    private var conversationTitle: String {
-        guard let convID = mainAppViewModel.selectedConversationID,
-              let entity = mainAppViewModel.persistenceService.getConversation(withId: convID),
-              let title = entity.userDefinedTitle, !title.isEmpty else { return String(localized: "New Conversation") }
-        return title
+    /// ⚠️ Read exactly once per body pass (see `body`), never from a nested view.
+    /// `getConversation(withId:)` is a synchronous main-actor SwiftData fetch, and the previous
+    /// shape ran one per property ACCESS — three per body pass for the same entity (CF-39).
+    private var resolved: Resolved {
+        let fallbackTitle = String(localized: "New Conversation")
+        guard let convID = mainAppViewModel.selectedConversationID else {
+            return Resolved(title: fallbackTitle, origin: nil)
+        }
+        guard let entity = mainAppViewModel.persistenceService.getConversation(withId: convID) else {
+            // [CF-39] The origin recording is keyed by conversation id, not by the store row, so
+            // it still answers here. Only the TITLE is lost when the row is missing.
+            let recorded = ChatHistoryView.remoteOrigin(forConversationID: convID, title: nil)
+            logger.debug("[PLACEHOLDER] Conversation \(convID.uuidString.prefix(8)) is selected but absent from the store. CONSEQUENCE: the empty state falls back to the generic title; its origin hint \(recorded == nil ? "is unavailable too" : "still resolves from the recorded provenance").")
+            return Resolved(title: fallbackTitle, origin: recorded)
+        }
+        let storedTitle: String? = entity.userDefinedTitle.flatMap { $0.isEmpty ? nil : $0 }
+        return Resolved(
+            title: storedTitle ?? fallbackTitle,
+            origin: ChatHistoryView.remoteOrigin(forConversationID: convID, title: storedTitle)
+        )
     }
 
     var body: some View {
+        let resolved = self.resolved
         VStack(spacing: 20) {
             Spacer()
 
             // Icon
-            Image(systemName: isRemoteConversation ? "paperplane.circle" : "bubble.left.and.text.bubble.right")
+            Image(systemName: resolved.origin == nil ? "bubble.left.and.text.bubble.right" : "paperplane.circle")
                 .font(.system(size: 40, weight: .thin)) // Fixed size: intentional (icon)
                 .foregroundStyle(theme.secondaryText.opacity(0.5))
 
             // Title
-            Text(conversationTitle)
+            Text(resolved.title)
                 .font(.system(.title3, weight: .semibold))
                 .foregroundStyle(theme.primaryText.opacity(0.8))
 
             // Subtitle / guidance
-            Text(isRemoteConversation
-                 ? "This conversation was started from Telegram.\nType here or reply from your phone."
-                 : "Start the conversation by typing a message below."
-            )
-            .font(theme.fontSubheadline)
-            .foregroundStyle(theme.secondaryText.opacity(0.6))
-            .multilineTextAlignment(.center)
-            .lineSpacing(4)
+            Text(ChatHistoryView.placeholderSubtitle(for: resolved.origin))
+                .font(theme.fontSubheadline)
+                .foregroundStyle(theme.secondaryText.opacity(0.6))
+                .multilineTextAlignment(.center)
+                .lineSpacing(4)
 
             // Quick hints
             VStack(spacing: 8) {

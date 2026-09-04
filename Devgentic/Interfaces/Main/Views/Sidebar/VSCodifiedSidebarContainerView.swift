@@ -103,9 +103,9 @@ struct VSCodifiedSidebarContainerView: View {
                     .strokeBorder(
                         LinearGradient(
                             colors: [
-                                Color.white.opacity(0.18),
-                                theme.secondaryText.opacity(0.15),
-                                theme.accentColor.opacity(0.2)
+                                theme.isDark ? Color.white.opacity(0.18) : theme.dividerColor,
+                                theme.dividerColor.opacity(0.6),
+                                theme.accentColor.opacity(0.25)
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing

@@ -134,9 +134,10 @@ final class WorkflowCanvasRunOverlayTests: XCTestCase {
     }
 
     /// The rule reads the CONTRACT, not a hardcoded case list: every reason that kills the subtree
-    /// must still draw dead. Guards a future skip reason from silently inheriting pass-through.
+    /// AND decided the branch must still draw dead. Guards a future skip reason from silently
+    /// inheriting pass-through.
     func testEveryNonPassThroughReasonStillKillsTheEdge() {
-        for reason in NodeSkipReason.allCases where !reason.keepsDownstreamAlive {
+        for reason in NodeSkipReason.allCases where !reason.keepsDownstreamAlive && reason.decidedTheBranch {
             let skipped = UUID(), downstream = UUID()
             let o = overlay([
                 result(.skipped(reason), nodeID: skipped, name: "Middle"),
@@ -144,6 +145,48 @@ final class WorkflowCanvasRunOverlayTests: XCTestCase {
             ])
             XCTAssertEqual(o?.edgeState(from: skipped, to: downstream), .notTaken,
                            "\(reason) kills the subtree below it")
+        }
+    }
+
+    /// ⚠️ The counter-case, and the reason `decidedTheBranch` exists. `testUnknownEndpointIsUndetermined`
+    /// below pins that a never-reached node leaves its edges neutral — but it does so with a node that
+    /// has NO snapshot, and CF-29 started synthesizing `.skipped(.notReached)` rows for exactly those
+    /// nodes so a stopped run still shows its pipeline. That re-entered this method through a different
+    /// door and painted every edge below the stop "this branch was not taken". Same invariant, new shape.
+    func testNotReachedEndpointIsUndeterminedNotNotTaken() {
+        let stoppedBefore = UUID(), downstream = UUID()
+        let o = overlay([
+            result(.completed, nodeID: UUID(), name: "Ran"),
+            result(.skipped(.notReached), nodeID: stoppedBefore, name: "Never got here"),
+            result(.skipped(.notReached), nodeID: downstream, name: "Nor here")
+        ])
+        XCTAssertEqual(o?.edgeState(from: stoppedBefore, to: downstream), .undetermined,
+                       "the run ended before these nodes — nothing decided their branch")
+    }
+
+    /// And the distinction is real: a router arm that WAS refused still reads as refused.
+    func testNotChosenEndpointStillReadsAsNotTaken() {
+        let refused = UUID(), downstream = UUID()
+        // ⚠️ The downstream node must be one that CANNOT kill the edge on its own, or the OR in
+        // `edgeState` returns `.notTaken` from the target term and this proves nothing about
+        // `.notChosen`. `.completed` is the only status with no independent claim.
+        let o = overlay([
+            result(.skipped(.notChosen), nodeID: refused, name: "Other arm"),
+            result(.completed, nodeID: downstream, name: "Below it")
+        ])
+        XCTAssertEqual(o?.edgeState(from: refused, to: downstream), .notTaken,
+                       "the Router genuinely went the other way")
+    }
+
+    /// ⚠️ The per-case contract, mirroring `testKeepsDownstreamAliveIsByUserAndNothingElse`.
+    /// Without it the loop test above is SELF-REFERENTIAL: it filters on `decidedTheBranch` and
+    /// then asserts the behaviour that property drives, so a reason wrongly answering `false` is
+    /// silently skipped rather than caught. This test reads the answer directly, case by case,
+    /// and a new skip reason must state its own.
+    func testDecidedTheBranchIsNotReachedAndNothingElse() {
+        for reason in NodeSkipReason.allCases {
+            XCTAssertEqual(reason.decidedTheBranch, reason != .notReached,
+                           "\(reason): only `.notReached` means the run never decided this branch")
         }
     }
 

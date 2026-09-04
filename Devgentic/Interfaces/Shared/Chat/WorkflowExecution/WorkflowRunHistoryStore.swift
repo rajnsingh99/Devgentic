@@ -57,8 +57,23 @@ final class WorkflowRunHistoryStore {
 
     // MARK: - Public API (matches the old UserDefaults-backed signature)
 
-    /// Loads all run records for a conversation, newest first. Returns `[]` on
-    /// miss (no records, no container, or fetch failure).
+    /// Loads all run records for a conversation, newest first, decoding SYNCHRONOUSLY on the main
+    /// actor. Returns `[]` on miss (no records, no container, or fetch failure).
+    ///
+    /// ⚠️ **TEST-ONLY. Production reads `loadFinalized` (a list) or `loadRecord` (one run).** Every
+    /// remaining caller is in `DevgenticTests`, which wants a synchronous read; keeping it is
+    /// cheaper than making twenty assertions `async` for no coverage gained. It is documented here
+    /// rather than deleted so nobody reintroduces a main-actor decode by reaching for the file's
+    /// first, most public-looking method.
+    ///
+    /// ⚠️ [CF-34] It decodes each row's `rowSnapshot` DIRECTLY. It used to read a
+    /// `WorkflowRunRecordSD.record` accessor that cached its decode into the row's
+    /// `_cachedRecord`, re-parking exactly the full-record residency XUI-14 removed from
+    /// `apply`/`init` — and from a test helper at that. Rerouting here left that accessor with
+    /// no callers and CF-34 DELETED it outright; this is now the only shape. Same bytes, same
+    /// decoder (`decodeRecord(from:)`, which `loadFinalized` and `loadRecord` also use). The decode stays on this
+    /// actor because the callers are synchronous — that is the reason this is not the production
+    /// path, not an oversight.
     func load(forConversation conversationID: UUID) -> [WorkflowRunRecord] {
         guard let context = mainContext else {
             logger.error("load(forConversation:) called before container was configured — returning [].")
@@ -72,7 +87,8 @@ final class WorkflowRunHistoryStore {
         )
 
         do {
-            return try context.fetch(descriptor).map(\.record)
+            return try context.fetch(descriptor)
+                .map { WorkflowRunRecordSD.decodeRecord(from: $0.rowSnapshot) }
         } catch {
             logger.error("Failed to fetch run history for \(conversationID): \(error.localizedDescription)")
             return []

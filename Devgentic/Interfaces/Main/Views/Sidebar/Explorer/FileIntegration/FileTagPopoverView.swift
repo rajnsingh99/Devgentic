@@ -52,26 +52,29 @@ struct FileTagPopoverView: View {
         }
     }
 
+    @Environment(\.appTheme) private var theme
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Image(systemName: fileItem.iconName)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
                     .accessibilityHidden(true)
                 Text(fileItem.name)
-                    .font(.headline)
+                    .font(theme.fontHeadline)
+                    .foregroundColor(theme.primaryText)
                 Spacer()
                 Button(action: dismissAction) {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.gray.opacity(0.7))
+                        .foregroundColor(theme.tertiaryText)
                 }
                 .buttonStyle(PlainButtonStyle())
                 .accessibilityLabel("Close")
             }
 
             Text("Path: \(fileItem.url.path)")
-                .font(.caption)
-                .foregroundColor(.secondary)
+                .font(theme.fontCaption)
+                .foregroundColor(theme.secondaryText)
                 .lineLimit(1)
                 .truncationMode(.middle)
             
@@ -89,7 +92,7 @@ struct FileTagPopoverView: View {
                         Image(systemName: fullPathCopied ? "checkmark.circle.fill" : "doc.on.doc")
                         Text(fullPathCopied ? "Path Copied!" : "Copy Path")
                     }
-                    .foregroundColor(fullPathCopied ? .green : .accentColor)
+                    .foregroundColor(fullPathCopied ? theme.successColor : theme.accentColor)
                 }
                 .buttonStyle(.bordered)
                 
@@ -100,17 +103,20 @@ struct FileTagPopoverView: View {
             }
             
             Divider()
+                .overlay(theme.dividerColor)
 
             if let preview = contentPreview {
                 Text("Content Preview:")
-                    .font(.caption.weight(.semibold))
+                    .font(theme.fontCaption.weight(.semibold))
+                    .foregroundColor(theme.primaryText)
                 ScrollView {
                     Text(preview)
-                        .font(.system(.caption, design: .monospaced))
+                        .font(theme.fontCodeCaption)
+                        .foregroundColor(theme.primaryText)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(5)
-                        .background(Color.gray.opacity(0.1))
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .padding(8)
+                        .background(theme.surfaceOverlay)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
                 }
                 .frame(maxHeight: 150)
             } else if isLoadingPreview {
@@ -118,15 +124,16 @@ struct FileTagPopoverView: View {
                     ProgressView()
                         .controlSize(.small)
                     Text("Loading preview...")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                        .font(theme.fontCaption)
+                        .foregroundColor(theme.secondaryText)
                 }
             } else if let error = previewError {
                  Text("Preview Error:")
-                    .font(.caption.weight(.semibold))
+                    .font(theme.fontCaption.weight(.semibold))
+                    .foregroundColor(theme.errorColor)
                  Text(error)
-                    .font(.caption)
-                    .foregroundColor(.red)
+                    .font(theme.fontCaption)
+                    .foregroundColor(theme.errorColor)
             } else {
                 Button("Show Content Preview") {
                     loadContentPreview()
@@ -134,6 +141,7 @@ struct FileTagPopoverView: View {
             }
         }
         .padding()
+        .background(theme.secondaryBackground)
         .frame(minWidth: 300, idealWidth: 350, maxWidth: 450)
         .onAppear(perform: loadContentPreview)
     }

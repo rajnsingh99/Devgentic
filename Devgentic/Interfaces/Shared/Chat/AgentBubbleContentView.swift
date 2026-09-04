@@ -208,7 +208,16 @@ struct AgentBubbleContentView: View, Equatable {
 
         case .error(let title, let details, let category, let suggestion):
             VStack(alignment: .leading, spacing: 8) {
-                ErrorMessageView(title: title, details: details, category: category, suggestion: suggestion)
+                // [CF-40] An identity-bearing announcement key, so VoiceOver speaks a RETRY that
+                // failed the same way instead of suppressing it as a repeat. Keyed on the message
+                // plus `generationAttempts`, which `beginRegenerationVariant` increments on every
+                // Retry — the same shape `MediaArtifactImageView` uses with its `loadAttempt`.
+                // Without it this card falls back to the error SENTENCE, and two identical failures
+                // five seconds apart are indistinguishable from the same card being rebuilt.
+                ErrorMessageView(
+                    title: title, details: details, category: category, suggestion: suggestion,
+                    announcementKey: "agent-error-\(message.id.uuidString)#\(message.agentResponse?.generationAttempts ?? 1)"
+                )
 
                 // P1: Retry button for failed agent responses
                 RetryMessageButton(
@@ -216,8 +225,16 @@ struct AgentBubbleContentView: View, Equatable {
                     refusal: mainAppViewModel.regenerationRefusal(for: message)
                 )
             }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Error: \(title ?? "Unknown"). \(details)")
+            // [CF-42] `.contain`, not `.combine`. `.combine` merged the card and its Retry into
+            // ONE element, and the `.accessibilityLabel` that followed then REPLACED the merged
+            // label outright — so the two things a screen-reader user needs here never arrived:
+            // `RetryMessageButton`'s refusal reason ("This message has reached its limit of 3
+            // attempts."), and `ErrorMessageView`'s `suggestion` line. Both children already
+            // label themselves correctly, and the ASM-2 Retry above sits under the body's own
+            // `.contain` and has always worked; this makes the error path match it. The hand-
+            // written label is gone rather than extended: it was a lossy duplicate of
+            // `ErrorMessageView.spokenDescription`, free to drift from it.
+            .accessibilityElement(children: .contain)
 
         // NB there is no `.image` case any more (removed 2026-07-17): MediaArtifact is the
         // single image representation. Legacy persisted "image" messages convert at decode

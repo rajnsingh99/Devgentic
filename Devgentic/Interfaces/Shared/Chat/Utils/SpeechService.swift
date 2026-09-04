@@ -42,6 +42,44 @@ struct VoiceInfo: Identifiable, Hashable {
     let locale: String
 }
 
+// MARK: - Stamped Utterance
+
+/// An `AVSpeechUtterance` that remembers WHICH `speakUtterance` call created it.
+///
+/// ⚠️ MEASURED on macOS 26 (Darwin 25.5), a real `AVSpeechSynthesizer` with a full delegate:
+/// `stopSpeaking(at:)` delivers **`didFinish`** for the utterance it cancels — `didCancel` was
+/// never delivered in any probe, including for a paused synthesizer. Every site here that stops
+/// the synthesizer (`skipForward`, `skipBackward`, `restartCurrentUtterance`) then decides what
+/// plays next itself, so that completion for the DISCARDED utterance would advance the playlist
+/// a second time: one Skip Forward press would play two segments back to back.
+///
+/// AVFoundation hands the very same object back to each delegate callback (probed), so the stamp
+/// travels with the callback and is what tells "the utterance we are still playing" from "an
+/// utterance a skip or a restart already threw away". Only the `Int` crosses the actor hop.
+private final class StampedUtterance: AVSpeechUtterance {
+    /// `SpeechService.utteranceGeneration` at the moment this utterance was handed over.
+    ///
+    /// ⚠️ OPTIONAL, and `nil` on the decode path on purpose. The completion guard fails OPEN
+    /// only on `nil`; any concrete value is compared for equality. A sentinel like `0` would
+    /// therefore fail CLOSED — `speakUtterance` pre-increments, so no live utterance is ever
+    /// generation 0 and a decoded one could never match — parking playback forever, which is
+    /// the exact outcome `completionBelongsToInFlightUtterance` documents as the worse failure.
+    let generation: Int?
+
+    init(string: String, generation: Int) {
+        self.generation = generation
+        super.init(string: string)
+    }
+
+    /// Required by `AVSpeechUtterance`'s `NSSecureCoding` conformance. Nothing here is ever
+    /// archived today; if one ever is, it carries no live generation and `nil` routes it to the
+    /// guard's fail-open branch, i.e. exactly the pre-stamp behaviour.
+    required init?(coder: NSCoder) {
+        generation = nil
+        super.init(coder: coder)
+    }
+}
+
 // MARK: - SpeechService
 
 /// A singleton wrapper around AVSpeechSynthesizer that speaks agent responses
@@ -120,6 +158,78 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
     /// Temporarily holds a code block waiting to be opened after the announcement finishes.
     private var pendingCodeBlock: (language: String?, code: String)?
 
+    /// [CF-21] Whether the surface that started this session has a Code Viewer to hand a code
+    /// block to. Set by `speak(_:messageID:canPresentCodeViewer:)`, reset at session end.
+    ///
+    /// The `.speechOpenCodeViewer` hand-off is fire-and-forget: its observer calls
+    /// `showCodeInViewer` on whatever `ChatHistoryViewModel` is in its environment, and
+    /// QuickAccess's is built WITHOUT `ownsCodeViewer`, so nothing opens. The reader still
+    /// announced "Here is the code in the panel view", and with pause-on-code enabled then
+    /// stopped waiting for a user action in a window that mounts no transport controls.
+    ///
+    /// The default is `true` so a caller that doesn't pass the flag keeps main-window behavior.
+    /// `ChatBubbleView.toggleReadAloud` — the only caller, shared by the main window and
+    /// QuickAccess — now passes `chatHistoryViewModel.canPresentCodeViewer`, so QuickAccess's
+    /// view model (built WITHOUT `ownsCodeViewer`) correctly gets `false` and the wrong
+    /// announcement / stuck-waiting-on-a-panel-that-never-appears symptom is gone. QuickAccess
+    /// still mounts no speech island (no play/pause/stop transport UI) — a separate, smaller
+    /// gap left open by CF-21.
+    @ObservationIgnored private var sessionCanPresentCodeViewer: Bool = true
+
+    /// Test seam: the code-viewer capability the current session was started with.
+    var sessionCanPresentCodeViewerForTesting: Bool { sessionCanPresentCodeViewer }
+
+    // MARK: - In-flight utterance tracking [CF-18]
+
+    /// The text of the utterance currently inside the synthesizer, nil when nothing is in
+    /// flight (between segments, during the code-block delay, or idle).
+    ///
+    /// Rate and voice are BAKED INTO an `AVSpeechUtterance` at creation (`makeUtterance`), so a
+    /// setting changed mid-playback never reaches the utterance already queued — and because
+    /// `parseSegments` splits only on ``` fences, a message with no code block is ONE utterance
+    /// for the whole answer. Changing speed or voice therefore did nothing for the common case
+    /// while the island showed the new setting. Knowing what is in flight, and how far into it
+    /// playback has got, lets `setRate`/`setVoice` re-speak the remainder with the new setting.
+    @ObservationIgnored private var currentUtteranceText: String?
+
+    /// UTF-16 offset of the word the synthesizer most recently began speaking, from
+    /// `willSpeakRangeOfSpeechString` — an `NSRange`, hence UTF-16 units and not `Character`s.
+    /// 0 until the first word is reported.
+    @ObservationIgnored private var spokenUpTo: Int = 0
+
+    /// Set when a setting changes while PAUSED. `continueSpeaking()` would resume the old
+    /// utterance with the old setting baked in, so `resumeSpeaking` stops it and re-speaks the
+    /// remainder instead.
+    @ObservationIgnored private var restartOnResume: Bool = false
+
+    /// Bumped every time an utterance is handed to the synthesizer. Test seam: a live-setting
+    /// change that restarts the current utterance is observable as a generation bump.
+    @ObservationIgnored private(set) var utteranceGeneration: Int = 0
+
+    /// The generation of the utterance the service still considers in flight — nil whenever
+    /// nothing is (between segments, during the code-block delay, idle). Set and cleared in
+    /// lockstep with `currentUtteranceText`.
+    ///
+    /// This, not the monotonic counter, is what `handleUtteranceFinished` compares against: a
+    /// completion whose generation is no longer the in-flight one belongs to an utterance a skip
+    /// or a restart discarded, and acting on it double-advances the playlist. Nil-vs-nil never
+    /// matches either, so a SECOND completion for a generation already consumed (the tracking is
+    /// cleared as the first is handled) is ignored too — that is the `.holdAtNextSegment` case,
+    /// where no replacement utterance is spoken to move the counter on.
+    @ObservationIgnored private var activeUtteranceGeneration: Int?
+
+    /// Test seam: generation of the utterance the service believes is in flight.
+    var activeUtteranceGenerationForTesting: Int? { activeUtteranceGeneration }
+
+    /// Test seam: text of the utterance in flight (nil when nothing is queued).
+    var currentUtteranceTextForTesting: String? { currentUtteranceText }
+
+    /// Test seam: UTF-16 offset of the last word boundary the synthesizer reported.
+    var spokenUpToForTesting: Int { spokenUpTo }
+
+    /// Test seam: whether the next `resumeSpeaking` re-speaks with changed settings.
+    var willRestartOnResume: Bool { restartOnResume }
+
     /// Available speed presets.
     static let speedPresets: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 
@@ -150,7 +260,13 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
     // MARK: - Public API
 
     /// Starts segment-based speech for the given raw markdown text.
-    func speak(_ rawText: String, messageID: UUID) {
+    ///
+    /// [CF-21] `canPresentCodeViewer` is the calling surface's answer to "do I have a Code
+    /// Viewer to open into?" — pass `chatHistoryViewModel.canPresentCodeViewer`. When it is
+    /// false the reader says a code block is being SKIPPED instead of promising a panel, posts
+    /// no `.speechOpenCodeViewer`, and never enters the pause-on-code wait. It defaults to true
+    /// so the main window (which does own a viewer) keeps its behaviour unchanged.
+    func speak(_ rawText: String, messageID: UUID, canPresentCodeViewer: Bool = true) {
         stop()
 
         let segments = SpeechService.parseSegments(from: rawText)
@@ -163,6 +279,7 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
         currentSegmentIndex = 1
         isActive = true
         isPaused = false
+        sessionCanPresentCodeViewer = canPresentCodeViewer
 
         logger.info("Started reading aloud message \(messageID.uuidString) (\(segments.count) segments)")
         speakCurrentSegment()
@@ -183,11 +300,13 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
         allSegments.removeAll()
         playbackIndex = 0
         pendingCodeBlock = nil
+        clearUtteranceTracking()
         isActive = false
         isPaused = false
         currentSegmentIndex = 0
         totalSegmentCount = 0
         currentMessageID = nil
+        sessionCanPresentCodeViewer = true
 
         if let id = previousID {
             logger.info("Stopped reading aloud message \(id.uuidString)")
@@ -197,12 +316,24 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
         releaseSynthesizer(reason: "stop")
     }
 
+    /// [CF-18] Forgets the in-flight utterance. Called wherever the utterance the tracking
+    /// describes is no longer the one in the synthesizer (finish, stop, skip, session end) —
+    /// a stale text here would make a later setting change re-speak the WRONG segment.
+    private func clearUtteranceTracking() {
+        currentUtteranceText = nil
+        activeUtteranceGeneration = nil
+        spokenUpTo = 0
+        restartOnResume = false
+    }
+
     /// Pauses speech at the next word boundary.
     func pauseSpeaking() {
         guard isActive, !isPaused else { return }
         synthesizer?.pauseSpeaking(at: .word)
         isPaused = true
-        logger.info("Paused speech")
+        // [CF-22] The request is honoured at the NEXT word boundary, so `isPaused` runs ahead
+        // of the synthesizer here. `didPause` logs when (or whether) it actually landed.
+        logger.info("[SPEECH] Pause requested at the next word boundary (message \(self.messageIDPrefix), segment \(self.currentSegmentIndex) of \(self.totalSegmentCount)).")
     }
 
     /// Resumes paused speech.
@@ -210,12 +341,33 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
         guard isActive, isPaused else { return }
         isPaused = false
 
-        if synthesizer?.isPaused == true {
+        if restartOnResume, currentUtteranceText != nil {
+            // [CF-18] Speed or voice changed while paused. `continueSpeaking()` would resume the
+            // utterance already in the synthesizer, with the OLD setting baked in — so drop it
+            // and re-speak from the last word boundary with the new one.
+            restartOnResume = false
+            restartCurrentUtterance(reason: "resume after a settings change while paused")
+        } else if currentUtteranceText != nil, synthesizer?.isPaused == true || synthesizer?.isSpeaking == true {
+            // ⚠️ `isPaused == true` is NOT sufficient, and testing it alone was PERMANENT SILENCE.
+            // MEASURED on macOS 26: `pauseSpeaking(at: .word)` returns true but leaves `isPaused`
+            // FALSE until the word boundary actually lands — so a Play pressed within that window
+            // (a user changing their mind, ~300ms) fell through to `speakCurrentSegment()` and
+            // queued a second utterance BEHIND an utterance that was about to pause. The
+            // synthesizer then paused and the queued one never started: probe recorded
+            // `isPaused=true, isSpeaking=true`, events `[start, pause]`, and no completion ever —
+            // a dead-silent reader under a Playing transport, escapable only by Stop or Skip.
+            // `isSpeaking` is what covers the pause-pending window; `continueSpeaking()` is
+            // harmless when the pause has not landed yet.
             synthesizer?.continueSpeaking()
         } else {
+            // [CF-22] `currentUtteranceText` leads here. When an utterance FINISHED while the
+            // pause was still pending at a word boundary, `handleUtteranceFinished` cleared the
+            // tracking and left the playlist parked on the next segment — but whether the
+            // synthesizer also drops its paused flag when its queue drains is undocumented, and
+            // a `continueSpeaking()` with nothing queued resumes silence for good.
             speakCurrentSegment()
         }
-        logger.info("Resumed speech")
+        logger.info("[SPEECH] Resumed (message \(self.messageIDPrefix), segment \(self.currentSegmentIndex) of \(self.totalSegmentCount)).")
     }
 
     /// Toggles between paused and speaking states.
@@ -235,6 +387,7 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
             synthesizer.stopSpeaking(at: .immediate)
         }
         pendingCodeBlock = nil
+        clearUtteranceTracking()
         isPaused = false
 
         playbackIndex += 1
@@ -254,6 +407,7 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
             synthesizer.stopSpeaking(at: .immediate)
         }
         pendingCodeBlock = nil
+        clearUtteranceTracking()
         isPaused = false
 
         if playbackIndex > 0 {
@@ -263,18 +417,95 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
         speakCurrentSegment()
     }
 
-    /// Sets the speech rate multiplier and persists it.
+    /// Sets the speech rate multiplier and persists it. [CF-18] Also applies it to the
+    /// utterance in flight — a setting that only reached the NEXT segment did nothing for a
+    /// message with no code block, which is one segment.
     func setRate(_ rate: Float) {
         currentRate = rate
         UserDefaults.standard.set(rate, forKey: AppSettings.speechPlaybackRateKey)
-        logger.info("Speech rate set to \(rate)×")
+        logger.info("[SPEECH] Speech rate set to \(rate)× (message \(self.messageIDPrefix))")
+        applySettingToCurrentUtterance(setting: "rate \(rate)×")
     }
 
-    /// Sets the voice and persists it.
+    /// Sets the voice and persists it. [CF-18] Also applies it to the utterance in flight.
     func setVoice(_ voiceID: String) {
         selectedVoice = voiceID
         UserDefaults.standard.set(voiceID, forKey: AppSettings.speechPlaybackVoiceKey)
-        logger.info("Speech voice set to \(voiceID)")
+        logger.info("[SPEECH] Speech voice set to \(voiceID) (message \(self.messageIDPrefix))")
+        applySettingToCurrentUtterance(setting: "voice \(voiceID)")
+    }
+
+    /// Correlation id for [SPEECH] log lines — "idle" when no message is being read.
+    private var messageIDPrefix: String {
+        currentMessageID.map { String($0.uuidString.prefix(8)) } ?? "idle"
+    }
+
+    /// [CF-18] Makes a just-changed rate or voice audible NOW rather than at the next segment.
+    ///
+    /// Three cases:
+    ///   - Speaking: stop the utterance and re-speak its remainder with the new setting.
+    ///   - Paused: flag it; `resumeSpeaking` re-speaks the remainder instead of continuing.
+    ///   - Active but nothing in flight (the 1s code-block delay, or a paused-on-code stop after
+    ///     the announcement finished): nothing to restart — the next segment is created with the
+    ///     new setting by `makeUtterance`, so it is already covered.
+    private func applySettingToCurrentUtterance(setting: String) {
+        guard isActive, currentUtteranceText != nil else {
+            logger.debug("[SPEECH] \(setting) — no utterance in flight (message \(self.messageIDPrefix)); the next utterance picks it up.")
+            return
+        }
+
+        if isPaused {
+            restartOnResume = true
+            logger.info("[SPEECH] \(setting) noted while paused (message \(self.messageIDPrefix)) — resume will re-speak from the current word with the new setting.")
+            return
+        }
+
+        // Our own tracking says something is in flight, but trust the synthesizer for the
+        // restart itself: in the gap between the synthesizer finishing an utterance and
+        // `didFinish` hopping to the main actor, a restart would queue a stray remainder
+        // BEHIND the next segment and then advance the playlist twice when it finished.
+        guard let synthesizer, synthesizer.isSpeaking else {
+            logger.info("[SPEECH] \(setting) — synthesizer reports nothing speaking (message \(self.messageIDPrefix)); not restarting, the next utterance picks it up.")
+            return
+        }
+
+        restartCurrentUtterance(reason: setting)
+    }
+
+    /// [CF-18] Cancels the utterance in the synthesizer and speaks what was left of it, from
+    /// the last word boundary `willSpeakRangeOfSpeechString` reported, with the CURRENT rate
+    /// and voice. `pendingCodeBlock` and the playlist indices are untouched, so a restarted
+    /// announcement still opens its code block when the remainder finishes.
+    private func restartCurrentUtterance(reason: String) {
+        guard let text = currentUtteranceText else { return }
+        let remainder = Self.remainder(of: text, spokenUpTo: spokenUpTo)
+        let offset = spokenUpTo
+
+        // ⚠️ `stopSpeaking(at:)` delivers `didFinish` for the utterance it cancels (measured —
+        // see `StampedUtterance`; the previous comment here asserted the opposite). That stray
+        // completion is discarded by the generation guard in `handleUtteranceFinished`, because
+        // both branches below leave a DIFFERENT generation in flight than the one being stopped.
+        if let synthesizer, synthesizer.isSpeaking {
+            synthesizer.stopSpeaking(at: .immediate)
+        }
+
+        guard !remainder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            // The change landed on the final word. Nothing is left to say, and the cancelled
+            // utterance's own `didFinish` is about to be discarded as stale, so advance the
+            // playlist here exactly as it would have — otherwise playback hangs on this segment.
+            logger.info("[SPEECH] \(reason): nothing left of the current utterance after offset \(offset) (message \(self.messageIDPrefix)) — advancing as if it had finished.")
+            handleUtteranceFinished()
+            return
+        }
+
+        logger.info("[SPEECH] \(reason): re-speaking the current utterance from UTF-16 offset \(offset) of \(text.utf16.count) (message \(self.messageIDPrefix)).")
+        speakUtterance(remainder)
+
+        // Stopping a PAUSED synthesizer is documented to clear its queue; whether it also clears
+        // the paused flag is not, so make sure the fresh utterance is not sitting paused.
+        if let synthesizer, synthesizer.isPaused {
+            synthesizer.continueSpeaking()
+        }
     }
 
     /// Toggles the pause-on-code preference and persists it.
@@ -319,21 +550,62 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
                 currentSegmentIndex = playbackIndex + 1
                 speakCurrentSegment()
             } else {
-                let utterance = makeUtterance(text)
-                ensureSynthesizer().speak(utterance)
+                speakUtterance(text)
             }
 
         case .codeBlock(let language, let code):
-            let announcement = "Here is the code in the panel view."
+            // [CF-21] Only take on the code-viewer hand-off when this session's surface has a
+            // viewer. Without one, `pendingCodeBlock` would post a notification nobody acts on,
+            // and — with pause-on-code enabled — hold playback for a resume the user has no
+            // transport to press.
+            guard sessionCanPresentCodeViewer else {
+                logger.info("[SPEECH] Code block (\(language ?? "unlabelled"), \(code.count) chars) SKIPPED for message \(self.messageIDPrefix) — this surface has no Code Viewer to open it in. CONSEQUENCE: the listener is told the block is being skipped instead of being promised a panel, and playback continues to the next segment.")
+                speakUtterance(Self.codeBlockAnnouncement(canPresentCodeViewer: false, language: language))
+                return
+            }
             pendingCodeBlock = (language: language, code: code)
-            let utterance = makeUtterance(announcement)
-            ensureSynthesizer().speak(utterance)
+            speakUtterance(Self.codeBlockAnnouncement(canPresentCodeViewer: true, language: language))
         }
     }
 
-    /// Creates an AVSpeechUtterance with current rate and voice settings.
-    private func makeUtterance(_ text: String) -> AVSpeechUtterance {
-        let utterance = AVSpeechUtterance(string: text)
+    /// [CF-21] What the reader says when it reaches a code block.
+    ///
+    /// The panel sentence is a PROMISE, and it was made unconditionally. Where no Code Viewer
+    /// can be presented (QuickAccess), naming the block and moving on is the honest version —
+    /// and it is what lets `speakCurrentSegment` skip the hand-off without the listener losing
+    /// track of the response's structure.
+    nonisolated static func codeBlockAnnouncement(canPresentCodeViewer: Bool, language: String?) -> String {
+        if canPresentCodeViewer {
+            return "Here is the code in the panel view."
+        }
+        guard let language, !language.trimmingCharacters(in: .whitespaces).isEmpty else {
+            return String(localized: "Skipping a code block. There is no code panel in this window.")
+        }
+        return String(localized: "Skipping a \(language) code block. There is no code panel in this window.")
+    }
+
+    /// [CF-18] The ONE path that hands an utterance to the synthesizer, so the service always
+    /// knows what is in flight. Bypassing this for a `speak` call would leave a setting change
+    /// unable to find (and re-speak) that utterance.
+    private func speakUtterance(_ text: String) {
+        utteranceGeneration &+= 1
+        let utterance = makeUtterance(text, generation: utteranceGeneration)
+        currentUtteranceText = text
+        activeUtteranceGeneration = utteranceGeneration
+        spokenUpTo = 0
+        restartOnResume = false
+        ensureSynthesizer().speak(utterance)
+    }
+
+    /// Creates an AVSpeechUtterance with current rate and voice settings, stamped with the
+    /// generation that lets a completion for it be told apart from a completion for an utterance
+    /// a skip or a restart discarded (see `StampedUtterance`).
+    ///
+    /// ⚠️ Rate and voice are fixed on the utterance from here on — AVFoundation offers no way to
+    /// change them for an utterance already queued. That is why a live change must go through
+    /// `restartCurrentUtterance` rather than "just apply".
+    private func makeUtterance(_ text: String, generation: Int) -> AVSpeechUtterance {
+        let utterance = StampedUtterance(string: text, generation: generation)
         utterance.rate = avRate(for: currentRate)
 
         if let voiceID = selectedVoice,
@@ -344,17 +616,35 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
         return utterance
     }
 
+    /// [CF-18] The part of `text` not yet spoken, given the UTF-16 offset of the last word the
+    /// synthesizer reported via `willSpeakRangeOfSpeechString`. Re-speaking from the START of
+    /// that word repeats one word rather than dropping one, which is the better of the two.
+    ///
+    /// Pure and clamped: 0 (or negative) returns the whole text — no word has been reported
+    /// yet — and an offset at or past the end returns "". The offset is UTF-16 because the
+    /// synthesizer hands over an `NSRange`; `String.Index(utf16Offset:in:)` maps it onto the
+    /// Swift string, and a slice at that index rounds down to a scalar boundary rather than
+    /// splitting a surrogate pair.
+    nonisolated static func remainder(of text: String, spokenUpTo utf16Offset: Int) -> String {
+        guard utf16Offset > 0 else { return text }
+        guard utf16Offset < text.utf16.count else { return "" }
+        let index = String.Index(utf16Offset: utf16Offset, in: text)
+        return String(text[index...])
+    }
+
     private func finishPlayback() {
         let messageID = currentMessageID
 
         allSegments.removeAll()
         playbackIndex = 0
         pendingCodeBlock = nil
+        clearUtteranceTracking()
         isActive = false
         isPaused = false
         currentSegmentIndex = 0
         totalSegmentCount = 0
         currentMessageID = nil
+        sessionCanPresentCodeViewer = true
 
         if let id = messageID {
             NotificationCenter.default.post(name: .speechDidFinish, object: id)
@@ -365,57 +655,211 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
 
     // MARK: - AVSpeechSynthesizerDelegate
 
+    /// ⚠️ This fires for a CANCELLED utterance too — `stopSpeaking(at:)` delivers `didFinish`,
+    /// not `didCancel`, on macOS (measured; see `StampedUtterance`). The generation stamp is
+    /// what keeps a skip or a live-settings restart from being read as "that segment ended".
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        let generation = (utterance as? StampedUtterance)?.generation ?? nil
         Task { @MainActor [weak self] in
-            self?.handleUtteranceFinished()
+            self?.handleUtteranceFinished(generation: generation)
         }
     }
 
+    /// [CF-18] Position tracking. Delivered once per word (the range about to be spoken);
+    /// hops to the main actor like `didFinish` because that is where the state lives. Only
+    /// the range's location and the utterance's text cross the hop — both `Sendable`.
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
+                                       willSpeakRangeOfSpeechString characterRange: NSRange,
+                                       utterance: AVSpeechUtterance) {
+        let location = characterRange.location
+        let text = utterance.speechString
+        Task { @MainActor [weak self] in
+            self?.handleWillSpeakRange(location: location, text: text)
+        }
+    }
+
+    /// Deliberately a no-op — and, on macOS, never called.
+    ///
+    /// ⚠️ This used to be documented as THE cancellation signal: "`stopSpeaking(at:)` delivers
+    /// `didCancel`, not `didFinish`". That is false here. A probe against a real synthesizer
+    /// (immediate stop, stop-at-word, stop while paused, stop-then-speak-the-next-segment)
+    /// delivered `didFinish` every time and `didCancel` not once. Cancellation is therefore
+    /// recognised by the `StampedUtterance` generation in `handleUtteranceFinished`, not here.
+    /// The method stays as a no-op so a platform or path that DOES deliver it cannot advance
+    /// the playlist behind the call site's back.
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        // Intentionally empty — see the doc comment.
+    }
+
+    /// [CF-22] Records that a `pauseSpeaking(at: .word)` request reached the synthesizer.
+    ///
+    /// ⚠️ It does NOT mean the utterance is being held. Measured: `didPause` fires in BOTH
+    /// outcomes of the CF-22 race — pause at 0.35s into a 0.7s utterance gives `[start, pause]`
+    /// and `isPaused == true`, pause at 0.5s gives `[start, pause, finish]` and `isPaused ==
+    /// false`. The line therefore reports only that the request landed, and names the utterance
+    /// generation so the "[SPEECH] Utterance finished while PAUSED" line that follows in the
+    /// overtaken case is unambiguously about the SAME utterance rather than the next one.
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didPause utterance: AVSpeechUtterance) {
+        let generation = (utterance as? StampedUtterance)?.generation ?? nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            logger.info("[SPEECH] A pause request reached the synthesizer (message \(self.messageIDPrefix), segment \(self.currentSegmentIndex) of \(self.totalSegmentCount), utterance generation \(generation.map(String.init) ?? "unstamped")). CONSEQUENCE: the reader holds inside this segment UNLESS a 'finished while PAUSED' line follows for the same generation — that one means the utterance ended before the word boundary and the playlist parked on the NEXT segment instead.")
+        }
+    }
+
+    /// Records how far into the in-flight utterance playback has got.
+    ///
+    /// Keyed on the utterance TEXT rather than object identity: a range report from an
+    /// utterance that was just cancelled can still be in the main-actor hop when its
+    /// replacement starts, and the text is what tells the two apart. (When a restart happened
+    /// at offset 0 the texts are identical — and then the offset is valid for either.)
+    private func handleWillSpeakRange(location: Int, text: String) {
+        guard isActive, let current = currentUtteranceText, current == text else { return }
+        spokenUpTo = location
+    }
+
+    /// [CF-22] What `handleUtteranceFinished` does when an utterance completes. Extracted so
+    /// the decision can be tested without a live synthesizer, which is the only way to reach it.
+    enum UtteranceCompletionAction: Equatable, Hashable {
+        /// A code block was announced: hand it to the viewer, then WAIT for the user —
+        /// pause-on-code, or a Pause pressed while the announcement was still speaking.
+        case openCodeViewerThenHold
+        /// A code block was announced: hand it to the viewer, then auto-resume after the delay.
+        case openCodeViewerThenAutoResume
+        /// Playback is paused: move to the next segment but start no audio.
+        case holdAtNextSegment
+        /// Speak the next segment now.
+        case speakNextSegment
+        /// The playlist is exhausted.
+        case finish
+    }
+
+    /// The completion table.
+    ///
+    /// `isPaused` is the [CF-22] half, and it was missing entirely: `pauseSpeaking(at: .word)`
+    /// is honoured at the NEXT word boundary, so an utterance that ends before that boundary
+    /// still delivers `didFinish` with `isPaused` already true. Speaking on regardless put live
+    /// audio under a transport showing Play, and the Play the user then pressed found the
+    /// synthesizer un-paused and spoke that same segment a SECOND time (re-opening the viewer
+    /// with it, for a code block).
+    ///
+    /// `hasNextSegment` asks whether a segment exists AFTER the one that just finished.
+    nonisolated static func completionAction(hasPendingCodeBlock: Bool,
+                                             isPaused: Bool,
+                                             pauseOnCode: Bool,
+                                             hasNextSegment: Bool) -> UtteranceCompletionAction {
+        if hasPendingCodeBlock {
+            return (pauseOnCode || isPaused) ? .openCodeViewerThenHold : .openCodeViewerThenAutoResume
+        }
+        guard hasNextSegment else { return .finish }
+        return isPaused ? .holdAtNextSegment : .speakNextSegment
+    }
+
+    /// Whether a delivered completion belongs to the utterance still in flight.
+    ///
+    /// `reported == nil` means the completion did not come from the synthesizer at all — it is
+    /// `restartCurrentUtterance` standing in for a `didFinish` it just made impossible — so it is
+    /// always honoured. It also covers an utterance that somehow reached the delegate without its
+    /// stamp: unknown fails OPEN, to the pre-stamp behaviour, because a completion wrongly
+    /// ignored parks playback forever while one wrongly honoured only skips a segment.
+    ///
+    /// Extracted so the rule is testable without a live synthesizer; `handleUtteranceFinished`
+    /// is its only caller.
+    nonisolated static func completionBelongsToInFlightUtterance(reported: Int?, inFlight: Int?) -> Bool {
+        guard let reported else { return true }
+        return reported == inFlight
+    }
+
     /// Handles utterance completion on the main actor where all state lives.
-    private func handleUtteranceFinished() {
+    ///
+    /// `generation` is the stamp carried by the completing utterance, or nil for the internal
+    /// stand-in call from `restartCurrentUtterance`.
+    private func handleUtteranceFinished(generation: Int? = nil) {
         guard isActive else { return }
 
-        // If there's a pending code block, open it now
-        if let codeBlock = pendingCodeBlock {
-            pendingCodeBlock = nil
-            NotificationCenter.default.post(
-                name: .speechOpenCodeViewer,
-                object: self.currentMessageID,
-                userInfo: [
-                    "language": codeBlock.language as Any,
-                    "code": codeBlock.code
-                ]
-            )
-
-            if pauseOnCode {
-                isPaused = true
-                playbackIndex += 1
-                if playbackIndex < allSegments.count {
-                    currentSegmentIndex = playbackIndex + 1
-                }
-            } else {
-                pendingDelayTask = Task { [weak self] in
-                    guard let self, self.isActive else { return }
-                    try? await Task.sleep(for: .seconds(1.0))
-                    guard !Task.isCancelled, self.isActive else { return }
-                    self.pendingDelayTask = nil
-                    self.playbackIndex += 1
-                    if self.playbackIndex < self.allSegments.count {
-                        self.currentSegmentIndex = self.playbackIndex + 1
-                    }
-                    self.speakCurrentSegment()
-                }
-            }
+        let completedGeneration = activeUtteranceGeneration
+        guard Self.completionBelongsToInFlightUtterance(reported: generation, inFlight: completedGeneration) else {
+            // `stopSpeaking(at:)` reports `didFinish` for the utterance it cancelled (measured —
+            // see `StampedUtterance`), and `skipForward`/`skipBackward`/`restartCurrentUtterance`
+            // have already chosen and started what plays next by the time it arrives.
+            logger.info("[SPEECH] Ignored a completion for utterance generation \(generation.map(String.init) ?? "unstamped") — generation \(completedGeneration.map(String.init) ?? "none") is in flight (message \(self.messageIDPrefix)). CONSEQUENCE: the playlist stays on segment \(self.currentSegmentIndex) of \(self.totalSegmentCount); acting on it would advance a second time and play two segments at once.")
             return
         }
 
-        // Normal text segment finished — advance to next
+        // [CF-18] Whatever comes next is a new utterance; a settings change in the meantime
+        // must not try to re-speak this finished one.
+        clearUtteranceTracking()
+
+        switch Self.completionAction(hasPendingCodeBlock: pendingCodeBlock != nil,
+                                     isPaused: isPaused,
+                                     pauseOnCode: pauseOnCode,
+                                     hasNextSegment: playbackIndex + 1 < allSegments.count) {
+        case .openCodeViewerThenHold:
+            handOffPendingCodeBlock(autoResume: false)
+        case .openCodeViewerThenAutoResume:
+            handOffPendingCodeBlock(autoResume: true)
+        case .holdAtNextSegment:
+            advancePlaybackIndex()
+            logger.info("[SPEECH] Utterance finished while PAUSED (message \(self.messageIDPrefix), utterance generation \(completedGeneration.map(String.init) ?? "none")) — advanced to segment \(self.currentSegmentIndex) of \(self.totalSegmentCount) without speaking it. CONSEQUENCE: playback stays paused as the transport shows; Play speaks this segment once. This is the pause OVERTAKEN by completion — the 'pause request reached the synthesizer' line for the same generation did not hold the utterance.")
+        case .speakNextSegment:
+            advancePlaybackIndex()
+            speakCurrentSegment()
+        case .finish:
+            finishPlayback()
+        }
+    }
+
+    /// Test seam: replays a delegate completion for a given utterance generation, through the
+    /// production handler. The real path needs a live `AVSpeechSynthesizer`, audio output, and a
+    /// race whose whole point is that it lands a few milliseconds AFTER the skip that caused it —
+    /// none of which a test can arrange. Pass the generation a skip left behind to reproduce the
+    /// stale completion; pass the in-flight one for a natural finish.
+    func deliverUtteranceCompletionForTesting(generation: Int?) {
+        handleUtteranceFinished(generation: generation)
+    }
+
+    /// Moves the playlist on by one. `currentSegmentIndex` is display-only (1-based) and is
+    /// left alone past the end so the island doesn't flash "5 of 4" on the way to teardown.
+    private func advancePlaybackIndex() {
         playbackIndex += 1
         if playbackIndex < allSegments.count {
             currentSegmentIndex = playbackIndex + 1
-            speakCurrentSegment()
-        } else {
-            finishPlayback()
+        }
+    }
+
+    /// Posts the announced code block to whoever owns the Code Viewer, then either waits for
+    /// the user (`autoResume: false`) or moves on after a beat.
+    private func handOffPendingCodeBlock(autoResume: Bool) {
+        guard let codeBlock = pendingCodeBlock else { return }
+        pendingCodeBlock = nil
+        NotificationCenter.default.post(
+            name: .speechOpenCodeViewer,
+            object: self.currentMessageID,
+            userInfo: [
+                "language": codeBlock.language as Any,
+                "code": codeBlock.code
+            ]
+        )
+
+        guard autoResume else {
+            // Either pause-on-code, or [CF-22] the user pressed Pause during the announcement.
+            isPaused = true
+            advancePlaybackIndex()
+            // ⚠️ This branch parks the playlist exactly as the "finished while PAUSED" case does,
+            // and used to do it silently — so a field log showed a pause request with no
+            // follow-up and read as "held inside the announcement", which is what the didPause
+            // line tells the reader to conclude. It is the other outcome, and now says so.
+            logger.info("[SPEECH] Code block handed to the viewer and playback HELD (message \(self.messageIDPrefix), \(self.pauseOnCode ? "pause-on-code" : "user paused during the announcement")) — the announcement finished and the playlist parked on segment \(self.currentSegmentIndex) of \(self.totalSegmentCount) without speaking it. CONSEQUENCE: the reader is paused, not stuck inside the announcement; Play speaks that segment once.")
+            return
+        }
+
+        pendingDelayTask = Task { [weak self] in
+            guard let self, self.isActive else { return }
+            try? await Task.sleep(for: .seconds(1.0))
+            guard !Task.isCancelled, self.isActive else { return }
+            self.pendingDelayTask = nil
+            self.advancePlaybackIndex()
+            self.speakCurrentSegment()
         }
     }
 
@@ -462,6 +906,28 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
             } else {
                 currentText += cleanLineForSpeech(line) + "\n"
             }
+        }
+
+        if insideCodeBlock {
+            // [CF-20] The text ended INSIDE a fenced block — the response was cancelled
+            // mid-block, or the model never wrote the closing fence. Only the fence-CLOSE
+            // branch above appends a `.codeBlock`, so those lines used to be discarded here
+            // with no log, and `totalSegmentCount` was short by one. The bubble does not
+            // agree: the finalized render runs `preprocessStreamResilientMarkdown`, which
+            // appends the missing fence, so the user sees a code block Read Aloud pretended
+            // was not there. Repair the fence on this side too.
+            let code = currentCodeLines.joined(separator: "\n")
+            if !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let cleaned = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !cleaned.isEmpty {
+                    segments.append(.text(cleaned))
+                }
+                segments.append(.codeBlock(language: codeLanguage, code: code))
+                logger.info("[SPEECH] Repaired an unterminated ``` block while parsing speech segments — \(currentCodeLines.count) line(s) of \(codeLanguage ?? "unlabelled") code had no closing fence. CONSEQUENCE: the block is announced and handed to the viewer like any other; before the repair it was silently dropped from playback while the bubble still showed it.")
+                return segments
+            }
+            // An empty unterminated block has nothing to announce or show. Fall through so
+            // any prose BEFORE the fence is still spoken rather than lost with it.
         }
 
         let remaining = currentText.trimmingCharacters(in: .whitespacesAndNewlines)

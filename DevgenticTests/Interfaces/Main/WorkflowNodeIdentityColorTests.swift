@@ -83,7 +83,7 @@ final class WorkflowNodeIdentityColorTests: XCTestCase {
     /// A theme declaring `.light` gets the light ramp; one declaring `.dark` gets today's hues.
     func testThemeColorSchemeSelectsTheCorrectArm() {
         let light = AppThemes.OneLightTheme()
-        let dark = AppThemes.DraculaTheme()
+        let dark = AppThemes.MaterialTheme()
         XCTAssertEqual(light.colorScheme, ColorScheme.light)
         XCTAssertEqual(dark.colorScheme, ColorScheme.dark)
 

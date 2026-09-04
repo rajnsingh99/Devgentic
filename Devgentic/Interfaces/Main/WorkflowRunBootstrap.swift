@@ -165,6 +165,13 @@ final class WorkflowRunTicket {
             timestamp: state.startedAt,
             layout: layout
         )
+        // [CF-28] The live timelines are now COPIED into `frozen`; from this instant the state's
+        // own copy is redundant and the conversation-switch sweep (`releaseSettledTraces`) may
+        // drop it. Marked HERE rather than when the persist lands because `frozen` — a value —
+        // is what the persist task below encodes; the live copy plays no further part. Both
+        // finalize paths (natural, and `forceFinalizeActiveRuns` at quit) pass through this line;
+        // the registry-deallocated return above does NOT, and must not: nothing was captured.
+        state.markRecordFrozen()
 
         // Stamp the finalized record with the in-flight id so the upsert targets the existing row.
         let record: WorkflowRunRecord

@@ -14,7 +14,8 @@
 //
 //  Cost posture: the row shows a bounded `ImageDownsampler` thumbnail (decoded
 //  off-main, keyed by file identity); the FULL image is decoded only when the user
-//  opens the lightbox.
+//  opens the lightbox, and released again when it closes (CF-25). Copy decodes into
+//  a local and keeps nothing.
 //
 
 import SwiftUI
@@ -100,7 +101,12 @@ struct AttachedImageCardView: View {
                        image: fullImage,
                        altText: file.name,
                        data: file.binaryData,
-                       mimeType: "image/\(ImageExport.fileExtension(for: file.binaryData))")
+                       mimeType: "image/\(ImageExport.fileExtension(for: file.binaryData))",
+                       // [CF-25] The full-size bitmap belongs to the open sheet and nothing
+                       // else — the chip renders from `thumbnail`. Holding it past dismissal
+                       // retained ~45 MB per opened 12 MP photo in a row the user had scrolled
+                       // away from, on top of `binaryData` already resident for the message.
+                       onDismiss: { fullImage = nil })
         // One alert for all three context-menu actions. It used to cover Save only, so
         // "View Full Size" and "Copy Image" failed with no feedback whatsoever — see
         // `openLightbox` / `copyImage`.
@@ -112,7 +118,12 @@ struct AttachedImageCardView: View {
     }
 
     /// Full-size decode is deferred to here — thumbnails are the only cost while
-    /// scrolling. Decoded once, then reused for repeat opens and for Copy.
+    /// scrolling.
+    ///
+    /// [CF-25] The decoded bitmap lives only as long as the lightbox does: `fullImage` is
+    /// cleared when the sheet dismisses, so a transcript row that has been opened once no
+    /// longer carries ~45 MB of pixels for the life of the conversation view. Re-opening pays
+    /// the decode again, which is a few hundred milliseconds off-main, once, on a click.
     private func openLightbox() {
         if fullImage != nil {
             showLightbox = true
@@ -120,7 +131,10 @@ struct AttachedImageCardView: View {
         }
         let data = file.binaryData
         Task {
-            let image = await Task.detached(priority: .userInitiated) { NSImage(data: data) }.value
+            // [CF-23] `ImageDownsampler.fullSize`, not `NSImage(data:)`: the latter only reads
+            // headers here and decodes on first DRAW, which is the main thread — so this hop
+            // was moving the cheap 0.2 ms and leaving the 60 ms where it hurt.
+            let image = await Task.detached(priority: .userInitiated) { ImageDownsampler.fullSize(from: data) }.value
             guard let image else {
                 // Was a bare `return`. The user CLICKED this — nothing opening, with no alert
                 // and no log, reads as the app being unresponsive rather than a failed decode.
@@ -166,7 +180,10 @@ struct AttachedImageCardView: View {
         }
         let data = file.binaryData
         Task {
-            let image = await Task.detached(priority: .userInitiated) { NSImage(data: data) }.value
+            // [CF-23] Same eager decode as `openLightbox` — the pasteboard write reads the
+            // pixels, so a lazily-decoded NSImage would have paid for them on the main thread
+            // the moment this returned.
+            let image = await Task.detached(priority: .userInitiated) { ImageDownsampler.fullSize(from: data) }.value
             guard let image else {
                 // The clipboard is NOT cleared on failure, so a silent return here left the
                 // user pasting stale contents believing the copy had worked.
@@ -177,8 +194,12 @@ struct AttachedImageCardView: View {
                 )
                 return
             }
-            fullImage = image
             ImageExport.copyToPasteboard(image)
+            // [CF-25] Deliberately NOT stored in `fullImage`. A copy needs the bitmap for the
+            // length of the pasteboard write (which takes its own copy of the bytes), not for
+            // the life of the row — and this row sits in a `LazyVStack` that keeps the state of
+            // every instantiated row while the conversation is on screen. Storing it here is
+            // what made "copy ten photos" cost half a gigabyte of pixels nobody was looking at.
         }
     }
 

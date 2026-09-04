@@ -78,6 +78,9 @@ struct QuickAccessContentView: View {
     // (QuickAccessPanelView.setupContentView) so the Liquid Glass backdrop renders in the same
     // mode these tokens are designed against.
     private var theme: any Theme { themeManager.currentTheme }
+    /// [CF-21] The shared reader, so this panel can mount its transport while it is speaking.
+    /// `SpeechControlIsland` reads the same singleton, so no injection is needed.
+    private var speechService = SpeechService.shared
     private var iconColor: Color { theme.secondaryText }
     private var placeholderTextColor: Color { theme.placeholderText }
     private var textColor: Color { theme.primaryText }
@@ -525,6 +528,21 @@ extension QuickAccessContentView {
             )
         }
         .frame(minHeight: 0, maxHeight: .infinity)
+        // [CF-21] The speech transport. Read Aloud is reachable here — this panel renders the
+        // app's real `ChatBubbleView`, whose button is not among the actions
+        // `chatActionsSuppressed` hides — but the island was mounted ONLY in `ChatHistoryView`,
+        // so starting playback from the panel gave a reader with no Play, Pause, Stop or speed
+        // control anywhere on screen. Same placement as the main window: bottom-centred, over
+        // the transcript. Deliberately OUTSIDE the `.mask` above, so the island is not faded by
+        // the transcript's top-edge gradient.
+        .overlay(alignment: .bottom) {
+            if speechService.isActive {
+                SpeechControlIsland()
+                    .padding(.bottom, 12)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    .animation(.spring(response: 0.4, dampingFraction: 0.7), value: speechService.isActive)
+            }
+        }
     }
 
     private func scrollToLatest(_ proxy: ScrollViewProxy) {
@@ -562,7 +580,7 @@ extension QuickAccessContentView {
                 if inputText.isEmpty {
                     Text("Ask anything")
                         .foregroundColor(placeholderTextColor)
-                        .font(.system(size: ComposerStyle.editorFontSize)) // [UI audit gap 4] one token with the editor
+                        .font(themeManager.chatFont)
                         .padding(.leading, 12 + 7) // editor h-padding + inset(2)+lineFragmentPadding(5)
                         .padding(.top, 8 + 10)     // editor top padding + textContainerInset
                         .allowsHitTesting(false)
@@ -573,6 +591,8 @@ extension QuickAccessContentView {
                     onCommit: { _ in submitQuery() },
                     minHeight: editorMinHeight,
                     maxHeight: editorMaxHeight,
+                    fontSize: themeManager.chatFontSize,
+                    lineSpacing: themeManager.chatLineSpacing,
                     showPromptSuggestions: .constant(false),
                     suggestionQuery: .constant(""),
                     activePromptTriggerRange: .constant(nil),

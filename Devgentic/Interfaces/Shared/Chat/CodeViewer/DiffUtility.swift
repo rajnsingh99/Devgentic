@@ -44,14 +44,37 @@ struct DiffUtility {
     /// Full LCS on files beyond this threshold would freeze the UI.
     private static let lcsLineLimit = 5_000
 
-    /// Generates a diff between an original and a modified string.
+    /// Generates a diff between an original and a modified string: the line-level rows
+    /// plus the character-level `segments` on modified pairs.
+    ///
+    /// Callers that need only the row TYPES must use `lineLevelDiff` — the refinement
+    /// below is the expensive half and nothing about a row's type depends on it.
+    static func generateDiff(original: String, modified: String) -> [DiffResult] {
+        var rows = lineLevelDiff(original: original, modified: modified)
+        refineIntraLine(&rows)
+        return rows
+    }
+
+    /// The LINE-level half of `generateDiff`: identical rows, minus the character-level
+    /// `refineIntraLine` pass (so every `segments` is nil).
     ///
     /// **Optimizations over the original implementation:**
     /// - O(2m) space instead of O(n*m): uses rolling two-row LCS instead of full table.
     /// - Backtrack builds in forward order (append) instead of O(n) insert-at-0.
     /// - Common prefix/suffix stripped before LCS to reduce the matrix size.
     /// - Falls back to a simple linear scan for files > `lcsLineLimit` lines.
-    static func generateDiff(original: String, modified: String) -> [DiffResult] {
+    ///
+    /// Split out because `changeCounts` reads only `row.type` — running the intra-line
+    /// refinement for it computed up to `intraLineMaxPairs` char-level LCS tables purely
+    /// to throw them away, and it runs on the main actor at the tool-completion site
+    /// (`ActionEffectBuilder`), which also computes the FULL diff for the same file.
+    /// `generateDiff`'s own rows are unchanged: it still refines before returning, for its
+    /// ONE `segments` consumer — `FileChangePreviewView`, which renders them, off the main
+    /// actor. ⚠️ `ActionEffectBuilder.changedLines` is the other `generateDiff` caller and
+    /// reads only `type` and `line`; it reaches here on the MAIN actor (via
+    /// `ActiveStreamManager`, which is `@MainActor`), so it is still paying for a full
+    /// intra-line refinement it discards. It wants `lineLevelDiff` too.
+    static func lineLevelDiff(original: String, modified: String) -> [DiffResult] {
         let originalLines = original.components(separatedBy: .newlines)
         let modifiedLines = modified.components(separatedBy: .newlines)
 
@@ -114,7 +137,6 @@ struct DiffUtility {
             oldLine += 1; newLine += 1
         }
 
-        refineIntraLine(&finalDiff)
         return finalDiff
     }
 
@@ -125,12 +147,17 @@ struct DiffUtility {
     /// as pure addition instead of reporting a phantom "deleted blank line". Counts only —
     /// `generateDiff` itself keeps its raw rows (hunk reconstruction depends on their
     /// exact round-trip).
+    ///
+    /// Runs the LINE-level diff only. The counts are a function of `row.type` alone, and
+    /// `refineIntraLine` never changes a row's type — it only attaches `segments` — so
+    /// skipping it here cannot move a count, and it saves up to `intraLineMaxPairs`
+    /// character-level LCS tables per call.
     static func changeCounts(original: String, modified: String) -> (added: Int, deleted: Int) {
         func trimmed(_ text: String) -> String {
             text.hasSuffix("\n") ? String(text.dropLast()) : text
         }
         var added = 0, deleted = 0
-        for row in generateDiff(original: trimmed(original), modified: trimmed(modified)) {
+        for row in lineLevelDiff(original: trimmed(original), modified: trimmed(modified)) {
             switch row.type {
             case .added: added += 1
             case .deleted: deleted += 1

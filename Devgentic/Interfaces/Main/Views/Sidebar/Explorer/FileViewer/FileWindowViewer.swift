@@ -95,6 +95,8 @@ struct FileWindowViewer: View {
     
     @State private var state: CodeEditFileViewerState
     @State private var justCopied: Bool = false
+    @Environment(ThemeManager.self) private var themeManager
+    @Environment(\.appTheme) private var theme
 
     init(fileURL: URL) {
         _state = State(initialValue: CodeEditFileViewerState(fileURL: fileURL))
@@ -109,25 +111,24 @@ struct FileWindowViewer: View {
                 VStack(spacing: 12) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 40)) // Fixed size: intentional (error state icon)
-                        .foregroundColor(.red)
+                        .foregroundColor(theme.errorColor)
                     Text("Error Opening File")
                         .font(.title2.weight(.semibold))
                     Text(error)
                         .font(.body)
                         .multilineTextAlignment(.center)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.secondaryText)
                         .padding(.horizontal)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding()
             } else {
-                // The SourceEditor now uses the shared dark theme.
                 SourceEditor(
                     $state.content,
                     language: state.language,
                     configuration: .init(
                         appearance: .init(
-                            theme: .defaultDark, // Using the shared dark theme
+                            theme: themeManager.resolvedCodeViewerSyntaxTheme.editorTheme,
                             font: .monospacedSystemFont(ofSize: state.fontSize, weight: .regular),
                             lineHeightMultiple: 1.2,
                             wrapLines: true,
@@ -153,7 +154,7 @@ struct FileWindowViewer: View {
 
                 Button(action: copyContentToClipboard) {
                     Image(systemName: justCopied ? "checkmark.circle.fill" : "doc.on.doc")
-                        .foregroundColor(justCopied ? .green : .accentColor)
+                        .foregroundColor(justCopied ? theme.successColor : theme.accentColor)
                 }
                 .help(justCopied ? "Copied!" : "Copy content to clipboard")
                 .disabled(state.isLoading || state.errorMessage != nil)

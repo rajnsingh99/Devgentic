@@ -21,11 +21,12 @@ struct ScaleButtonStyle: ButtonStyle {
 /// Applies a repeating glow-pulse shadow effect, ideal for CTA buttons.
 struct PulseAnimationModifier: ViewModifier {
     @State private var isPulsing = false
+    @Environment(\.appTheme) private var theme
 
     func body(content: Content) -> some View {
         content
             .shadow(
-                color: Color.accentColor.opacity(isPulsing ? 0.3 : 0.0),
+                color: theme.accentColor.opacity(isPulsing ? 0.3 : 0.0),
                 radius: isPulsing ? 12 : 4, x: 0, y: 0
             )
             .onAppear {

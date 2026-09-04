@@ -381,10 +381,10 @@ struct SettingsCard<Content: View>: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
                 Image(systemName: icon)
-                    .font(.system(size: 11, weight: .bold))
+                    .font(theme.fontCaption2.weight(.bold))
                     .foregroundColor(theme.accentColor)
                 Text(title)
-                    .font(.system(size: 10, weight: .bold))
+                    .font(theme.fontCodeCaption.weight(.bold))
                     .foregroundColor(theme.secondaryText)
                     .tracking(0.8)
                     .textCase(.uppercase)
@@ -422,11 +422,11 @@ struct SettingsRow<Control: View>: View {
         HStack(alignment: .top, spacing: 20) {
             VStack(alignment: .leading, spacing: 6) {
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(theme.fontFootnote.weight(.semibold))
                     .foregroundColor(theme.primaryText)
 
                 Text(description)
-                    .font(.system(size: 11))
+                    .font(theme.fontCaption2)
                     .foregroundColor(isWarning ? theme.warningColor : theme.secondaryText)
                     .lineSpacing(2.5)
                     .fixedSize(horizontal: false, vertical: true)

@@ -231,7 +231,7 @@ struct PromptLibrarySidebarView: View {
             }
         } label: {
             Image(systemName: viewModel.sortOrder.systemImage)
-                .font(.system(.caption, weight: .semibold))
+                .font(theme.fontCaption.weight(.semibold))
                 .frame(width: 22, height: 22)
                 .foregroundColor(
                     viewModel.selectedSource == .all ? theme.secondaryText : theme.accentColor
@@ -313,7 +313,7 @@ struct PromptLibrarySidebarView: View {
                 showingTagManagerSheet = true
             } label: {
                 Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(theme.fontCodeCaption.weight(.semibold))
                     .frame(width: 22, height: 22)
                     .foregroundColor(theme.secondaryText)
                     .background(
@@ -336,7 +336,7 @@ struct PromptLibrarySidebarView: View {
                 .foregroundColor(theme.warningColor)
             if case .error(let message) = coordinator.promptBrowse.loadState {
                 Text(message)
-                    .font(.caption)
+                    .font(theme.fontCaption)
                     .foregroundColor(theme.primaryText)
                     .lineLimit(2)
             }
@@ -345,7 +345,7 @@ struct PromptLibrarySidebarView: View {
                 PromptService.shared.reload()
             } label: {
                 Image(systemName: "arrow.clockwise")
-                    .font(.caption)
+                    .font(theme.fontCaption)
             }
             .buttonStyle(.plain)
             .foregroundColor(theme.accentColor)
@@ -587,7 +587,7 @@ struct PromptLibrarySidebarView: View {
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "trash")
-                        .font(.system(.caption, weight: .semibold))
+                        .font(theme.fontCaption.weight(.semibold))
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
@@ -655,10 +655,10 @@ struct PromptLibrarySidebarView: View {
         HStack(spacing: 4) {
             if let systemImage {
                 Image(systemName: systemImage)
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(theme.fontCodeCaption.weight(.semibold))
             }
             Text(title.uppercased())
-                .font(.system(size: 10, weight: .semibold))
+                .font(theme.fontCodeCaption.weight(.semibold))
                 .tracking(0.5)
             Spacer()
         }
@@ -707,10 +707,10 @@ struct TagChip: View {
             HStack(spacing: 3) {
                 if let systemImage {
                     Image(systemName: systemImage)
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(theme.fontCodeCaption.weight(.semibold))
                 }
                 Text(title)
-                    .font(.system(size: 10, weight: isSelected ? .semibold : .medium))
+                    .font(theme.fontCodeCaption.weight(isSelected ? .semibold : .medium))
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 3)

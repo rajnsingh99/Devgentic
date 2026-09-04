@@ -16,6 +16,7 @@ struct ScheduledTaskRowView: View {
     let onPauseResume: () -> Void
     let onResetThread: () -> Void
     let onTap: () -> Void
+    var isSelected: Bool = false
 
     @State private var isHovering = false
     @Environment(\.appTheme) private var theme
@@ -37,7 +38,7 @@ struct ScheduledTaskRowView: View {
 
                 if task.isEnabled {
                     Text(task.scheduleDescription)
-                        .font(.system(.caption2, weight: .medium))
+                        .font(theme.fontCaption2.weight(.medium))
                         .foregroundColor(theme.secondaryText.opacity(0.7))
                         .lineLimit(1)
                 }
@@ -53,17 +54,17 @@ struct ScheduledTaskRowView: View {
 
                 if let nextRun = task.nextRunAt, task.isEnabled && !task.isPaused {
                     Text("Next: \(nextRun.timeAgoDisplay())")
-                        .font(.system(.caption2))
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText.opacity(0.6))
                 } else if let lastRun = task.lastRunAt {
                     Text("Last: \(lastRun.timeAgoDisplay())")
-                        .font(.system(.caption2))
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText.opacity(0.6))
                 }
 
                 if task.runCount > 0 {
                     Text("· Run \(task.runCount)")
-                        .font(.system(.caption2))
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText.opacity(0.5))
                 }
 
@@ -71,7 +72,7 @@ struct ScheduledTaskRowView: View {
 
                 if !task.isEnabled {
                     Text("Disabled")
-                        .font(.system(size: 9, weight: .medium)) // Fixed size: intentional (badge/chip text)
+                        .font(theme.fontCodeCaption.weight(.medium))
                         .foregroundColor(theme.secondaryText.opacity(0.5))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
@@ -79,8 +80,8 @@ struct ScheduledTaskRowView: View {
                         .clipShape(Capsule())
                 } else if task.isPaused {
                     Text("Paused")
-                        .font(.system(size: 9, weight: .medium)) // Fixed size: intentional (badge/chip text)
-                        .foregroundColor(.orange.opacity(0.8))
+                        .font(theme.fontCodeCaption.weight(.medium))
+                        .foregroundColor(theme.warningColor.opacity(0.9))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
                         .background(theme.warningColor.opacity(0.1))
@@ -91,22 +92,20 @@ struct ScheduledTaskRowView: View {
             // Last run summary
             if let summary = task.lastRunSummary, !summary.isEmpty {
                 Text(summary)
-                    .font(.system(.caption))
+                    .font(theme.fontCaption)
                     .foregroundColor(theme.secondaryText.opacity(0.5))
                     .lineLimit(1)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(isHovering ? theme.surfaceOverlay : Color.clear)
-        )
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .sidebarRowBackground(isSelected: isSelected, isHovering: isHovering)
         .contentShape(Rectangle())
         .onTapGesture { onTap() }
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) { isHovering = hovering }
         }
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSelected)
         .contextMenu {
             Button { onRunNow() } label: {
                 Label("Run Now", systemImage: "play.fill")
@@ -137,13 +136,13 @@ struct ScheduledTaskRowView: View {
     }
 
     private var statusColor: Color {
-        if !task.isEnabled { return .gray.opacity(0.4) }
+        if !task.isEnabled { return theme.secondaryText.opacity(0.4) }
         switch task.status {
-        case .pending: return .blue
-        case .running: return .orange
-        case .completed: return .green
-        case .failed: return .red
-        case .paused: return .gray
+        case .pending: return theme.accentColor
+        case .running: return theme.warningColor
+        case .completed: return theme.successColor
+        case .failed: return theme.errorColor
+        case .paused: return theme.secondaryText
         }
     }
 }

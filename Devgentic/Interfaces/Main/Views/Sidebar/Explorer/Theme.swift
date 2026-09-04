@@ -18,16 +18,32 @@ enum AppAccentColor: String, CaseIterable {
     case `default` = "default"
     case blue = "blue"
     case green = "green"
+    case spotify = "spotify"
     case purple = "purple"
     case orange = "orange"
     case pink = "pink"
     case modernSpotify = "modern_spotify"
+
+    init?(rawValue: String) {
+        switch rawValue {
+        case "default": self = .default
+        case "blue": self = .blue
+        case "green": self = .green
+        case "spotify", "spotify_green": self = .spotify
+        case "purple": self = .purple
+        case "orange": self = .orange
+        case "pink": self = .pink
+        case "modern_spotify", "cosmic_cyan", "cyan": self = .modernSpotify
+        default: return nil
+        }
+    }
 
     var color: Color? {
         switch self {
         case .default: return nil
         case .blue: return Color(hex: "#0A84FF")          // Electric Azure
         case .green: return Color(hex: "#10B981")         // Emerald Mint
+        case .spotify: return Color(hex: "#1DB954")       // Spotify Green
         case .purple: return Color(hex: "#8B5CF6")        // Royal Violet
         case .orange: return Color(hex: "#F59E0B")        // Warm Amber
         case .pink: return Color(hex: "#EC4899")          // Rose Quartz
@@ -40,6 +56,7 @@ enum AppAccentColor: String, CaseIterable {
         case .default: return nil
         case .blue: return NSColor(hex: "#0A84FF")
         case .green: return NSColor(hex: "#10B981")
+        case .spotify: return NSColor(hex: "#1DB954")
         case .purple: return NSColor(hex: "#8B5CF6")
         case .orange: return NSColor(hex: "#F59E0B")
         case .pink: return NSColor(hex: "#EC4899")
@@ -52,6 +69,7 @@ enum AppAccentColor: String, CaseIterable {
         case .default: return "Default"
         case .blue: return "Ocean Blue"
         case .green: return "Emerald Mint"
+        case .spotify: return "Spotify Green"
         case .purple: return "Royal Violet"
         case .orange: return "Warm Amber"
         case .pink: return "Rose Quartz"
@@ -67,8 +85,26 @@ enum AppAccentColor: String, CaseIterable {
 struct ThemeDecorator: Theme {
     let base: any Theme
     let accentColorOverride: AppAccentColor
+    let codeThemeOverride: CodeViewerThemeOverride
+
+    init(base: any Theme, accentColorOverride: AppAccentColor, codeThemeOverride: CodeViewerThemeOverride = .default) {
+        self.base = base
+        self.accentColorOverride = accentColorOverride
+        self.codeThemeOverride = codeThemeOverride
+    }
 
     var accentOverride: Color? { accentColorOverride.color }
+
+    /// The theme from which code blocks and syntax highlighting derive their styling.
+    var effectiveCodeTheme: any Theme {
+        switch codeThemeOverride {
+        case .default: return base
+        case .material: return AppThemes.MaterialTheme()
+        case .cosmicDark: return AppThemes.CosmicDarkTheme()
+        case .oneLight: return AppThemes.OneLightTheme()
+        case .solarizedLight: return AppThemes.SolarizedLightTheme()
+        }
+    }
 
     // Metadata
     var id: String { base.id }
@@ -94,6 +130,7 @@ struct ThemeDecorator: Theme {
     var successColor: Color { base.successColor }
     var warningColor: Color { base.warningColor }
     var colorScheme: ColorScheme? { base.colorScheme }
+    var isDark: Bool { base.isDark }
 
     // Tier 2 — Extended (Defaults provided by protocol extension, but we forward base)
     var controlBackground: Color { base.controlBackground }
@@ -103,13 +140,13 @@ struct ThemeDecorator: Theme {
     var userBubbleBackground: Color { accentOverride ?? base.userBubbleBackground }
     var inlineCodeHighlight: Color { accentColor }
     var accentMuted: Color { accentColor.opacity(0.7) }
-    var codeBlockHeaderBackground: Color { base.codeBlockHeaderBackground }
-    var codeBlockEditorBackground: Color { base.codeBlockEditorBackground }
+    var codeBlockHeaderBackground: Color { effectiveCodeTheme.codeBlockHeaderBackground }
+    var codeBlockEditorBackground: Color { effectiveCodeTheme.codeBlockEditorBackground }
+    var codeBlockHeaderText: Color { effectiveCodeTheme.codeBlockHeaderText }
+    var codeBlockHeaderSecondaryText: Color { effectiveCodeTheme.codeBlockHeaderSecondaryText }
     var surfaceOverlay: Color { base.surfaceOverlay }
     var surfaceOverlayStrong: Color { base.surfaceOverlayStrong }
     var streamingIndicator: Color { accentOverride ?? base.streamingIndicator }
-    var chatGPTGradientTop: Color { base.chatGPTGradientTop }
-    var chatGPTGradientBottom: Color { base.chatGPTGradientBottom }
     var shadowColor: Color { base.shadowColor }
     var searchHighlight: Color { base.searchHighlight }
     var searchHighlightActive: Color { base.searchHighlightActive }
@@ -161,12 +198,11 @@ struct ThemeDecorator: Theme {
 
     // Syntax Highlighting
     var syntaxTheme: SyntaxTheme {
-        base.syntaxTheme.patched(with: accentColorOverride.nsColor)
+        effectiveCodeTheme.syntaxTheme.patched(with: accentColorOverride.nsColor)
     }
 
-    /// Not patched with the accent override: a highlight.js theme is a whole CSS palette,
-    /// not a token we can recolour one entry of.
-    var codeHighlightThemeName: String { base.codeHighlightThemeName }
+    /// Routed through effectiveCodeTheme so code blocks in chat and the code viewer match.
+    var codeHighlightThemeName: String { effectiveCodeTheme.codeHighlightThemeName }
 }
 
 
@@ -190,7 +226,8 @@ struct SyntaxTheme {
     let comments: NSColor
     let bracketHighlight: NSColor
 
-    /// Returns a new SyntaxTheme with the keywords and bracket highlight color overridden.
+    /// Returns a new SyntaxTheme with the bracket highlight color overridden by the accent color,
+    /// preserving the language's authentic keyword palette.
     func patched(with accent: NSColor?) -> SyntaxTheme {
         guard let accent = accent else { return self }
         return SyntaxTheme(
@@ -198,7 +235,7 @@ struct SyntaxTheme {
             lineHighlight: lineHighlight,
             selection: selection,
             text: text,
-            keywords: accent,
+            keywords: keywords,
             commands: commands,
             types: types,
             attributes: attributes,
@@ -257,6 +294,7 @@ protocol Theme {
     /// can't infer the app's light/dark state from the parent environment.
     /// `nil` defers to the system appearance.
     var colorScheme: ColorScheme? { get }
+    var isDark: Bool { get }
 
     /// Accent color for an agent-capability surface (planning / reflection / delegation /
     /// compaction). Single source of truth for the capability hues used by the timeline
@@ -304,6 +342,12 @@ protocol Theme {
     /// Editor area of a fenced code block.
     var codeBlockEditorBackground: Color { get }
 
+    /// Foreground text color for the code block header bar.
+    var codeBlockHeaderText: Color { get }
+
+    /// Secondary text color for the code block header bar (e.g. line count, metadata).
+    var codeBlockHeaderSecondaryText: Color { get }
+
     /// Subtle overlay used for hover states and surface tints.
     var surfaceOverlay: Color { get }
 
@@ -312,12 +356,6 @@ protocol Theme {
 
     /// Color used for streaming / "thinking" indicators.
     var streamingIndicator: Color { get }
-
-    /// Top gradient stop for the main chat background.
-    var chatGPTGradientTop: Color { get }
-
-    /// Bottom gradient stop for the main chat background.
-    var chatGPTGradientBottom: Color { get }
 
     /// Drop-shadow color for elevated surfaces (sidebar pane, popovers, cards).
     /// Default is a dark-mode-friendly black@18%; light themes should override
@@ -460,6 +498,7 @@ extension Theme {
     /// Default to system appearance — concrete themes with a clear
     /// light/dark intent (Dracula, OneDark, OneLight, etc.) override this.
     var colorScheme: ColorScheme? { nil }
+    var isDark: Bool { colorScheme != .light }
 
     // ── Tier 2 Color Defaults ────────────────────────────────────────
 
@@ -472,11 +511,15 @@ extension Theme {
     var accentMuted: Color { accentColor.opacity(0.7) }
     var codeBlockHeaderBackground: Color { Color(red: 0.15, green: 0.15, blue: 0.17) }
     var codeBlockEditorBackground: Color { Color(red: 0.11, green: 0.11, blue: 0.13) }
+    var codeBlockHeaderText: Color {
+        codeHighlightThemeName.contains("light") ? Color(hex: "#383a42") : Color(hex: "#f8f8f2")
+    }
+    var codeBlockHeaderSecondaryText: Color {
+        codeHighlightThemeName.contains("light") ? Color(hex: "#696c77") : Color(hex: "#8b949e")
+    }
     var surfaceOverlay: Color { Color.white.opacity(0.06) }
     var surfaceOverlayStrong: Color { Color.white.opacity(0.1) }
     var streamingIndicator: Color { .blue }
-    var chatGPTGradientTop: Color { Color(red: 0.15, green: 0.15, blue: 0.16) }
-    var chatGPTGradientBottom: Color { Color(red: 0.1, green: 0.1, blue: 0.11) }
     var shadowColor: Color { Color.black.opacity(0.18) }
     // Find-in-conversation highlight hues (browser-find style). Kept in sync with
     // `SearchHighlighter.defaultBase`/`.defaultActive`, which the theme-less static
@@ -590,223 +633,72 @@ extension Theme {
 enum AppThemes {}
 
 
-// MARK: - Default Theme
+
+
+// MARK: - Material Theme
 
 extension AppThemes {
-    struct DefaultTheme: Theme {
-        let id = "default"
-        let displayName = "Default (System)"
-
-        // Uses SwiftUI's semantic colors which adapt automatically.
-        let primaryBackground: Color = Color(nsColor: .windowBackgroundColor)
-        let secondaryBackground: Color = Color(nsColor: .controlBackgroundColor)
-        let tertiaryBackground: Color = Color(nsColor: .underPageBackgroundColor)
-
-        let primaryText: Color = .primary
-        let secondaryText: Color = .secondary
-        let tertiaryText: Color = Color(nsColor: .tertiaryLabelColor)
-
-        let accentColor: Color = .accentColor
-        let dividerColor: Color = Color(nsColor: .separatorColor)
-        let selectionColor: Color = Color(nsColor: .selectedContentBackgroundColor)
-
-        let errorColor: Color = .red
-        let successColor: Color = .green
-        let warningColor: Color = .orange
-    }
-}
-
-
-// MARK: - Dracula Theme
-
-extension AppThemes {
-    struct DraculaTheme: Theme {
-        let id = "dracula"
-        let displayName = "Dracula"
+    struct MaterialTheme: Theme {
+        let id = "material"
+        let displayName = "Material Darker"
         let colorScheme: ColorScheme? = .dark
-        /// Highlightr bundles the real Dracula palette. Choosing Dracula and getting
-        /// Atom's colours in every code block was the most visible case of the old
-        /// light/dark-only fallback.
-        let codeHighlightThemeName = "dracula"
+        /// Highlightr bundles the real Material Darker palette.
+        let codeHighlightThemeName = "material-darker"
 
-        // Tier 1 — Core
-        let primaryBackground: Color = Color(hex: "#282a36")
-        let secondaryBackground: Color = Color(hex: "#383A59")
-        let tertiaryBackground: Color = Color(hex: "#44475a")
+        // Tier 1 — Core (Material Darker Charcoal Palette)
+        let primaryBackground: Color = Color(hex: "#212121")
+        let secondaryBackground: Color = Color(hex: "#1a1a1a")
+        let tertiaryBackground: Color = Color(hex: "#2c2c2c")
 
-        let primaryText: Color = Color(hex: "#f8f8f2")
-        let secondaryText: Color = Color(hex: "#6272a4")
-        let tertiaryText: Color = Color(hex: "#44475a")
+        let primaryText: Color = Color(hex: "#eeffff")
+        let secondaryText: Color = Color(hex: "#b0bec5")
+        let tertiaryText: Color = Color(hex: "#546e7a")
 
-        let accentColor: Color = Color(hex: "#bd93f9")
-        let dividerColor: Color = Color(hex: "#44475a")
-        let selectionColor: Color = Color(hex: "#44475a")
+        let accentColor: Color = Color(hex: "#80cbc4") // Material Teal
+        let dividerColor: Color = Color(hex: "#303030")
+        let selectionColor: Color = Color(hex: "#353535")
 
-        let errorColor: Color = Color(hex: "#ff5555")
-        let successColor: Color = Color(hex: "#50fa7b")
-        let warningColor: Color = Color(hex: "#f1fa8c")
+        let errorColor: Color = Color(hex: "#ff5370")
+        let successColor: Color = Color(hex: "#c3e88d")
+        let warningColor: Color = Color(hex: "#ffcb6b")
 
-        // Tier 2 — Dracula-specific overrides
-        var controlBackground: Color { Color(hex: "#383A59") }
-        var textBackground: Color { Color(hex: "#282a36") }
-        var placeholderText: Color { Color(hex: "#6272a4") }
-        var controlAccent: Color { Color(hex: "#bd93f9") }
-        var userBubbleBackground: Color { Color(hex: "#bd93f9") }
-        var inlineCodeHighlight: Color { Color(hex: "#ff79c6") }    // Dracula Pink
-        var codeBlockHeaderBackground: Color { Color(hex: "#282a36") }
-        var codeBlockEditorBackground: Color { Color(hex: "#1e1e2e") }
-        var surfaceOverlay: Color { Color.white.opacity(0.08) }
-        var surfaceOverlayStrong: Color { Color.white.opacity(0.12) }
-        var streamingIndicator: Color { Color(hex: "#8be9fd") }
-        var chatGPTGradientTop: Color { Color(hex: "#282a36") }
-        var chatGPTGradientBottom: Color { Color(hex: "#1e1e2e") }
-
-        // Syntax — Dracula palette
-        var syntaxTheme: SyntaxTheme {
-            SyntaxTheme(
-                background: NSColor(hex: "#282a36"),
-                lineHighlight: NSColor(hex: "#44475a"),
-                selection: NSColor(hex: "#44475a"),
-                text: NSColor(hex: "#f8f8f2"),
-                keywords: NSColor(hex: "#ff79c6"),
-                commands: NSColor(hex: "#f1fa8c"),
-                types: NSColor(hex: "#8be9fd"),
-                attributes: NSColor(hex: "#ff79c6"),
-                variables: NSColor(hex: "#f8f8f2"),
-                values: NSColor(hex: "#bd93f9"),
-                numbers: NSColor(hex: "#bd93f9"),
-                strings: NSColor(hex: "#f1fa8c"),
-                characters: NSColor(hex: "#f1fa8c"),
-                comments: NSColor(hex: "#6272a4"),
-                bracketHighlight: NSColor(hex: "#ff79c6").withAlphaComponent(0.4)
-            )
-        }
-    }
-
-    struct OneLightTheme: Theme {
-        let id = "one_light"
-        let displayName = "One Light"
-        let colorScheme: ColorScheme? = .light
-
-        // Tier 1 — Core (Light Mode)
-        let primaryBackground: Color = Color(hex: "#fafafa")
-        let secondaryBackground: Color = Color(hex: "#f0f0f0")
-        let tertiaryBackground: Color = Color(hex: "#e5e5e6")
-
-        let primaryText: Color = Color(hex: "#383a42")
-        let secondaryText: Color = Color(hex: "#696c77")
-        let tertiaryText: Color = Color(hex: "#a0a1a7")
-
-        let accentColor: Color = Color(hex: "#4078f2")
-        let dividerColor: Color = Color(hex: "#d0d0d0")
-        let selectionColor: Color = Color(hex: "#e5e5e6")
-
-        let errorColor: Color = Color(hex: "#e45649")
-        let successColor: Color = Color(hex: "#50a14f")
-        let warningColor: Color = Color(hex: "#c18401")
-
-        // Tier 2 — Overrides
-        var controlBackground: Color { Color(hex: "#f0f0f0") }
-        var textBackground: Color { Color(hex: "#fafafa") }
-        var placeholderText: Color { Color(hex: "#a0a1a7") }
-        var controlAccent: Color { Color(hex: "#4078f2") }
-        var userBubbleBackground: Color { Color(hex: "#4078f2") }
-        var inlineCodeHighlight: Color { Color(hex: "#a626a4") }    // One Light Purple
-        var codeBlockHeaderBackground: Color { Color(hex: "#f0f0f0") }
-        var codeBlockEditorBackground: Color { Color(hex: "#fafafa") }
-        var surfaceOverlay: Color { Color.black.opacity(0.04) }
-        var surfaceOverlayStrong: Color { Color.black.opacity(0.08) }
-        var streamingIndicator: Color { Color(hex: "#0184bc") }
-        var chatGPTGradientTop: Color { Color(hex: "#fafafa") }
-        var chatGPTGradientBottom: Color { Color(hex: "#f0f0f0") }
-        var shadowColor: Color { Color.black.opacity(0.08) }
-
-        // Syntax — One Light palette
-        var syntaxTheme: SyntaxTheme {
-            SyntaxTheme(
-                background: NSColor(hex: "#fafafa"),
-                lineHighlight: NSColor(hex: "#f0f0f0"),
-                selection: NSColor(hex: "#e5e5e6"),
-                text: NSColor(hex: "#383a42"),
-                keywords: NSColor(hex: "#a626a4"),
-                commands: NSColor(hex: "#0184bc"),
-                types: NSColor(hex: "#c18401"),
-                attributes: NSColor(hex: "#d19a66"),
-                variables: NSColor(hex: "#e45649"),
-                values: NSColor(hex: "#986801"),
-                numbers: NSColor(hex: "#d19a66"),
-                strings: NSColor(hex: "#50a14f"),
-                characters: NSColor(hex: "#50a14f"),
-                comments: NSColor(hex: "#a0a1a7"),
-                bracketHighlight: NSColor(hex: "#4078f2").withAlphaComponent(0.4)
-            )
-        }
-    }
-}
-
-
-// MARK: - One Dark Theme
-
-extension AppThemes {
-    struct OneDarkTheme: Theme {
-        let id = "one_dark"
-        let displayName = "One Dark"
-        let colorScheme: ColorScheme? = .dark
-
-        // Tier 1 — Core (Atom One Dark)
-        let primaryBackground: Color = Color(hex: "#282c34")
-        let secondaryBackground: Color = Color(hex: "#21252b")
-        let tertiaryBackground: Color = Color(hex: "#2c313a")
-
-        let primaryText: Color = Color(hex: "#abb2bf")
-        let secondaryText: Color = Color(hex: "#5c6370")
-        let tertiaryText: Color = Color(hex: "#4b5263")
-
-        let accentColor: Color = Color(hex: "#61afef")
-        let dividerColor: Color = Color(hex: "#181a1f")
-        let selectionColor: Color = Color(hex: "#3e4451")
-
-        let errorColor: Color = Color(hex: "#e06c75")
-        let successColor: Color = Color(hex: "#98c379")
-        let warningColor: Color = Color(hex: "#e5c07b")
-
-        // Tier 2 — Overrides
-        var controlBackground: Color { Color(hex: "#21252b") }
-        var textBackground: Color { Color(hex: "#282c34") }
-        var placeholderText: Color { Color(hex: "#5c6370") }
-        var controlAccent: Color { Color(hex: "#61afef") }
-        var userBubbleBackground: Color { Color(hex: "#61afef") }
-        var inlineCodeHighlight: Color { Color(hex: "#d19a66") }    // One Dark Orange
-        var codeBlockHeaderBackground: Color { Color(hex: "#21252b") }
-        var codeBlockEditorBackground: Color { Color(hex: "#282c34") }
+        // Tier 2 — Material-specific overrides
+        var controlBackground: Color { Color(hex: "#2c2c2c") }
+        var textBackground: Color { Color(hex: "#212121") }
+        var placeholderText: Color { Color(hex: "#546e7a") }
+        var controlAccent: Color { Color(hex: "#80cbc4") }
+        var userBubbleBackground: Color { Color(hex: "#80cbc4") }
+        var inlineCodeHighlight: Color { Color(hex: "#c792ea") }    // Material Lilac
+        var codeBlockHeaderBackground: Color { Color(hex: "#1a1a1a") }
+        var codeBlockEditorBackground: Color { Color(hex: "#212121") }
         var surfaceOverlay: Color { Color.white.opacity(0.06) }
         var surfaceOverlayStrong: Color { Color.white.opacity(0.1) }
-        var streamingIndicator: Color { Color(hex: "#56b6c2") }
-        var chatGPTGradientTop: Color { Color(hex: "#282c34") }
-        var chatGPTGradientBottom: Color { Color(hex: "#21252b") }
+        var streamingIndicator: Color { Color(hex: "#80cbc4") }
 
-        // Syntax — One Dark palette (Atom)
+        // Syntax — Material Darker palette (matching highlight.js material-darker)
         var syntaxTheme: SyntaxTheme {
             SyntaxTheme(
-                background: NSColor(hex: "#282c34"),
-                lineHighlight: NSColor(hex: "#2c313a"),
-                selection: NSColor(hex: "#3e4451"),
-                text: NSColor(hex: "#abb2bf"),
-                keywords: NSColor(hex: "#c678dd"),
-                commands: NSColor(hex: "#61afef"),
-                types: NSColor(hex: "#e5c07b"),
-                attributes: NSColor(hex: "#d19a66"),
-                variables: NSColor(hex: "#e06c75"),
-                values: NSColor(hex: "#d19a66"),
-                numbers: NSColor(hex: "#d19a66"),
-                strings: NSColor(hex: "#98c379"),
-                characters: NSColor(hex: "#56b6c2"),
-                comments: NSColor(hex: "#5c6370"),
-                bracketHighlight: NSColor(hex: "#61afef").withAlphaComponent(0.4)
+                background: NSColor(hex: "#212121"),
+                lineHighlight: NSColor(hex: "#1a1a1a"),
+                selection: NSColor(hex: "#353535"),
+                text: NSColor(hex: "#eeffff"),
+                keywords: NSColor(hex: "#c792ea"),
+                commands: NSColor(hex: "#82aaff"),
+                types: NSColor(hex: "#ffcb6b"),
+                attributes: NSColor(hex: "#c792ea"),
+                variables: NSColor(hex: "#eeffff"),
+                values: NSColor(hex: "#f78c6c"),
+                numbers: NSColor(hex: "#f78c6c"),
+                strings: NSColor(hex: "#c3e88d"),
+                characters: NSColor(hex: "#c3e88d"),
+                comments: NSColor(hex: "#546e7a"),
+                bracketHighlight: NSColor(hex: "#80cbc4").withAlphaComponent(0.4)
             )
         }
     }
 }
+
+
 
 
 // MARK: - Cosmic Dark Theme (Spotify Inspired)
@@ -849,8 +741,6 @@ extension AppThemes {
         var surfaceOverlay: Color { Color.white.opacity(0.05) }
         var surfaceOverlayStrong: Color { Color.white.opacity(0.1) }
         var streamingIndicator: Color { Color(hex: "#1DB954") }
-        var chatGPTGradientTop: Color { Color(hex: "#1e1e1e") }
-        var chatGPTGradientBottom: Color { Color(hex: "#121212") }
 
         // Syntax — Modern Dark palette
         var syntaxTheme: SyntaxTheme {
@@ -870,6 +760,138 @@ extension AppThemes {
                 characters: NSColor(hex: "#f1fa8c"),
                 comments: NSColor(hex: "#b3b3b3"),          // Gray for comments
                 bracketHighlight: NSColor(hex: "#1DB954").withAlphaComponent(0.4)
+            )
+        }
+    }
+}
+
+
+// MARK: - One Light Theme
+
+extension AppThemes {
+    struct OneLightTheme: Theme {
+        let id = "one_light"
+        let displayName = "One Light"
+        let colorScheme: ColorScheme? = .light
+        let codeHighlightThemeName = "github"
+
+        // Tier 1 — Core (GitHub Light Palette)
+        let primaryBackground: Color = Color(hex: "#ffffff")
+        let secondaryBackground: Color = Color(hex: "#f6f8fa")
+        let tertiaryBackground: Color = Color(hex: "#eaeef2")
+
+        let primaryText: Color = Color(hex: "#1f2328")
+        let secondaryText: Color = Color(hex: "#656d76")
+        let tertiaryText: Color = Color(hex: "#8c959f")
+
+        let accentColor: Color = Color(hex: "#0969da")        // GitHub Blue
+        let dividerColor: Color = Color(hex: "#d0d7de")
+        let selectionColor: Color = Color(hex: "#ddf4ff")
+
+        let errorColor: Color = Color(hex: "#cf222e")
+        let successColor: Color = Color(hex: "#1a7f37")
+        let warningColor: Color = Color(hex: "#9a6700")
+
+        // Tier 2 — Overrides
+        var controlBackground: Color { Color(hex: "#eaeef2") }
+        var textBackground: Color { Color(hex: "#ffffff") }
+        var placeholderText: Color { Color(hex: "#8c959f") }
+        var controlAccent: Color { Color(hex: "#0969da") }
+        var userBubbleBackground: Color { Color(hex: "#0969da") }
+        var inlineCodeHighlight: Color { Color(hex: "#0969da") }
+        var codeBlockHeaderBackground: Color { Color(hex: "#f6f8fa") }
+        var codeBlockEditorBackground: Color { Color(hex: "#ffffff") }
+        var codeBlockHeaderText: Color { Color(hex: "#1f2328") }
+        var codeBlockHeaderSecondaryText: Color { Color(hex: "#656d76") }
+        var surfaceOverlay: Color { Color.black.opacity(0.04) }
+        var surfaceOverlayStrong: Color { Color.black.opacity(0.08) }
+        var streamingIndicator: Color { Color(hex: "#0969da") }
+        var shadowColor: Color { Color.black.opacity(0.06) }
+
+        // Syntax — GitHub Light palette (matching highlight.js github.min.css)
+        var syntaxTheme: SyntaxTheme {
+            SyntaxTheme(
+                background: NSColor(hex: "#ffffff"),
+                lineHighlight: NSColor(hex: "#f6f8fa"),
+                selection: NSColor(hex: "#c8c8fa"),
+                text: NSColor(hex: "#24292f"),
+                keywords: NSColor(hex: "#a71d5d"),          // Purple
+                commands: NSColor(hex: "#795da3"),
+                types: NSColor(hex: "#a71d5d"),
+                attributes: NSColor(hex: "#795da3"),
+                variables: NSColor(hex: "#ed6a43"),
+                values: NSColor(hex: "#0086b3"),
+                numbers: NSColor(hex: "#0086b3"),
+                strings: NSColor(hex: "#183691"),          // Navy
+                characters: NSColor(hex: "#183691"),
+                comments: NSColor(hex: "#6e7781"),
+                bracketHighlight: NSColor(hex: "#0969da").withAlphaComponent(0.4)
+            )
+        }
+    }
+}
+
+
+// MARK: - Solarized Light Theme
+
+extension AppThemes {
+    struct SolarizedLightTheme: Theme {
+        let id = "solarized_light"
+        let displayName = "Solarized Light"
+        let colorScheme: ColorScheme? = .light
+        let codeHighlightThemeName = "solarized-light"
+
+        // Tier 1 — Core (Solarized Light Cream Palette)
+        let primaryBackground: Color = Color(hex: "#fdf6e3")
+        let secondaryBackground: Color = Color(hex: "#eee8d5")
+        let tertiaryBackground: Color = Color(hex: "#e0d8c3")
+
+        let primaryText: Color = Color(hex: "#586e75")        // Base01
+        let secondaryText: Color = Color(hex: "#839496")      // Base00
+        let tertiaryText: Color = Color(hex: "#93a1a1")       // Base1
+
+        let accentColor: Color = Color(hex: "#2aa198")        // Solarized Cyan
+        let dividerColor: Color = Color(hex: "#d33682").opacity(0.18)
+        let selectionColor: Color = Color(hex: "#eee8d5")
+
+        let errorColor: Color = Color(hex: "#dc322f")         // Red
+        let successColor: Color = Color(hex: "#859900")       // Green
+        let warningColor: Color = Color(hex: "#b58900")       // Yellow
+
+        // Tier 2 — Overrides
+        var controlBackground: Color { Color(hex: "#eee8d5") }
+        var textBackground: Color { Color(hex: "#fdf6e3") }
+        var placeholderText: Color { Color(hex: "#93a1a1") }
+        var controlAccent: Color { Color(hex: "#2aa198") }
+        var userBubbleBackground: Color { Color(hex: "#2aa198") }
+        var inlineCodeHighlight: Color { Color(hex: "#268bd2") }   // Blue
+        var codeBlockHeaderBackground: Color { Color(hex: "#eee8d5") }
+        var codeBlockEditorBackground: Color { Color(hex: "#fdf6e3") }
+        var codeBlockHeaderText: Color { Color(hex: "#586e75") }
+        var codeBlockHeaderSecondaryText: Color { Color(hex: "#839496") }
+        var surfaceOverlay: Color { Color.black.opacity(0.04) }
+        var surfaceOverlayStrong: Color { Color.black.opacity(0.08) }
+        var streamingIndicator: Color { Color(hex: "#2aa198") }
+        var shadowColor: Color { Color(hex: "#586e75").opacity(0.08) }
+
+        // Syntax — Solarized Light palette (matching highlight.js solarized-light.min.css)
+        var syntaxTheme: SyntaxTheme {
+            SyntaxTheme(
+                background: NSColor(hex: "#fdf6e3"),
+                lineHighlight: NSColor(hex: "#eee8d5"),
+                selection: NSColor(hex: "#93a1a1"),
+                text: NSColor(hex: "#586e75"),
+                keywords: NSColor(hex: "#6c71c4"),          // Violet
+                commands: NSColor(hex: "#268bd2"),          // Blue
+                types: NSColor(hex: "#b58900"),             // Yellow
+                attributes: NSColor(hex: "#2aa198"),        // Cyan
+                variables: NSColor(hex: "#586e75"),
+                values: NSColor(hex: "#cb4b16"),            // Orange
+                numbers: NSColor(hex: "#cb4b16"),
+                strings: NSColor(hex: "#859900"),           // Green
+                characters: NSColor(hex: "#859900"),
+                comments: NSColor(hex: "#839496"),
+                bracketHighlight: NSColor(hex: "#2aa198").withAlphaComponent(0.4)
             )
         }
     }

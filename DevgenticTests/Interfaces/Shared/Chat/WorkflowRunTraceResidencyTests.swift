@@ -244,6 +244,27 @@ final class WorkflowRunTraceResidencyTests: XCTestCase {
         XCTAssertEqual(row.rowSnapshot.cached?.id, full.id)
     }
 
+    /// ⚠️ [CF-34] The one behaviour `decodeRecord(from:)` has that the deleted instance
+    /// `decodeRecord()` never did: it hands back `snapshot.cached` WITHOUT decoding. That reads
+    /// like a warm-cache optimisation and is not one — the cache is filled only when an encode was
+    /// REFUSED, so the bytes in the snapshot are the previous run's (update) or the deliberately
+    /// unreadable marker this insert wrote. Deleting the short-circuit would decode the marker
+    /// instead and report a run whose nodes are sitting right there as having none. Nothing pinned
+    /// it while the dead instance twin was still in the file to draw the eye.
+    func testDecodeReturnsTheRetainedRecordRatherThanTheUnreadableBytes() {
+        let full = record([snapshot(events: 12)])
+        let row = WorkflowRunRecordSD(
+            record: full,
+            blobs: WorkflowRunRecordSD.EncodedBlobs(nodeResults: nil, variables: Data("{}".utf8)))
+
+        let decoded = WorkflowRunRecordSD.decodeRecord(from: row.rowSnapshot)
+
+        XCTAssertEqual(decoded.id, full.id)
+        XCTAssertEqual(decoded.nodeResults.first?.nodeTimeline?.count, 12,
+                       "⚠️ this row holds the ONLY readable copy of the run; decoding the refusal "
+                       + "marker instead turns a logged, recoverable refusal into silent loss")
+    }
+
     /// And the UPDATE seam, which is the one `finalize` actually takes.
     func testAHealthyUpdateClearsWhateverTheRowWasHolding() {
         let full = record([snapshot(events: 40)])
@@ -259,12 +280,20 @@ final class WorkflowRunTraceResidencyTests: XCTestCase {
     }
 
     // MARK: - [XUI-15] Live traces are released for conversations left behind
+    //
+    // ⚠️ [CF-28] "Settled" was the wrong predicate, and the fixture makes the freeze gate explicit
+    // for every state it builds. `isRunning` goes false in `handleStreamEnd`, but the freeze that
+    // copies the timelines into the record runs only after the stream's `await finalizeMessage`
+    // and a main-queue hop — a conversation switch inside that window used to wipe the traces
+    // before `WorkflowRunRecord.freeze` read them, and the record persisted with no timeline,
+    // permanently. `hasFrozenRecord` is what the release now requires.
 
-    private func liveState(runID: UUID, events: Int, running: Bool) -> WorkflowExecutionState {
+    private func liveState(runID: UUID, events: Int, running: Bool, frozen: Bool) -> WorkflowExecutionState {
         let state = WorkflowExecutionState()
         state.runRecordID = runID
         state.isRunning = running
         state.nodeTimelines[UUID()] = (0..<events).map { .thought(id: UUID(), text: "e\($0)") }
+        if frozen { state.markRecordFrozen() }
         return state
     }
 
@@ -273,7 +302,7 @@ final class WorkflowRunTraceResidencyTests: XCTestCase {
     /// rejected outright. Only the traces go, and the run view re-reads them from the store.
     func testASettledRunReleasesItsTracesAndKeepsItsIdentity() {
         let runID = UUID()
-        let state = liveState(runID: runID, events: 120, running: false)
+        let state = liveState(runID: runID, events: 120, running: false, frozen: true)
 
         XCTAssertEqual(state.releaseSettledTraces(), 120)
         XCTAssertTrue(state.nodeTimelines.isEmpty)
@@ -286,7 +315,7 @@ final class WorkflowRunTraceResidencyTests: XCTestCase {
     /// mid-flight deletes the evidence of a live run and makes whatever arrives after the drop look
     /// like the whole story.
     func testARunningRunNeverReleasesItsTraces() {
-        let state = liveState(runID: UUID(), events: 120, running: true)
+        let state = liveState(runID: UUID(), events: 120, running: true, frozen: false)
 
         XCTAssertEqual(state.releaseSettledTraces(), 0)
         XCTAssertEqual(state.nodeTimelines.values.reduce(0) { $0 + $1.count }, 120)
@@ -295,9 +324,67 @@ final class WorkflowRunTraceResidencyTests: XCTestCase {
     /// Releasing twice reports nothing the second time, so the switch log cannot claim a saving it
     /// did not make.
     func testReleasingAnAlreadyReleasedStateReportsNothing() {
-        let state = liveState(runID: UUID(), events: 40, running: false)
+        let state = liveState(runID: UUID(), events: 40, running: false, frozen: true)
         XCTAssertEqual(state.releaseSettledTraces(), 40)
         XCTAssertEqual(state.releaseSettledTraces(), 0)
+    }
+
+    // MARK: - [CF-28] Settled is not persisted
+
+    /// ⚠️ THE CF-28 PIN. This is the exact shape of the window: the stream has ended
+    /// (`isRunning == false`), the traces are resident, and `finalize()` — the only thing that
+    /// copies them into the record — has not run. A release here is not "re-read later"; the
+    /// store holds only the `.running` stub, so the traces would be gone for good.
+    func testASettledRunWhoseRecordIsNotYetFrozenKeepsItsTraces() {
+        let state = liveState(runID: UUID(), events: 120, running: false, frozen: false)
+
+        XCTAssertEqual(state.releaseSettledTraces(), 0,
+                       "nothing may be released before the record has captured the trace")
+        XCTAssertEqual(state.nodeTimelines.values.reduce(0) { $0 + $1.count }, 120,
+                       "…and the timelines must be exactly as they were")
+    }
+
+    /// The same state becomes releasable the instant the record is frozen — the flag, not time,
+    /// is what unlocks it.
+    func testMarkingTheRecordFrozenUnlocksTheRelease() {
+        let state = liveState(runID: UUID(), events: 120, running: false, frozen: false)
+        XCTAssertEqual(state.releaseSettledTraces(), 0, "precondition: refused while unfrozen")
+
+        state.markRecordFrozen()
+
+        XCTAssertTrue(state.hasFrozenRecord)
+        XCTAssertEqual(state.releaseSettledTraces(), 120)
+        XCTAssertTrue(state.nodeTimelines.isEmpty)
+    }
+
+    /// ⚠️ THE CONJUNCTION CONTROL. Freezing must not override the in-flight refusal: a mutant
+    /// that keeps only the `hasFrozenRecord` guard passes every test above and drops a running
+    /// run's trace the moment anything marks it frozen.
+    func testARunningRunNeverReleasesItsTracesEvenOnceMarkedFrozen() {
+        let state = liveState(runID: UUID(), events: 120, running: true, frozen: true)
+
+        XCTAssertEqual(state.releaseSettledTraces(), 0)
+        XCTAssertEqual(state.nodeTimelines.values.reduce(0) { $0 + $1.count }, 120)
+    }
+
+    /// A fresh state has captured nothing, so nothing may be released from it.
+    ///
+    /// ⚠️ [CF-33] This used to also drive `reset()` back to `false` on a reused state. `reset()`
+    /// has been DELETED: it had no production caller and cleared only SOME of the state's stored
+    /// properties, so its first caller would have frozen the next run as `.cancelled` under the
+    /// previous run's `traceID`. Every run now gets a fresh state at `WorkflowRunBootstrap.begin`,
+    /// and `hasFrozenRecord` is `private(set)` with `markRecordFrozen()` as its only writer — so
+    /// "unfrozen at birth" is the whole of the invariant that remains.
+    ///
+    /// ⚠️ The tally (how many it cleared, and which fields survived) is stated ONCE, in the
+    /// tombstone that replaced `reset()` in `WorkflowExecutionState` — deliberately NOT repeated
+    /// here. An earlier draft of this comment said "nine" while that tombstone said ten; ten is
+    /// right (the ninth-and-tenth pair being `runRecordID` and `hasFrozenRecord`), and two copies
+    /// of a hand-counted number is how the disagreement happened in the first place.
+    func testAFreshStateIsNotFrozen() {
+        let fresh = WorkflowExecutionState()
+        XCTAssertFalse(fresh.hasFrozenRecord)
+        XCTAssertEqual(fresh.releaseSettledTraces(), 0)
     }
 
     /// ⚠️ THE KEEP-TEST. Inverted, this frees the traces of the run the user is looking at and
@@ -305,8 +392,8 @@ final class WorkflowRunTraceResidencyTests: XCTestCase {
     /// the first battery because the loop lived on a method taking a `MainApplicationViewModel`.
     func testOnlyConversationsLeftBehindAreSwept() {
         let current = UUID(), other = UUID()
-        let states = [current: liveState(runID: UUID(), events: 10, running: false),
-                      other: liveState(runID: UUID(), events: 20, running: false)]
+        let states = [current: liveState(runID: UUID(), events: 10, running: false, frozen: true),
+                      other: liveState(runID: UUID(), events: 20, running: false, frozen: true)]
 
         let swept = ConversationSwitchCoordinator.statesLeftBehind(in: states, keeping: current)
 
@@ -317,8 +404,8 @@ final class WorkflowRunTraceResidencyTests: XCTestCase {
 
     /// No selection means nothing is on screen, so every state is left behind.
     func testWithNoSelectionEveryStateIsSwept() {
-        let states = [UUID(): liveState(runID: UUID(), events: 10, running: false),
-                      UUID(): liveState(runID: UUID(), events: 20, running: false)]
+        let states = [UUID(): liveState(runID: UUID(), events: 10, running: false, frozen: true),
+                      UUID(): liveState(runID: UUID(), events: 20, running: false, frozen: true)]
         XCTAssertEqual(ConversationSwitchCoordinator.statesLeftBehind(in: states, keeping: nil).count, 2)
     }
 

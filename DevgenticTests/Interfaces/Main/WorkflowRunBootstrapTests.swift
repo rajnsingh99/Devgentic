@@ -548,4 +548,120 @@ final class WorkflowRunBootstrapTests: XCTestCase {
         XCTAssertEqual(loadedA.status, .cancelled)
         XCTAssertEqual(loadedB.status, .cancelled)
     }
+
+    // MARK: - CF-28
+    //
+    // `Chat_Production_Readiness_Fresh.md` CF-28: a conversation switch between stream end and
+    // `finalize()` used to wipe a run's node traces (`releaseSettledTraces` gated on `!isRunning`
+    // alone) before `WorkflowRunRecord.freeze` read them — the record persisted with no timeline,
+    // permanently, and the switch log claimed a store re-read that could not succeed. The release
+    // now requires `hasFrozenRecord`, which only `finalize()` sets, right after `freeze` returns.
+
+    /// The flag is set SYNCHRONOUSLY inside `finalize()`, before the persist task has run —
+    /// `freeze` has already copied the timelines into the record value the task encodes, so the
+    /// live copy is redundant from that instant, not from when the write lands.
+    func testFinalizeMarksTheRecordFrozenBeforeThePersistLands() async throws {
+        let conversationID = try makeConversation()
+        let registry = FakeRegistry()
+        guard let ticket = WorkflowRunBootstrap.begin(
+            config: BackendRequestConfig(profile: workflowProfile()),
+            conversationID: conversationID, userInput: "go",
+            registry: registry, origin: .chat
+        ) else { return XCTFail("expected a ticket") }
+
+        XCTAssertFalse(ticket.state.hasFrozenRecord, "nothing has been captured at begin")
+        ticket.state.handleFinalOutput("done")
+        XCTAssertFalse(ticket.state.hasFrozenRecord,
+                       "settling the run is NOT capturing it — this is the window CF-28 is about")
+
+        let persist = ticket.finalize()
+
+        XCTAssertTrue(ticket.state.hasFrozenRecord,
+                      "finalize must mark the record frozen before it returns, not when the write lands")
+        await persist?.value
+    }
+
+    /// ⚠️ THE CF-28 SCENARIO END TO END, on the real ticket. The run has ended (`isRunning` is
+    /// false), its traces are resident, and finalize has not run: the switch sweep's release must
+    /// refuse and leave the timelines intact, so that `freeze` finds them and the persisted record
+    /// carries every event. Only after finalize may the same call release them.
+    func testTheSettledButUnfinalizedWindowKeepsTheTracesForFreeze() async throws {
+        let conversationID = try makeConversation()
+        let registry = FakeRegistry()
+        guard let ticket = WorkflowRunBootstrap.begin(
+            config: BackendRequestConfig(profile: workflowProfile()),
+            conversationID: conversationID, userInput: "go",
+            registry: registry, origin: .chat
+        ) else { return XCTFail("expected a ticket") }
+
+        let nodeID = UUID()
+        ticket.state.nodeResults = [
+            WorkflowNodeResult(id: UUID(), nodeID: nodeID, profileName: "Fetcher",
+                               status: .completed, detail: "done",
+                               startTime: Date(), endTime: Date())
+        ]
+        ticket.state.nodeTimelines[nodeID] = (0..<30).map { .thought(id: UUID(), text: "e\($0)") }
+        // Mirrors `handleStreamEnd`'s success path: the run is settled, finalize is still ahead.
+        ticket.state.handleFinalOutput("the report")
+        XCTAssertFalse(ticket.state.isRunning, "precondition: settled — the old gate would have released")
+
+        // The conversation-switch sweep lands inside the window.
+        XCTAssertEqual(ticket.state.releaseSettledTraces(), 0,
+                       "a settled-but-unfrozen run must keep its traces for freeze")
+        XCTAssertEqual(ticket.state.nodeTimelines[nodeID]?.count, 30)
+
+        await ticket.finalize()?.value
+
+        // Freeze found the traces: the persisted record carries every event.
+        let loaded = try XCTUnwrap(WorkflowRunHistoryStore.shared.load(forConversation: conversationID).first)
+        XCTAssertEqual(loaded.nodeResults.first?.nodeTimeline?.count, 30,
+                       "⚠️ this is the trace CF-28 lost — the sweep used to empty it before freeze read it")
+
+        // …and now the same sweep may release the live copy, since the record has it.
+        XCTAssertEqual(ticket.state.releaseSettledTraces(), 30)
+        XCTAssertTrue(ticket.state.nodeTimelines.isEmpty)
+    }
+
+    /// The quit-time force path is the same `finalize()`, so it captures the traces too and the
+    /// state reads as frozen afterwards.
+    func testForceFinalizeMarksTheRecordFrozen() async throws {
+        let conversationID = try makeConversation()
+        let registry = FakeRegistry()
+        guard let ticket = WorkflowRunBootstrap.begin(
+            config: BackendRequestConfig(profile: workflowProfile()),
+            conversationID: conversationID, userInput: "go",
+            registry: registry, origin: .scheduled
+        ) else { return XCTFail("expected a ticket") }
+        ticket.state.handleNodeStarted(nodeID: UUID(), profileName: "Writer", index: 1, total: 1)
+        XCTAssertFalse(ticket.state.hasFrozenRecord)
+
+        WorkflowRunTicket.forceFinalizeActiveRuns(reason: "Quit during run")
+
+        XCTAssertTrue(ticket.state.hasFrozenRecord)
+        await WorkflowRunTicket.drainPendingPersists()
+    }
+
+    /// ⚠️ "Frozen" means CAPTURED, not "finalize was called". The registry-deallocated return
+    /// happens before `freeze`, persists nothing, and must leave the flag false — otherwise the
+    /// sweep would release traces that never reached a record.
+    func testFinalizeWithoutARegistryLeavesTheRecordUnfrozen() throws {
+        let conversationID = try makeConversation()
+        var registry: FakeRegistry? = FakeRegistry()
+        guard let ticket = WorkflowRunBootstrap.begin(
+            config: BackendRequestConfig(profile: workflowProfile()),
+            conversationID: conversationID, userInput: "go",
+            registry: try XCTUnwrap(registry), origin: .chat
+        ) else { return XCTFail("expected a ticket") }
+        let nodeID = UUID()
+        ticket.state.nodeTimelines[nodeID] = (0..<5).map { .thought(id: UUID(), text: "e\($0)") }
+        ticket.state.handleFinalOutput("done")
+
+        registry = nil   // the ticket holds it weakly — this is the "registry deallocated" branch
+        XCTAssertNil(ticket.finalize(), "precondition: the deallocated-registry branch was taken")
+
+        XCTAssertFalse(ticket.state.hasFrozenRecord)
+        XCTAssertEqual(ticket.state.releaseSettledTraces(), 0,
+                       "nothing was captured, so nothing may be released")
+        XCTAssertEqual(ticket.state.nodeTimelines[nodeID]?.count, 5)
+    }
 }

@@ -21,6 +21,16 @@ struct MediaArtifactImageView: View {
     @State private var loadedData: Data?
     @State private var isHovering = false
     @State private var loadError: String?
+    /// [CF-26] Whether the current `loadError` could ever change on a retry.
+    ///
+    /// A `.remoteURL` that is not a file URL never resolves — `MediaReference.resolve()` refuses
+    /// it unconditionally — so the Retry button beside the card was guaranteed to fail, forever.
+    @State private var loadErrorIsRetriable = true
+    /// ⚠️ [CF-40] Bumped by Retry so the error card's VoiceOver announcement carries a NEW
+    /// identity per attempt. Without it a retry that fails the same way produced the identical
+    /// sentence, which the announcer's repeat suppression swallowed for its whole window — so
+    /// pressing Retry appeared to do nothing at all to a VoiceOver user.
+    @State private var loadAttempt = 0
     @State private var showLightbox = false
     @State private var saveError: String?
     @State private var savedURL: URL?
@@ -154,12 +164,28 @@ struct MediaArtifactImageView: View {
         loadedImage = nil
         loadedData = nil
         loadError = nil
+        loadErrorIsRetriable = true
+
+        let reference = Self.resolvableReference(for: artifact.reference)
+
+        // [CF-26] A genuinely remote reference is a dead end, not a failure: `resolve()` throws
+        // for it every single time. Say so in the user's language and drop the Retry, rather
+        // than showing "Convert to diskPath first" with a button that re-runs the same refusal.
+        guard !Self.isUnresolvable(reference) else {
+            loadError = String(localized: "This image is stored as a link to a remote address, and Devgentic never downloads images from the web.")
+            loadErrorIsRetriable = false
+            logger.info("[MEDIA] Artifact \(self.artifact.id.uuidString.prefix(8)) (\(Self.referenceKind(reference)), \(self.artifact.mimeType)) is a non-file remote reference, which is never fetched — a download via MediaStore would have to convert it to a disk path first. CONSEQUENCE: an 'Image not available' card is shown in place of the picture, with NO Retry, because no retry can succeed.")
+            return
+        }
+
         do {
-            let data = try await artifact.reference.resolve()
-            // Decoding a full-size bitmap is expensive and was happening on whatever
-            // context resolve() returned on — off-main keeps a large artifact from
-            // stalling the bubble it's rendering into.
-            let image = await Task.detached(priority: .userInitiated) { NSImage(data: data) }.value
+            let data = try await reference.resolve()
+            // Decoding a full-size bitmap is expensive, so it goes off-main to keep a large
+            // artifact from stalling the bubble it's rendering into. [CF-23] That needs
+            // `ImageDownsampler.fullSize`, not `NSImage(data:)` — the latter only parses
+            // headers here and materialises the pixels on FIRST DRAW, back on the main thread,
+            // so this hop was moving nothing that cost anything.
+            let image = await Task.detached(priority: .userInitiated) { ImageDownsampler.fullSize(from: data) }.value
             guard !Task.isCancelled else { return }
 
             if let image {
@@ -168,7 +194,7 @@ struct MediaArtifactImageView: View {
                 self.loadError = nil
             } else {
                 self.loadError = String(localized: "Could not decode image data")
-                logger.error("[MEDIA] Artifact \(self.artifact.id.uuidString.prefix(8)) (\(Self.referenceKind(self.artifact.reference)), \(self.artifact.mimeType), \(data.count) bytes) resolved but did NOT decode. CONSEQUENCE: the picture is missing from the transcript and the error card is shown in its place.")
+                logger.error("[MEDIA] Artifact \(self.artifact.id.uuidString.prefix(8)) (\(Self.referenceKind(reference)), \(self.artifact.mimeType), \(data.count) bytes) resolved but did NOT decode. CONSEQUENCE: the picture is missing from the transcript and the error card is shown in its place.")
             }
         } catch {
             guard !Task.isCancelled else { return }
@@ -176,8 +202,37 @@ struct MediaArtifactImageView: View {
             // A `.diskPath` reference that no longer resolves is exactly the durability
             // failure the logging standard exists for: without this line, "my generated
             // images disappeared" leaves no trace beyond an error card the user scrolls past.
-            logger.error("[MEDIA] Artifact \(self.artifact.id.uuidString.prefix(8)) (\(Self.referenceKind(self.artifact.reference)), \(self.artifact.mimeType)) FAILED to resolve: \(error.localizedDescription). CONSEQUENCE: the picture is missing from the transcript and the error card is shown in its place (retry offered).")
+            logger.error("[MEDIA] Artifact \(self.artifact.id.uuidString.prefix(8)) (\(Self.referenceKind(reference)), \(self.artifact.mimeType)) FAILED to resolve: \(error.localizedDescription). CONSEQUENCE: the picture is missing from the transcript and the error card is shown in its place (retry offered).")
         }
+    }
+
+    /// [CF-26] The reference `loadImage` actually reads from, which is not always the one the
+    /// artifact carries.
+    ///
+    /// The legacy `"image"` decode shim (`ChatMessage.swift`) maps EVERY url-only message to
+    /// `.remoteURL` — including the `file://` URLs older image-gen runs wrote to disk — and
+    /// `MediaReference.resolve()` refuses `.remoteURL` unconditionally. So readable pictures
+    /// still sitting on disk rendered a developer-facing "Convert to diskPath first" card next
+    /// to a Retry that re-ran the same refusal. A `file://` URL is a disk path however it got
+    /// labelled; read it as one.
+    ///
+    /// The repair lives here rather than in `MediaReference` because that type is Core and
+    /// serves the whole pipeline (where "remote is never auto-fetched" is a deliberate rule);
+    /// this is the one renderer that has to cope with the legacy shape.
+    nonisolated static func resolvableReference(for reference: MediaReference) -> MediaReference {
+        if case .remoteURL(let url) = reference, url.isFileURL {
+            return .diskPath(url)
+        }
+        return reference
+    }
+
+    /// [CF-26] Whether this reference can never produce bytes, so the card must not offer a
+    /// Retry. Only a non-file `.remoteURL` qualifies — everything else can succeed on a later
+    /// read (a file can come back). Expects a reference already passed through
+    /// `resolvableReference(for:)`.
+    nonisolated static func isUnresolvable(_ reference: MediaReference) -> Bool {
+        if case .remoteURL(let url) = reference { return !url.isFileURL }
+        return false
     }
 
     /// Reference kind for logs — the URL itself is deliberately not logged (user paths).
@@ -216,19 +271,29 @@ struct MediaArtifactImageView: View {
     /// The shared error card, not a bespoke one. The old placeholder was a fixed
     /// 256×128 tile that truncated the reason to TWO lines with no expand, no copy, and
     /// no way to retry — a dead end that also announced nothing. ErrorMessageView brings
-    /// copy + the VoiceOver announcement for free, and the reference resolve is genuinely
-    /// retriable (a file on disk can be back on the next read).
+    /// copy + the VoiceOver announcement for free.
+    ///
+    /// [CF-26] Retry is offered only where a retry can work. A resolve against disk is
+    /// genuinely retriable (a file can be back on the next read); a non-file `.remoteURL` is
+    /// refused by `MediaReference.resolve()` every time, so that card says the image is
+    /// unavailable and carries no button.
     private func errorPlaceholder(_ error: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             ErrorMessageView(
-                title: String(localized: "Failed to load image"),
+                title: loadErrorIsRetriable
+                    ? String(localized: "Failed to load image")
+                    : String(localized: "Image not available"),
                 details: error,
-                category: .imageResolutionFailed
+                category: .imageResolutionFailed,
+                announcementKey: "media-artifact-\(artifact.id.uuidString)#\(loadAttempt)"
             )
-            RetryMessageButton {
-                loadError = nil   // back to the loading placeholder while we re-resolve
-                loadedImage = nil
-                Task { await loadImage() }
+            if loadErrorIsRetriable {
+                RetryMessageButton {
+                    loadAttempt += 1  // [CF-40] a new attempt is a new announcement identity
+                    loadError = nil   // back to the loading placeholder while we re-resolve
+                    loadedImage = nil
+                    Task { await loadImage() }
+                }
             }
         }
         .frame(maxWidth: ChatUIConstants.imageMaxWidth,

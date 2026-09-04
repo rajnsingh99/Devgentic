@@ -21,10 +21,10 @@ struct SidebarHeaderActionButton: View {
         Button(action: action) {
             HStack(spacing: 4) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 11, weight: .bold))
+                    .font(theme.fontCaption2.weight(.bold))
                     .foregroundColor(theme.accentColor)
                 Text(title)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(theme.fontCaption2.weight(.semibold))
                     .foregroundColor(theme.primaryText)
             }
             .padding(.horizontal, 10)
@@ -41,7 +41,7 @@ struct SidebarHeaderActionButton: View {
                     )
             )
             .shadow(
-                color: isHovered ? theme.accentColor.opacity(0.15) : Color.black.opacity(0.08),
+                color: isHovered ? theme.accentColor.opacity(0.15) : theme.shadowColor.opacity(0.3),
                 radius: isHovered ? 4 : 2,
                 x: 0,
                 y: 1
@@ -110,7 +110,7 @@ struct SidebarSearchBarView: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .foregroundColor(isFocused ? theme.accentColor : theme.tertiaryText)
-                .font(.system(size: 13, weight: .semibold))
+                .font(theme.fontFootnote.weight(.semibold))
                 .animation(.easeInOut(duration: 0.2), value: isFocused)
                 .accessibilityHidden(true)
 
@@ -135,7 +135,7 @@ struct SidebarSearchBarView: View {
                     }
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 12))
+                        .font(theme.fontCaption)
                         .foregroundColor(theme.tertiaryText)
                 }
                 .buttonStyle(.plain)
@@ -157,7 +157,7 @@ struct SidebarSearchBarView: View {
                 )
         )
         .shadow(
-            color: isFocused ? theme.accentColor.opacity(0.2) : Color.black.opacity(0.1),
+            color: isFocused ? theme.accentColor.opacity(0.2) : theme.shadowColor.opacity(0.35),
             radius: 5, x: 0, y: 1
         )
         .animation(.easeInOut(duration: 0.2), value: isFocused)
@@ -196,7 +196,7 @@ struct BatchHeaderTextButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(.caption, weight: .medium))
+                .font(theme.fontCaption.weight(.medium))
                 .foregroundColor(tint)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
@@ -232,7 +232,7 @@ struct CategoryChip: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                .font(theme.fontCaption2.weight(isSelected ? .semibold : .medium))
                 .foregroundColor(
                     isSelected
                         ? theme.primaryText
@@ -260,7 +260,7 @@ struct CategoryChip: View {
                 .shadow(
                     color: isSelected
                         ? theme.accentColor.opacity(0.18)
-                        : (isHovered ? Color.black.opacity(0.12) : Color.clear),
+                        : (isHovered ? theme.shadowColor.opacity(0.35) : Color.clear),
                     radius: isSelected ? 5 : 3,
                     x: 0,
                     y: 1
@@ -296,7 +296,7 @@ struct SidebarEmptyStateView: View {
                 Circle()
                     .fill(
                         LinearGradient(
-                            colors: [theme.accentColor.opacity(0.08), Color.purple.opacity(0.06)],
+                            colors: [theme.accentColor.opacity(0.12), theme.accentColor.opacity(0.03)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
@@ -307,7 +307,7 @@ struct SidebarEmptyStateView: View {
                     .font(.system(size: 36)) // Fixed size: intentional (empty state icon)
                     .foregroundStyle(
                         LinearGradient(
-                            colors: [theme.accentColor.opacity(0.7), Color.purple.opacity(0.5)],
+                            colors: [theme.accentColor, theme.accentColor.opacity(0.65)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
@@ -316,11 +316,11 @@ struct SidebarEmptyStateView: View {
 
             VStack(spacing: 6) {
                 Text(title)
-                    .font(.system(.title3, weight: .semibold))
+                    .font(theme.fontTitle3.weight(.semibold))
                     .foregroundColor(theme.primaryText)
 
                 Text(subtitle)
-                    .font(.system(.caption))
+                    .font(theme.fontCaption)
                     .foregroundColor(theme.secondaryText)
                     .multilineTextAlignment(.center)
             }
@@ -329,7 +329,7 @@ struct SidebarEmptyStateView: View {
                 Button(action: onAction) {
                     HStack(spacing: 6) {
                         Image(systemName: "plus")
-                            .font(.system(.subheadline, weight: .bold))
+                            .font(theme.fontSubheadline.weight(.bold))
                             .foregroundColor(theme.accentColor)
                         Text(buttonTitle)
                             .font(theme.fontSubheadline.weight(.semibold))
@@ -349,7 +349,7 @@ struct SidebarEmptyStateView: View {
                             )
                     )
                     .shadow(
-                        color: isHovered ? theme.accentColor.opacity(0.2) : Color.black.opacity(0.1),
+                        color: isHovered ? theme.accentColor.opacity(0.2) : theme.shadowColor.opacity(0.3),
                         radius: isHovered ? 6 : 4,
                         x: 0,
                         y: 2
@@ -367,5 +367,39 @@ struct SidebarEmptyStateView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Standard Sidebar Row Background
+struct SidebarRowBackground: View {
+    let isSelected: Bool
+    let isHovering: Bool
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        if isSelected {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(theme.accentColor.opacity(0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(theme.accentColor.opacity(0.15), lineWidth: 0.5)
+                )
+                .shadow(color: theme.accentColor.opacity(0.05), radius: 4, x: 0, y: 0)
+        } else if isHovering {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(theme.surfaceOverlay)
+        } else {
+            Color.clear
+        }
+    }
+}
+
+extension View {
+    /// Applies the canonical Devgentic sidebar interactive row plate (10pt continuous corner radius,
+    /// dynamic accent tint when selected, and smooth surface overlay on hover).
+    func sidebarRowBackground(isSelected: Bool = false, isHovering: Bool) -> some View {
+        self
+            .background(SidebarRowBackground(isSelected: isSelected, isHovering: isHovering))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }

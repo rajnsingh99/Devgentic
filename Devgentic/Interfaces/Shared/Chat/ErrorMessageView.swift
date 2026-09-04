@@ -12,6 +12,14 @@ struct ErrorMessageView: View {
     /// Optional actionable remediation ("try re-attaching the file"). Rendered as a
     /// distinct lightbulb line below the details when present.
     var suggestion: String? = nil
+    /// ⚠️ [CF-40] Identity for the repeat-suppression window, when the caller has one.
+    ///
+    /// Suppression defaults to keying on the SENTENCE, which stops a rebuilt card re-speaking a
+    /// days-old failure — but it also silences a genuinely NEW failure that happens to read the
+    /// same, and "the retry failed the same way" is the case a VoiceOver user most needs to hear.
+    /// A caller that can distinguish occurrences (an artifact id plus an attempt counter) passes
+    /// one here; `nil` keeps the sentence-keyed behaviour for callers that cannot.
+    var announcementKey: String? = nil
     @Environment(\.appTheme) private var theme
     @Environment(ThemeManager.self) private var themeManager
 
@@ -89,8 +97,24 @@ struct ErrorMessageView: View {
         // where the VoiceOver cursor is — so the run just went quiet and stayed quiet.
         // `.polite` rather than `.immediate`: the error has already happened and the card
         // isn't going anywhere; nothing is lost by waiting for the current utterance.
-        .task(id: spokenDescription) {
-            AccessibilityAnnouncer.announce(spokenDescription, urgency: .polite)
+        //
+        // ⚠️ `announceOnce`, not `announce` (CF-40). `.task(id:)` fires on APPEARANCE as well as
+        // on id change, and the transcript is a LazyVStack: scrolling an old error card back
+        // into view, or switching away and back, rebuilt this view and re-spoke a failure that
+        // may be days old as if it were happening now. The key is the sentence itself, so the
+        // same card cannot be re-announced by a rebuild.
+        //
+        // ⚠️ This does NOT make the announcement live-only — a historical card scrolled into
+        // view for the FIRST time still speaks. That needs a liveness signal from the caller
+        // (the message's timestamp), which this view is not given.
+        //
+        // ⚠️ The key is `announcementKey` when the caller supplied one, so a NEW occurrence that
+        // reads identically (a retry failing the same way) still speaks. Sentence-keying alone
+        // silenced it for the whole suppression window — see `announcementKey`.
+        .task(id: announcementKey ?? spokenDescription) {
+            AccessibilityAnnouncer.announceOnce(spokenDescription,
+                                                key: announcementKey ?? spokenDescription,
+                                                urgency: .polite)
         }
         // One-click copy of the WHOLE error for a bug report. `.textSelection` on the
         // details covers partial selection, but drag-selecting across title + details +

@@ -34,6 +34,7 @@ struct MainApplicationView: View {
     @Environment(MainApplicationViewModel.self) private var viewModel
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
     @Environment(MainViewRouter.self) private var router
+    @Environment(ThemeManager.self) private var themeManager
     @Environment(\.appTheme) private var theme
 
     @FocusState private var isInputFocused: Bool
@@ -41,9 +42,11 @@ struct MainApplicationView: View {
     @AppStorage("sidebar.isVisible") private var isSidebarVisible: Bool = true
     @AppStorage("sidebar.paneWidth") private var currentSidebarPaneWidth: Double = 320
     /// Same key the Code Viewer panel persists its divider width to. Read here so split
-    /// mode can inset the chat by the panel's width. Updates on drag END (not per tick),
-    /// so the chat reflows ONCE per resize instead of re-laying-out every bubble at the
-    /// mouse's report rate — the panel overlaps the delta live, exactly like overlay mode.
+    /// mode can inset the chat by the panel's width. Written on drag END only — a
+    /// UserDefaults write per mouse move spams the preferences daemon — so it is the
+    /// AT-REST width; the in-flight width comes from `codeViewerLiveDragWidth` instead
+    /// (see `chatSplitInset`), which is what keeps the chat column pinned to the divider
+    /// for the whole drag rather than a full drag behind it.
     @AppStorage("codeViewerPanelWidth") private var codeViewerPanelWidth: Double = 600
     @State private var showModePicker: Bool = true
     /// Window content width, for clamping the split inset (measured, not derived — the
@@ -69,7 +72,16 @@ struct MainApplicationView: View {
     private var chatSplitInset: CGFloat {
         guard chatHistoryViewModel.codeViewerPresentation == .split,
               chatHistoryViewModel.isCodeViewerPanelPresented else { return 0 }
-        let desired = CGFloat(codeViewerPanelWidth)
+        // [CF-15] The IN-FLIGHT drag width when one is running, else the persisted value.
+        // `codeViewerPanelWidth` only updates on drag end (see the doc above), so without
+        // this the panel's edge moved live while this inset held still for the whole
+        // drag — the panel slid over the chat text, then the chat jumped to its new
+        // column in one animated step on release. The Code Viewer panel publishes the
+        // live value onto the view model per drag tick for exactly this reader — which
+        // only pins the column because `chatSplitInsetAnimation` drops the ease for the
+        // duration of the drag; an animated per-tick inset trails just as visibly.
+        let liveWidth = chatHistoryViewModel.codeViewerLiveDragWidth ?? codeViewerPanelWidth
+        let desired = CGFloat(liveWidth)
             + ChatUIConstants.codeViewerDividerWidth
             + ChatUIConstants.splitModeChatGutter
         // The floor accounts for BOTH gutters (leading one below + this trailing one) so
@@ -77,6 +89,34 @@ struct MainApplicationView: View {
         let maxInset = windowContentWidth - totalSidebarWidth - ChatUIConstants.splitModeChatGutter
             - ChatUIConstants.splitModeMinChatWidth
         return max(0, min(desired, maxInset))
+    }
+
+    /// Animation for `chatSplitInset` — deliberately NONE while a divider drag is running.
+    ///
+    /// [CF-15] The inset used to change exactly once per drag (on release), so a 0.2s ease
+    /// was the whole transition. It now changes every drag tick, and each tick RETARGETS
+    /// the ease from wherever the presentation value happens to be — so the chat column
+    /// eases permanently behind a panel edge that tracks the cursor instantly (the panel's
+    /// `.frame(width:)` is unanimated), which is the very overlap this row filed, plus a
+    /// ~0.2s slide continuing after the mouse is released. Open/close/mode changes still
+    /// move `codeViewerPanelWidth` with no drag in flight and keep their ease.
+    /// ⚠️ Guarded on `.split` FIRST, so the live-drag property is read only in the mode whose
+    /// inset depends on it. `chatSplitInset` has always had that guard, so before this
+    /// animation existed the root window registered no observation dependency on a value the
+    /// divider writes on every mouse-move tick — and the divider is mounted in `.overlay` too.
+    /// Reading it unguarded here invalidated `MainApplicationView.body` (the whole root window)
+    /// per tick of a drag that, in overlay, cannot move the inset off 0.
+    private var chatSplitInsetAnimation: Animation? {
+        guard chatHistoryViewModel.codeViewerPresentation == .split else {
+            return Self.splitInsetAnimation(isDraggingDivider: false)
+        }
+        return Self.splitInsetAnimation(isDraggingDivider: chatHistoryViewModel.codeViewerLiveDragWidth != nil)
+    }
+
+    /// The rule above, as a value — the view can't be instantiated in a test, and this is
+    /// the part worth pinning: no animation while the divider is being dragged.
+    static func splitInsetAnimation(isDraggingDivider: Bool) -> Animation? {
+        isDraggingDivider ? nil : .easeInOut(duration: 0.2)
     }
 
     /// Leading breathing room between the sidebar edge and the chat column in split mode
@@ -105,7 +145,7 @@ struct MainApplicationView: View {
                 theme.primaryBackground
                 
                 // Ambient Aura Glows (Provides texture for Liquid Glass refraction)
-                if theme.id != "one_light" {
+                if theme.colorScheme != .light {
                     GeometryReader { geo in
                         ZStack {
                             Circle()
@@ -167,7 +207,7 @@ struct MainApplicationView: View {
             }
             .animation(.easeInOut(duration: 0.1), value: currentSidebarPaneWidth)
             .animation(.easeInOut(duration: 0.2), value: router.activeDestination)
-            .animation(.easeInOut(duration: 0.2), value: chatSplitInset)
+            .animation(chatSplitInsetAnimation, value: chatSplitInset)
             
             VSCodifiedSidebarContainerView(
                 isSidebarVisible: $isSidebarVisible,
@@ -225,7 +265,7 @@ struct MainApplicationView: View {
         } action: { newWidth in
             windowContentWidth = newWidth
         }
-        .preferredColorScheme(theme.id == "one_light" ? .light : (theme.id == "dracula" ? .dark : nil))
+        .preferredColorScheme(theme.colorScheme)
         .onAppear {
              if viewModel.selectedConversationID != nil && router.isShowingChat {
                  DispatchQueue.main.async { isInputFocused = true }

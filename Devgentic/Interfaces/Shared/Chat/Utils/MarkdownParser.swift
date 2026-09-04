@@ -34,8 +34,76 @@ func preprocessStreamResilientMarkdown(_ text: String) -> String {
     return text
 }
 
+/// Rewrites every spelling of an HTML line break to a markdown HARD break.
+///
+/// Two bugs in one line, both confirmed against `AttributedString(markdown:)`:
+///  - the replacement used to be `"\n"`, which CommonMark reads as a SOFT break and the
+///    renderer collapses to a SPACE — so the break the author asked for silently vanished.
+///    Only a two-space-then-newline survives as a real line break.
+///  - only the literal lowercase `<br>` was matched, so `<br/>`, `<br />` and `<BR>`
+///    reached the reader as literal tag text.
+///
+/// Applied wherever a string is about to be handed to `AttributedString(markdown:)`:
+/// paragraph/fallback text via `preprocessMarkdownText`, and table cells in `BlockBuilder`.
+/// Tables matter here specifically: the app's own `TableMarkdown.escapeCell` EMITS `<br>`
+/// for a multi-line cell, so a table Devgentic serialises has to survive its own round trip.
+/// ⚠️ The rewrite runs ONLY OUTSIDE code spans and fenced blocks. It is a blind regex over a
+/// string that is sometimes already-serialised markdown (`cell.children.map { $0.format() }`
+/// re-emits an inline-code child as `` `<br>` ``), so rewriting the whole string turns a
+/// documented tag into three spaces: "Use `<br/>` to force a break" rendered as "Use     to
+/// force a break", and a `<br>` inside a fence was mangled the same way. Code spans are
+/// content, never markup to interpret — this is the repo's standing rule for payload-shaped
+/// rewrites (repair only outside quoted/verbatim spans, never by shape-matching the payload).
+func rewritingHTMLLineBreaks(_ text: String) -> String {
+    guard text.contains("`") else { return rewritingBreaksInProse(text) }
+    // Split on backtick RUNS: a run opens a span that only an equal-length run closes, so
+    // ``a `b` c`` and a ``` fence are both handled by the same alternation of
+    // outside/inside segments. Odd trailing run (unclosed span) leaves the tail as prose.
+    var result = ""
+    var index = text.startIndex
+    var insideFence: String? = nil          // the run that opened the current span
+    var segment = ""
+    while index < text.endIndex {
+        guard text[index] == "`" else {
+            segment.append(text[index])
+            index = text.index(after: index)
+            continue
+        }
+        var run = ""
+        while index < text.endIndex, text[index] == "`" {
+            run.append(text[index])
+            index = text.index(after: index)
+        }
+        if let open = insideFence {
+            // Inside a span: only an equal-length run closes it. Content passes through raw.
+            segment.append(run)
+            if run == open {
+                result += segment
+                segment = ""
+                insideFence = nil
+            }
+        } else {
+            result += rewritingBreaksInProse(segment)
+            segment = run
+            insideFence = run
+        }
+    }
+    // An unterminated run never opened a span at all — CommonMark leaves an unmatched
+    // backtick as literal text — so the tail is prose and its breaks still count.
+    result += rewritingBreaksInProse(segment)
+    return result
+}
+
+private func rewritingBreaksInProse(_ text: String) -> String {
+    text.replacingOccurrences(
+        of: "<br[ \t]*/?>",
+        with: "  \n",
+        options: [.regularExpression, .caseInsensitive]
+    )
+}
+
 func preprocessMarkdownText(_ text: String) -> String {
-    var processed = text.replacingOccurrences(of: "<br>", with: "\n")
+    var processed = rewritingHTMLLineBreaks(text)
 
     // If the text looks like a list of paths but isn't properly formatted as a markdown list,
     // we can try to force double newlines to ensure readability in the UI.
@@ -126,7 +194,8 @@ fileprivate func buildContentBlocks(
 enum CodeFileNameInference {
 
     /// Longest prose allowed to claim a filename — a short lead-in like "Here is the
-    /// updated `Main.swift`:", not a paragraph that happens to end in one.
+    /// updated `Main.swift`:", not a paragraph that happens to end in one. Kept as a
+    /// second gate alongside the markup requirement in `fromTrailingProse`.
     private static let proseClaimLimit = 160
 
     /// The anchored "looks like a filename" test: `stem.ext` with a letter-led extension
@@ -137,13 +206,105 @@ enum CodeFileNameInference {
     /// with trailing punctuation ("`Foo.java`:", "(see Foo.java).") — and returns the
     /// cleaned name, or nil.
     static func filenameToken(_ raw: String) -> String? {
-        var token = raw.trimmingCharacters(in: .whitespaces)
-        while let last = token.last, ":.,;!?".contains(last) { token.removeLast() }
+        var token = strippingTrailingPunctuation(raw.trimmingCharacters(in: .whitespaces))
         token = token.trimmingCharacters(in: CharacterSet(charactersIn: "`*_\"'()[]<>"))
-        while let last = token.last, ":.,;!?".contains(last) { token.removeLast() }
+        token = strippingTrailingPunctuation(token)
         guard !token.contains("://"), !token.hasPrefix("www.") else { return nil }
         guard token.wholeMatch(of: /[A-Za-z0-9_][A-Za-z0-9_\-.\/]*\.[A-Za-z][A-Za-z0-9]{0,7}/) != nil else { return nil }
         return token
+    }
+
+    /// Trailing sentence punctuation, removed — with ONE exception that is the whole point:
+    /// a `.` sitting directly after a letter or digit is NOT removed.
+    ///
+    /// That dot belongs to an abbreviation ("e.g.", "etc.", "Inc."), and stripping it
+    /// manufactures an extension out of the letters in front of it: `e.g.:` used to clean
+    /// down to `e.g`, which passes the `stem.ext` test and then became the file badge, the
+    /// card title, the viewer tab name and the Save-As default filename. A real filename
+    /// never ends in a bare dot, so refusing to strip that one costs nothing — while a dot
+    /// after a bracket or backtick (`src/Main.java).`) is ordinary prose punctuation and
+    /// still goes.
+    private static func strippingTrailingPunctuation(_ input: String) -> String {
+        var token = input
+        while let last = token.last, ":.,;!?".contains(last) {
+            if last == "." {
+                let lastIndex = token.index(before: token.endIndex)
+                if lastIndex > token.startIndex {
+                    let preceding = token[token.index(before: lastIndex)]
+                    if preceding.isLetter || preceding.isNumber { break }
+                }
+            }
+            token.removeLast()
+        }
+        return token
+    }
+
+    /// `filenameToken`, plus the one shape test that only makes sense for a claim made in
+    /// PROSE (or a heading): the token must not be a fully-qualified identifier.
+    ///
+    /// CF-3's markup gate asks the AUTHOR whether a token names a file, and that is the
+    /// right question for `Node.js` in a bare sentence — but a backticked dotted identifier
+    /// immediately above a fence ("a small example using `java.util.List`:") is the single
+    /// most common trailing token in code chat, and the backticks are ordinary code
+    /// formatting, not a file claim. It still became the block's badge, its viewer tab title
+    /// and its Save-As default filename.
+    ///
+    /// The separable half of that class is structural, not a word list: a fully-qualified type
+    /// name is DOTTED THREE OR MORE DEEP and ends in a Pascal-cased segment
+    /// (`java.util.List`, `com.example.Main`, `org.slf4j.Logger`), which no real filename is.
+    ///
+    /// ⚠️ BOTH halves of that test are load-bearing; an earlier form rejected any uppercase
+    /// first character of the extension and silently un-named a whole class of real files —
+    /// measured: `script.R` (the canonical R extension), `README.MD`, `query.SQL`,
+    /// `Makefile.PL`, `analysis.Rmd`. Losing a real file's badge, tab title and Save-As name
+    /// is the same cosmetic cost as a wrong one, so a rule that trades one for the other buys
+    /// nothing. Requiring the third dot keeps every one of those.
+    ///
+    /// ⚠️ The rest of the class is NOT separable by shape and is deliberately left open:
+    /// `ASP.NET`, `os.path`, `numpy.random` and `Node.js` are indistinguishable from a real
+    /// filename (`app.min.js` is one). They claim only when the author marked them up, which
+    /// is the signal this gate exists to honour.
+    ///
+    /// Deliberately NOT folded into `filenameToken`: the fence info string (```java Foo.NET),
+    /// the leading comment and the injected file marker are explicit claims, and an explicit
+    /// claim is honoured whatever its extension looks like.
+    private static func plausibleFilenameToken(_ raw: String) -> String? {
+        guard let token = filenameToken(raw) else { return nil }
+        let ext = (token as NSString).pathExtension
+        let endsInPascalCasedSegment = ext.first?.isUppercase == true
+            && ext.dropFirst().contains(where: \.isLowercase)
+        guard !(endsInPascalCasedSegment && token.split(separator: ".").count >= 3) else { return nil }
+        return token
+    }
+
+    /// A LABELLED claim inside the author's markup — "**File: src/Main.java**",
+    /// "**Updated: config.yaml**" — reduced to the token it labels.
+    ///
+    /// Models label the filename constantly, and the label is exactly what a whole-string
+    /// `filenameToken` test chokes on: its spaces defeat the anchored `stem.ext` match. The
+    /// CF-3 gate handed the whole `Strong` run to `filenameToken`, so those two shapes — which
+    /// carry the very markup signal the gate asks for — stopped naming their block and
+    /// regressed to "Java Snippet".
+    ///
+    /// Only the text after the LAST colon counts, and only when it is a SINGLE token: a label
+    /// is short and what follows it is the name and nothing else, which keeps a bolded
+    /// SENTENCE ("**Note: this program runs on Node.js**") out — its remainder is four words.
+    ///
+    /// Everything this accepts, the pre-CF-3 last-word rule accepted too (and then some): it
+    /// restores lost shapes, it cannot introduce a claim that behaviour did not already make.
+    private static func labelledFilenameToken(_ raw: String) -> String? {
+        if let direct = plausibleFilenameToken(raw) { return direct }
+        guard let colon = raw.lastIndex(of: ":") else { return nil }
+        let label = raw[raw.startIndex..<colon].trimmingCharacters(in: .whitespaces)
+        let remainder = raw[raw.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+        // ⚠️ The label must look like a LABEL — a plain word. Splitting on the last colon of an
+        // arbitrary token also splits a URL (`http://localhost:3000/app.js` → `3000/app.js`),
+        // which then sails past `filenameToken`'s own URL guard because that guard never sees
+        // the scheme. A real label carries no slash and no dot.
+        guard !label.isEmpty,
+              !label.contains("/"), !label.contains("."),
+              !remainder.contains(where: \.isWhitespace) else { return nil }
+        return plausibleFilenameToken(remainder)
     }
 
     /// Splits a fence info string into its language token and an optional filename.
@@ -211,15 +372,71 @@ enum CodeFileNameInference {
         return filenameToken(line.trimmingCharacters(in: .whitespaces))
     }
 
-    /// Short prose (or a heading) whose LAST word is a filename — "`DijkstraSolver.java`"
-    /// alone above a fence, or "Here is the updated `Main.swift`:". Ends-with is the
-    /// discriminator: a mid-sentence mention ("I changed Foo.java and then…") ends on a
-    /// different word and never claims.
-    static func fromTrailingProse(_ text: String) -> String? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count <= proseClaimLimit else { return nil }
-        guard let lastWord = trimmed.split(whereSeparator: \.isWhitespace).last else { return nil }
-        return filenameToken(String(lastWord))
+    /// Short prose that DELIBERATELY names a file at its end — "`DijkstraSolver.java`"
+    /// alone above a fence, or "Here is the updated `Main.swift`:".
+    ///
+    /// Ends-with alone is not enough, and that was a real defect: the last word of any
+    /// paragraph up to `proseClaimLimit` chars was handed to `filenameToken`, so ordinary
+    /// prose ending in "…in Node.js:" or "…with ASP.NET:" claimed the file badge, the card
+    /// title, the viewer tab name and the Save-As default filename. Those words ARE
+    /// `stem.ext` shaped; no amount of token cleaning can tell them from a filename. What
+    /// separates a claim from a mention is the AUTHOR'S MARKUP, so the trailing token must
+    /// arrive as an inline-code span or a bold run — which is how models actually write a
+    /// filename above a fence.
+    ///
+    /// Trailing punctuation after the claim ("…`Main.swift`:") is skipped, so the colon
+    /// lead-in still works, and a LABEL inside the marked-up run ("**File: src/Main.java**")
+    /// is stepped over rather than defeating the claim — see `labelledFilenameToken`.
+    static func fromTrailingProse(in paragraph: Paragraph) -> String? {
+        guard paragraph.plainText.count <= proseClaimLimit else { return nil }
+        return emphasizedTrailingToken(in: paragraph)
+    }
+
+    /// A heading that claims a filename for the fence below it.
+    ///
+    /// A heading gets one signal prose does not: being the ENTIRE heading. "### DijkstraSolver.java"
+    /// is a section named after a file, not a sentence that happens to end in one — there is
+    /// no surrounding prose for the token to be a stray word of. A heading that merely ends
+    /// in a filename-shaped word ("## Setting up Node.js") must still carry markup emphasis,
+    /// exactly like prose.
+    ///
+    /// The whole-heading escape hatch deliberately does NOT take `labelledFilenameToken`'s
+    /// label fallback: a heading carries no markup signal of its own, so "## Note: Node.js"
+    /// would claim on the colon alone. Inside a heading, a labelled claim still has to be
+    /// marked up, and `emphasizedTrailingToken` below is where that is read.
+    static func fromHeading(_ heading: Heading) -> String? {
+        let plain = heading.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !plain.isEmpty, plain.count <= proseClaimLimit else { return nil }
+        if let wholeHeading = plausibleFilenameToken(plain) { return wholeHeading }
+        return emphasizedTrailingToken(in: heading)
+    }
+
+    /// The filename in the container's last MARKED-UP inline (`` `Main.swift` `` or
+    /// **Main.swift**), or nil.
+    ///
+    /// Walks the inline children backwards, stepping over trailing punctuation-only text
+    /// and line breaks. The first child that carries content decides: inline code or strong
+    /// emphasis may claim, anything else (plain text, a link, italics) stops the walk. That
+    /// backwards walk IS the ends-with test — a mid-sentence mention ("I changed
+    /// `Foo.java` and then reran") stops on the trailing prose and never claims.
+    ///
+    /// The run is read through `labelledFilenameToken`, not `filenameToken`: the whole run is
+    /// what a model writes ("**File: src/Main.java**"), and the label inside it must not be
+    /// what defeats the claim.
+    private static func emphasizedTrailingToken(in container: some Markup) -> String? {
+        for child in container.children.reversed() {
+            if let text = child as? Markdown.Text {
+                let trimmed = text.string.trimmingCharacters(in: .whitespacesAndNewlines)
+                // A colon, a period or a closing bracket after the claim is normal prose.
+                if trimmed.isEmpty || trimmed.allSatisfy({ ":.,;!?)]}".contains($0) }) { continue }
+                return nil
+            }
+            if child is SoftBreak || child is LineBreak { continue }
+            if let code = child as? InlineCode { return labelledFilenameToken(code.code) }
+            if let strong = child as? Strong { return labelledFilenameToken(strong.plainText) }
+            return nil
+        }
+        return nil
     }
 }
 
@@ -290,8 +507,10 @@ private struct BlockBuilder {
             if consumedFileMarker(plain) { return }
             // Prose filename claim ("`DijkstraSolver.java`" above a fence). Unlike the
             // marker the paragraph stays VISIBLE — it's the model's own prose, not an
-            // injected sentinel to hide. plainText again: no backtick/bold markers.
-            if let inferred = CodeFileNameInference.fromTrailingProse(plain) {
+            // injected sentinel to hide. The AST node itself is passed, not `plain`: the
+            // claim requires the author's own markup (inline code or bold) on the trailing
+            // token, and plainText erases bold entirely.
+            if let inferred = CodeFileNameInference.fromTrailingProse(in: paragraph) {
                 pendingFileName = inferred
                 logger.debug("[FILENAME] Prose claim '\(inferred)' pending for next code block.")
             }
@@ -311,8 +530,9 @@ private struct BlockBuilder {
             pendingFileName = nil
         }
         else if let heading = child as? Heading {
-            // A heading that IS a filename ("### DijkstraSolver.java") claims like prose.
-            if let inferred = CodeFileNameInference.fromTrailingProse(heading.plainText) {
+            // A heading that IS a filename ("### DijkstraSolver.java") claims; one that
+            // merely ends in a filename-shaped word needs the same markup emphasis prose does.
+            if let inferred = CodeFileNameInference.fromHeading(heading) {
                 pendingFileName = inferred
                 logger.debug("[FILENAME] Heading claim '\(inferred)' pending for next code block.")
             }
@@ -338,14 +558,15 @@ private struct BlockBuilder {
             blocks.append(ContentBlock(id: id, type: .blockquote(blocks: nested.blocks)))
         }
         else if let table = child as? Markdown.Table {
-            let headers: [String] = table.head.cells.map { cell in
-                cell.children.map { $0.format() }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+            // Cells never reached `preprocessMarkdownText` — `TableCellView.textCell` parses
+            // this string directly — so `a<br>b` displayed the tag as literal text, including
+            // in tables the app itself serialised through `TableMarkdown.escapeCell`.
+            func cellText(_ cell: Markdown.Table.Cell) -> String {
+                rewritingHTMLLineBreaks(cell.children.map { $0.format() }.joined())
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
             }
-            let rows: [[String]] = table.body.rows.map { row in
-                row.cells.map { cell in
-                    cell.children.map { $0.format() }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-            }
+            let headers: [String] = table.head.cells.map(cellText)
+            let rows: [[String]] = table.body.rows.map { $0.cells.map(cellText) }
             // cmark parsed `:--` / `:-:` / `--:` all along; we simply never read it, so an
             // author's right-aligned numbers rendered left. `nil` = unspecified, which GFM
             // renders leading.

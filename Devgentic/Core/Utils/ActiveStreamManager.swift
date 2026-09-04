@@ -699,6 +699,14 @@ final class ActiveStreamManager {
                         logger.notice("[WF_EVENT] NodeCancelled: '\(profileName)' [\(nodeID)]. CONSEQUENCE: the node's row settles as 'Cancelled' (not failed) with any partial output discarded; no output port is activated, so nothing downstream of it runs.")
                         workflowExecutionState?.handleNodeCancelled(nodeID: nodeID, profileName: profileName)
 
+                    case .workflowNodeRetryScheduled(let nodeID, let profileName, let attemptsRemaining):
+                        // [CF-30] The row deliberately keeps showing the failure of the attempt
+                        // that just ended; this only records that the engine has not given up, so
+                        // a Stop during the back-off settles it as cancelled instead of leaving a
+                        // failure the user pre-empted.
+                        logger.notice("[WF_EVENT] NodeRetryScheduled: '\(profileName)' [\(nodeID)], \(attemptsRemaining) attempt(s) left. CONSEQUENCE: the node's row stays 'Failed' for the back-off (it is not retrying yet, and may never), but a Stop pressed now settles it as Cancelled rather than as a genuine failure.")
+                        workflowExecutionState?.handleNodeRetryScheduled(nodeID: nodeID, profileName: profileName, attemptsRemaining: attemptsRemaining)
+
                     case .workflowProgress(let completed, let total):
                         logger.info("[WF_EVENT] Progress: \(completed)/\(total)")
                         workflowExecutionState?.handleProgress(completed: completed, total: total)
@@ -1336,9 +1344,46 @@ final class ActiveStreamManager {
         // [TL-1] Close any tool row still spinning at end-of-run — cancel and failure
         // mid-tool used to persist rows with `isExecuting == true`, so the spinner
         // survived reload forever.
-        let danglingClosed = message.closeDanglingToolRows(outcome: message.terminalOutcome)
-        if danglingClosed > 0 {
-            logger.warning("[STREAM_FINALIZE] messageID: \(message.id.uuidString.prefix(8)) — closed \(danglingClosed) dangling tool row(s) at finalize (outcome: \(message.terminalOutcome?.rawValue ?? "nil")); a persisted row must never claim to still be executing (TL-1).")
+        let closedRows = message.closeDanglingToolRowsReporting(outcome: message.terminalOutcome)
+        if !closedRows.isEmpty {
+            logger.warning("[STREAM_FINALIZE] messageID: \(message.id.uuidString.prefix(8)) — closed \(closedRows.count) dangling tool row(s) at finalize (outcome: \(message.terminalOutcome?.rawValue ?? "nil")); a persisted row must never claim to still be executing (TL-1).")
+        }
+
+        // [CF-9] Settle the LIVE CODE VIEWER TAB for every abandoned file write.
+        //
+        // A live tab is opened from `.toolCall`, which `ToolExecutionLoop` yields BEFORE the
+        // permission park; both of its terminal transitions hang off the `.toolSucceeded` /
+        // `.toolFailed` posts above. Stop pressed while a write is parked throws
+        // `CancellationError` WITHOUT yielding `.toolFailed` (ToolExecutionLoop, "if
+        // Task.isCancelled { throw CancellationError() }"), and a provider throw reaches the
+        // generic catch the same way — so neither posted a completion and
+        // `ChatHistoryViewModel.handleAgentWriteCompleted` was never called. The tab kept
+        // `liveState == .active` for the rest of the session: the orange "Agent is writing this
+        // file" banner stayed up, `hasLiveAgentTabs` kept the minimized pill pulsing, and the
+        // proposal that never reached disk was never marked rejected.
+        //
+        // This runs on EVERY finalize, including the clean one — where it is a no-op, because a
+        // tool that completed normally is not a dangling row. `isSuccess: false` is the honest
+        // value: the write did not land.
+        //
+        // ⚠️ `completed(...)` is NOT the exact inverse of `began(...)`, and the log below is worded
+        // for that. `began` additionally refuses an empty `content` and anything over
+        // `liveContentByteLimit`, so a 600 KB write opens no tab and this loop still produces a
+        // payload for it. Posting one is harmless — `handleAgentWriteCompleted` finds no matching
+        // `.active` tab and says so at debug — but the line must not claim a tab settled.
+        for row in closedRows {
+            guard let payload = AgentLiveWriteEvent.completed(
+                toolName: row.name,
+                params: row.params,
+                isSuccess: false,
+                preWriteContent: nil,
+                conversationID: conversationID
+            ) else { continue }
+            NotificationCenter.default.post(
+                name: AgentLiveWriteEvent.completed, object: nil,
+                userInfo: [AgentLiveWriteEvent.payloadKey: payload]
+            )
+            logger.warning("[CodeViewer] messageID: \(message.id.uuidString.prefix(8)) — the run ended without a completion event for the live write of '\(payload.fileName)'; posting a failed completion now. CONSEQUENCE: if that file has a live tab it settles as rejected (the proposal never reached disk) instead of claiming the agent is still writing for the rest of the session; if no tab was opened for it — an empty or over-cap write, which `began` refuses — the post is a no-op and the handler logs that at debug.")
         }
 
         if let traceID = message.traceID {

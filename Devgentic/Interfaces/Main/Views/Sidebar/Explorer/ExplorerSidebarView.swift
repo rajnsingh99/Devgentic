@@ -106,7 +106,7 @@ struct HeaderActionButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(.caption2))
+                .font(theme.fontCaption2)
                 .foregroundColor(isHovering ? theme.primaryText : theme.secondaryText)
                 .frame(width: 20, height: 20)
                 .background(isHovering ? theme.surfaceOverlay : Color.clear)
@@ -238,7 +238,8 @@ struct FileOutlineView: NSViewRepresentable {
             guard let fileItem = item as? FileSystemItem else { return nil }
 
             let view = ExplorerItemContentRow(item: fileItem, viewModel: viewModel)
-                .environment(themeManager) // Use injected theme manager
+                .environment(themeManager)
+                .environment(\.appTheme, themeManager.currentTheme)
             let hostingView = NSHostingView(rootView: view)
             
             return hostingView
@@ -288,7 +289,7 @@ struct ExplorerItemContentRow: View {
         @Bindable var viewModel = viewModel
         HStack(spacing: 6) {
             Image(systemName: item.iconName)
-                .foregroundColor(item.isDirectory ? .secondary : item.iconColor(for: themeManager.currentTheme))
+                .foregroundColor(item.isDirectory ? theme.secondaryText : item.iconColor(for: themeManager.currentTheme))
                 .font(theme.fontSubheadline)
                 .accessibilityHidden(true)
             
@@ -313,7 +314,7 @@ struct ExplorerItemContentRow: View {
             } else {
                 Text(item.name)
                     .font(theme.fontFootnote.weight(.medium))
-                    .foregroundColor(.primary.opacity(0.9))
+                    .foregroundColor(theme.primaryText)
                     .lineLimit(1)
             }
             Spacer()
@@ -416,7 +417,7 @@ struct ExplorerSidebarView_Previews: PreviewProvider {
                 .environment(ThemeManager())
                 .previewDisplayName("Active Project")
                 .frame(width: 300, height: 500)
-                .background(AppThemes.DefaultTheme().primaryBackground)
+                .background(AppThemes.MaterialTheme().primaryBackground)
         }
     }
 }

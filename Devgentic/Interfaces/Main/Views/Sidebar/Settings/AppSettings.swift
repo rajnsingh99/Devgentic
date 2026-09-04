@@ -56,6 +56,10 @@ struct AppSettings {
     static let notificationChannelsKey = "notificationChannels"
     static let notificationPerConversationKey = "notificationPerConversation"
 
+    // [CF-39] Conversation id → the ChatOps service that created it. See
+    // `RemoteConversationOriginStore` for why this is not a `ConversationSD` column.
+    static let remoteConversationOriginsKey = "remoteConversationOrigins"
+
     // Chat Font
     static let chatFontSizeKey = "chatFontSize"
     static let chatLineSpacingKey = "chatLineSpacing"

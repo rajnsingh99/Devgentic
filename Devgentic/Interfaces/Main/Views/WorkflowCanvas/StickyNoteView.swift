@@ -94,7 +94,7 @@ struct StickyNoteView: View {
                 .font(.system(size: 13, weight: .regular, design: .rounded))
                 .scrollContentBackground(.hidden)
                 .background(Color.clear)
-                .foregroundColor(theme.primaryText)
+                .foregroundColor(theme.primaryText)	
                 .padding(.horizontal, 6)
                 .padding(.bottom, 6)
                 .onSubmit {

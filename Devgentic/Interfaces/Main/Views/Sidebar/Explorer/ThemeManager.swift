@@ -14,18 +14,29 @@ import SwiftUI
 /// Selecting a specific theme overrides the global theme for the code viewer only.
 enum CodeViewerThemeOverride: String, CaseIterable {
     case `default` = "default"
-    case oneLight = "one_light"
-    case oneDark = "one_dark"
+    case material = "material"
     case cosmicDark = "cosmic_dark"
-    case dracula = "dracula"
+    case oneLight = "one_light"
+    case solarizedLight = "solarized_light"
+
+    init?(rawValue: String) {
+        switch rawValue {
+        case "default": self = .default
+        case "material", "dracula", "one_dark": self = .material // Backward-compatible migration
+        case "cosmic_dark": self = .cosmicDark
+        case "one_light", "github_light": self = .oneLight // One Light (renamed GitHub Light)
+        case "solarized_light": self = .solarizedLight
+        default: return nil
+        }
+    }
 
     var displayName: String {
         switch self {
         case .default: return "Default (Follow App Theme)"
-        case .oneLight: return "One Light"
-        case .oneDark: return "One Dark"
+        case .material: return "Material Darker"
         case .cosmicDark: return "Cosmic Dark"
-        case .dracula: return "Dracula"
+        case .oneLight: return "One Light"
+        case .solarizedLight: return "Solarized Light"
         }
     }
 }
@@ -49,18 +60,18 @@ enum CodeViewerThemeOverride: String, CaseIterable {
 
     /// The array of all themes available in the application.
     let availableThemes: [any Theme] = [
-        AppThemes.DefaultTheme(),
-        AppThemes.DraculaTheme(),
+        AppThemes.MaterialTheme(),
+        AppThemes.CosmicDarkTheme(),
         AppThemes.OneLightTheme(),
-        AppThemes.OneDarkTheme(),
-        AppThemes.CosmicDarkTheme()
+        AppThemes.SolarizedLightTheme()
     ]
 
     /// The currently active theme. Published to allow SwiftUI views to automatically
     /// update when the theme changes.
     private(set) var currentTheme: any Theme
 
-    private var baseTheme: any Theme
+    /// The base theme without dynamic decorators/overrides.
+    public private(set) var baseTheme: any Theme
 
     /// The Code Viewer theme override. When `.default`, follows the global app theme.
     private(set) var codeViewerThemeOverride: CodeViewerThemeOverride
@@ -80,21 +91,34 @@ enum CodeViewerThemeOverride: String, CaseIterable {
     }
 
     init() {
-        // Load the saved app theme.
-        let savedThemeID = UserDefaults.standard.string(forKey: Self.selectedThemeKey)
+        // Load the saved app theme (migrating legacy "dracula", "one_dark", "default", or "github_light").
+        let rawSavedThemeID = UserDefaults.standard.string(forKey: Self.selectedThemeKey)
+        let savedThemeID: String
+        if rawSavedThemeID == "dracula" || rawSavedThemeID == "one_dark" || rawSavedThemeID == "default" || rawSavedThemeID == nil {
+            savedThemeID = "material"
+            if rawSavedThemeID != nil {
+                UserDefaults.standard.set("material", forKey: Self.selectedThemeKey)
+            }
+        } else if rawSavedThemeID == "github_light" {
+            savedThemeID = "one_light"
+            UserDefaults.standard.set("one_light", forKey: Self.selectedThemeKey)
+        } else {
+            savedThemeID = rawSavedThemeID ?? "material"
+        }
+
         let allThemes: [any Theme] = [
-            AppThemes.DefaultTheme(),
-            AppThemes.DraculaTheme(),
+            AppThemes.MaterialTheme(),
+            AppThemes.CosmicDarkTheme(),
             AppThemes.OneLightTheme(),
-            AppThemes.OneDarkTheme(),
-            AppThemes.CosmicDarkTheme()
+            AppThemes.SolarizedLightTheme()
         ]
         let base = allThemes.first { $0.id == savedThemeID } ?? allThemes[0]
         self.baseTheme = base
 
         // Load the saved code viewer override.
         let savedOverride = UserDefaults.standard.string(forKey: Self.codeViewerThemeKey)
-        self.codeViewerThemeOverride = savedOverride.flatMap { CodeViewerThemeOverride(rawValue: $0) } ?? .default
+        let codeOverride = savedOverride.flatMap { CodeViewerThemeOverride(rawValue: $0) } ?? .default
+        self.codeViewerThemeOverride = codeOverride
 
         // Load the saved accent color.
         let savedAccent = UserDefaults.standard.string(forKey: Self.accentColorKey)
@@ -108,26 +132,45 @@ enum CodeViewerThemeOverride: String, CaseIterable {
         self.chatLineSpacing = savedLineSpacing ?? 4
 
         // Initialize currentTheme with decorator
-        self.currentTheme = ThemeDecorator(base: base, accentColorOverride: accent)
+        self.currentTheme = ThemeDecorator(base: base, accentColorOverride: accent, codeThemeOverride: codeOverride)
+
+        // Sync initial window chrome appearance
+        Self.syncWindowAppearance(colorScheme: base.colorScheme)
+    }
+
+    /// Synchronizes native NSWindow appearance with the active color scheme.
+    static func syncWindowAppearance(colorScheme: ColorScheme?) {
+        #if canImport(AppKit) && !targetEnvironment(macCatalyst)
+        DispatchQueue.main.async {
+            let appearance: NSAppearance? = colorScheme.map {
+                NSAppearance(named: $0 == .dark ? .darkAqua : .aqua)
+            } ?? nil
+            for window in NSApp.windows {
+                window.appearance = appearance
+            }
+        }
+        #endif
     }
 
     /// Applies a new theme to the application.
     func applyTheme(_ theme: any Theme) {
         self.baseTheme = theme
-        self.currentTheme = ThemeDecorator(base: theme, accentColorOverride: selectedAccentColor)
+        self.currentTheme = ThemeDecorator(base: theme, accentColorOverride: selectedAccentColor, codeThemeOverride: codeViewerThemeOverride)
         UserDefaults.standard.set(theme.id, forKey: Self.selectedThemeKey)
+        Self.syncWindowAppearance(colorScheme: theme.colorScheme)
     }
 
     /// Applies a Code Viewer theme override.
     func applyCodeViewerTheme(_ override: CodeViewerThemeOverride) {
         self.codeViewerThemeOverride = override
+        self.currentTheme = ThemeDecorator(base: baseTheme, accentColorOverride: selectedAccentColor, codeThemeOverride: override)
         UserDefaults.standard.set(override.rawValue, forKey: Self.codeViewerThemeKey)
     }
 
     /// Applies a new accent color override.
     func applyAccentColor(_ accent: AppAccentColor) {
         self.selectedAccentColor = accent
-        self.currentTheme = ThemeDecorator(base: baseTheme, accentColorOverride: accent)
+        self.currentTheme = ThemeDecorator(base: baseTheme, accentColorOverride: accent, codeThemeOverride: codeViewerThemeOverride)
         UserDefaults.standard.set(accent.rawValue, forKey: Self.accentColorKey)
     }
 
@@ -143,21 +186,8 @@ enum CodeViewerThemeOverride: String, CaseIterable {
         UserDefaults.standard.set(spacing, forKey: AppSettings.chatLineSpacingKey)
     }
 
-    /// The resolved syntax theme for the Code Viewer, accounting for the override setting.
-    /// If override is `.default`, uses the current app theme's syntax colors.
-    /// Otherwise, uses the specified theme's syntax colors regardless of the global theme.
+    /// The resolved syntax theme for the Code Viewer and in-chat code blocks.
     var resolvedCodeViewerSyntaxTheme: SyntaxTheme {
-        switch codeViewerThemeOverride {
-        case .default:
-            return currentTheme.syntaxTheme
-        case .oneLight:
-            return AppThemes.OneLightTheme().syntaxTheme.patched(with: selectedAccentColor.nsColor)
-        case .oneDark:
-            return AppThemes.OneDarkTheme().syntaxTheme.patched(with: selectedAccentColor.nsColor)
-        case .cosmicDark:
-            return AppThemes.CosmicDarkTheme().syntaxTheme.patched(with: selectedAccentColor.nsColor)
-        case .dracula:
-            return AppThemes.DraculaTheme().syntaxTheme.patched(with: selectedAccentColor.nsColor)
-        }
+        currentTheme.syntaxTheme
     }
 }

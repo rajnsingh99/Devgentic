@@ -381,6 +381,8 @@ final class DiscordChatOpsBridge {
         }
 
         let convID = vm.createConversationForScheduledTask(profileID: profile, title: "Discord Chat")
+        // [CF-39] See the Telegram bridge — provenance recorded at creation, not inferred later.
+        RemoteConversationOriginStore.record(.discord, for: convID)
         config.discordActiveConversationID = convID
         vm.selectedConversationID = convID
         logger.info("[Discord] Mac UI navigated to new conversation \(convID.uuidString).")

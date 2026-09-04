@@ -45,9 +45,8 @@ struct PromptRowView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 6)
         .padding(.vertical, 6)
-        .background(backgroundView)
+        .sidebarRowBackground(isSelected: isSelected, isHovering: isHovering)
         .overlay(keyboardFocusRing)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .opacity(isSelectionMode && !canDelete ? 0.55 : 1)
         .contentShape(Rectangle())
         .onTapGesture {
@@ -162,11 +161,11 @@ struct PromptRowView: View {
         Group {
             if canDelete {
                 Image(systemName: isBatchSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 16, weight: .regular))
+                    .font(theme.fontHeadline)
                     .foregroundColor(isBatchSelected ? theme.accentColor : theme.tertiaryText)
             } else {
                 Image(systemName: "lock.fill")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(theme.fontCaption.weight(.semibold))
                     .foregroundColor(theme.tertiaryText.opacity(0.7))
                     .frame(width: 16, height: 16)
             }
@@ -202,7 +201,7 @@ struct PromptRowView: View {
                 HStack(spacing: 4) {
                     if prompt.isPinned {
                         Image(systemName: "pin.fill")
-                            .font(.system(size: 9))
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.accentColor.opacity(0.85))
                             .rotationEffect(.degrees(45))
                             .accessibilityHidden(true)
@@ -226,7 +225,7 @@ struct PromptRowView: View {
                 }
 
                 Text(prompt.text)
-                    .font(.system(.caption))
+                    .font(theme.fontCaption)
                     .foregroundColor(theme.secondaryText)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -238,7 +237,7 @@ struct PromptRowView: View {
 
     private var categoryBadge: some View {
         Text(prompt.category)
-            .font(.system(size: 10, weight: .medium)) // Fixed size: intentional (badge/chip text)
+            .font(theme.fontCodeCaption.weight(.medium))
             .padding(.horizontal, 5)
             .padding(.vertical, 1)
             .background(theme.accentColor.opacity(0.1))
@@ -278,26 +277,6 @@ struct PromptRowView: View {
         }
     }
 
-    // MARK: - Background
-
-    @ViewBuilder
-    private var backgroundView: some View {
-        if isSelected {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(theme.accentColor.opacity(0.08))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(theme.accentColor.opacity(0.15), lineWidth: 0.5)
-                )
-                .shadow(color: theme.accentColor.opacity(0.05), radius: 4, x: 0, y: 0)
-        } else if isHovering {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(theme.surfaceOverlay)
-        } else {
-            Color.clear
-        }
-    }
-
     @ViewBuilder
     private var keyboardFocusRing: some View {
         if isKeyboardFocused && !isSelected {
@@ -334,7 +313,7 @@ private struct HoverIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 10, weight: .semibold))
+                .font(theme.fontCaption2.weight(.semibold))
                 .frame(width: 20, height: 20)
                 .foregroundColor(tint ?? theme.secondaryText)
                 .background(

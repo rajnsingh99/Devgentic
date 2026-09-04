@@ -142,7 +142,7 @@ struct FileAttachmentCardView_Previews: PreviewProvider {
             .padding()
         }
         .frame(height: 100)
-        .environment(\.appTheme, AppThemes.DefaultTheme())
+        .environment(\.appTheme, AppThemes.MaterialTheme())
         .previewLayout(.sizeThatFits)
         .preferredColorScheme(.dark)
     }

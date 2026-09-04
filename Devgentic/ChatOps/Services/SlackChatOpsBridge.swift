@@ -306,6 +306,8 @@ final class SlackChatOpsBridge {
         }
 
         let convID = vm.createConversationForScheduledTask(profileID: profile, title: "Slack Chat")
+        // [CF-39] See the Telegram bridge — provenance recorded at creation, not inferred later.
+        RemoteConversationOriginStore.record(.slack, for: convID)
         config.slackActiveConversationID = convID
         vm.selectedConversationID = convID
 

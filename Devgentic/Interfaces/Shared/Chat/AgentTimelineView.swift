@@ -45,11 +45,27 @@ struct AgentTimelineView: View {
     /// header then reports success/degraded but never "Stopped".
     private let terminalOutcome: ExecutionOutcome?
 
+    /// The conversation this timeline BELONGS to, when the caller knows it. Threaded down to
+    /// `ActionDetailView` so an "Open in viewer" whose disk read outlives a conversation switch
+    /// can be dropped instead of landing a tab in whatever conversation is open when it returns
+    /// (CF-53).
+    ///
+    /// nil = the caller supplied none. That is NOT "this surface opens no tabs" — any caller
+    /// that leaves it nil still opens into the SAME shared Code Viewer, because
+    /// `ChatHistoryViewModel` is injected at the app root. A nil here only means the
+    /// per-conversation half of the check cannot run; the switch-in-flight half in
+    /// `ActionDetailView.shouldDeliverOpen` still covers it. The workflow per-node timeline
+    /// DOES supply one (`WorkflowExecutionTimelineView` passes its `conversationID` to all four
+    /// `AgentTimelineView` inits) — note that value is the SIDEBAR selection, which leads the
+    /// chat view model by the switch debounce; see the property's doc there.
+    private let conversationID: UUID?
+
     /// Initialize from a ChatMessage (existing usage in chat bubbles).
     init(message: ChatMessage) {
         self.events = message.timelineEvents
         self.revision = message.timelineRevision
         self.terminalOutcome = message.terminalOutcome
+        self.conversationID = message.conversationId
         self.isStreaming = message.isStreaming
         self.finalContentText = message.currentAgentContent?.textContent ?? message.content.textContent
         self.streamingContext = StreamingContext(
@@ -72,17 +88,25 @@ struct AgentTimelineView: View {
     ///   separately below this timeline (e.g. the workflow node detail view),
     ///   pass it here so a trailing reasoning event that merely repeats the
     ///   answer is deduplicated — same behaviour as the chat-bubble init.
+    /// - Parameter conversationID: The chat conversation these events belong to, when there is
+    ///   one. Only the capability cards pass it — a plan step's / attempt's nested timeline is
+    ///   still IN a chat message, so its file rows need CF-53's destination check exactly as
+    ///   much as a top-level row does, and `CapabilityCardRouter` puts most agent runs' tool
+    ///   rows there. The workflow per-node callers leave it nil — see the `conversationID`
+    ///   property for what nil does and does not mean there.
     init(
         events: [TimelineEvent],
         revision: UInt64 = 0,
         isStreaming: Bool = false,
         chatFidelity: Bool = false,
         streamingStartedAt: Date? = nil,
-        finalContentText: String? = nil
+        finalContentText: String? = nil,
+        conversationID: UUID? = nil
     ) {
         self.events = events
         self.revision = revision
         self.terminalOutcome = nil
+        self.conversationID = conversationID
         self.isStreaming = isStreaming
         self.finalContentText = finalContentText
         if chatFidelity, isStreaming, let start = streamingStartedAt {
@@ -167,13 +191,16 @@ struct AgentTimelineView: View {
                 )
 
                 // Expanded Nodes Content
-                if isTimelineExpanded || isStreaming {
+                if Self.showsTimelineBody(isTimelineExpanded: isTimelineExpanded,
+                                          isStreaming: isStreaming,
+                                          userToggled: userToggled) {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(nodes) { node in
                             TimelineNodeGroupView(
                                 node: node,
                                 compactReasoning: compactReasoning,
                                 isStreaming: isStreaming,
+                                conversationID: conversationID,
                                 expandedRowIDs: $expandedRowIDs
                             )
                         }
@@ -202,6 +229,28 @@ struct AgentTimelineView: View {
         }
     }
 
+    /// Whether the execution log's body renders.
+    ///
+    /// [CF-47] The body used to be gated on `isTimelineExpanded || isStreaming`, so collapsing
+    /// DURING a run did nothing at all while the chevron rotated shut and the `.help` and
+    /// VoiceOver label both announced it as collapsed — the one control on a live run advertised
+    /// an action it would not perform until the run ended. The streaming auto-expand is a
+    /// DEFAULT, so it stops applying the moment the user takes the decision themselves. The
+    /// alternative (suppress the chevron, help and label while streaming) was rejected: it makes
+    /// the control inert instead of making it work.
+    ///
+    /// `nonisolated static` and pure so the rule is unit-testable; the `@State` plumbing that
+    /// sets these three is not.
+    nonisolated static func showsTimelineBody(isTimelineExpanded: Bool,
+                                              isStreaming: Bool,
+                                              userToggled: Bool) -> Bool {
+        if userToggled { return isTimelineExpanded }
+        // `.onAppear` only runs AFTER the first render, so on that first pass a streaming
+        // timeline still has `isTimelineExpanded == false`. `|| isStreaming` is the auto-expand
+        // default covering that window; once the user has toggled, it is theirs to decide.
+        return isTimelineExpanded || isStreaming
+    }
+
     /// What the collapsed header may claim about a finished run.
     ///
     /// The header is the ONLY thing visible once a run ends — `.onChange(of: isStreaming)`
@@ -211,8 +260,9 @@ struct AgentTimelineView: View {
     /// renders below the content, but neither is inside the collapsed log, so the log itself
     /// was the thing lying.
     ///
-    /// Derived from the events rather than from `message.terminalOutcome` so the workflow
-    /// per-node init (which has no message) gets the same treatment.
+    /// `message.terminalOutcome` decides it when the caller has one, and the events decide it
+    /// otherwise — the workflow per-node init has no message, and a run with failed tool rows
+    /// must still read degraded there.
     enum TimelineSummaryStatus {
         case succeeded, degraded, cancelled
 
@@ -241,14 +291,30 @@ struct AgentTimelineView: View {
             guard case .toolExecution(let data) = event else { continue }
             if data.isSuccess == false { failed += 1 }
         }
-        // Cancellation comes from the RUN's outcome, never inferred from a tool row.
+        // The RUN's own outcome LEADS; the tool-failure count can only escalate from there.
+        //
+        // [CF-46] It used to be consulted for `.cancelled` alone, so `.failed` and
+        // `.completedWithWarnings` fell through to the failure count — and neither produces a
+        // failed tool ROW (iteration exhaustion and the circuit breaker end the LOOP, not a
+        // tool), so `failed == 0` and the header rendered a green checkmark plus "Executed N
+        // steps" directly above the amber TerminalOutcomeChip saying the run didn't finish
+        // cleanly. Both map to `.degraded` because that is exactly how the chip treats them —
+        // one amber vocabulary for "the answer shipped but the run stopped early".
+        //
+        // Cancellation likewise comes from the outcome and is never inferred from a tool row:
         // `failureCategory == .cancelled` is also written by `ToolExecutionLoop` when the user
         // skips an `ask_user` prompt ("skip/timeout = cancelled (soft failure, no constraint)"),
         // after which the run continues and finishes — so the old heuristic asserted "Stopped"
         // for a run that completed. Flattening makes those rows MORE visible, not less, so the
         // two changes have to land together.
-        if outcome == .cancelled { return (.cancelled, failed) }
-        return (failed > 0 ? .degraded : .succeeded, failed)
+        switch outcome {
+        case .cancelled:
+            return (.cancelled, failed)
+        case .failed, .completedWithWarnings:
+            return (.degraded, failed)
+        case .completed, nil:
+            return (failed > 0 ? .degraded : .succeeded, failed)
+        }
     }
 
     private var summary: (status: TimelineSummaryStatus, failedTools: Int) {
@@ -290,6 +356,23 @@ struct AgentTimelineView: View {
         case .succeeded:
             return String(localized: "Executed \(steps) (\(tools))")
         case .degraded:
+            // [CF-46] A degraded TERMINAL outcome (iteration budget, circuit breaker) normally
+            // leaves `failed == 0` — the LOOP ended, no tool did — so "· 0 failed" would be both
+            // noise and wrong about what went wrong. Say what actually happened instead.
+            if terminalOutcome == .failed {
+                return failed > 0
+                    ? String(localized: "Ended early after \(steps) (\(tools) · \(failed) failed)")
+                    : String(localized: "Ended early after \(steps) (\(tools))")
+            }
+            // ⚠️ `.completedWithWarnings` is NOT an early end — the run reached its own end and
+            // carried an unrecovered tool failure out with it, which is the COMMON degraded case.
+            // Grouping it under "Ended early" told the user their answer had been cut short when
+            // it had not.
+            if terminalOutcome == .completedWithWarnings {
+                return failed > 0
+                    ? String(localized: "Completed with warnings after \(steps) (\(tools) · \(failed) failed)")
+                    : String(localized: "Completed with warnings after \(steps) (\(tools))")
+            }
             return String(localized: "Executed \(steps) (\(tools) · \(failed) failed)")
         case .cancelled:
             return failed > 0
@@ -506,6 +589,9 @@ struct TimelineNodeGroupView: View {
     /// Threaded to capability cards so their live indicators (ticking elapsed,
     /// auto-expanded running step) only run while the message is streaming.
     var isStreaming: Bool = false
+    /// The owning conversation, forwarded to `ActionDetailView` for CF-53's destination check.
+    /// nil when the caller supplied none — see `AgentTimelineView.conversationID`.
+    var conversationID: UUID? = nil
     /// Owned by `AgentTimelineView` — see the declaration there for why a row's
     /// disclosure cannot live in the row.
     @Binding var expandedRowIDs: Set<UUID>
@@ -530,7 +616,9 @@ struct TimelineNodeGroupView: View {
             // Workflow per-node views (compactReasoning == false) keep the full
             // markdown — their "thought" often IS the node's output.
             if compactReasoning {
-                InterimReasoningRow(text: text)
+                // [CF-49] `isLive` gates the sparkle's repeating pulse. Without it a reasoning
+                // row in a run that finished last week held a Core Animation loop forever.
+                InterimReasoningRow(text: text, isLive: isStreaming)
             } else {
                 WorkflowMarkdownView(text: text)
                     .padding(.horizontal, 4)
@@ -547,13 +635,15 @@ struct TimelineNodeGroupView: View {
             UnrecognizedEventRow(caseName: caseName)
 
         case .planCard(let data):
-            PlanProgressCard(data: data, isStreaming: isStreaming)
+            PlanProgressCard(data: data, isStreaming: isStreaming, conversationID: conversationID)
 
         case .reflectionCard(let data):
-            ReflectionAttemptsCard(data: data, isStreaming: isStreaming)
+            ReflectionAttemptsCard(data: data, isStreaming: isStreaming, conversationID: conversationID)
 
         case .action(let event):
-            ActionDetailView(event: event, expandedRowIDs: $expandedRowIDs)
+            ActionDetailView(event: event,
+                             originConversationID: conversationID,
+                             expandedRowIDs: $expandedRowIDs)
                 .padding(.horizontal, 4)
 
         case .actionGroup(let actions):
@@ -611,7 +701,9 @@ struct TimelineNodeGroupView: View {
                 if isExpanded {
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(actions) { action in
-                            ActionDetailView(event: action, expandedRowIDs: $expandedRowIDs)
+                            ActionDetailView(event: action,
+                                             originConversationID: conversationID,
+                                             expandedRowIDs: $expandedRowIDs)
                         }
                     }
                     .padding(.leading, 28)
@@ -864,8 +956,12 @@ struct TimelineFileViewerAction: Equatable {
 }
 
 /// `.task(id:)` key for chip resolution — the row must re-resolve when the tool finishes,
-/// not just when a different event takes its place.
-private struct TimelineChipKey: Equatable {
+/// not just when a different event takes its place. Completion is also the ONLY place
+/// `params` is rewritten (`completeToolTimelineEvent` / `CapabilityCardRouter.completeTool`
+/// assign `params` and flip `isExecuting` in the same mutation), so a cache keyed on this
+/// is also a cache keyed on the params. Internal, not private, so the cache rule in
+/// `ActionDetailView.primaryArgLabel` can be unit-tested.
+struct TimelineChipKey: Equatable {
     let id: UUID
     let isExecuting: Bool
     let isSuccess: Bool?
@@ -873,6 +969,11 @@ private struct TimelineChipKey: Equatable {
 
 struct ActionDetailView: View {
     let event: TimelineEvent
+    /// The conversation this row was rendered for, when the caller supplied one. `openInViewer`
+    /// compares it against the view model's current conversation AFTER its disk read returns
+    /// (CF-53). A nil falls back to the switch-in-flight term of `shouldDeliverOpen`, not to
+    /// "always deliver".
+    var originConversationID: UUID? = nil
     @Environment(\.appTheme) private var theme
     /// Optional lookup: contexts that render timelines without a chat VM in the
     /// environment simply show no Code Viewer chip instead of crashing.
@@ -884,10 +985,20 @@ struct ActionDetailView: View {
     /// "+N −M" for successful writes with a pre-write snapshot; computed off-main once.
     @State private var writeDiffStat: (added: Int, deleted: Int)? = nil
 
-    /// Resolution is NOT done in `body`: it JSON-parses the tool params, and a body-side
-    /// call re-parsed once per row per render pass across the whole timeline. Resolved once
-    /// per row in `.task(id:)` and cached here instead.
+    /// Neither of the next two values is resolved in `body`: each JSON-parses the tool
+    /// params — the FULL params string, which for `write_file` / `create_new_file` is the
+    /// whole file, and is never capped — and a body-side call re-parsed it once per row per
+    /// render pass across the whole timeline, on the main actor, for every stream event.
+    /// Both are resolved once per row in `.task(id: TimelineChipKey)` (`resolveChip`) and
+    /// cached here. (`ToolArgFormatter.primaryLabel` did exactly the forbidden thing at the
+    /// row label until CF-45, a few lines below this rule.)
     @State private var resolvedAction: TimelineFileViewerAction?
+    /// The row's primary-argument label, with the key it was resolved for. Read through
+    /// `primaryArgLabel(cached:for:tool:params:)`, which falls back to a fresh parse on a
+    /// key mismatch — so the first pass (before `.task` runs) and the one pass after the
+    /// completion rewrite of `params` still render, at one parse each, and a recycled row
+    /// identity can never show the previous row's label.
+    @State private var primaryArgCache: (key: TimelineChipKey, label: String)?
     /// True while a `.fromDisk` row is being read after a click.
     @State private var isOpeningFromDisk = false
     /// Why the last "Open in viewer" failed, rendered under the row. `.fromDisk` is the ONLY
@@ -1088,6 +1199,29 @@ struct ActionDetailView: View {
             }.value
             isOpeningFromDisk = false
 
+            // [CF-53] The read outlived a conversation switch. Nothing cancels this task and the
+            // view holds no handle to it, so without a destination check the tab (and its failure
+            // banner) landed in whatever conversation is open when the disk read returns.
+            //
+            // `currentChatMessages` CANNOT answer this on its own: `loadConversation` assigns it
+            // only after its fetch returns, so for the whole duration of a switch it still names
+            // the OUTGOING conversation (`ChatHistoryViewModel.destinationConversationID`) — the
+            // one window `resetCodeViewer()` has already emptied the viewer in. So the in-flight
+            // flag is asked FIRST and the displayed identity is only trusted outside a load.
+            let current = viewModel.currentChatMessages.first?.conversationId
+            let isLoadInFlight = viewModel.isInitiallyLoadingConversation
+            guard Self.shouldDeliverOpen(origin: originConversationID,
+                                         current: current,
+                                         isLoadInFlight: isLoadInFlight) else {
+                openFailureReason = nil
+                let origin = originConversationID?.uuidString.prefix(8) ?? "no conversation"
+                let now = isLoadInFlight
+                    ? "a conversation switch is still in flight"
+                    : "\(current?.uuidString.prefix(8) ?? "none") is open now"
+                timelineLogger.info("[CodeViewer] Timeline open of '\(path)' dropped — it was started in conversation \(origin) and \(now). CONSEQUENCE: no tab opens; planting one here would also suppress the incoming conversation's tab restore, so the user re-clicks the row once the switch settles.")
+                return
+            }
+
             switch result {
             case .failure(let error):
                 let reason = Self.openFailureText(for: error, path: path)
@@ -1110,6 +1244,37 @@ struct ActionDetailView: View {
         }
     }
 
+    /// Whether a completed disk read may still open a tab.
+    ///
+    /// [CF-53] The sibling paths in `ChatHistoryViewModel` were given explicit destination checks
+    /// by CH15/CH17/CH60; this one had none. Two independent ways the click can be stale, because
+    /// the row's own identity only covers one of them:
+    ///
+    /// * `isLoadInFlight` — a conversation switch is between `resetCodeViewer()` (which has
+    ///   already stashed and emptied the viewer) and `restoreCodeViewerSession(for:)`. NOTHING may
+    ///   be planted in that window, whatever the row's origin: `currentChatMessages` still names
+    ///   the OUTGOING conversation throughout it, so `origin == current` passes exactly when it
+    ///   must not, and a tab planted here ALSO suppresses the incoming conversation's restore,
+    ///   which only fires on an empty viewer. This term is also what covers any caller that
+    ///   supplies no origin yet opens into that same shared viewer.
+    /// * `origin != current` — the switch settled on a different conversation before the read
+    ///   returned.
+    ///
+    /// A nil `origin` outside a load still delivers: the viewer's owner has not moved, so there is
+    /// nothing to be wrong about.
+    ///
+    /// Deliberately conservative — a same-conversation reload in flight drops too, because the
+    /// chat view model publishes no destination identity to tell the two apart (its
+    /// `destinationConversationID` is private). Re-clicking costs the user one click; the other
+    /// error destroys the incoming conversation's tabs and unsaved drafts.
+    ///
+    /// `nonisolated static` and pure so the rule is unit-testable; the `Task`/read plumbing is not.
+    nonisolated static func shouldDeliverOpen(origin: UUID?, current: UUID?, isLoadInFlight: Bool) -> Bool {
+        guard !isLoadInFlight else { return false }
+        guard let origin else { return true }
+        return origin == current
+    }
+
     /// Turns a read error into something the user can act on. `CocoaError` codes are checked
     /// rather than the message, so the distinction survives localization.
     private static func openFailureText(for error: Error, path: String) -> String {
@@ -1127,15 +1292,57 @@ struct ActionDetailView: View {
         }
     }
 
-    /// One resolution + one stat computation per row, keyed by the event id — off the
-    /// render path entirely.
+    /// The ONE key both the resolver task and the label cache use — built in one place so
+    /// they cannot disagree about when a row has changed.
+    nonisolated static func chipKey(for data: ToolExecutionData) -> TimelineChipKey {
+        TimelineChipKey(id: data.id, isExecuting: data.isExecuting, isSuccess: data.isSuccess)
+    }
+
+    /// The row label: the cached one when it was resolved for exactly `key`, a fresh parse
+    /// otherwise. A miss is not an error — it is the very first body pass before `.task`
+    /// has run, or the single pass after completion rewrote `params` (a new key) before
+    /// `resolveChip` re-resolves. `nonisolated static` and pure so the hit/miss rule is
+    /// unit-testable (`TimelinePrimaryArgCacheTests`); the `.task` plumbing is not.
+    nonisolated static func primaryArgLabel(
+        cached: (key: TimelineChipKey, label: String)?,
+        for key: TimelineChipKey,
+        tool: String,
+        params: String
+    ) -> String {
+        if let cached, cached.key == key { return cached.label }
+        return ToolArgFormatter.primaryLabel(tool: tool, params: params)
+    }
+
+    /// Whether this row needs its OWN measured diff, or already has the answer persisted.
+    ///
+    /// [CF-48] `fileViewerChip` reads `writeDiffStat` only as the fallback for a row with no
+    /// `effect`: `stat`, `isNoOpWrite` and `hasBaseline` all take the `effect` branch first. So
+    /// on the in-session path — where `ActionEffectBuilder` has already produced an effect — the
+    /// full-file LCS diff below was computed and never read, and because it lives in `.task(id:)`
+    /// it was re-armed every time the row scrolled back into the `LazyVStack`.
+    ///
+    /// `nonisolated static` and pure so the rule is unit-testable; the `.task` plumbing is not.
+    nonisolated static func needsMeasuredWriteDiff(hasPersistedEffect: Bool,
+                                                   action: TimelineFileViewerAction?) -> Bool {
+        guard !hasPersistedEffect, let action, action.isWrite else { return false }
+        return action.preWriteContent != nil && action.inlineContent != nil
+    }
+
+    /// One resolution + one stat computation + one label parse per row, keyed by the event
+    /// id and completion state — off the render path entirely.
     private func resolveChip(for data: ToolExecutionData) async {
+        // Label first, before any suspension: it is the cheapest of the three and the one
+        // every row shows, so it must not wait behind a detached diff.
+        primaryArgCache = (
+            key: Self.chipKey(for: data),
+            label: ToolArgFormatter.primaryLabel(tool: data.name, params: data.params)
+        )
         let action = TimelineFileViewerAction.resolve(data: data)
         resolvedAction = action
 
-        guard let action, action.isWrite,
-              let pre = action.preWriteContent,
-              let content = action.inlineContent else { return }
+        guard Self.needsMeasuredWriteDiff(hasPersistedEffect: data.effect != nil, action: action),
+              let pre = action?.preWriteContent,
+              let content = action?.inlineContent else { return }
         // Byte-identical no-op: skip the detached diff — equality is O(n) and the answer
         // is already known.
         if pre == content {
@@ -1199,8 +1406,9 @@ struct ActionDetailView: View {
                 }
             }
             // Keyed on the completion state too: a row resolves to no chip while the tool
-            // is still executing, and must re-resolve once it finishes.
-            .task(id: TimelineChipKey(id: data.id, isExecuting: data.isExecuting, isSuccess: data.isSuccess)) {
+            // is still executing, and must re-resolve once it finishes — which is also when
+            // `params` is rewritten, so the cached label re-resolves with it.
+            .task(id: Self.chipKey(for: data)) {
                 await resolveChip(for: data)
             }
         }
@@ -1248,7 +1456,15 @@ struct ActionDetailView: View {
                             .font(theme.fontSubheadline)
                             .foregroundColor(theme.secondaryText)
 
-                        let primaryArg = ToolArgFormatter.primaryLabel(tool: data.name, params: data.params)
+                        // Cached per key by `resolveChip`; parsed inline only on a miss (see
+                        // `primaryArgLabel`). A direct `primaryLabel` call here re-parsed the
+                        // full params — the whole file for a write — on every body pass (CF-45).
+                        let primaryArg = Self.primaryArgLabel(
+                            cached: primaryArgCache,
+                            for: Self.chipKey(for: data),
+                            tool: data.name,
+                            params: data.params
+                        )
                         if !primaryArg.isEmpty {
                             Text(primaryArg)
                                 .font(.system(size: 12, design: .monospaced))
@@ -1449,11 +1665,16 @@ struct WarningRow: View {
 /// few lines behind a "Show more" toggle.
 struct InterimReasoningRow: View {
     let text: String
+    /// [CF-49] Whether the run producing this reasoning is still going. The sparkle used to be
+    /// driven by an `isAnimating` `@State` set true in `.onAppear` and never set false, and the
+    /// row was handed no liveness input at all — so a reasoning row in a run that finished last
+    /// week pulsed continuously, holding one repeating Core Animation loop per visible row. Same
+    /// defect and same fix as `CapabilityStatusIcon.isLive` (CH52), one row over.
+    var isLive: Bool = false
 
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isExpanded = false
-    @State private var isAnimating = false
 
     private static let collapsedLineLimit = 3
     private static let expandThresholdChars = 220
@@ -1473,7 +1694,7 @@ struct InterimReasoningRow: View {
                 .foregroundColor(theme.accentColor.opacity(0.85))
                 .frame(width: 14, alignment: .center)
                 .padding(.top, 3)
-                .symbolEffect(.pulse, options: .repeating, isActive: isAnimating && !reduceMotion)
+                .symbolEffect(.pulse, options: .repeating, isActive: isLive && !reduceMotion)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(flattened)
@@ -1509,7 +1730,6 @@ struct InterimReasoningRow: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
         )
-        .onAppear { isAnimating = true }
     }
 
     /// Flattens markdown for compact display: drops heading markers, list

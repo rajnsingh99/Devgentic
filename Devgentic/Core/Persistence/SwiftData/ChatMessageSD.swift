@@ -157,6 +157,31 @@ final class ChatMessageSD {
             rawKind: lifecycleStateRaw,
             parkedOperationID: parkedOperationID.flatMap { UUID(uuidString: $0) }
         )
+
+        // [CF-44] Settle tool rows the process never got to close.
+        //
+        // `flushInFlight` persists the in-flight message at every tool boundary, so a crash or
+        // force-quit mid-tool leaves `isExecuting == true` on disk. The only repair was
+        // `closeDanglingToolRows`, whose sole caller is `ActiveStreamManager.finalizeMessage` —
+        // a path a force-quit never reaches — so the row rendered an animating spinner forever,
+        // with no output, no failure badge, and permanently non-disclosable (`isDisclosable`
+        // requires `!isExecuting`). Decode is the one place every reader goes through.
+        //
+        // ⚠️ `.streaming` ONLY — deliberately NOT `lifecycleState.isInterrupted`, which is also
+        // true for `.parkedHITL`. A parked run's dangling row is LOAD-BEARING: `resumeRun` calls
+        // `TimelineTurnReconstructor.reconstruct`, which identifies the parked tool by exactly
+        // `data.isExecuting || data.output == nil` and hands it back as `parkedTool`; resume then
+        // REFUSES ("The interrupted state is incomplete and can't be resumed") when that is nil.
+        // Closing the row here would therefore turn a resumable park into a permanently
+        // unresumable one — strictly worse than the spinner this fixes. A `.streaming` resume
+        // passes `dropDanglingTool: true` and wants the row gone, so closing it changes nothing
+        // it depends on.
+        if case .streaming = message.lifecycleState {
+            let stopped = DanglingToolRowCloser.markInterruptedByProcessDeath(&message.timelineEvents)
+            if stopped > 0 {
+                logger.warning("[DECODE] Message \(self.id.uuidString.prefix(8)): stopped \(stopped) spinning tool row(s) on a message persisted mid-stream (the app was force-quit or crashed before finalize). CONSEQUENCE: those rows stop animating; they keep no output and no verdict, because the tool's fate is genuinely unknown — which also keeps the resume engine able to recognise and drop them. A parked-HITL message is deliberately left alone so its Resume can still re-raise the tool.")
+            }
+        }
         message.apiProvider = apiProvider
         message.modelName = modelName
         message.modelDialect = modelDialect

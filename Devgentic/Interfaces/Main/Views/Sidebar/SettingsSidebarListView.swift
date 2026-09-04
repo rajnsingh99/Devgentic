@@ -74,7 +74,7 @@ private struct SettingsCategoryRow: View {
 
             HStack(spacing: 10) {
                 Image(systemName: category.iconName)
-                    .font(.system(size: 13, weight: isSelected ? .bold : .semibold))
+                    .font(theme.fontFootnote.weight(isSelected ? .bold : .semibold))
                     .foregroundColor(isSelected ? theme.accentColor : (isHovering ? theme.primaryText : theme.secondaryText))
                     .frame(width: 22)
 
@@ -84,7 +84,7 @@ private struct SettingsCategoryRow: View {
                         .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
 
                     Text(category.subtitle)
-                        .font(.system(size: 10, weight: .regular))
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.tertiaryText)
                         .lineLimit(1)
                 }
@@ -95,23 +95,14 @@ private struct SettingsCategoryRow: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(isSelected
-                      ? theme.surfaceOverlayStrong
-                      : (isHovering ? theme.surfaceOverlay : Color.clear))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(isHovering && !isSelected ? theme.secondaryText.opacity(0.18) : Color.clear, lineWidth: 1)
-        )
+        .sidebarRowBackground(isSelected: isSelected, isHovering: isHovering)
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { hovering in
-            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+            withAnimation(.easeInOut(duration: 0.15)) {
                 isHovering = hovering
             }
         }
-        .animation(.spring(response: 0.28, dampingFraction: 0.75), value: isSelected)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSelected)
     }
 }

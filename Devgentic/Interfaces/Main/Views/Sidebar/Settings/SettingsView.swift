@@ -137,7 +137,7 @@ struct SettingsView: View {
                     .ignoresSafeArea()
                 
                 // Ambient Aura Glows (Provides texture for Liquid Glass refraction)
-                if theme.id != "one_light" {
+                if theme.colorScheme != .light {
                     GeometryReader { geo in
                         ZStack {
                             Circle()
@@ -167,7 +167,7 @@ struct SettingsView: View {
         }
         .frame(minWidth: 750, minHeight: 600)
         .tint(theme.accentColor)
-        .preferredColorScheme(theme.id == "one_light" ? .light : (theme.id == "dracula" || theme.id == "one_dark" ? .dark : nil))
+        .preferredColorScheme(theme.colorScheme)
         .configureWindow(collectionBehavior: [.canJoinAllSpaces, .fullScreenAuxiliary])
     }
 }

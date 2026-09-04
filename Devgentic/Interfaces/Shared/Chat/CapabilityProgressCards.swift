@@ -22,6 +22,11 @@ import SwiftUI
 struct PlanProgressCard: View {
     let data: PlanRunData
     var isStreaming: Bool = false
+    /// The chat conversation this card lives in, forwarded into each step's nested timeline so
+    /// its file rows get CF-53's destination check. A step's tool rows are still rows in a chat
+    /// message — and with Plan & Execute on, they are where most of them are. nil off the chat
+    /// path (the previews, and any future non-chat host).
+    var conversationID: UUID? = nil
 
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -103,10 +108,38 @@ struct PlanProgressCard: View {
                 .stroke(capColor.opacity(0.18), lineWidth: 0.5)
         )
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Plan: \(headerStatusText)")
+        .accessibilityLabel("Plan: \(headerSummaryText)")
     }
 
     // MARK: Header
+
+    /// Everything the header ASSERTS about the run, as one string.
+    ///
+    /// [CF-50] `headerStatusText` alone was the container's label and it never mentions
+    /// failures — "4 steps · 3 done" for a plan with a failed step. The amber `WarningsPill`
+    /// beside it carries that, but it lives inside the Button's label, which
+    /// `.accessibilityLabel` replaces wholesale, and the per-step labels that carry status are
+    /// unreachable while the card is collapsed — which a FINISHED card is by default. So the
+    /// one fact a degraded plan most needs to convey reached sighted users only.
+    ///
+    /// `nonisolated static` and pure so the rule is unit-testable; the `.accessibilityLabel`
+    /// plumbing that consumes it is not.
+    nonisolated static func headerSummary(for data: PlanRunData, statusText: String) -> String {
+        guard let suffix = degradedSuffix(for: data) else { return statusText }
+        return "\(statusText) · \(suffix)"
+    }
+
+    /// The WarningsPill's text when the header shows one, nil when it does not. The `if` in
+    /// `headerRow` reads this too, so the label and the pill cannot disagree about WHEN a run
+    /// counts as degraded — the disagreement is the whole bug.
+    nonisolated static func degradedSuffix(for data: PlanRunData) -> String? {
+        guard data.phase == .finished, data.hasDegradedSteps else { return nil }
+        return degradedPillText(for: data)
+    }
+
+    private var headerSummaryText: String {
+        Self.headerSummary(for: data, statusText: headerStatusText)
+    }
 
     private var headerRow: some View {
         Button {
@@ -135,8 +168,8 @@ struct PlanProgressCard: View {
 
                 Spacer(minLength: 8)
 
-                if data.phase == .finished && data.hasDegradedSteps {
-                    WarningsPill(text: degradedPillText)
+                if let degraded = Self.degradedSuffix(for: data) {
+                    WarningsPill(text: degraded)
                 }
 
                 elapsedLabel
@@ -151,7 +184,12 @@ struct PlanProgressCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(isCardExpanded ? "Collapse plan" : "Expand plan")
+        // The summary rides the button label too — `.accessibilityLabel` REPLACES the button's
+        // computed label, so the status text and the WarningsPill inside it were both invisible
+        // to VoiceOver and the control announced only its own verb (CF-50).
+        .accessibilityLabel(
+            "\(headerSummaryText). " + (isCardExpanded ? String(localized: "Collapse plan") : String(localized: "Expand plan"))
+        )
     }
 
     private var headerStatusText: String {
@@ -167,7 +205,7 @@ struct PlanProgressCard: View {
         }
     }
 
-    private var degradedPillText: String {
+    nonisolated static func degradedPillText(for data: PlanRunData) -> String {
         let failed = data.steps.filter { $0.status == .failed }.count
         let warned = data.steps.filter { $0.status == .warning }.count
         if failed > 0 && warned > 0 { return String(localized: "\(failed) failed · \(warned) ended early") }
@@ -266,7 +304,8 @@ struct PlanProgressCard: View {
                         AgentTimelineView(
                             events: step.events,
                             isStreaming: isLive && step.status == .running,
-                            chatFidelity: true
+                            chatFidelity: true,
+                            conversationID: conversationID
                         )
                     }
                     // The subtask's own closing summary (its intermediate answer) —
@@ -326,6 +365,9 @@ struct PlanProgressCard: View {
 struct ReflectionAttemptsCard: View {
     let data: ReflectionRunData
     var isStreaming: Bool = false
+    /// Same purpose as `PlanProgressCard.conversationID` — an attempt's nested timeline is still
+    /// inside a chat message, so its file rows need CF-53's destination check too.
+    var conversationID: UUID? = nil
 
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -407,7 +449,13 @@ struct ReflectionAttemptsCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(isCardExpanded ? "Collapse attempts" : "Expand attempts")
+        // Same replacement trap as the plan header (CF-50): without the status text folded in,
+        // VoiceOver heard only "Expand attempts" and never "no attempt accepted" — and the
+        // per-attempt labels that carry the verdicts are unreachable while the card is
+        // collapsed, which a finished card is by default.
+        .accessibilityLabel(
+            "\(headerStatusText). " + (isCardExpanded ? String(localized: "Collapse attempts") : String(localized: "Expand attempts"))
+        )
     }
 
     private var headerStatusText: String {
@@ -528,7 +576,8 @@ struct ReflectionAttemptsCard: View {
                 AgentTimelineView(
                     events: attempt.events,
                     isStreaming: isLive && attempt.status == .running,
-                    chatFidelity: true
+                    chatFidelity: true,
+                    conversationID: conversationID
                 )
                 .padding(.leading, 30)
                 .padding(.trailing, 12)

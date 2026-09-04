@@ -66,31 +66,37 @@ final class WorkflowRunRecordSD {
     @Transient
     private var _cachedRecord: WorkflowRunRecord?
 
-    // MARK: - Computed Accessor
+    // MARK: - [CF-34] There is deliberately no `record` accessor
 
-    /// The decoded `WorkflowRunRecord` value type. Reading decodes from the
-    /// persisted columns + blobs (cached); writing re-encodes and updates all
-    /// columns to match. Mirrors `BackendProfile.details`.
-    /// ⚠️ DECODE-ONLY, deliberately. There is no setter.
-    ///
-    /// `decodeRecord()` is LOSSY BY DESIGN: `nodeTimeline` nils on a container mismatch, and
-    /// `decodeNodeResultsResiliently` drops nodes it cannot read. A `row.record = mutated`
-    /// round-trip would therefore re-encode those losses over the surviving bytes and make them
-    /// permanent — the same read-modify-write hazard that required a write-refusal guard on the
-    /// chat timeline.
-    ///
-    /// The setter previously existed with ZERO call sites, so removing it costs nothing today and
-    /// closes the trap before someone reaches for the convenient-looking assignment. Every write
-    /// goes through `apply(_:blobs:)` with a record built fresh in memory — see
-    /// `WorkflowRunHistoryStore.write(_:forConversation:blobs:)`. A future feature that wants to
-    /// edit one field must construct the whole record explicitly, which forces the author to
-    /// confront where the other values came from.
-    var record: WorkflowRunRecord {
-        if let cached = _cachedRecord { return cached }
-        let decoded = decodeRecord()
-        _cachedRecord = decoded
-        return decoded
-    }
+    // A `var record: WorkflowRunRecord` used to sit here: reading decoded the persisted columns +
+    // blobs and CACHED the result, writing re-encoded and rewrote every column, mirroring
+    // `BackendProfile.details`. Both halves are gone, and so is the private `decodeRecord()` that
+    // only the getter ever called — `decodeRecord(from:)` below is now the app's single decode.
+    //
+    // ⚠️ THE SETTER went first. The decode is LOSSY BY DESIGN (the caveat now lives on
+    // `decodeRecord(from:)`), so a `row.record = mutated` round-trip would re-encode those losses
+    // over the surviving bytes and make them permanent — the same read-modify-write hazard that
+    // required a write-refusal guard on the chat timeline. It had ZERO call sites, so removing it
+    // cost nothing and closed the trap before someone reached for the convenient-looking
+    // assignment. Every write goes through `apply(_:blobs:)` with a record built fresh in memory —
+    // see `WorkflowRunHistoryStore.write(_:forConversation:blobs:)`. A future feature that wants to
+    // edit one field must construct the whole record explicitly, which forces the author to
+    // confront where the other values came from.
+    //
+    // ⚠️ THE GETTER went too, and deliberately. It was the ONLY thing that ever FILLED
+    // `_cachedRecord` on a read, which is precisely the lifetime retention XUI-14 removed from the
+    // write path: one main-actor decode parked a full record — node traces included — on a row
+    // that stays reachable through `ConversationSD.workflowRuns` for the life of the process. Its
+    // last caller was `WorkflowRunHistoryStore.load(forConversation:)`, which now decodes through
+    // `rowSnapshot` + `decodeRecord(from:)` like every other read.
+    //
+    // `_cachedRecord` itself STAYS: `rowSnapshot` reads it (never fills it), and it is still
+    // written by `init`/`apply` under `retainsInMemoryRecord` — the refused-blob case where the
+    // in-memory record is the only readable copy. Removing that would turn a logged, recoverable
+    // refusal into silent loss. Read-only cache, one filler, one reader.
+    //
+    // If you need a record from a row, use `rowSnapshot` and decode off the main actor:
+    // `WorkflowRunRecordSD.decodeRecord(from: row.rowSnapshot)`.
 
     // MARK: - Initializer
 
@@ -188,8 +194,8 @@ final class WorkflowRunRecordSD {
         // PREVIOUS ones and this is the only copy of the truth, so dropping it would turn a
         // logged, recoverable refusal into silent loss.
         //
-        // Nothing in production reads a warm cache: `rowSnapshot` only ever READS `_cachedRecord`
-        // and never fills it, and the one filling accessor (`record`) has no production callers.
+        // Nothing reads a warm cache: `rowSnapshot` only ever READS `_cachedRecord` and never
+        // fills it, and the filling accessor (`record`) has been REMOVED outright (CF-34).
         // A same-session re-read therefore decodes the blob off-main, exactly as a cold row does —
         // the path WF-UI6 already established does not hitch.
         _cachedRecord = nil
@@ -288,9 +294,29 @@ final class WorkflowRunRecordSD {
         )
     }
 
-    /// The same decode `decodeRecord()` performs, runnable off the main actor.
+    /// Turns a row's `RowSnapshot` back into a `WorkflowRunRecord`, off the main actor.
+    ///
+    /// ⚠️ [CF-34] THE app's ONE decode. The instance `record` getter and the private
+    /// `decodeRecord()` it called are gone, so every read — `load(forConversation:)`,
+    /// `loadFinalized`, `loadRecord`, the tests — lands here. A change to the decode rules belongs
+    /// in this function and nowhere else.
+    ///
+    /// ⚠️ Returns `snapshot.cached` VERBATIM when it is non-nil, decoding nothing. That is normally
+    /// nil (register XUI-14): the row is only left holding a record when a blob encode was REFUSED,
+    /// and there the bytes in the snapshot are the PREVIOUS ones (update) or a deliberately
+    /// unreadable marker (insert), so the in-memory record is the only readable copy of the truth.
+    ///
+    /// ⚠️ The blob path is LOSSY BY DESIGN: `WorkflowNodeResultSnapshot`'s decoder nils
+    /// `nodeTimeline` on a container mismatch, and `decodeNodeResultsResiliently` drops nodes it
+    /// cannot read. Both log what was lost. This is only safe because nothing re-saves a decoded
+    /// record — every writer builds a fresh one in memory — so the losses stay in memory and the
+    /// stored bytes remain recoverable by a build that understands them. Do not add a path that
+    /// writes a decoded record back; that is exactly what the removed setter would have been.
     nonisolated static func decodeRecord(from snapshot: RowSnapshot) -> WorkflowRunRecord {
         if let cached = snapshot.cached { return cached }
+        // ⚠️ No `?? .completed`. `RunStatus.init(rawValue:)` never returns nil now — an unrecognised
+        // value becomes `.other(raw)` and is carried verbatim, so a run written by a newer build is
+        // no longer asserted to have SUCCEEDED just because this build cannot classify it (G82).
         let status = WorkflowRunRecord.RunStatus(rawValue: snapshot.statusRaw) ?? .other(snapshot.statusRaw)
         return WorkflowRunRecord(
             id: snapshot.id,
@@ -308,33 +334,6 @@ final class WorkflowRunRecordSD {
             traceID: snapshot.traceID
         )
     }
-
-    private func decodeRecord() -> WorkflowRunRecord {
-        let nodeResults = Self.decodeNodeResults(from: nodeResultsData, runID: id, workflowName: workflowName)
-        let variables = Self.decodeVariables(from: variablesData)
-        // ⚠️ No `?? .completed`. `RunStatus.init(rawValue:)` never returns nil now — an unrecognised
-        // value becomes `.other(raw)` and is carried verbatim, so a run written by a newer build is
-        // no longer asserted to have SUCCEEDED just because this build cannot classify it (G82).
-        let status = WorkflowRunRecord.RunStatus(rawValue: statusRaw) ?? .other(statusRaw)
-        return WorkflowRunRecord(
-            id: id,
-            conversationID: conversationID,
-            workflowProfileID: workflowProfileID,
-            workflowName: workflowName,
-            timestamp: timestamp,
-            userInput: userInput,
-            nodeResults: nodeResults,
-            finalOutput: finalOutput,
-            variables: variables,
-            status: status,
-            duration: duration,
-            error: errorMessage,
-            traceID: traceID
-        )
-    }
-
-    /// Inline-encoding apply, used by the `record` setter. Prefer
-    /// `apply(_:blobs:)` with off-main-encoded blobs on hot paths.
 
     // MARK: - Encode / Decode (blobs)
 

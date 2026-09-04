@@ -282,7 +282,11 @@ final class ConversationSwitchCoordinator {
             }
         }
         guard releasedConversations > 0 else { return }
-        logger.info("[WORKFLOW] Released \(releasedEvents) live node timeline event(s) across \(releasedConversations) conversation(s) left behind by this switch. CONSEQUENCE: returning to one of those runs re-reads its trace from the store (one off-main decode); the run's identity, status and HITL wiring are untouched, and a run still in flight is skipped.")
+        // [CF-28] Only runs whose record has already been FROZEN are counted here — the state's
+        // own guard refuses (and logs, with the run id) both a run still in flight and one that
+        // has settled but whose `finalize()` has not yet run, because for the latter the store
+        // holds only the `.running` stub and there is nothing to re-read.
+        logger.info("[WORKFLOW] Released \(releasedEvents) live node timeline event(s) across \(releasedConversations) conversation(s) left behind by this switch. CONSEQUENCE: returning to one of those runs re-reads its trace from the store (one off-main decode); the run's identity, status and HITL wiring are untouched. Every released run was FROZEN first — its traces were copied into the record value — but `upsertFinalized` awaits an off-main encode, so a re-read inside that window can still find the older row and render the Timeline tabs empty until the write lands. A run still in flight, or settled but not yet frozen, is skipped entirely.")
     }
 
     /// What the in-memory mirror becomes after a disk load: existing rows first, then the loaded

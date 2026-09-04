@@ -227,6 +227,26 @@ enum NodeSkipReason: String, Sendable, Codable, Equatable, CaseIterable {
         }
     }
 
+    /// Whether the run actually DECIDED anything about this branch, as opposed to never getting here.
+    ///
+    /// ⚠️ Only `.notReached` is "never got here", and the distinction is load-bearing for the canvas
+    /// run overlay: an edge touching a node the run never reached must stay NEUTRAL, because nothing
+    /// about that branch was decided. Before CF-29 such a node had no snapshot at all, so the overlay
+    /// left it `.undetermined` by falling through its `nodeStatus` lookup — the invariant
+    /// `testUnknownEndpointIsUndetermined` was written to protect. CF-29 then began synthesizing
+    /// `.skipped(.notReached)` rows for exactly those nodes (so a stopped run still shows the pipeline
+    /// shape), which re-entered the overlay through a different door and painted every edge below the
+    /// stop "this branch was not taken" — a claim about ROUTING, in a run the user had simply stopped.
+    ///
+    /// Exhaustive on purpose: no `default`, so a new skip reason cannot inherit an answer.
+    var decidedTheBranch: Bool {
+        switch self {
+        case .notChosen, .errorPortNotTaken, .upstreamFailed,
+             .upstreamSkipped, .upstreamCancelled, .byUser: return true
+        case .notReached: return false
+        }
+    }
+
     /// Whether this skip traces back to something going WRONG, as opposed to ordinary routing.
     ///
     /// Drives presentation only — a skip is NEVER counted as a failure, whatever this returns.

@@ -579,6 +579,14 @@ final class MessagingCoordinator {
         agentMessage.lifecycleState = .final
         agentMessage.terminalOutcome = .cancelled
         agentMessage.terminalReason = reason
+        // [CF-44] This is the LAST word on the run — no resume will follow, so any row still
+        // marked executing would spin forever with nothing left to settle it. The decode-time
+        // repair deliberately spares `.parkedHITL` messages (their dangling row is what resume
+        // re-raises); this is the path where that sparing ends, so close them here.
+        let closed = agentMessage.closeDanglingToolRows(outcome: .cancelled)
+        if closed > 0 {
+            logger.warning("[resumeRun] Closed \(closed) dangling tool row(s) on message \(agentMessage.id.uuidString.prefix(8)) while marking it unresumable. CONSEQUENCE: the rows settle as cancelled instead of animating a spinner forever on a run that can no longer be resumed.")
+        }
         let conversationID = agentMessage.conversationId
         Task { await persistenceService.addMessage(agentMessage, toConversation: conversationID) }
     }

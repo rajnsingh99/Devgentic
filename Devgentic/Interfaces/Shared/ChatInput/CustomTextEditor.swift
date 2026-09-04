@@ -11,6 +11,8 @@ struct CustomTextEditor: NSViewRepresentable {
     var onCommit: (NSAttributedString) -> Void
     var minHeight: CGFloat
     var maxHeight: CGFloat
+    var fontSize: CGFloat = ComposerStyle.editorFontSize
+    var lineSpacing: CGFloat = 4
 
     // Suggestion Bindings
     @Binding var showPromptSuggestions: Bool
@@ -48,9 +50,9 @@ struct CustomTextEditor: NSViewRepresentable {
     
     private var defaultTypingAttributes: [NSAttributedString.Key: Any] {
         let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.lineSpacing = 4
+        paragraphStyle.lineSpacing = lineSpacing
         return [
-            .font: ComposerStyle.editorNSFont, // [UI audit gap 4] single source (was hardcoded 14)
+            .font: NSFont.systemFont(ofSize: fontSize),
             .foregroundColor: NSColor.labelColor,
             .paragraphStyle: paragraphStyle
         ]
@@ -113,6 +115,30 @@ struct CustomTextEditor: NSViewRepresentable {
         if context.coordinator.lastKnownTextViewInstance !== textView {
             self.textViewRef?(textView)
             context.coordinator.lastKnownTextViewInstance = textView
+        }
+
+        // Dynamically update typing attributes and typography if font size or line spacing changed
+        if context.coordinator.lastAppliedFontSize != fontSize || context.coordinator.lastAppliedLineSpacing != lineSpacing {
+            context.coordinator.lastAppliedFontSize = fontSize
+            context.coordinator.lastAppliedLineSpacing = lineSpacing
+            let newAttributes = defaultTypingAttributes
+            context.coordinator.defaultTypingAttributes = newAttributes
+            context.coordinator.listConfig = ListFormattingEngine.Config(
+                font: .systemFont(ofSize: fontSize),
+                lineSpacing: lineSpacing
+            )
+            textView.font = NSFont.systemFont(ofSize: fontSize)
+            textView.typingAttributes = newAttributes
+
+            if let textStorage = textView.textStorage, textStorage.length > 0 {
+                let fullRange = NSRange(location: 0, length: textStorage.length)
+                textStorage.addAttribute(.font, value: NSFont.systemFont(ofSize: fontSize), range: fullRange)
+                let pStyle = NSMutableParagraphStyle()
+                pStyle.lineSpacing = lineSpacing
+                textStorage.addAttribute(.paragraphStyle, value: pStyle, range: fullRange)
+            }
+            textView.invalidateIntrinsicContentSize()
+            scrollView.invalidateIntrinsicContentSize()
         }
 
         var textWasChangedByInsertionRequest = false
@@ -505,12 +531,20 @@ struct CustomTextEditor: NSViewRepresentable {
         var lastProcessedInsertionID: UUID?
         var lastProcessedInsertionString: String?
 
-        let defaultTypingAttributes: [NSAttributedString.Key: Any]
-        let listConfig = ListFormattingEngine.Config.default
+        var defaultTypingAttributes: [NSAttributedString.Key: Any]
+        var listConfig: ListFormattingEngine.Config
+        var lastAppliedFontSize: CGFloat?
+        var lastAppliedLineSpacing: CGFloat?
 
         init(_ parent: CustomTextEditor, defaultTypingAttributes: [NSAttributedString.Key: Any]) {
             self.parent = parent
             self.defaultTypingAttributes = defaultTypingAttributes
+            self.listConfig = ListFormattingEngine.Config(
+                font: (defaultTypingAttributes[.font] as? NSFont) ?? .systemFont(ofSize: parent.fontSize),
+                lineSpacing: parent.lineSpacing
+            )
+            self.lastAppliedFontSize = parent.fontSize
+            self.lastAppliedLineSpacing = parent.lineSpacing
         }
 
         // MARK: - NSTextStorageDelegate

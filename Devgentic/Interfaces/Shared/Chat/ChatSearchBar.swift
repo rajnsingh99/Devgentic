@@ -14,6 +14,9 @@ struct ChatSearchBar: View {
     @State private var isPrevHovered: Bool = false
     @State private var isNextHovered: Bool = false
     @Environment(\.appTheme) private var theme
+    // [CF-37] For `unreachableMatchCount` — an ancestor already provides this (ChatHistoryView),
+    // so no call site needs to change.
+    @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
 
     var body: some View {
         HStack(spacing: 10) {
@@ -35,7 +38,11 @@ struct ChatSearchBar: View {
 
             // Match Count Badge
             if !searchViewModel.searchQuery.isEmpty {
-                Text(matchCountLabel)
+                // Computed ONCE per body pass and handed to both strings: it walks the search
+                // corpus, and reading it from each of the two computed properties doubled that
+                // walk on every keystroke.
+                let unreachable = unreachableCount
+                Text(matchCountLabel(unreachable: unreachable))
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundColor(searchViewModel.totalMatchCount > 0 ? theme.accentColor : theme.errorColor)
                     .padding(.horizontal, 7)
@@ -47,12 +54,26 @@ struct ChatSearchBar: View {
                         Capsule().stroke(searchViewModel.totalMatchCount > 0 ? theme.accentColor.opacity(0.3) : theme.errorColor.opacity(0.3), lineWidth: 0.5)
                     )
                     .fixedSize()
-                    .accessibilityLabel(matchCountAccessibilityLabel)
+                    .accessibilityLabel(matchCountAccessibilityLabel(unreachable: unreachable))
                     .task(id: searchViewModel.totalMatchCount) {
                         try? await Task.sleep(for: .milliseconds(600))
                         guard !Task.isCancelled else { return }
                         AccessibilityAnnouncer.announce(resultCountAnnouncement, urgency: .polite)
                     }
+            }
+
+            // Unreachable-match caption (CF-35): the active match exists in the stored
+            // history but lies past the resident window's cap, so Next/Previous landed on
+            // it without the transcript moving. Say so, rather than leave "N of M" pointing
+            // at nothing.
+            if searchViewModel.totalMatchCount > 0, searchViewModel.currentMatchUnreachable {
+                Text("Older than the loaded history")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(theme.tertiaryText)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .help("This match is beyond the \(ChatHistoryViewModel.maxResidentMessages) most recent messages kept on screen, so it can't be scrolled to. Scroll-back stops there to bound memory.")
+                    .accessibilityLabel("This match is older than the loaded history and can't be scrolled to")
             }
 
             // Navigation Buttons (Previous / Next match)
@@ -134,16 +155,28 @@ struct ChatSearchBar: View {
         }
     }
 
-    private var matchCountLabel: String {
+    /// [CF-37] `unreachableMatchCount` was written to keep this honest and had zero callers —
+    /// so "N of M" counted matches Next/Previous could never actually land on, with nothing
+    /// distinguishing them from a reachable one until the user pressed toward one and hit the
+    /// silent "Older than the loaded history" case CF-35 added below.
+    private var unreachableCount: Int {
+        chatHistoryViewModel.unreachableMatchCount(in: searchViewModel.matches)
+    }
+
+    private func matchCountLabel(unreachable: Int) -> String {
         if searchViewModel.totalMatchCount == 0 {
             return String(localized: "No results")
         }
-        return String(localized: "\(searchViewModel.currentMatchIndex + 1) of \(searchViewModel.totalMatchCount)")
+        let position = String(localized: "\(searchViewModel.currentMatchIndex + 1) of \(searchViewModel.totalMatchCount)")
+        guard unreachable > 0 else { return position }
+        return String(localized: "\(position) · \(unreachable) older not shown")
     }
 
-    private var matchCountAccessibilityLabel: String {
+    private func matchCountAccessibilityLabel(unreachable: Int) -> String {
         if searchViewModel.totalMatchCount == 0 { return String(localized: "No results") }
-        return String(localized: "Match \(searchViewModel.currentMatchIndex + 1) of \(searchViewModel.totalMatchCount)")
+        let position = String(localized: "Match \(searchViewModel.currentMatchIndex + 1) of \(searchViewModel.totalMatchCount)")
+        guard unreachable > 0 else { return position }
+        return String(localized: "\(position), \(unreachable) older matches not loaded and cannot be reached")
     }
 
     /// Announced while typing, so it reports the COUNT rather than the position — which

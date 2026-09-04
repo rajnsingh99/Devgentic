@@ -263,6 +263,9 @@ final class ConversationManagementCoordinator {
         // Unsent draft text shouldn't outlive the conversation it belonged to.
         ComposerDraftStore.shared.discard(for: conversationID)
         logger.info("[DELETE] \(short) — discarded any unsent composer draft.")
+        // [CF-39] Same reasoning as the draft above: a side store keyed by conversation id must
+        // not outlive the conversation.
+        RemoteConversationOriginStore.forget(conversationID: conversationID)
         persistenceService.deleteConversation(with: conversationID)
         // Privacy: delete the conversation's traces too (FK cascades spans/events/configs),
         // so its raw content doesn't linger in traces.sqlite after deletion (§12.5).
@@ -299,6 +302,7 @@ final class ConversationManagementCoordinator {
         for id in ids {
             drainLiveExecution(conversationID: id, vm: vm)
             ComposerDraftStore.shared.discard(for: id)
+            RemoteConversationOriginStore.forget(conversationID: id)   // [CF-39]
             persistenceService.deleteConversation(with: id)
             do {
                 try TraceStore.shared?.deleteTraces(forConversationID: id.uuidString)

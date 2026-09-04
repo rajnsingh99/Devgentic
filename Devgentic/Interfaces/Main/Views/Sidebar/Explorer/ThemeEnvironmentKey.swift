@@ -13,7 +13,7 @@ import SwiftUI
 // MARK: - Environment Key
 
 private struct AppThemeKey: EnvironmentKey {
-    static let defaultValue: any Theme = AppThemes.DefaultTheme()
+    static let defaultValue: any Theme = AppThemes.MaterialTheme()
 }
 
 private struct AppAccentColorKey: EnvironmentKey {

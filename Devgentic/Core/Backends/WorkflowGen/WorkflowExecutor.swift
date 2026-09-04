@@ -1726,6 +1726,7 @@ actor WorkflowExecutor: Executor {
 
                         case .workflowNodeStarted, .workflowNodeCompleted, .workflowNodeFailed,
                              .workflowNodeSkipped, .workflowNodeCancelled,
+                             .workflowNodeRetryScheduled,
                              .workflowProgress, .workflowRunFinished:
                             break // Ignore nested workflow events
 
@@ -2241,6 +2242,20 @@ actor WorkflowExecutor: Executor {
                 } else {
                     logger.info("[WF_EXEC] Node '\(node.displayName)' retry \(attempt)/\(maxRetries) after \(retryDelay)s delay — prior failure: \(priorReason?.localizedDescription ?? "unknown").")
                 }
+                // [CF-30] Announce the pending retry BEFORE the back-off, while the consumer is
+                // still healthy. The `.workflowNodeCancelled` yielded from the catch below can
+                // never be acted on — `ActiveStreamManager`'s loop calls `try
+                // Task.checkCancellation()` before it switches on the event — so without this the
+                // UI's last word on the node stays the `.failed` of the attempt that just ended,
+                // and a Stop pressed during the delay persists it as a genuine failure beside the
+                // run's own "Cancelled" pill.
+                // ⚠️ Deliberately does NOT say "retrying" anywhere the user can see: WF-CC4 moved
+                // that claim to after the sleep precisely so a cancelled attempt cannot make it.
+                continuation.yield(.workflowNodeRetryScheduled(
+                    nodeID: node.id,
+                    profileName: node.displayName,
+                    attemptsRemaining: attempts - attempt
+                ))
                 if retryDelay > 0 {
                     do {
                         try await Task.sleep(for: .seconds(retryDelay))
@@ -3362,7 +3377,13 @@ actor WorkflowExecutor: Executor {
                     // see the log line below. (`.workflowNodeStarted` is the arm above: suppressed
                     // too, but its name is harvested for HITL banner titling.)
                     case .workflowNodeCompleted, .workflowNodeFailed, .workflowNodeSkipped,
-                         .workflowNodeCancelled, .workflowProgress, .workflowRunFinished:
+                         .workflowNodeCancelled, .workflowProgress, .workflowRunFinished,
+                         // [CF-30] Suppressed with its siblings: it names an inner node of the
+                         // CHILD, and the parent's own row is `.running` for the whole child run,
+                         // so a Stop during a nested back-off is already covered by
+                         // `settleInFlightWork`'s `.running` arm. Forwarding it would mark the
+                         // PARENT node retry-pending for a retry that is not its own.
+                         .workflowNodeRetryScheduled:
                         suppressedOrchestrationEvents += 1
 
                     // ⚠️ FORWARDED — the same event set the direct profile path forwards (register

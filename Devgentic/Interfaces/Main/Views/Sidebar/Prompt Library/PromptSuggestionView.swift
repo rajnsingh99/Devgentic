@@ -168,6 +168,6 @@ struct PromptSuggestionView_Previews: PreviewProvider {
         }
         .frame(width: 450)
         .padding()
-        .background(AppThemes.DefaultTheme().primaryBackground)
+        .background(AppThemes.MaterialTheme().primaryBackground)
     }
 }

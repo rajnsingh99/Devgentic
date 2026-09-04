@@ -999,8 +999,13 @@ final class DanglingToolRowCloserUserSkipTests: XCTestCase {
         XCTAssertEqual(after.output, "real output")
     }
 
-    /// Regression pin for the shared-walk refactor: the pre-existing `.failed`/`.cancelled`
-    /// close semantics must be byte-identical to before the walk was extracted.
+    /// Regression pin for the shared-walk refactor: the close's coverage, category and synthetic
+    /// output must survive the extraction of the walk.
+    ///
+    /// [CF-51] `isSuccess` no longer goes to `false` on a CANCELLED close — a user Stop is not a
+    /// tool failure, and asserting one badged the row red and counted it in the header's
+    /// "N failed". Every other outcome still writes `false` — pinned by
+    /// `CancelledToolRowSettlementTests.testAFailedCloseStillAssertsFailure`.
     func testExistingCloseSemanticsUnchangedByRefactor() {
         var events = [executingRow(), executingRow()]
         let closed = DanglingToolRowCloser.close(&events, outcome: .cancelled)
@@ -1009,7 +1014,7 @@ final class DanglingToolRowCloserUserSkipTests: XCTestCase {
         for event in events {
             guard case .toolExecution(let data) = event else { return XCTFail() }
             XCTAssertFalse(data.isExecuting)
-            XCTAssertEqual(data.isSuccess, false)
+            XCTAssertNil(data.isSuccess)
             XCTAssertEqual(data.failureCategory, .cancelled)
             XCTAssertEqual(data.output, "Cancelled before the tool finished.")
         }

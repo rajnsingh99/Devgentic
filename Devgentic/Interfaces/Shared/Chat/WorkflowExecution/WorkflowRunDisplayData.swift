@@ -88,8 +88,11 @@ struct WorkflowRunDisplayData {
         /// Whether this node kind produces a meaningful step-by-step timeline
         /// (agent reasoning + tool calls, or an Action node's tool invocation).
         /// Bots, image generators, and structural transform nodes are single-shot;
-        /// their timeline holds only incidental events (e.g. model-load thoughts),
-        /// so `WorkflowOutputView` hides the Timeline tab and shows Output directly.
+        /// their timeline holds only incidental events (e.g. model-load thoughts).
+        /// ⚠️ This used to name `WorkflowOutputView`, which hid a Timeline tab and showed
+        /// Output directly — that view and the whole `.original` layout were DELETED 2026-07-17.
+        /// Today the readers are `WorkflowExecutionTimelineView` (which renders the per-node
+        /// `AgentTimelineView` only when this is true) and `hasRenderableTimeline` below.
         let supportsTimeline: Bool
 
         /// Per-node SKIP eligibility (D2.1): PROFILE kinds only — bot, agent, sub-workflow.
@@ -248,8 +251,16 @@ struct WorkflowRunDisplayData {
             let upstreamResults = upstreamIDs.compactMap { resultByNodeID[$0] }
             let derivedInput: String? = {
                 if !upstreamResults.isEmpty {
+                    // [CF-31] `upstreamInputContribution`, NOT `\.detail`. A user-skipped upstream's
+                    // detail is the skip SENTENCE, while the engine forwarded that node's own INPUT
+                    // down this edge — so the node currently RUNNING previewed the one string it
+                    // certainly did not receive. Every other status still resolves to `detail`.
                     let combined = upstreamResults
-                        .map(\.detail)
+                        .map {
+                            WorkflowExecutionState.upstreamInputContribution(
+                                of: $0, resultsByNodeID: resultByNodeID,
+                                edges: layout.edges, userInput: state.userInput)
+                        }
                         .filter { !$0.isEmpty }
                         .joined(separator: "\n\n")
                     return combined.isEmpty ? nil : combined
@@ -327,7 +338,18 @@ struct WorkflowRunDisplayData {
     ) -> [NodeDisplayData] {
         let orphans = state.nodeResults.filter { nodeByID[$0.nodeID] == nil }
         guard !orphans.isEmpty else { return [] }
-        logger.info("[WORKFLOW] \(orphans.count) live node result(s) not in the current layout — node deleted mid-run, or the layout diverged. Appending rather than hiding live evidence (same policy as the record path).")
+        // [CF-32] ⚠️ ONCE PER (run, orphan-set), not once per evaluation. This function runs inside
+        // `from(live:layout:)`, which `WorkflowDedicatedView.displayData` rebuilds on EVERY body
+        // pass — and the view re-evaluates on every streamed workflow event, because
+        // `appendNodeTimelineEvent` mutates the `@Observable` `nodeTimelines` per thought and per
+        // tool call. Unconditional logging therefore produced dozens of identical lines per second
+        // for the whole remainder of a run whose layout diverged: the one route that reaches here
+        // is also the one route that makes the line unreadable. The set is part of the key, so a
+        // SECOND node leaving the layout still gets its own line.
+        if shouldLogOrphans(signature: orphanLogSignature(
+            runID: state.runRecordID, orphanNodeIDs: orphans.map(\.nodeID))) {
+            logger.info("[WORKFLOW] \(orphans.count) live node result(s) not in the current layout — node deleted mid-run, or the layout diverged. Appending rather than hiding live evidence (same policy as the record path). CONSEQUENCE: logged once for this run and this set of orphans; the rows keep rendering for the rest of the run without repeating this line.")
+        }
         return orphans.map { result in
             NodeDisplayData(
                 id: result.id,
@@ -348,6 +370,38 @@ struct WorkflowRunDisplayData {
                 supportsTimeline: true
             )
         }
+    }
+
+    // MARK: - Orphan log de-duplication (CF-32)
+
+    /// The last (run, orphan-set) that produced an orphan log line.
+    ///
+    /// ⚠️ `nonisolated(unsafe)` and deliberately unsynchronised. It is a LOG MEMO: the only thing a
+    /// torn read can cost is one duplicated or one missed info line, never a wrong display, and
+    /// every real caller is `WorkflowDedicatedView.body` on the main actor. Locking a value the
+    /// render path touches per frame to protect a log line would be the worse trade.
+    /// (`ToolSchemaSizes.sizesByName` is the same pattern.)
+    nonisolated(unsafe) private static var lastLoggedOrphanSignature: String?
+
+    /// The identity of one orphan situation: WHICH run, and WHICH nodes left its layout.
+    ///
+    /// Sorted so the signature does not change when `nodeResults` reorders — arrival order is not
+    /// stable across parallel levels, and a signature that flipped with it would log on every
+    /// frame again, which is the row.
+    nonisolated static func orphanLogSignature(runID: UUID?, orphanNodeIDs: [UUID]) -> String {
+        (runID?.uuidString ?? "<no run id>") + "|"
+            + orphanNodeIDs.map(\.uuidString).sorted().joined(separator: ",")
+    }
+
+    /// True the FIRST time a signature is seen, false for every repeat until it changes.
+    ///
+    /// ⚠️ The memo lives here rather than in a pure predicate on purpose: "the second identical
+    /// evaluation is silent" is the entire fix, and a pure `previous != next` helper would leave
+    /// exactly that untested (WF-UI5's rule applied to a side effect).
+    nonisolated static func shouldLogOrphans(signature: String) -> Bool {
+        guard lastLoggedOrphanSignature != signature else { return false }
+        lastLoggedOrphanSignature = signature
+        return true
     }
 
     // MARK: - Factory: Frozen Run Record

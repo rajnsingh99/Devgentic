@@ -19,6 +19,20 @@ import Foundation
 
 enum DanglingToolRowCloser {
 
+    /// A row this closer settled, identified well enough for a caller to react to WHICH tool
+    /// was abandoned rather than merely how many were.
+    ///
+    /// Exists for [CF-9]: a live-agent-write tab is opened from the `.toolCall` event and is
+    /// settled only by an `AgentLiveWriteEvent.completed`, which is posted from `.toolSucceeded`
+    /// / `.toolFailed`. A Stop or a provider throw yields NEITHER, so the tab stays `.active`
+    /// forever. `close` already runs on every one of those paths and already knows exactly which
+    /// rows were abandoned — reporting them lets the caller post the missing completion instead
+    /// of duplicating the traversal.
+    struct ClosedRow: Sendable {
+        let name: String
+        let params: String
+    }
+
     /// Closes every still-executing tool row in `events`, including rows nested inside
     /// capability cards, and returns how many were closed so the caller can log the repair.
     ///
@@ -27,11 +41,30 @@ enum DanglingToolRowCloser {
     /// stream fresh events. Here the run is over and the row is the record of what happened.
     @discardableResult
     static func close(_ events: inout [TimelineEvent], outcome: ExecutionOutcome?) -> Int {
+        closeReporting(&events, outcome: outcome).count
+    }
+
+    /// `close`, returning the rows it settled. Same traversal and same mutation — the count-only
+    /// form delegates here, so the two can never disagree about coverage.
+    ///
+    /// ⚠️ [CF-51] A CANCELLED close leaves `isSuccess` nil; every other outcome writes `false`.
+    /// A user Stop is not a tool failure: the tool never reported, and the run ended because the
+    /// user said so. Writing `false` made `ActionDetailView.statusIcon` paint a red "CANCELLED"
+    /// capsule and made `AgentTimelineView.summarize` count the row, so a Stop mid-tool read
+    /// "Stopped after 3 steps (3 tools · 1 failed)" — a failure claim about a run in which
+    /// nothing failed. That is the same reasoning `closeForUserSkip` and
+    /// `markInterruptedByProcessDeath` below were already built on; this is the third and last
+    /// user-initiated stop to adopt it. `failureCategory` still records `.cancelled` — the
+    /// structured cause is worth keeping even when nothing renders it as a failure — and the
+    /// synthetic output still says what happened, so the row stays disclosable.
+    @discardableResult
+    static func closeReporting(_ events: inout [TimelineEvent], outcome: ExecutionOutcome?) -> [ClosedRow] {
         walk(&events) { data in
             data.isExecuting = false
-            data.isSuccess = false
             if outcome == .cancelled {
                 data.failureCategory = .cancelled
+            } else {
+                data.isSuccess = false
             }
             if data.output == nil {
                 // Persisted tool output — deliberately unlocalized (category-c, must stay stable).
@@ -42,6 +75,29 @@ enum DanglingToolRowCloser {
         }
     }
 
+    /// The PROCESS-DEATH repair (CF-44): stops the spinner on a row persisted mid-tool by
+    /// `flushInFlight`, and changes NOTHING else.
+    ///
+    /// ⚠️ `output` is deliberately left nil, and that is the whole design. `isExecuting || output
+    /// == nil` is how the resume engine identifies the tool a run died inside —
+    /// `TimelineTurnReconstructor.reconstruct` uses it to pick `dangling`
+    /// (TimelineTurnReconstructor.swift:82), and `resumeRun` uses the same expression to strip the
+    /// stale card (MessagingCoordinator.swift:529-532). Writing a synthetic output would make the
+    /// row look OBSERVED to both: a streaming resume would stop dropping it and would instead
+    /// replay it to the model as a completed step whose result was "Interrupted before the tool
+    /// finished.", and the stale card would survive into the resumed run. Turning the spinner off
+    /// is the entire user-visible defect; asserting an outcome we never saw is not part of it.
+    ///
+    /// `isSuccess` stays nil for the same reason — the tool's fate is genuinely unknown, so the
+    /// row renders no badge rather than a fabricated success or failure, and
+    /// `AgentTimelineView.summarize` does not count it toward "N failed".
+    @discardableResult
+    static func markInterruptedByProcessDeath(_ events: inout [TimelineEvent]) -> Int {
+        walk(&events) { data in
+            data.isExecuting = false
+        }.count
+    }
+
     /// The USER-SKIP close (Phase B increment 5): the node was deliberately skipped mid-flight,
     /// so its abandoned tool rows are neither failures nor cancellations — `isSuccess` stays nil
     /// (statusIcon renders no badge, `summarize` counts nothing failed) and the output says what
@@ -50,13 +106,15 @@ enum DanglingToolRowCloser {
     /// says "Skipped by you" — a failure claim about a run in which nothing failed.
     @discardableResult
     static func closeForUserSkip(_ events: inout [TimelineEvent]) -> Int {
+        // Count only — no caller needs to know WHICH rows a user-skip settled. (The live-write
+        // completion CF-9 posts is a chat-path concern; a skipped workflow node has no live tab.)
         walk(&events) { data in
             data.isExecuting = false
             if data.output == nil {
                 // Persisted tool output — deliberately unlocalized (category-c, must stay stable).
                 data.output = "Interrupted — the node was skipped by you."
             }
-        }
+        }.count
     }
 
     /// The shared traversal: every still-executing tool row, including rows nested inside
@@ -66,12 +124,14 @@ enum DanglingToolRowCloser {
     private static func walk(
         _ events: inout [TimelineEvent],
         applying mutate: (inout ToolExecutionData) -> Void
-    ) -> Int {
-        var closed = 0
+    ) -> [ClosedRow] {
+        var closed: [ClosedRow] = []
 
         func close(_ data: inout ToolExecutionData) {
             mutate(&data)
-            closed += 1
+            // Captured AFTER the mutation, but `name`/`params` are not mutated by either close
+            // body — they identify the abandoned call, which is exactly what CF-9's caller needs.
+            closed.append(ClosedRow(name: data.name, params: data.params))
         }
 
         /// One step's / attempt's sub-timeline: its own tool rows, plus those inside a plan

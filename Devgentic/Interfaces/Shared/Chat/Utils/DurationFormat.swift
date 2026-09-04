@@ -14,23 +14,23 @@ import Foundation
 
 /// App-wide duration rendering. One vocabulary for every ms → label conversion.
 enum DurationFormat {
+    /// The Run Report's ms formatter. Now literally `milliseconds(_:)` — it is kept only
+    /// because eleven Run Report call sites spell it this way.
+    ///
+    /// [CF-52] It never joined the consolidation below: it carried its own
+    /// `"\(minutes)m \(remainingSeconds)s"` with no zero-remainder collapse and no hour
+    /// bucket, so the same 60 s value read "1m" in the timeline and "1m 0s" in the Run
+    /// Report, and a two-hour run read "120m 0s". That is verbatim the drift the
+    /// consolidation exists to remove, so it delegates like everything else.
     static func format(ms: Int) -> String {
-        if ms < 1000 {
-            return "\(ms)ms"
-        } else if ms < 60_000 {
-            let seconds = Double(ms) / 1000.0
-            return String(format: "%.1fs", seconds)
-        } else {
-            let minutes = ms / 60_000
-            let remainingSeconds = (ms % 60_000) / 1000
-            return "\(minutes)m \(remainingSeconds)s"
-        }
+        milliseconds(ms)
     }
 }
 
 extension DurationFormat {
 
-    /// The ONE minute/hour rendering all three helpers delegate to.
+    /// The ONE minute/hour rendering every helper in this file delegates to — `milliseconds`,
+    /// `elapsed`, `seconds`, and (since CF-52) `format(ms:)`.
     ///
     /// The file header records that these were consolidated because the copies "had drifted";
     /// the drift survived INSIDE the consolidated version — two helpers collapsed a zero
@@ -53,9 +53,8 @@ extension DurationFormat {
     }
 
     /// Integer **milliseconds** → "820ms" / "3.4s" / "1m 5s" / "1h 2m".
-    /// Used by capability cards and the agent timeline (tool durations are ms).
-    /// Distinct from `format(ms:)` (Report spans) only in that a whole-minute value
-    /// renders "1m" rather than "1m 0s".
+    /// Used by capability cards, the agent timeline and — through `format(ms:)`, which is now
+    /// a thin alias — the Run Report. One vocabulary for every ms duration in the app.
     ///
     /// Clamped ≥0 like `elapsed`: a negative duration is a clock artefact, and "-42ms" in a
     /// tool row reads as a real measurement.

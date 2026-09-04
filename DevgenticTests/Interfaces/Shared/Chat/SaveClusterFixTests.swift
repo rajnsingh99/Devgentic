@@ -256,3 +256,124 @@ final class SaveClusterFixTests: XCTestCase {
         XCTAssertEqual(fresh, buffer, "a new Save-As target must not gain phantom whitespace")
     }
 }
+
+
+// MARK: - CF-17 residual · saveTabToItsPath off the main actor
+
+/// `saveTabToItsPath` used to do BOTH its drift read and its write synchronously on the main
+/// actor, uncapped — so ⌘S on a large agent-written file (opened from a timeline row, a path
+/// `openTimelineFileInCodeViewer` size-caps not at all) beachballed the app for the length of
+/// both. Moving them off the actor introduced a window this method never had: the user can type
+/// while the save is in flight. These pin the safety properties that must survive that.
+@MainActor
+final class SaveTabOffMainActorTests: XCTestCase {
+
+    private var viewModel: ChatHistoryViewModel!
+    private let conversation = UUID()
+    private var path: String!
+
+    override func setUp() async throws {
+        let store = NoopSaveStore()
+        viewModel = ChatHistoryViewModel(
+            persistenceService: store,
+            activeStreamManager: ActiveStreamManager(persistenceService: store,
+                                                     fileProcessorService: FileProcessorService())
+        )
+        await viewModel.loadConversation(id: conversation)
+        path = NSTemporaryDirectory() + "devgentic_savetab_\(UUID().uuidString).swift"
+    }
+
+    override func tearDown() async throws {
+        if let path { try? FileManager.default.removeItem(atPath: path) }
+        viewModel = nil
+    }
+
+    private func openLinkedTab(seed: String) -> UUID? {
+        viewModel.handleAgentWriteBegan(
+            AgentLiveWriteEvent.Began(conversationID: conversation, path: path,
+                                      fileName: "Thing.swift", proposedContent: seed)
+        )
+        return viewModel.codeViewerTabs.first?.id
+    }
+
+    /// ⚠️ THE PIN for the new window. The save snapshots the buffer, then suspends for the read
+    /// and the write; a keystroke landing in that gap must NOT be discarded by the bookkeeping
+    /// that runs afterwards. An unconditional `editedCode = buffer` would silently throw the
+    /// user's newer text away — data loss introduced by a performance fix.
+    func testTypingWhileASaveIsInFlightIsNotDiscarded() async {
+        guard let tabID = openLinkedTab(seed: "let version = 1") else { return XCTFail("no tab") }
+        viewModel.updateCodeViewerDraft(tabID: tabID, content: "let version = 1 // first")
+
+        let save = Task { await viewModel.saveTabToItsPath(tabID: tabID) }
+        await Task.yield()   // let the save reach its first suspension point
+        viewModel.updateCodeViewerDraft(tabID: tabID, content: "let version = 1 // typed during save")
+        await save.value
+
+        XCTAssertEqual(viewModel.codeViewerTabs.first?.effectiveCode,
+                       "let version = 1 // typed during save",
+                       "the keystroke that landed during the save must survive it")
+        XCTAssertTrue(viewModel.codeViewerTabs.first?.isDirty ?? false,
+                      "and the tab must stay dirty, so the next save writes it")
+    }
+
+    /// The guard the read exists for. It is NOT size-capped like the Save-As pre-read, because
+    /// skipping it would mean overwriting an external edit unseen.
+    func testAnExternalEditStillRefusesTheSave() async throws {
+        guard let tabID = openLinkedTab(seed: "let version = 1") else { return XCTFail("no tab") }
+        viewModel.updateCodeViewerDraft(tabID: tabID, content: "let version = 1 // mine")
+        await viewModel.saveTabToItsPath(tabID: tabID)
+        XCTAssertNil(viewModel.codeApplyError, "precondition: the first save succeeds")
+
+        // Someone else edits the file behind the viewer's back.
+        try "let version = 99 // theirs".write(toFile: path, atomically: true, encoding: .utf8)
+        viewModel.updateCodeViewerDraft(tabID: tabID, content: "let version = 1 // mine again")
+        await viewModel.saveTabToItsPath(tabID: tabID)
+
+        XCTAssertNotNil(viewModel.codeApplyError, "the drift guard must still refuse")
+        let onDisk = try String(contentsOfFile: path, encoding: .utf8)
+        XCTAssertTrue(onDisk.contains("theirs"), "the external edit must not have been overwritten")
+    }
+
+    /// UNREADABLE IS NOT ABSENT — the distinction the detached read has to carry back across the
+    /// actor hop. Invalid UTF-8 is unreadable, so the save must refuse rather than treat the file
+    /// as missing and recreate it over whatever those bytes were.
+    func testAnUndecodableDestinationRefusesRatherThanOverwrites() async throws {
+        guard let tabID = openLinkedTab(seed: "let version = 1") else { return XCTFail("no tab") }
+        try Data([0xFF, 0xFE, 0xFF, 0xFE]).write(to: URL(fileURLWithPath: path))
+        viewModel.updateCodeViewerDraft(tabID: tabID, content: "let version = 2")
+
+        await viewModel.saveTabToItsPath(tabID: tabID)
+
+        XCTAssertNotNil(viewModel.codeApplyError,
+                        "its absence was NOT established, so the save must refuse")
+        let bytes = try Data(contentsOf: URL(fileURLWithPath: path))
+        XCTAssertEqual(Array(bytes), [0xFF, 0xFE, 0xFF, 0xFE], "the unreadable file must be intact")
+    }
+
+    /// The ordinary path still works, and the bytes land.
+    func testASaveWithNoInterferenceWritesTheBuffer() async throws {
+        guard let tabID = openLinkedTab(seed: "let version = 1") else { return XCTFail("no tab") }
+        viewModel.updateCodeViewerDraft(tabID: tabID, content: "let version = 42")
+
+        await viewModel.saveTabToItsPath(tabID: tabID)
+
+        XCTAssertNil(viewModel.codeApplyError)
+        let onDisk = try String(contentsOfFile: path, encoding: .utf8)
+        XCTAssertTrue(onDisk.contains("let version = 42"), "got: \(onDisk)")
+        XCTAssertFalse(viewModel.codeViewerTabs.first?.isDirty ?? true, "a saved tab is clean")
+    }
+}
+
+@MainActor
+private final class NoopSaveStore: ChatPersistenceProtocol {
+    func addConversation(from conversation: Conversation) {}
+    func addMessage(_ message: ChatMessage, toConversation conversationId: UUID) async {}
+    func addMessages(_ messages: [ChatMessage], toConversation conversationId: UUID) async {}
+    func getConversation(withId id: UUID) -> ConversationSD? { nil }
+    func fetchMessages(for conversationId: UUID, offset: Int, limit: Int) async -> [ChatMessage] { [] }
+    func updateOpenAIThreadID(for conversationId: UUID, with threadId: String) {}
+    func deleteConversation(with id: UUID) {}
+    func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?) {}
+    func updateProfileType(for conversationId: UUID, profileTypeRaw: String) {}
+    func togglePinStatus(for conversationId: UUID) {}
+}

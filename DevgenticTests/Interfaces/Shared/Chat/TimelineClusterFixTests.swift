@@ -48,7 +48,9 @@ final class TimelineClusterFixTests: XCTestCase {
             return XCTFail("plan/step/tool shape not preserved")
         }
         XCTAssertFalse(row.isExecuting, "a persisted row must never claim to still be executing")
-        XCTAssertEqual(row.isSuccess, false)
+        // [CF-51] `isSuccess` stays nil on a CANCELLED close — a user Stop is not a tool
+        // failure. It was `false` here until CF-51; the pinned behaviour is now "no verdict".
+        XCTAssertNil(row.isSuccess)
         XCTAssertEqual(row.failureCategory, .cancelled)
         XCTAssertEqual(row.output, "Cancelled before the tool finished.")
     }

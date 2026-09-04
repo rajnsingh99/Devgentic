@@ -13,6 +13,13 @@ import SwiftUI
 
 struct WorkflowRunHistoryListView: View {
     let runHistory: [WorkflowRunRecord]
+    /// ⚠️ WRITE-ONLY from this list, by construction (register CF-61). The one call site is
+    /// `WorkflowDedicatedView.emptyExecutionState`, which renders in the `else` of
+    /// `if let data = displayData` — and `displayData` is non-nil exactly when this id resolves to
+    /// a record in `runHistory`. So whenever the list is on screen nothing is selected, and a tap
+    /// replaces the list with the timeline in the same update. The per-card selected styling and
+    /// `.isSelected` trait that used to read it back were unreachable and have been deleted rather
+    /// than left as a description of a state the code cannot produce.
     @Binding var selectedRunID: UUID?
     @Environment(\.appTheme) private var theme
 
@@ -46,10 +53,7 @@ struct WorkflowRunHistoryListView: View {
             ScrollView(.vertical) {
                 LazyVStack(spacing: 8) {
                     ForEach(runHistory) { record in
-                        WorkflowRunCardView(
-                            record: record,
-                            isSelected: selectedRunID == record.id
-                        ) {
+                        WorkflowRunCardView(record: record) {
                             selectedRunID = record.id
                         }
                     }
@@ -178,9 +182,12 @@ enum RunCardSpeech {
 
 // MARK: - Run Card
 
+/// ⚠️ NO selected state (register CF-61). This card had `isSelected` styling — accent fill, a
+/// 1.5pt accent border, a status-tinted shadow — and an `.isSelected` accessibility trait, none of
+/// which could ever render: see the gate documented on `WorkflowRunHistoryListView.selectedRunID`.
+/// If this list is ever shown BESIDE a selection, the styling comes back with the gate, not before.
 private struct WorkflowRunCardView: View {
     let record: WorkflowRunRecord
-    let isSelected: Bool
     let onSelect: () -> Void
 
     @Environment(\.appTheme) private var theme
@@ -342,9 +349,9 @@ private struct WorkflowRunCardView: View {
             .glassEffect(.regular, in: .rect(cornerRadius: 12))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(cardBorder, lineWidth: isSelected ? 1.5 : 0.5)
+                    .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
             )
-            .shadow(color: isSelected ? statusColor.opacity(0.08) : Color.black.opacity(0.04), radius: isSelected ? 6 : 1, y: 1)
+            .shadow(color: Color.black.opacity(0.04), radius: 1, y: 1)
         }
         .buttonStyle(.plain)
         .scaleEffect(isHovering && !reduceMotion ? 1.012 : 1.0)
@@ -358,18 +365,11 @@ private struct WorkflowRunCardView: View {
         // and it takes the decorative glyphs out of the tree for free.
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(cardAccessibilityLabel)
-        // Which run you're viewing was conveyed only by border weight, fill and shadow.
-        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAddTraits(.isButton)
     }
 
     private var cardBackground: Color {
-        if isSelected { return theme.accentColor.opacity(0.08) }
         if isHovering { return theme.surfaceOverlay }
         return Color.clear
-    }
-
-    private var cardBorder: Color {
-        if isSelected { return theme.accentColor.opacity(0.15) }
-        return theme.surfaceOverlayStrong
     }
 }

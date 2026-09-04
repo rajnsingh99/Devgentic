@@ -9,6 +9,7 @@ import SwiftUI
 
 struct CheckboxView: View {
     @Binding var isChecked: Bool
+    @Environment(\.appTheme) private var theme
     
     private let size: CGFloat = 20
     private let cornerRadius: CGFloat = 5
@@ -19,10 +20,10 @@ struct CheckboxView: View {
         ZStack {
             // The outer box
             RoundedRectangle(cornerRadius: cornerRadius)
-                .strokeBorder(isChecked ? Color.accentColor : Color.secondary.opacity(0.5), lineWidth: 2)
+                .strokeBorder(isChecked ? theme.accentColor : theme.dividerColor.opacity(0.7), lineWidth: 1.5)
                 .background(
                     RoundedRectangle(cornerRadius: cornerRadius)
-                        .fill(isChecked ? Color.accentColor : Color.clear)
+                        .fill(isChecked ? theme.accentColor : theme.surfaceOverlay.opacity(0.3))
                 )
                 .frame(width: size, height: size)
 
@@ -30,7 +31,7 @@ struct CheckboxView: View {
             if isChecked {
                 Image(systemName: "checkmark")
                     .font(.system(size: size * 0.6, weight: .bold)) // Fixed size: user-configured checkbox size
-                    .foregroundColor(.white)
+                    .foregroundColor(theme.isDark ? theme.primaryBackground : .white)
                     .transition(.scale(scale: 0.5).combined(with: .opacity))
             }
         }

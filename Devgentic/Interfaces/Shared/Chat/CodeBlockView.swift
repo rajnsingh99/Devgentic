@@ -12,6 +12,8 @@
 import SwiftUI
 import Highlightr
 
+private let logger = DGLogger(category: "CodeBlockView")
+
 struct CodeBlockView: View {
     let language: String
     let content: String
@@ -23,6 +25,23 @@ struct CodeBlockView: View {
     var fileName: String? = nil
     /// Code point size, passed down from `chatFontSize` so code scales with prose.
     var fontSize: CGFloat = ChatUIConstants.defaultCodeFontSize
+    /// The message this block was rendered from, when the host knows it.
+    ///
+    /// Paired with `resolveOriginBlockIndex` it gives the "Viewer" button below the same
+    /// origin identity the CARD path passes (`openMessageInCodeViewer`), so `openTab`'s
+    /// origin-keyed branch can refresh the block's existing tab. Without it dedup fell
+    /// through to exact-code equality — and this button is live on a STREAMING block, so
+    /// opening one mid-stream and again once it finished left a second tab holding the
+    /// truncated fragment. A block can also cross the 50-line card threshold while it
+    /// streams, which is how one block gets opened from both paths.
+    var originMessageID: UUID? = nil
+    /// This block's ordinal among the message's code blocks, resolved ON TAP.
+    ///
+    /// A closure rather than a stored `Int` because deriving the ordinal costs a re-parse
+    /// of the whole message, and this view re-renders on every streamed flush: the cost
+    /// must be paid once per click, never in `body`. Returning nil (block not found) falls
+    /// back to content-equality dedup, i.e. today's behaviour.
+    var resolveOriginBlockIndex: (() -> Int?)? = nil
     @State private var isCopied = false
     @State private var isHovering = false
     @State private var isOpenHovering = false
@@ -65,11 +84,11 @@ struct CodeBlockView: View {
                 // Language Badge (Aligned Left)
                 Text(language.isEmpty ? "plaintext" : language.lowercased())
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(theme.primaryText.opacity(0.85))
+                    .foregroundColor(theme.codeBlockHeaderText.opacity(0.85))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
-                    .background(Capsule().fill(theme.surfaceOverlayStrong))
-                    .overlay(Capsule().stroke(theme.secondaryText.opacity(0.2), lineWidth: 0.5))
+                    .background(Capsule().fill(theme.codeBlockHeaderText.opacity(0.08)))
+                    .overlay(Capsule().stroke(theme.codeBlockHeaderText.opacity(0.15), lineWidth: 0.5))
 
                 if let fileName, !fileName.isEmpty {
                     HStack(spacing: 4) {
@@ -78,7 +97,7 @@ struct CodeBlockView: View {
                         Text(fileName)
                             .font(.system(size: 10, weight: .medium))
                     }
-                    .foregroundColor(theme.primaryText.opacity(0.85))
+                    .foregroundColor(theme.codeBlockHeaderText.opacity(0.85))
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .accessibilityLabel("From file \(fileName)")
@@ -87,7 +106,7 @@ struct CodeBlockView: View {
                 if lineCount > 1 {
                     Text("\(lineCount) lines")
                         .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(theme.tertiaryText)
+                        .foregroundColor(theme.codeBlockHeaderSecondaryText)
                 }
 
                 Spacer()
@@ -97,7 +116,19 @@ struct CodeBlockView: View {
                     if let viewModel = chatHistoryViewModel {
                         Button {
                             let snippet = CodeSnippet(codeBlock: language, content: content)
-                            viewModel.openTab(for: snippet, fileName: fileName)
+                            // Origin is all-or-nothing: an id without an ordinal (or the
+                            // reverse) never matches `openTab`'s origin branch, so pass
+                            // neither and let content equality decide, as it did before.
+                            let blockIndex = resolveOriginBlockIndex?()
+                            if blockIndex == nil, originMessageID != nil {
+                                logger.debug("[CodeViewer] Inline Viewer open could not place this block within its message — opening without an origin, so a later reopen of the same block may add a tab instead of refreshing one.")
+                            }
+                            viewModel.openTab(
+                                for: snippet,
+                                fileName: fileName,
+                                originMessageID: blockIndex == nil ? nil : originMessageID,
+                                originBlockIndex: originMessageID == nil ? nil : blockIndex
+                            )
                         } label: {
                             HStack(spacing: 4) {
                                 Image(systemName: "arrow.up.forward.app")
@@ -124,11 +155,11 @@ struct CodeBlockView: View {
                             Text(isCopied ? "Copied" : "Copy")
                                 .font(.system(size: 10, weight: .semibold))
                         }
-                        .foregroundColor(isCopied ? theme.successColor : theme.primaryText.opacity(0.8))
+                        .foregroundColor(isCopied ? theme.successColor : theme.codeBlockHeaderText.opacity(0.85))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3.5)
-                        .background(Capsule().fill(isHovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay))
-                        .overlay(Capsule().stroke(theme.secondaryText.opacity(0.2), lineWidth: 0.5))
+                        .background(Capsule().fill(theme.codeBlockHeaderText.opacity(isHovering ? 0.12 : 0.06)))
+                        .overlay(Capsule().stroke(theme.codeBlockHeaderText.opacity(0.15), lineWidth: 0.5))
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(isCopied ? "Copied" : "Copy code")
@@ -140,7 +171,7 @@ struct CodeBlockView: View {
             .background(theme.codeBlockHeaderBackground)
 
             Rectangle()
-                .fill(theme.surfaceOverlayStrong)
+                .fill(theme.codeBlockHeaderText.opacity(0.1))
                 .frame(height: 0.5)
 
             // MARK: - Editor Content
