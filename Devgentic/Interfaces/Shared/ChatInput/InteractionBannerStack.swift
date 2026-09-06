@@ -618,7 +618,7 @@ private struct PermissionInteractionBanner: View {
         // Register the grant BEFORE the approval resume so the tool's next call in this run
         // already observes it — ordered by construction, not by Task timing.
         Task { @MainActor in
-            await SessionToolApprovals.shared.allow(toolName: tool, conversationID: conversationID, nodeID: nodeID)
+            await SessionToolApprovals.shared.allow(toolName: tool, risk: confirmation.risk, conversationID: conversationID, nodeID: nodeID)
             vm.submitToolApproval(operationID: pending.id, approved: true, editedArguments: edited)
         }
     }

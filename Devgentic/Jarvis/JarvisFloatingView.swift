@@ -17,22 +17,44 @@ import SwiftUI
 struct JarvisFloatingView: View {
     let controller: JarvisSessionController
     /// Reports which panel size the current stage needs.
-    let onModeChange: (Bool) -> Void
+    let onModeChange: (JarvisPanelMode) -> Void
     let onClose: () -> Void
 
-    private var isPickerMode: Bool { controller.stage == .selectingProfile }
+    /// The presentation the current stage needs. `.approval` only when there is genuinely
+    /// something to answer — a parked stage with an empty queue would grow the panel to show
+    /// nothing.
+    private var panelMode: JarvisPanelMode {
+        if controller.stage == .selectingProfile { return .picker }
+        if controller.stage == .awaitingApproval, controller.pendingInteraction != nil { return .approval }
+        return .orb
+    }
 
     var body: some View {
         Group {
-            if isPickerMode {
-                pickerPresentation
-            } else {
-                orbPresentation
+            switch panelMode {
+            case .picker:   pickerPresentation
+            case .orb:      orbPresentation
+            case .approval: approvalPresentation
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onChange(of: isPickerMode, initial: false) { _, isPicker in
-            onModeChange(isPicker)
+        .onChange(of: panelMode, initial: false) { _, mode in
+            onModeChange(mode)
+        }
+    }
+
+    // MARK: - Approval
+
+    /// The orb, shrunk, above the request. Keeping the orb visible matters: it is the anchor the
+    /// user recognises, and the panel is the same window that was floating a moment ago.
+    @ViewBuilder private var approvalPresentation: some View {
+        if let pending = controller.pendingInteraction {
+            VStack(spacing: 12) {
+                JarvisCoreVisual(mode: .processing, size: 78)
+                JarvisHITLBanner(pending: pending, controller: controller)
+            }
+            .padding(14)
+            .background(pickerChrome)
         }
     }
 
@@ -72,25 +94,30 @@ struct JarvisFloatingView: View {
                 .contentShape(Circle())
                 .onTapGesture { handleOrbTap() }
                 .help(orbTooltip)
-                .contextMenu {
-                    Button("Switch Profile…") { controller.requestProfileSwitch() }
-                    if case .voiceUnavailable = controller.stage {
-                        Button("Retry Voice") { controller.retryVoice() }
-                    }
-                    if controller.stage == .passiveListening {
-                        Button("Speak Now (skip wake word)") { controller.armManualCapture() }
-                    }
-                    if controller.stage == .commandCapture {
-                        Button("Send What I Said") { controller.commitCaptureNow() }
-                    }
-                    if controller.isExecuting {
-                        Button("Stop Current Task") { controller.stopExecution() }
-                    }
-                    Divider()
-                    Button("Close Jarvis") { onClose() }
-                }
+                // ⚠️⚠️ THE ORB IS THE WHOLE FEATURE'S ONLY CONTROL, and without this it was not a
+                // control at all to VoiceOver: an unlabelled shape carrying an `onTapGesture`,
+                // announced as nothing, with its state (STANDBY vs LISTENING vs WAITING ON YOU)
+                // carried only by colour and an unlabelled capsule.
+                //
+                // ⚠️ `.accessibilityAction`, not just the trait. VoiceOver's activate does not
+                // reliably fire a bare `onTapGesture` on a shape, and this tap is the click-to-speak
+                // affordance, the send-now affordance AND the only way to interrupt an answer.
+                .accessibilityElement(children: .ignore)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel(Text("Jarvis"))
+                .accessibilityValue(Text(Self.accessibilityStatus(
+                    stage: controller.stage, micTrouble: controller.micTroubleDetected)))
+                .accessibilityHint(Text(orbTooltip))
+                .accessibilityAction { handleOrbTap() }
+                // ⚠️ EVERY CONTEXT-MENU ITEM ALSO BECOMES AN ACCESSIBILITY ACTION. The recovery
+                // paths — Repair Audio for a wedged coreaudiod, Cancel for a mis-transcription
+                // about to reach a profile with shell tools — lived exclusively behind a
+                // right-click, which needs a pointer. These surface in VoiceOver's Actions rotor.
+                .accessibilityActions { orbActions }
+                .contextMenu { orbActions }
 
                 statusCapsule
+                transcriptCaption
             }
 
             // Config bubbles, floated off the orb's top-right
@@ -105,6 +132,62 @@ struct JarvisFloatingView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black.opacity(0.001))
+    }
+
+    /// The orb's actions, used by BOTH the right-click menu and VoiceOver's Actions rotor.
+    ///
+    /// ⚠️ ONE LIST, TWO SURFACES. Written twice they would drift, and the half that drifts is
+    /// always the one nobody is looking at — which here is the accessible one.
+    @ViewBuilder private var orbActions: some View {
+        Button("Switch Profile…") { controller.requestProfileSwitch() }
+        if case .voiceUnavailable = controller.stage {
+            Button("Retry Voice") { controller.retryVoice() }
+        }
+        // Offered as soon as the microphone misbehaves, not only after Jarvis gives
+        // up — the wedge survives relaunching the app, so waiting is never useful.
+        if controller.micTroubleDetected || controller.isVoiceUnavailable {
+            Button("Repair Audio…") { controller.repairAudio() }
+        }
+        if controller.stage == .passiveListening {
+            Button("Speak Now (skip wake word)") { controller.armManualCapture() }
+        }
+        if controller.stage == .commandCapture {
+            Button("Send What I Said") { controller.commitCaptureNow() }
+            // The abort path. A tap on the orb SENDS (deliberate, Siri-style), so
+            // without this a user watching a mis-transcription had no way to stop it
+            // reaching a profile with shell and filesystem tools.
+            Button("Cancel — Don't Send") { controller.cancelCapture() }
+        }
+        if controller.isExecuting {
+            Button("Stop Current Task") { controller.stopExecution() }
+        }
+        if controller.stage == .announcing {
+            Button("Stop Speaking") { controller.bargeIn() }
+        }
+        Divider()
+        Button("Close Jarvis") { onClose() }
+    }
+
+    /// What VoiceOver reads as the orb's VALUE. Pure, so every stage is guaranteed to say
+    /// something and the set can be checked without rendering.
+    ///
+    /// ⚠️ Sentence case, not the capsule's `statusText`. That is styled in capitals for the HUD
+    /// ("WAITING ON YOU"), and a screen reader is entitled to spell capitals out letter by letter.
+    /// The two strings say the same thing on purpose; only their casing differs.
+    static func accessibilityStatus(stage: JarvisStage, micTrouble: Bool) -> String {
+        switch stage {
+        case .selectingProfile:  return String(localized: "Choosing a profile")
+        case .welcoming:         return String(localized: "Starting up")
+        case .passiveListening:  return micTrouble
+            ? String(localized: "No audio from the microphone")
+            : String(localized: "Standing by")
+        case .commandCapture:    return String(localized: "Listening")
+        case .followUpWindow:    return String(localized: "Listening for a follow-up")
+        case .executing:         return String(localized: "Working")
+        case .awaitingApproval:  return String(localized: "Waiting for your answer")
+        case .announcing:        return String(localized: "Speaking")
+        case .voiceUnavailable:  return String(localized: "Voice input unavailable")
+        }
     }
 
     /// Futuristic floating HUD status capsule underneath the orb.
@@ -131,28 +214,68 @@ struct JarvisFloatingView: View {
         )
         .shadow(color: statusColor.opacity(0.22), radius: 8, x: 0, y: 3)
         .animation(.spring(response: 0.3, dampingFraction: 0.75), value: controller.stage)
+        // The orb already exposes this as its accessibility VALUE; announcing it again as a
+        // separate element makes every stage change read twice.
+        .accessibilityHidden(true)
+    }
+
+    /// What Jarvis currently thinks you said.
+    ///
+    /// ⚠️ Not optional, and not a setting. A mis-transcribed command reaches a profile with shell
+    /// and filesystem tools, and the source's own defence of deliberately generous wake-word
+    /// matching is that "the user can see" a false positive — which was not true until this
+    /// existed. Shown only while capture is armed, and gone the moment it commits, so the orb
+    /// stays wordless the rest of the time.
+    @ViewBuilder private var transcriptCaption: some View {
+        if controller.stage == .commandCapture, !controller.commandPreview.isEmpty {
+            Text(controller.commandPreview)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(JarvisPalette.textSecondary)
+                .lineLimit(2)
+                .truncationMode(.head)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 250)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(JarvisPalette.backgroundTop.opacity(0.75)))
+                .transition(.opacity)
+                .accessibilityLabel("Heard: \(controller.commandPreview)")
+        }
     }
 
     private var statusColor: Color {
         switch controller.stage {
         case .selectingProfile, .welcoming: return JarvisPalette.hologram
-        case .passiveListening:             return JarvisPalette.hologram
+        // Amber while the microphone is failing but retries continue — a healthy-looking
+        // STANDBY over a dead mic is the thing this whole warning exists to prevent.
+        case .passiveListening:             return controller.micTroubleDetected ? JarvisPalette.gold : JarvisPalette.hologram
         case .commandCapture:               return JarvisPalette.hologram
+        case .followUpWindow:               return JarvisPalette.successEmerald
         case .executing:                    return JarvisPalette.gold
+        case .awaitingApproval:             return JarvisPalette.gold
         case .announcing:                   return JarvisPalette.successEmerald
         case .voiceUnavailable:             return JarvisPalette.alert
         }
     }
 
+    /// ⚠️ `String(localized:)` rather than bare literals, because `Text(statusText)` takes a
+    /// `String` — which is SwiftUI's NON-localizing initializer. A `Text("STANDBY")` literal would
+    /// have been extracted into the catalogue for free; routing the same words through a `String`
+    /// property silently opted them out, which is how half this subsystem ended up untranslated
+    /// while the other half was not.
     private var statusText: String {
         switch controller.stage {
-        case .selectingProfile:  return "SELECTING"
-        case .welcoming:         return "INITIALIZING"
-        case .passiveListening:  return "STANDBY"
-        case .commandCapture:    return "LISTENING"
-        case .executing:         return "THINKING"
-        case .announcing:        return "COMPLETE"
-        case .voiceUnavailable:  return "OFFLINE"
+        case .selectingProfile:  return String(localized: "SELECTING")
+        case .welcoming:         return String(localized: "INITIALIZING")
+        case .passiveListening:  return controller.micTroubleDetected
+            ? String(localized: "NO AUDIO")
+            : String(localized: "STANDBY")
+        case .commandCapture:    return String(localized: "LISTENING")
+        case .followUpWindow:    return String(localized: "GO AHEAD")
+        case .executing:         return String(localized: "THINKING")
+        case .awaitingApproval:  return String(localized: "WAITING ON YOU")
+        case .announcing:        return String(localized: "COMPLETE")
+        case .voiceUnavailable:  return String(localized: "OFFLINE")
         }
     }
 
@@ -162,8 +285,9 @@ struct JarvisFloatingView: View {
         case .selectingProfile:  return .idle
         case .welcoming:         return .greeting
         case .passiveListening:  return .passive
-        case .commandCapture:    return .capturing
-        case .executing:         return .processing
+        // The microphone really is hot, so it gets the hot-mic expression rather than standby's.
+        case .commandCapture, .followUpWindow: return .capturing
+        case .executing, .awaitingApproval: return .processing
         case .announcing:        return .speaking
         case .voiceUnavailable:  return .alert
         }
@@ -173,6 +297,9 @@ struct JarvisFloatingView: View {
         switch controller.stage {
         case .passiveListening:  controller.armManualCapture()
         case .commandCapture:    controller.commitCaptureNow()
+        // Tapping during the answer cuts it short. Until full duplex lands the microphone is
+        // closed while Jarvis speaks, so this tap is the only way to interrupt.
+        case .announcing:        controller.bargeIn()
         default:                 break
         }
     }
@@ -181,12 +308,26 @@ struct JarvisFloatingView: View {
     /// explainable without breaking the wordless presentation.
     private var orbTooltip: String {
         switch controller.stage {
-        case .selectingProfile:  return "Select a profile"
-        case .welcoming:         return "Starting up"
-        case .passiveListening:  return "Standing by — say “Jarvis”, or click to speak"
-        case .commandCapture:    return "Listening — click to send"
-        case .executing:         return "Working — follow along in the chat window"
-        case .announcing:        return "Task complete"
+        case .selectingProfile:  return String(localized: "Select a profile")
+        case .welcoming:         return String(localized: "Starting up")
+        case .passiveListening:
+            if controller.micTroubleDetected {
+                return String(localized: "The microphone opened but delivered no audio — right-click to repair")
+            }
+            // A wake word that cannot match in the configured speech language must say so —
+            // otherwise the orb looks alive and silently ignores the user.
+            // ⚠️ “Jarvis” stays untranslated inside the sentence around it: it is an ACOUSTIC
+            // token matched against ASR output, not a word. Translating it would tell the user to
+            // say something that can never match — see `wakeWordCanMatch(language:)`.
+            return controller.wakeWordUnavailable
+                ? String(localized: "Standing by — click to speak (the wake word can’t work in this speech language)")
+                : String(localized: "Standing by — say “Jarvis”, or click to speak")
+        case .commandCapture:    return String(localized: "Listening — click to send, or right-click to cancel")
+        case .followUpWindow:    return String(localized: "Go ahead — ask a follow-up, no wake word needed")
+        case .executing:         return String(localized: "Working — follow along in the chat window")
+        case .awaitingApproval:  return String(localized: "Waiting for you to answer")
+        case .announcing:        return String(localized: "Speaking — click to stop")
+        // Already localized at the source — these are the sentences the listening loops build.
         case .voiceUnavailable(let reason): return reason
         }
     }
@@ -197,7 +338,9 @@ struct JarvisFloatingView: View {
 /// A small hologram bubble orbiting the orb — the config affordances from the sketch.
 struct JarvisBubbleButton: View {
     let systemName: String
-    let help: String
+    /// ⚠️ `LocalizedStringKey`, not `String`. Both `.help` and `.accessibilityLabel` have a
+    /// non-localizing `StringProtocol` overload that a `String` property silently selects.
+    let help: LocalizedStringKey
     let action: () -> Void
 
     @State private var isHovered = false

@@ -22,6 +22,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     var contentWindow: QuickAccessPanelView?
     var hotKey: HotKey?
+    /// Jarvis's global shortcut. Separate registration from QuickAccess's: push-to-talk needs
+    /// BOTH Carbon edges, and the two features must be independently enable-able.
+    var jarvisHotKey: HotKey?
 
     /// [QA revival P1a] The shared object graph, injected from DevgenticApp once the app is
     /// up (AppDelegate and the panel live outside the SwiftUI environment). Weak — both are
@@ -115,6 +118,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         UNUserNotificationCenter.current().delegate = self
         Self.logger.info("UNUserNotificationCenter delegate set.")
         applyHotkeyConfig()
+        applyJarvisHotkeyConfig()
         setupStatusItem()
         setupNotificationObserver()
 
@@ -699,6 +703,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     func applicationWillTerminate(_ notification: Notification) {
         Self.logger.info("Application will terminate.")
 
+        // ⚠️ LAST GRACEFUL CHANCE. The Jarvis duplex engine is panel-scoped, so it can still be
+        // live here; an AVAudioEngine that reaches process death wedges coreaudiod into
+        // `_StartIO error 35` — an app-wide dead microphone that survives relaunch and needs an
+        // admin `killall coreaudiod`. Crashes and force-quits cannot be covered; Repair Audio in
+        // Settings is the remedy for those.
+        JarvisDuplexAudio.shared.release(reason: "application terminating")
+
         // Mark this session cleanly exited (§12.1) — async teardown already ran via
         // applicationShouldTerminate. Crashes and force-quits never get here; the next
         // launch reads the stale `false` and knows.
@@ -742,6 +753,74 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         } else {
             Self.logger.warning("QuickAccess hotkey \(config.shortcutDescription) could not be registered — it may be held by another app. The shortcut will not fire until changed.")
         }
+    }
+
+    /// (Re)register Jarvis's global shortcut from JarvisConfigManager. Called at launch and
+    /// whenever the settings pane changes the shortcut, the activation mode, or the enable flag.
+    ///
+    /// ⚠️ Registered ONLY in `.holdShortcut` mode. In the continuously-listening modes the
+    /// microphone is already open and a shortcut would be a second, redundant way in — and
+    /// holding a Carbon registration the user cannot see is exactly the kind of invisible state
+    /// that makes a shortcut conflict impossible to diagnose.
+    @MainActor
+    func applyJarvisHotkeyConfig() {
+        let config = JarvisConfigManager.shared
+        jarvisHotKey = nil
+
+        // The enable flag governs the WHOLE feature: close an open panel so turning Jarvis off
+        // takes effect immediately rather than leaving a live microphone floating over every Space.
+        if !config.isEnabled, JarvisPanelController.shared.isOpen {
+            JarvisPanelController.shared.close(reason: "Jarvis disabled in Settings")
+        }
+
+        guard config.isEnabled, config.activationMode == .holdShortcut else {
+            Self.logger.info("[JARVIS] Global shortcut not registered (enabled: \(config.isEnabled), mode: \(config.activationMode.rawValue)). CONSEQUENCE: in this mode the orb is reached from the composer button or an already-open panel.")
+            return
+        }
+
+        // Probe BEFORE the package registers: the soffes/HotKey package swallows
+        // RegisterEventHotKey's OSStatus, so it cannot tell us when the OS refuses.
+        let canRegister = HotkeyRegistrationProbe.canRegister(
+            carbonKeyCode: config.carbonKeyCode, carbonModifiers: config.carbonModifiers
+        )
+        let hk = HotKey(carbonKeyCode: config.carbonKeyCode, carbonModifiers: config.carbonModifiers)
+        hk.keyDownHandler = { [weak self] in
+            DispatchQueue.main.async { self?.jarvisPushToTalkDown() }
+        }
+        hk.keyUpHandler = { [weak self] in
+            DispatchQueue.main.async { self?.jarvisPushToTalkUp() }
+        }
+        jarvisHotKey = hk
+
+        if canRegister {
+            Self.logger.info("[JARVIS] Push-to-talk shortcut registered: \(config.shortcutDescription)")
+        } else {
+            Self.logger.warning("[JARVIS] Push-to-talk shortcut \(config.shortcutDescription) could not be registered — another app likely holds it. CONSEQUENCE: the shortcut will never fire and, in hold-to-talk mode, the composer button is the only way in until the combo is changed.")
+        }
+    }
+
+    @MainActor private func jarvisPushToTalkDown() {
+        guard let mainVM = quickAccessMainViewModel else {
+            Self.logger.warning("[JARVIS] Push-to-talk pressed before the shared view model was injected. CONSEQUENCE: this press does nothing; the shortcut works once the main window has finished mounting.")
+            return
+        }
+        // Opening the panel on first press is the point of the shortcut: Jarvis was otherwise
+        // reachable only from a composer button that exists in chat interface mode alone.
+        if !JarvisPanelController.shared.isOpen {
+            JarvisPanelController.shared.show(mainVM: mainVM)
+        }
+        JarvisPanelController.shared.beginPushToTalk()
+    }
+
+    @MainActor private func jarvisPushToTalkUp() {
+        JarvisPanelController.shared.endPushToTalk()
+    }
+
+    /// Pause/resume BOTH global shortcuts while a settings recorder is armed, so pressing a
+    /// current combo to re-record it reaches the recorder instead of firing the feature.
+    @MainActor
+    func setJarvisHotkeyPaused(_ paused: Bool) {
+        jarvisHotKey?.isPaused = paused
     }
 
     /// [M3] Pause/resume the live global hotkey while the settings recorder is armed, so pressing

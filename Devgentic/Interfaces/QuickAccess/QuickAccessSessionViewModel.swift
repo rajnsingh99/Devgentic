@@ -417,7 +417,7 @@ final class QuickAccessSessionViewModel {
         let opID = pending.id
         if allowForChat, case .toolConfirmation(let c) = pending.kind, let convID = conversationID {
             Task { @MainActor in
-                await SessionToolApprovals.shared.allow(toolName: c.toolName, conversationID: convID)
+                await SessionToolApprovals.shared.allow(toolName: c.toolName, risk: c.risk, conversationID: convID)
                 mainAppViewModel?.submitToolApproval(operationID: opID, approved: true)
             }
         } else {

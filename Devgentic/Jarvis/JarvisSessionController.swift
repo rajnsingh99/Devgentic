@@ -22,6 +22,7 @@
 //
 
 import Foundation
+import AppKit
 import AVFoundation
 import Observation
 
@@ -36,12 +37,33 @@ enum JarvisStage: Equatable {
     case passiveListening
     /// Wake word heard; capturing the command until the user stops talking.
     case commandCapture
+    /// Just answered, microphone still hot: ANY speech now is a follow-up, no wake word needed.
+    /// The deadline lives on the controller rather than in the case so `stage == .followUpWindow`
+    /// stays a plain equality check at every call site.
+    case followUpWindow
     /// A run is streaming through the chat pipeline.
     case executing
     /// Completion TTS is playing.
     case announcing
+    /// The run has stopped to ask the user something and is waiting for an answer.
+    case awaitingApproval
     /// Voice input can't run (no model / mic denied / session failure).
     case voiceUnavailable(reason: String)
+}
+
+/// A phrase that controls Jarvis instead of being sent to the model.
+enum JarvisVoiceCommand: Equatable {
+    case repeatAnswer
+    case newConversation
+    /// [Phase 6 · F1] Escalating detail about the run that just finished. Deliberately ON DEMAND:
+    /// a run report spoken after every turn is noise, and the verdict adds nothing to an answer
+    /// the user just heard in full.
+    case whatWentWrong
+    case whatDidYouChange
+    /// Speaks the part of the answer a length setting held back. This is what makes a short
+    /// default a CHOICE rather than a loss — and it is the answer to the truncation notice, which
+    /// otherwise points at a chat window the user may not be near.
+    case tellMeMore
 }
 
 // MARK: - Controller
@@ -51,11 +73,26 @@ final class JarvisSessionController {
 
     // MARK: Tunables
 
+    /// Bumped whenever a tester is asked to verify a change, so a log proves which binary ran.
+    static let featureMarker = "pr9 (all P1/P2/P3 closed — entry-point guards, playback fallback, panel + HITL logging)"
+    /// Canonical wake word. ⚠️ Was dead code until 2026-09-04 — all matching went through
+    /// `wakeWordVariants`, so editing this changed nothing. `wakeWordVariants` now derives
+    /// from it, which is what makes a future user-configurable wake word actually take effect.
     static let wakeWord = "jarvis"
-    static let completionPhrase = "Your task is completed, let me know next"
+    /// Spoken when a run ends WELL. ⚠️ Until the reply itself is spoken (roadmap Phase 1)
+    /// the announcement is the ONLY thing a voice-only user hears, so it must reflect the
+    /// real outcome — see `announcement(for:reason:)`, not this constant, at the call site.
+    static let completionPhrase = String(localized: "Your task is completed, let me know next")
     /// Command considered final after this much NORMALIZED-command stability (VAD's
     /// own 1.5s auto-stop usually wins when WhisperKit has confirmed segments).
-    private static let commandSilenceCommit: TimeInterval = 2.2
+    ///
+    /// Forwards to the config manager at USE time rather than caching: the watchdog re-reads this
+    /// on every 300ms tick, so a change in the settings pane reaches a RUNNING orb with no other
+    /// plumbing. That matters because the panel keeps its session private and lives outside the
+    /// SwiftUI environment — the config manager is the only channel Settings has.
+    private static var commandSilenceCommit: TimeInterval {
+        JarvisConfigManager.shared.endpointing.seconds
+    }
     /// Wake word heard but nothing said — give up capture and re-arm after this.
     private static let emptyCaptureTimeout: TimeInterval = 8.0
     /// Hard cap for a single capture session: whatever has been heard by now IS the
@@ -67,7 +104,25 @@ final class JarvisSessionController {
     /// Recycle passive sessions to bound WhisperKit's ever-growing audio buffer.
     private static let passiveRecycleInterval: TimeInterval = 45.0
     private static let energyBarCount = 48
-    private static let profileMemoryKey = "jarvisProfileID"
+
+    /// Minimum word count before a capture is dispatched to a profile.
+    ///
+    /// ⚠️ `!command.isEmpty` was the ONLY gate on the send path. Whisper hallucinates short
+    /// filler on silence and steady background noise — "Thank you." is the canonical one, and
+    /// this controller's own notes at `captureHardCap` record hallucination on fan hum — while
+    /// the profile picker admits `.agent` profiles, which have shell and filesystem tools. So a
+    /// single hallucinated token could start a tool-using run the user never asked for. Two
+    /// words is the cheapest gate that does not cost real commands: a genuine one-word request
+    /// to an agent is rare, and the user can simply say it again.
+    static let minimumCommandWords = 2
+
+    /// Spoken phrases that ABORT an armed capture instead of becoming the command.
+    /// The audible half of the cancel path — see `cancelCapture()` for why one was needed.
+    static let cancelPhrases = ["never mind", "nevermind", "cancel that", "forget it"]
+
+    /// Seconds to wait for `AVSpeechSynthesizer`'s `didFinish` before handing back anyway.
+    /// Generous: it is a deadlock breaker, not a pacing control.
+    private static let speechCompletionTimeout: TimeInterval = 20
 
     /// CoreAudio settle time before opening the mic. AVSpeechSynthesizer's output
     /// context is torn down asynchronously AFTER its didFinish delegate fires, so
@@ -76,8 +131,88 @@ final class JarvisSessionController {
     /// so the session "succeeds" with a dead mic. Paired with
     /// `JarvisVoiceOutput.releaseAudio()`, which deallocates the synthesizer first.
     private static let audioSettleDelay: TimeInterval = 1.0
+
+    /// Releases the speech synthesisers and waits out the CoreAudio race — UNLESS the duplex
+    /// engine is up and cancelling echo, in which case there is nothing to race.
+    ///
+    /// ⚠️ The skip is only sound because BOTH speech paths (`JarvisVoiceOutput` for short phrases
+    /// and `JarvisStreamingSpeaker` for the answer) render through the shared engine's player
+    /// node when it is warm. One remaining plain `AVSpeechSynthesizer` would reintroduce the
+    /// asynchronous audio-unit teardown this delay exists to outlast, and the microphone would go
+    /// quietly dead again.
+    private func settleAudioBeforeCapture() async {
+        // ⚠️ An ambient announcement speaks WITHOUT holding the stage, so the next session recycle
+        // (every 45 s in passive listening) used to reach `voice.releaseAudio()` and deallocate
+        // its synthesizer mid-sentence — silently, because `speakAmbient` arms no completion. The
+        // announcement is a few seconds; letting it finish costs one delayed session.
+        if voice.isSpeaking, ambientSpeechInFlight {
+            logger.info("[JARVIS_SESSION]\(self.tag) Holding the microphone closed until the ambient announcement finishes. CONSEQUENCE: this session opens a moment later; without it the announcement would be cut off mid-sentence with nothing logged.")
+            for _ in 0..<Int(Self.ambientSpeechGrace * 10) {
+                guard voice.isSpeaking else { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            ambientSpeechInFlight = false
+        }
+        if JarvisDuplexAudio.shared.isEchoCancelling {
+            logger.info("[JARVIS_SESSION]\(self.tag) Skipping the \(String(format: "%.1f", Self.audioSettleDelay))s audio settle — speech and capture share one echo-cancelling engine, so there is no synthesiser teardown to outrun. CONSEQUENCE: the microphone opens immediately.")
+            return
+        }
+        // Fully release the speech synthesizer's audio unit, then let CoreAudio settle, before
+        // claiming the input device.
+        voice.releaseAudio()
+        // The narrator holds its own synthesizer for the length of an answer; BOTH audio units
+        // must be gone before the HAL is asked for the input device.
+        speaker.releaseAudio()
+        try? await Task.sleep(nanoseconds: UInt64(Self.audioSettleDelay * 1_000_000_000))
+    }
     /// Consecutive dead sessions before surfacing voiceUnavailable instead of retrying.
     private static let maxDeadSessions = 4
+    /// How long an OPEN session may deliver no audio before the orb says so.
+    ///
+    /// A healthy microphone produces energy samples within ~100ms even in a silent room, so this
+    /// cannot false-positive on quiet. Kept short because the whole point is to beat the user's
+    /// patience.
+    static let deadAudioWarningDelay: TimeInterval = 3.0
+
+    /// How long an Apple Speech session may deliver no audio before it is ended so the retry
+    /// ladder can run.
+    ///
+    /// ⚠️ Only the Apple path needs this. WhisperKit's passive sessions are recycled every 45s for
+    /// buffer reasons, so a dead session there always ends by itself and reaches the post-session
+    /// check; `SpeechAnalyzer` needs no recycle, so a dead passive session would otherwise run
+    /// FOREVER and the escalation to OFFLINE would never be reached.
+    ///
+    /// Safe to keep short because the signal is "the tap has delivered ZERO buffers", not
+    /// "nobody spoke" — a healthy engine delivers buffers within ~100 ms in a silent room, so this
+    /// cannot cut short a user who is merely thinking.
+    static let deadAudioSessionLimit: TimeInterval = 12.0
+
+    /// What to do after a session that delivered no audio at all.
+    enum DeadSessionOutcome: Equatable {
+        case retry(backoff: TimeInterval)
+        /// Stop pretending to listen and say so.
+        case giveUp
+    }
+
+    /// ⚠️ SHARED BY BOTH RECOGNIZER LOOPS, and that is the whole point of it existing.
+    ///
+    /// This ladder was written inline in the WhisperKit loop and simply never written in the Apple
+    /// Speech one, so a wedged input device left that path re-arming forever on a healthy-looking
+    /// STANDBY — with "Repair Audio…" unreachable, because it is gated on the very flags this
+    /// escalation sets. Two copies of a policy is how one of them ends up missing; one pure
+    /// function that both call is how the next recognizer inherits it for free.
+    ///
+    /// The backoff climbs so the HAL gets progressively longer to release a device another app is
+    /// holding — the usual cause when a microphone opens and delivers nothing.
+    static func deadSessionOutcome(consecutive: Int) -> DeadSessionOutcome {
+        guard consecutive < maxDeadSessions else { return .giveUp }
+        return .retry(backoff: Double(consecutive) * 0.8)
+    }
+
+    /// Spoken by the orb when the microphone opens but delivers nothing. Shared so both loops
+    /// send the user to the same place.
+    static let deadAudioUnavailableReason = String(localized:
+        "The microphone opened but delivered no audio. Another app may be holding the input device — quit apps using the mic (or check your input device in System Settings → Sound), then retry.")
 
     // MARK: Observable state (drives the HUD)
 
@@ -89,6 +224,19 @@ final class JarvisSessionController {
     private(set) var currentAgentMessage: ChatMessage?
     /// The profile remembered from the last Jarvis session (pre-highlighted in the picker).
     private(set) var rememberedProfileID: UUID?
+    /// True once a microphone session has opened but delivered NO audio.
+    ///
+    /// ⚠️ Deliberately SEPARATE from `voiceUnavailable`. The first `-10877` is often transient
+    /// engine spin-up noise that the very next attempt survives, so giving up after one failure
+    /// would be wrong — but saying NOTHING for four failures plus escalating backoff leaves the
+    /// orb sitting on STANDBY, looking healthy, while deaf. Observed on 2026-09-04: the user
+    /// closed the panel before the escalation ever fired and never learned the mic was dead.
+    /// This warns immediately while the loop keeps retrying underneath.
+    private(set) var micTroubleDetected = false
+    /// True when the configured ASR language cannot produce a wake-word match, so clicking
+    /// the orb is the ONLY way in. Drives the tooltip — without it the orb looks alive and
+    /// simply never responds. See `wakeWordCanMatch(language:)`.
+    private(set) var wakeWordUnavailable = false
 
     /// The command as it stands right now: everything spoken after the wake word, or —
     /// when capture was armed by clicking — everything spoken after the arm point.
@@ -113,19 +261,93 @@ final class JarvisSessionController {
 
     var isExecuting: Bool { streamingMessageID != nil }
 
+    var isVoiceUnavailable: Bool {
+        if case .voiceUnavailable = stage { return true }
+        return false
+    }
+
     // MARK: Private state
 
     @ObservationIgnored private weak var mainVM: MainApplicationViewModel?
     @ObservationIgnored private let backendConfiguration = BackendConfiguration()
     @ObservationIgnored private let voice = JarvisVoiceOutput()
+    /// Narrates the assistant's answer as it streams (Phase 1).
+    @ObservationIgnored private let speaker = JarvisStreamingSpeaker()
+    /// [Phase 6 · F3] Announces main-window runs. ⚠️ Held STRONGLY here, and nowhere else.
+    /// `ActiveStreamManager` keeps mirror delegates in weak boxes and silently compacts dead ones
+    /// away with no log — a watcher owned by a closure or a local would simply stop working, and
+    /// nothing would say so.
+    @ObservationIgnored private var ambientWatcher: JarvisAmbientRunWatcher?
+    /// True while an unprompted announcement is playing. The listening loop's settle would
+    /// otherwise deallocate its synthesizer mid-sentence.
+    @ObservationIgnored private var ambientSpeechInFlight = false
+    /// Tracked from the lock/unlock notifications, because a display wake arrives BEFORE
+    /// authentication and cannot be treated as one.
+    @ObservationIgnored private var screenLocked = false
+    /// Hard bound on how long a session start waits for one. An announcement is a few seconds;
+    /// this exists so a stuck synthesizer cannot stop the microphone from ever reopening.
+    private static let ambientSpeechGrace: TimeInterval = 6
+    /// [Phase 6 · F2] The operation a spoken "yes" would currently approve, and the deadline
+    /// after which it no longer would.
+    ///
+    /// ⚠️ BOTH are required. A parked run can sit for hours, and `.awaitingApproval` has no
+    /// natural closing edge — an armed window with no deadline is an open microphone in a room,
+    /// indefinitely, waiting for a word a television could supply.
+    /// ⚠️ The WHOLE token, not just the id: `.describe` re-reads the tool and its arguments, and
+    /// rebuilding that sentence from anywhere else would let the second read-back drift from the
+    /// first — in the one exchange whose entire purpose is that the user knows what they are
+    /// approving.
+    @ObservationIgnored private var voiceApprovalToken: JarvisApprovalPolicy.VoiceApproval?
+    private var voiceApprovalOperationID: UUID? { voiceApprovalToken?.operationID }
+    @ObservationIgnored private var voiceApprovalTask: Task<Void, Never>?
     @ObservationIgnored private let logger = DGLogger(category: "JarvisSession")
+
+    /// Correlation identity for EVERY Jarvis log line.
+    ///
+    /// ⚠️ Jarvis fails acoustically and unreproducibly — a microphone that opened but delivered
+    /// nothing, a wake word that never matched, a run that parked while nobody was looking. The
+    /// log is the only viable debugging channel, and a log you cannot reassemble into a single
+    /// session is not one. `s` identifies the panel presentation, `t` the turn within it.
+    @ObservationIgnored private let sessionID = UUID().uuidString.prefix(4).lowercased()
+    /// ⚠️ Stamped when a CAPTURE begins, not when a send is decided.
+    ///
+    /// It used to be assigned inside `execute()`, so every line produced while listening, arming
+    /// on the wake word, capturing, discarding or cancelling carried the id of the LAST turn that
+    /// dispatched — including the abort line, which fires before the assignment. Reconstructing a
+    /// turn from the log is the entire purpose of this field, and the lines that describe why a
+    /// turn never happened were filed under the previous one.
+    @ObservationIgnored private var turnID: String = "—"
+    private var tag: String { "[s:\(sessionID) t:\(turnID)]" }
+
+    /// The HITL request already announced, so a re-render of the queue does not re-speak it.
+    @ObservationIgnored private var announcedInteractionID: UUID?
 
     @ObservationIgnored private var listenTask: Task<Void, Never>?
     @ObservationIgnored private var watchdogTask: Task<Void, Never>?
+    /// Deadlock breaker for the two TTS-gated stages — see `speakWithWatchdog`.
+    @ObservationIgnored private var speechWatchdogTask: Task<Void, Never>?
+    /// When the current phrase started, and how long it was — used to catch a synthesizer that
+    /// "finishes" instantly because it produced no audio at all.
+    @ObservationIgnored private var speechStartedAt = Date()
+    @ObservationIgnored private var speechPhraseLength = 0
+    /// The hand-back for the phrase currently being spoken. Nil-ing it out IS the
+    /// exactly-once guarantee: whichever edge (didFinish or timeout) arrives first wins.
+    @ObservationIgnored private var pendingSpeechCompletion: (() -> Void)?
     @ObservationIgnored private var isSessionActive = false
     @ObservationIgnored private var sessionStart = Date()
     @ObservationIgnored private var lastTranscriptChange = Date()
     @ObservationIgnored private var dismissed = false
+    /// Sleep/lock observers — see `installSystemObservers()`.
+    @ObservationIgnored private var workspaceObservers: [NSObjectProtocol] = []
+    @ObservationIgnored private var distributedObservers: [NSObjectProtocol] = []
+    /// True while the machine is asleep or the screen is locked.
+    @ObservationIgnored private var systemSuspended = false
+    /// True between the push-to-talk shortcut's key-down and key-up.
+    @ObservationIgnored private var pushToTalkHeld = false
+    /// When the open follow-up window closes. Nil outside `.followUpWindow`.
+    @ObservationIgnored private var followUpDeadline: Date?
+    /// A voice command recognised during capture, performed instead of being sent to the model.
+    @ObservationIgnored private var pendingVoiceCommand: JarvisVoiceCommand?
 
     @ObservationIgnored private var jarvisConversationID: UUID?
     @ObservationIgnored private var transcript: [ChatMessage] = []   // oldest-first
@@ -165,6 +387,22 @@ final class JarvisSessionController {
 
     func attach(mainVM: MainApplicationViewModel) {
         self.mainVM = mainVM
+        // Registered here rather than at init: this is where `mainVM` — and therefore the stream
+        // manager — first exists.
+        let watcher = JarvisAmbientRunWatcher { [weak self] phrase, reason in
+            // ⚠️ Through the arbiter, never `voice.speak` directly: an announcement that lands
+            // mid-turn would orphan the in-flight speech hand-back and park the orb.
+            self?.speakAmbient(phrase, reason: reason)
+        }
+        watcher.correlationTag = tag
+        ambientWatcher = watcher
+        // ⚠️ Every panel-scoped audio type, not just the speakers. These lines are the ones a
+        // device test actually reads, and they carried no session id at all.
+        JarvisDuplexAudio.shared.correlationTag = tag
+        voice.correlationTag = tag
+        speaker.correlationTag = tag
+        mainVM.activeStreamManager.addMirrorDelegate(watcher)
+        logger.info("[JARVIS_SESSION]\(self.tag) Ambient run watcher registered (announcements \(JarvisConfigManager.shared.ambientAnnouncements ? "on" : "off"), threshold \(Int(JarvisConfigManager.shared.ambientThresholdSeconds))s).")
     }
 
     /// True when a previously-chosen profile still resolves. Drives the "ask once,
@@ -172,38 +410,90 @@ final class JarvisSessionController {
     var hasRememberedProfile: Bool { Self.rememberedProfile() != nil }
 
     private static func rememberedProfile() -> BackendProfileModel? {
-        guard let idString = UserDefaults.standard.string(forKey: profileMemoryKey),
-              let id = UUID(uuidString: idString),
-              let profile = try? BackendProfileStore.shared.fetchProfile(byId: id),
-              profile.profileType == .bot || profile.profileType == .agent
-        else { return nil }
-        return profile
+        guard let id = JarvisConfigManager.shared.profileID else { return nil }
+        do {
+            guard let profile = try BackendProfileStore.shared.fetchProfile(byId: id) else {
+                staticLogger.info("[JARVIS_SESSION] Remembered profile \(id.uuidString.prefix(8)) no longer exists. CONSEQUENCE: the picker is shown instead of resuming — expected after deleting a profile.")
+                return nil
+            }
+            guard profile.profileType == .bot || profile.profileType == .agent else {
+                staticLogger.info("[JARVIS_SESSION] Remembered profile is a \(profile.profileType.rawValue), which Jarvis cannot drive. CONSEQUENCE: the picker is shown instead of resuming.")
+                return nil
+            }
+            return profile
+        } catch {
+            staticLogger.error("[JARVIS_SESSION] Could not read the remembered profile: \(error.localizedDescription). CONSEQUENCE: the picker is shown as if none had ever been chosen, and the user's choice appears to have been forgotten.")
+            return nil
+        }
     }
 
+    /// The static half of the type has no instance `logger`; without this the two failures above
+    /// would have to stay silent, which is how they got missed.
+    private static let staticLogger = DGLogger(category: "JarvisSession")
+
     func begin() {
+        // ⚠️ ONE line that answers "which build is this, and how is it configured?". Without it,
+        // a device test cannot distinguish "the fix is not in this binary" from "the fix is in and
+        // correctly silent" — both look identical in a log. Bump `featureMarker` with any change
+        // a tester is asked to verify.
+        let config = JarvisConfigManager.shared
+        logger.notice("[JARVIS_SESSION]\(self.tag) Jarvis \(Self.featureMarker) starting — activation: \(config.activationMode.rawValue), recognizer: \(config.recognizer.rawValue), spokenResponses: \(config.spokenResponses.rawValue), followUp: \(config.followUp.rawValue), earcons: \(config.earcons.rawValue), approvals: \(config.toolApprovals.rawValue), duplexAudio: \(config.duplexAudioEnabled), endpointing: \(String(format: "%.1f", Self.commandSilenceCommit))s.")
+        installSystemObservers()
         loadProfiles()
         // Remembered profile → skip the picker entirely and start listening.
         // A deleted/renamed-away profile falls back to the picker rather than failing later.
         if let remembered = Self.rememberedProfile() {
-            logger.info("Jarvis resuming with remembered profile \"\(remembered.displayName)\".")
+            logger.info("[JARVIS_SESSION]\(self.tag) Resuming with remembered profile \"\(remembered.displayName)\" — skipping the picker.")
             selectProfile(remembered)
         } else {
-            stage = .selectingProfile
+            setStage(.selectingProfile, "begin")
         }
     }
 
     /// Config-bubble action: return to the picker. Stops the voice loop and any run
     /// first so the new profile starts from a clean session.
+    ///
+    /// ⚠️ The conversation state MUST be cleared here. Without it the newly-chosen profile
+    /// inherited the previous profile's turns as LLM history and appended its run into the
+    /// previous profile's conversation — so switching from a local bot to a cloud agent
+    /// silently replayed the bot's transcript to the agent, and the sidebar showed one
+    /// conversation whose messages came from two different backends.
     func requestProfileSwitch() {
         guard stage != .selectingProfile else { return }
         stopListening()
+        // The picker can stay open indefinitely. Holding the input device — and the orange
+        // indicator — while nothing listens is both rude and a needless crash-wedge window;
+        // `selectProfile` warms again on the way out.
+        JarvisDuplexAudio.shared.releaseWhenIdle(reason: "profile picker open")
         if let id = streamingMessageID {
             mainVM?.activeStreamManager.cancelStream(for: id)
             streamingMessageID = nil
         }
+        // ⚠️ SAME ORDER AS `teardown()`, AND FOR THE REASON IT DOCUMENTS: `voice.stop()` drops the
+        // synthesizer's completion, so `didFinish` never drains the pending hand-back — and the
+        // 20 s watchdog then fires into a session that has moved on. `drainSpeechCompletion` only
+        // guards on `dismissed`, which is FALSE here because the panel is still open, so the
+        // greeting's stale "start listening" closure would drag the user back out of the picker.
+        speechWatchdogTask?.cancel()
+        speechWatchdogTask = nil
+        pendingSpeechCompletion = nil
         voice.stop()
+        speaker.cancel()
+        // Release any HITL park on the outgoing conversation before abandoning it — the
+        // full `teardown()` does this, and a switch that skipped it stranded the entry.
+        if let convID = jarvisConversationID {
+            Task { await ExecutionSuspensionService.shared.cancel(for: convID) }
+        }
+        logger.info("[JARVIS_SESSION]\(self.tag) Profile switch — discarding \(self.transcript.count) turn(s) and starting a new conversation. CONSEQUENCE: the new profile starts with empty history and any autonomous grant on the old conversation is revoked.")
+        if let convID = jarvisConversationID {
+            Task { await SessionToolApprovals.shared.setAutonomous(false, conversationID: convID) }
+        }
+        announcedInteractionID = nil
+        transcript.removeAll()
+        jarvisConversationID = nil
+        currentAgentMessage = nil
         loadProfiles()
-        stage = .selectingProfile
+        setStage(.selectingProfile, "requestProfileSwitch")
     }
 
     /// Tears down the voice loop without ending the whole session (profile switch).
@@ -230,12 +520,28 @@ final class JarvisSessionController {
     /// nothing keeps executing invisibly after the HUD is gone.
     func teardown() {
         dismissed = true
+        removeSystemObservers()
         listenGeneration &+= 1
         watchdogTask?.cancel()
         watchdogTask = nil
         listenTask?.cancel()
         listenTask = nil
+        // Drop the speech hand-back before stopping the synthesizer: `voice.stop()` cancels the
+        // pending completion, so a live watchdog would otherwise fire into a torn-down session.
+        speechWatchdogTask?.cancel()
+        speechWatchdogTask = nil
+        pendingSpeechCompletion = nil
         voice.stop()
+        speaker.cancel()
+        // ⚠️ Synchronous, and NOT inside the Task below. The engine is panel-scoped now, so this
+        // is the primary release path: a live AVAudioEngine at process death wedges coreaudiod
+        // into `_StartIO error 35` — an app-wide dead microphone that survives relaunch.
+        disarmVoiceApproval(reason: "panel torn down")
+        JarvisDuplexAudio.shared.release(reason: "panel torn down")
+        if let ambientWatcher {
+            mainVM?.activeStreamManager.removeMirrorDelegate(ambientWatcher)
+            self.ambientWatcher = nil
+        }
         if isSessionActive {
             Task { _ = await WhisperRecognitionService.shared.stopStreaming() }
             isSessionActive = false
@@ -245,7 +551,122 @@ final class JarvisSessionController {
             streamingMessageID = nil
         }
         if let convID = jarvisConversationID {
-            Task { await ExecutionSuspensionService.shared.cancel(for: convID) }
+            Task {
+                await ExecutionSuspensionService.shared.cancel(for: convID)
+                // ⚠️ Revoke the blanket grant with the panel. It is in-memory so it cannot survive
+                // relaunch — but it WOULD survive the orb closing, and a mode the user can no
+                // longer see must not still be approving tools.
+                await SessionToolApprovals.shared.setAutonomous(false, conversationID: convID)
+            }
+        }
+        logger.info("[JARVIS_SESSION]\(self.tag) Panel torn down — voice loop stopped, run cancelled, autonomous grant revoked.")
+    }
+
+    // MARK: System power / lock
+
+    /// Releases the microphone while the machine is asleep or the screen is locked.
+    ///
+    /// ⚠️ There were NO sleep, wake, or lock observers anywhere in the app, and the Jarvis panel
+    /// is `.canJoinAllSpaces` with `hidesOnDeactivate = false` — so locking the screen left a
+    /// full Whisper decoder running against the microphone indefinitely, behind the lock screen,
+    /// where the orb's own recording cue is not even visible.
+    private func installSystemObservers() {
+        guard workspaceObservers.isEmpty, distributedObservers.isEmpty else { return }
+        let workspace = NSWorkspace.shared.notificationCenter
+        let distributed = DistributedNotificationCenter.default()
+
+        let pause: (Notification) -> Void = { [weak self] note in
+            MainActor.assumeIsolated { self?.suspendForSystemEvent(note.name.rawValue) }
+        }
+        // ⚠️ WAKE IS NOT UNLOCK. `didWake` and `screensDidWake` both fire while the Mac is still
+        // showing the LOGIN WINDOW. Wiring them straight to resume reopened the microphone there —
+        // and because resume cleared `systemSuspended`, the real `screenIsUnlocked` that followed
+        // found nothing to do, so the lock-state observer gated nothing at all.
+        let wake: (Notification) -> Void = { [weak self] note in
+            MainActor.assumeIsolated { self?.resumeIfUnlocked(note.name.rawValue) }
+        }
+        let unlock: (Notification) -> Void = { [weak self] note in
+            MainActor.assumeIsolated { self?.screenLocked = false; self?.resumeAfterSystemEvent(note.name.rawValue) }
+        }
+        let lock: (Notification) -> Void = { [weak self] note in
+            MainActor.assumeIsolated { self?.screenLocked = true; self?.suspendForSystemEvent(note.name.rawValue) }
+        }
+
+        workspaceObservers = [
+            workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main, using: pause),
+            workspace.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main, using: pause),
+            workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main, using: wake),
+            workspace.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main, using: wake),
+        ]
+        // Screen lock has no NSWorkspace equivalent; these are the documented distributed names.
+        distributedObservers = [
+            distributed.addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main, using: lock),
+            distributed.addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main, using: unlock),
+        ]
+    }
+
+    private func removeSystemObservers() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        for observer in workspaceObservers { workspace.removeObserver(observer) }
+        workspaceObservers.removeAll()
+        let distributed = DistributedNotificationCenter.default()
+        for observer in distributedObservers { distributed.removeObserver(observer) }
+        distributedObservers.removeAll()
+    }
+
+    private func suspendForSystemEvent(_ event: String) {
+        guard !dismissed, !systemSuspended else { return }
+        systemSuspended = true
+        // ⚠️ All FOUR mic-holding stages. `.followUpWindow` and an armed `.awaitingApproval` also
+        // keep a session open, so omitting them left Whisper recycling sessions behind the lock
+        // screen — precisely what these observers were added to prevent.
+        guard stage == .passiveListening || stage == .commandCapture
+                || stage == .followUpWindow
+                || (stage == .awaitingApproval && isVoiceApprovalArmed) else { return }
+        logger.info("[JARVIS_SESSION]\(self.tag) Releasing the microphone for system event \(event). CONSEQUENCE: the wake word cannot fire until the system wakes — an in-flight run keeps executing, only listening stops.")
+        // A capture armed before the machine slept is stale by definition — the user walked away.
+        if stage == .commandCapture {
+            manualCaptureBaseline = nil
+            setStage(.passiveListening, "suspendForSystemEvent")
+        }
+        // ⚠️⚠️ #10 — DISARM BEFORE STOPPING. `.awaitingApproval` is the one stage the spoken
+        // approval work newly made hold the microphone open, and an armed window survives a screen
+        // lock: for its remaining seconds a bystander at a locked Mac could say the approve
+        // keyword and commit a tool. Disarming also closes the session, so it must come first.
+        if isVoiceApprovalArmed {
+            logger.notice("[JARVIS_HITL]\(self.tag) Disarming the spoken approval for \(event) — the request stays on screen and must be answered there. CONSEQUENCE: nobody can approve it by speaking at a locked or sleeping Mac.")
+            disarmVoiceApproval(reason: "system event: \(event)")
+        }
+        stopListening()
+        // ⚠️ Non-optional. These observers exist because a decoder once ran against the
+        // microphone behind the lock screen; a panel-scoped engine that survived sleep would
+        // hold the device — and its indicator — with nothing even listening.
+        JarvisDuplexAudio.shared.release(reason: "system suspend")
+    }
+
+    /// A display or system wake. ⚠️ Resumes ONLY if the screen is not locked — otherwise the
+    /// microphone would reopen at the login window, which is what these observers exist to prevent.
+    private func resumeIfUnlocked(_ event: String) {
+        guard !dismissed, systemSuspended else { return }
+        guard !screenLocked else {
+            logger.info("[JARVIS_SESSION]\(self.tag) Woke on \(event) but the screen is still locked — staying suspended. CONSEQUENCE: the microphone does not reopen until the screen is actually unlocked.")
+            return
+        }
+        resumeAfterSystemEvent(event)
+    }
+
+    private func resumeAfterSystemEvent(_ event: String) {
+        guard !dismissed, systemSuspended else { return }
+        systemSuspended = false
+        // Only resume a loop we actually paused: a stage that moved on (executing, announcing,
+        // voiceUnavailable) owns its own transition back to listening.
+        guard listenTask == nil, stage == .passiveListening else { return }
+        logger.info("[JARVIS_SESSION]\(self.tag) Resuming voice input after \(event).")
+        consecutiveDeadSessions = 0
+        Task { [weak self] in
+            await JarvisDuplexAudio.shared.warm(reason: "system resume")
+            guard let self, !self.dismissed, self.listenTask == nil, self.stage == .passiveListening else { return }
+            self.startListeningLoop()
         }
     }
 
@@ -257,10 +678,19 @@ final class JarvisSessionController {
         // node's private configuration here as if it were one of the user's chat profiles — and
         // selecting one persists its id to UserDefaults, making a node's row the remembered Jarvis
         // profile until the node is deleted and its row collected out from under it.
-        let all = (try? BackendProfileStore.shared.fetchSharedProfiles()) ?? []
+        let all: [BackendProfileModel]
+        do {
+            all = try BackendProfileStore.shared.fetchSharedProfiles()
+        } catch {
+            // Swallowed into `?? []` before, which renders as an empty picker — indistinguishable
+            // from a user who genuinely has no profiles, and it sends them to create one they
+            // already have.
+            logger.error("[JARVIS_SESSION]\(self.tag) Could not load profiles: \(error.localizedDescription). CONSEQUENCE: the picker will be EMPTY and Jarvis cannot start a turn — this is a store failure, not an absence of profiles.")
+            all = []
+        }
         // Same restriction as QuickAccess: only chat-style profiles make sense here.
         profiles = all.filter { $0.profileType == .bot || $0.profileType == .agent }
-        if let idString = UserDefaults.standard.string(forKey: Self.profileMemoryKey) {
+        if let idString = UserDefaults.standard.string(forKey: AppSettings.jarvisProfileIDKey) {
             rememberedProfileID = UUID(uuidString: idString)
         }
     }
@@ -269,13 +699,224 @@ final class JarvisSessionController {
         guard !dismissed else { return }
         selectedProfile = profile
         backendConfiguration.selectedProfileID = profile.id
-        UserDefaults.standard.set(profile.id.uuidString, forKey: Self.profileMemoryKey)
-        stage = .welcoming
-        voice.speak(greetingLine) { [weak self] in
-            guard let self, !self.dismissed else { return }
-            self.stage = .passiveListening
-            self.startListeningLoop()
+        JarvisConfigManager.shared.profileID = profile.id
+        setStage(.welcoming, "selectProfile")
+        // ⚠️ ORDER IS THE WHOLE POINT. Voice processing is healthy when its engine is the first
+        // audio client and dead when it follows a speech synthesiser's teardown, so the engine is
+        // warmed and AWAITED before Jarvis says a word. Greeting first would rebuild the exact
+        // failure this phase exists to remove.
+        Task { [weak self] in
+            guard let self else { return }
+            await JarvisDuplexAudio.shared.warm(reason: "panel open")
+            guard !self.dismissed else { return }
+            // ⚠️⚠️ THE OTHER HALF OF THE COLD-OPEN FIX. The shortcut opens the panel and arms
+            // capture in one gesture, and `beginPushToTalk` runs SYNCHRONOUSLY after `show()` —
+            // before this Task ever gets to speak. Without this guard the greeting would start on
+            // top of the capture that press just armed, and its hand-back would then drag the
+            // stage back to `.passiveListening`, cancelling the user's own turn mid-sentence.
+            guard !self.pushToTalkHeld else {
+                self.logger.info("[JARVIS_SESSION]\(self.tag) Skipping the greeting — push-to-talk was pressed before it could start, so the microphone is already open. CONSEQUENCE: Jarvis does not say hello this time; speaking over the user's first words and then cancelling their capture is the alternative.")
+                return
+            }
+            self.speakWithWatchdog(self.greetingLine) { [weak self] in
+                guard let self, !self.dismissed else { return }
+                self.setStage(.passiveListening, "selectProfile")
+                self.startListeningLoop()
+            }
         }
+    }
+
+    // MARK: Stage transitions
+
+    /// The ONLY way `stage` changes. Every transition is logged with where it came from, so a
+    /// session can be replayed from the log without the app in front of you.
+    private func setStage(_ next: JarvisStage, _ origin: String) {
+        guard stage != next else { return }
+        logger.info("[JARVIS_STAGE]\(self.tag) \(Self.name(of: self.stage)) → \(Self.name(of: next)) (\(origin))")
+        stage = next
+        if Self.releasesEngineOnEntry(to: next) { releaseEngineForOfflineStage(origin) }
+    }
+
+    /// Whether entering `stage` should hand the input device back. Pure.
+    ///
+    /// ⚠️⚠️ THIS FUNCTION EXISTS TO RECORD A REJECTED DESIGN, not just the accepted one. The
+    /// obvious reading of "release the engine on long idles" is to release on the LONGEST parks —
+    /// `.awaitingApproval` (a run stopped to ask the user something can sit for hours) and
+    /// `.executing`. Both were reviewed against the source and both are unsafe:
+    ///
+    ///  1. The guard everyone reaches for — "release only when no spoken-approval window is armed"
+    ///     — is DEAD CODE. Arming happens inside the approval prompt's speech hand-back, one to two
+    ///     seconds AFTER `setStage(.awaitingApproval)`, so `isVoiceApprovalArmed` is false at every
+    ///     entry. The hook would fire on 100% of parks, including the spoken-approval parks it was
+    ///     written to exclude, moments before the microphone that can authorise a tool call opens.
+    ///  2. The release lands on a LIVE NARRATION QUEUE. A run parks mid-answer, `JarvisDuplexSpeaker`
+    ///     holds the player node across its own FIFO, and `stopEngine` stops that node underneath
+    ///     it — the render never terminates, the 8 s watchdog hands back, the pump starts the next
+    ///     sentence, and `player.play()` on a stopped engine is "a crash, not a silent no-op"
+    ///     (`JarvisDuplexAudio.playbackTarget`). Cancelling the speaker first is not an out: that
+    ///     latches `cancelled` and drops the rest of the answer for the whole run.
+    ///  3. The paired re-warm is REFUSED on the commonest exit. `stopListening()` does not await
+    ///     `stopStreaming`, so `VoiceSessionLedger`'s owner is still `.jarvis` when `warm()` checks
+    ///     it; the warm returns false with an info-level line and nothing retries. The session runs
+    ///     cold for the rest of the panel, silently.
+    ///
+    /// `.voiceUnavailable` survives all three: nothing is narrating, voice input has already been
+    /// declared dead so the engine is provably useless, and the stage has exactly one automatic
+    /// exit — `retryVoice()` — where the re-warm can be awaited before anything listens.
+    ///
+    /// Adding a stage here means solving 1–3 for it first.
+    static func releasesEngineOnEntry(to stage: JarvisStage) -> Bool {
+        if case .voiceUnavailable = stage { return true }
+        return false
+    }
+
+    /// Gives the input device back when voice input has been declared unavailable.
+    ///
+    /// ⚠️ HOOKED ON THE STAGE FUNNEL, NOT ON EIGHT CALL SITES. There are eight places that enter
+    /// `.voiceUnavailable` across the two recognizer loops, and a release wired at seven of them is
+    /// the "two copies of a policy, one of them missing" shape that produced the Apple Speech
+    /// dead-mic gap. `setStage` is documented as the ONLY way the stage changes, so it is the only
+    /// place this cannot be forgotten.
+    ///
+    /// ⚠️ WHY THIS STAGE AND NOT THE OTHER LONG PARKS. `.voiceUnavailable` is the one place the
+    /// engine is provably useless — voice input has already been declared dead — and it has no
+    /// timer, so an OFFLINE orb left overnight is the longest-lived warm-engine window there is.
+    /// It also actively helps on the `.sessionBusy` cause, where Jarvis was holding the very device
+    /// the composer is trying to claim. Releasing in `.awaitingApproval` or `.executing` was
+    /// considered and REJECTED — see the note on `retryVoice()`.
+    ///
+    /// ⚠️ NEVER WHILE SPEECH IS IN FLIGHT. `JarvisDuplexSpeaker` holds the player node across its
+    /// own queue, and `stopEngine` stops that node underneath it: the render never terminates, the
+    /// 8 s watchdog hands back, the pump starts the next sentence, and `player.play()` on a stopped
+    /// engine is — in this subsystem's own words — "a crash, not a silent no-op". The engine stays
+    /// up in that case; the panel teardown still releases it.
+    private func releaseEngineForOfflineStage(_ origin: String) {
+        guard JarvisDuplexAudio.shared.isWarm else { return }
+        guard !voice.isSpeaking, !speaker.isSpeaking else {
+            logger.info("[JARVIS_SESSION]\(self.tag) Voice went unavailable (\(origin)) but Jarvis is still speaking — keeping the audio engine. CONSEQUENCE: the input device stays held until the panel closes; stopping the engine under a live render would strand the hand-back and crash on the next sentence.")
+            return
+        }
+        JarvisDuplexAudio.shared.releaseWhenIdle(reason: "voice unavailable (\(origin))")
+    }
+
+    /// Short, log-friendly stage name. `String(describing:)` would inline the whole
+    /// `voiceUnavailable` sentence and make every line unscannable.
+    static func name(of stage: JarvisStage) -> String {
+        switch stage {
+        case .selectingProfile: return "selectingProfile"
+        case .welcoming:        return "welcoming"
+        case .passiveListening: return "passiveListening"
+        case .commandCapture:   return "commandCapture"
+        case .followUpWindow:   return "followUpWindow"
+        case .executing:        return "executing"
+        case .awaitingApproval: return "awaitingApproval"
+        case .announcing:       return "announcing"
+        case .voiceUnavailable: return "voiceUnavailable"
+        }
+    }
+
+    // MARK: Earcons
+
+    /// Plays a short system sound marking a turn boundary.
+    ///
+    /// ⚠️ `NSSound`, deliberately not `AVAudioPlayer` or a synthesizer: it does not hold a
+    /// CoreAudio OUTPUT context open, so it cannot re-arm the documented -10877 microphone race
+    /// the way `AVSpeechSynthesizer` does. A retired system sound name yields nil and therefore
+    /// simply no sound — never a failure.
+    private func playEarcon(_ cue: JarvisEarcon) {
+        guard JarvisConfigManager.shared.earcons.plays(cue) else { return }
+        NSSound(named: cue.systemSoundName)?.play()
+    }
+
+    // MARK: Speech hand-back
+
+    /// Speaks `phrase` and GUARANTEES `then` runs exactly once.
+    ///
+    /// ⚠️ `.welcoming` and `.announcing` each had exactly ONE exit: `AVSpeechSynthesizer`'s
+    /// `didFinish` delegate, which has no timeout and no failure path. A synthesizer that never
+    /// fires it — a voice asset that fails to load, an output device pulled mid-phrase — parked
+    /// the stage machine permanently with the microphone CLOSED and no in-UI recovery: the orb
+    /// sat on INITIALIZING or COMPLETE forever and only closing the panel got out.
+    private func speakWithWatchdog(_ phrase: String, then: @escaping () -> Void) {
+        speechWatchdogTask?.cancel()
+        speechStartedAt = Date()
+        speechPhraseLength = phrase.count
+        pendingSpeechCompletion = then
+        voice.speak(phrase) { [weak self] in
+            self?.drainSpeechCompletion(failureReason: nil)
+        }
+        speechWatchdogTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.speechCompletionTimeout * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            self.drainSpeechCompletion(
+                failureReason: "no didFinish within \(Int(Self.speechCompletionTimeout))s"
+            )
+        }
+    }
+
+    /// [Phase 6 · S1] Speaks something NOBODY asked for — and refuses rather than interrupt.
+    ///
+    /// ⚠️ WHY THIS IS NOT `speakWithWatchdog`. That method writes a single `pendingSpeechCompletion`
+    /// optional, and nil-ing it out IS the exactly-once guarantee. A second call while one is in
+    /// flight silently discards the first hand-back, and the watchdog then fires for the SECOND
+    /// phrase — so the orphaned stage transition never happens and the orb parks forever. Ambient
+    /// announcements are the first thing in Jarvis that can speak concurrently with a turn, so
+    /// they must yield instead of overwriting.
+    ///
+    /// A dropped announcement is a non-event; a parked orb is a bug report.
+    @discardableResult
+    private func speakAmbient(_ phrase: String, reason: String) -> Bool {
+        guard !dismissed else { return false }
+        if pendingSpeechCompletion != nil || voice.isSpeaking || speaker.isSpeaking {
+            logger.info("[JARVIS_SESSION]\(self.tag) Ambient announcement DROPPED (\(reason)) — Jarvis is already speaking. CONSEQUENCE: this one is never spoken; interrupting would orphan the in-flight turn's hand-back and park the orb.")
+            return false
+        }
+        // Only the idle stages. Announcing over a command capture would eat the user's words, and
+        // over an approval it would talk across something they are being asked to decide.
+        // ⚠️ NOT `.followUpWindow`. That is the one stage where ANY transcript is treated as a
+        // command, and with no echo cancellation Jarvis hears his own announcement, arms capture,
+        // and dispatches "your task in the main window finished" to the model as if the user had
+        // said it. Rule 4 says "not while speaking OR LISTENING FOR A COMMAND" — this is the
+        // listening half.
+        guard stage == .passiveListening else {
+            logger.info("[JARVIS_SESSION]\(self.tag) Ambient announcement DROPPED (\(reason)) — stage is \(Self.name(of: self.stage)). CONSEQUENCE: this one is never spoken; the user is mid-turn.")
+            return false
+        }
+        logger.notice("[JARVIS_SESSION]\(self.tag) Ambient announcement: \(reason).")
+        ambientSpeechInFlight = true
+        voice.speak(phrase) { [weak self] in
+            self?.ambientSpeechInFlight = false
+        }
+        return true
+    }
+
+    /// Runs the pending speech hand-back exactly once, whichever edge arrives first.
+    private func drainSpeechCompletion(failureReason: String?) {
+        guard let completion = pendingSpeechCompletion else { return }
+        pendingSpeechCompletion = nil
+        speechWatchdogTask?.cancel()
+        speechWatchdogTask = nil
+        // ⚠️ A synthesizer whose audio unit is dead still calls didFinish — immediately, having
+        // played nothing. Observed on device as `AVAudioBuffer mBuffers[0].mDataByteSize (0)`
+        // with a wedged coreaudiod: the greeting "completed" in milliseconds and Jarvis advanced
+        // as though it had spoken. AVFoundation reports the zero-byte buffer, we do not, so from
+        // this log alone the greeting looked fine. Roughly 40 ms per character is far slower than
+        // any real voice, so anything faster did not play.
+        // Real speech runs at roughly 60-80ms per character. 30ms/char is still twice as fast as
+        // any voice, and the 0.25s floor catches a SHORT phrase — "Hello Raj" is 9 characters, so
+        // a per-character rule alone gave it a 90ms budget and the failure (~100-200ms) slipped
+        // through. Observed 2026-09-04: the greeting produced a zero-byte buffer and this said
+        // nothing.
+        let elapsed = Date().timeIntervalSince(speechStartedAt)
+        let plausibleFloor = max(0.25, Double(speechPhraseLength) * 0.03)
+        if failureReason == nil, speechPhraseLength > 8, elapsed < plausibleFloor {
+            logger.error("[JARVIS_TTS]\(self.tag) Speech reported completion after only \(Int(elapsed * 1000))ms for a \(self.speechPhraseLength)-character phrase — it almost certainly produced NO AUDIO. CONSEQUENCE: Jarvis advances as if it had spoken, so the user hears nothing and the turn continues silently. On macOS this usually means a wedged coreaudiod (paired with `_StartIO error 35` on the microphone); `sudo killall coreaudiod` clears it.")
+        }
+        if let failureReason {
+            logger.error("[JARVIS_TTS]\(self.tag) Speech completion never fired (\(failureReason)) — handing back anyway. CONSEQUENCE: without this the stage machine parks in \(String(describing: self.stage)) forever with the microphone closed, and only closing the panel recovers.")
+        }
+        guard !dismissed else { return }
+        completion()
     }
 
     // MARK: Greeting
@@ -286,20 +927,142 @@ final class JarvisSessionController {
         return String(first)
     }
 
-    var greetingLine: String { "Hello \(Self.greetingName)" }
+    var greetingLine: String { String(localized: "Hello \(Self.greetingName)") }
 
     // MARK: Voice loop
 
+    /// Offers to restart CoreAudio's daemon, then retries listening.
+    ///
+    /// The wedge survives quitting the app, so without this the only remedy is a terminal — an
+    /// unreasonable ask for a feature whose failure mode is silence.
+    func repairAudio() {
+        // ⚠️ Release BEFORE the daemon restarts. Restarting coreaudiod under a live engine is how
+        // the wedge got created in the first place.
+        let wasWarm = JarvisDuplexAudio.shared.isWarm
+        JarvisDuplexAudio.shared.release(reason: "audio repair")
+        let outcome = JarvisAudioRepair.run(logger: logger, tag: tag)
+        guard outcome == .repaired else {
+            // ⚠️ Both the alert and the administrator prompt are DECLINABLE, and this early return
+            // used to leave the engine torn down for the life of the panel — so cancelling a
+            // repair silently cost echo cancellation on every later turn, for a dialog the user
+            // was invited to dismiss.
+            logger.info("[JARVIS_SESSION]\(self.tag) Audio repair was not performed. CONSEQUENCE: \(wasWarm ? "restoring the echo-cancelling engine that was released for it" : "nothing had been released, so there is nothing to restore").")
+            if wasWarm {
+                Task { [weak self] in
+                    await JarvisDuplexAudio.shared.warm(reason: "audio repair declined")
+                    guard let self, !self.dismissed else { return }
+                    self.startListeningLoop()
+                }
+            }
+            return
+        }
+        micTroubleDetected = false
+        consecutiveDeadSessions = 0
+        if case .voiceUnavailable = stage {
+            setStage(.passiveListening, "repairAudio")
+        }
+        stopListening()
+        Task { [weak self] in
+            await JarvisDuplexAudio.shared.warm(reason: "after audio repair")
+            guard let self, !self.dismissed else { return }
+            self.startListeningLoop()
+        }
+    }
+
+    /// [Batch 1 · #46] Called when the activation mode changes while the panel is OPEN.
+    ///
+    /// ⚠️ Without this the switch was one-directional. Continuous → hold is handled inside the
+    /// loop (it closes the microphone on the next iteration), but hold → continuous unregistered
+    /// the shortcut and started no loop, so the orb read STANDBY and the wake word did nothing —
+    /// and clicking it then wedged the session in LISTENING with no session behind it.
+    func activationModeChanged() {
+        guard !dismissed else { return }
+        let mode = JarvisConfigManager.shared.activationMode
+        logger.notice("[JARVIS_SESSION]\(self.tag) Activation mode changed to \(mode.rawValue) while the panel is open.")
+        guard mode.listensContinuously else {
+            // The loop's own guard closes the microphone on its next pass; nothing to start.
+            logger.info("[JARVIS_SESSION]\(self.tag) Hold-to-talk selected — the running loop will close the microphone on its next pass. CONSEQUENCE: the shortcut is now the only way in.")
+            return
+        }
+        guard stage == .passiveListening || stage == .followUpWindow else {
+            logger.info("[JARVIS_SESSION]\(self.tag) Continuous mode selected mid-turn (stage \(Self.name(of: self.stage))). CONSEQUENCE: listening resumes when the turn returns to standby, not now.")
+            return
+        }
+        startListeningLoop()
+    }
+
+    /// [Batch 1 · #47] Called when the user switches the spoken-approval channel OFF.
+    ///
+    /// ⚠️ Must close the microphone too, not just disarm. `.awaitingApproval` keeps the mic open
+    /// for as long as the window is armed, so disarming alone would leave it hot with nothing
+    /// listening for it.
+    func cancelVoiceApproval(reason: String) {
+        guard isVoiceApprovalArmed else { return }
+        disarmVoiceApproval(reason: reason)
+        logger.notice("[JARVIS_HITL]\(self.tag) Spoken approval withdrawn mid-window (\(reason)). CONSEQUENCE: the microphone is closed and the request stays on screen to be answered there.")
+    }
+
+    /// [Batch 1 · #49] Called when the Tool approvals picker changes while the orb is open.
+    ///
+    /// ⚠️ The autonomous grant is applied per DISPATCH and otherwise revoked only at teardown, so
+    /// a mid-run change never reached the run in flight — the picker said "Ask me" while every
+    /// remaining tool call kept auto-approving.
+    func toolApprovalsChanged() {
+        guard !dismissed, let convID = jarvisConversationID else { return }
+        let autonomous = JarvisConfigManager.shared.toolApprovals == .autonomous
+        logger.notice("[JARVIS_HITL]\(self.tag) Tool approvals changed to \(JarvisConfigManager.shared.toolApprovals.rawValue) mid-session — applying to the run in flight. CONSEQUENCE: \(autonomous ? "remaining tool calls in this conversation are auto-approved" : "the blanket grant is revoked NOW; the next tool call asks").")
+        Task { await SessionToolApprovals.shared.setAutonomous(autonomous, conversationID: convID) }
+    }
+
     /// Re-entry point from the voiceUnavailable stage.
+    ///
+    /// ⚠️ MUST WARM, AND MUST AWAIT IT. Entering `.voiceUnavailable` now releases the engine, so
+    /// this is the matching re-warm — and a fire-and-forget `Task` would lose the race with
+    /// `startListeningLoop`, leaving `borrow()` to return nil and the session silently running
+    /// without echo cancellation for the rest of the panel. `selectProfile` is the template: warm
+    /// first, then listen.
+    ///
+    /// ⚠️ THE TWO PARKS THAT ARE DELIBERATELY NOT RELEASED. `.awaitingApproval` and `.executing`
+    /// are longer-lived still, and releasing there was reviewed and rejected on three concrete
+    /// grounds: the "only when no approval window is armed" guard is DEAD CODE (arming happens in
+    /// the approval prompt's hand-back, one to two seconds AFTER the stage is set, so the flag is
+    /// false at every entry); the release lands on a live narration queue and reaches
+    /// `player.play()` on a stopped engine; and the paired re-warm is refused deterministically on
+    /// the commonest exit, because `stopListening()` does not await `stopStreaming`, so
+    /// `activeVoiceOwner` is still `.jarvis` when `warm()` checks it — leaving the session cold for
+    /// good with only an info-level line. Do not add them without solving all three.
     func retryVoice() {
         guard !dismissed, listenTask == nil else { return }
+        micTroubleDetected = false
         consecutiveDeadSessions = 0
-        stage = .passiveListening
-        startListeningLoop()
+        setStage(.passiveListening, "retryVoice")
+        Task { [weak self] in
+            await JarvisDuplexAudio.shared.warm(reason: "retry after voice unavailable")
+            guard let self, !self.dismissed, self.listenTask == nil,
+                  self.stage == .passiveListening else { return }
+            self.startListeningLoop()
+        }
     }
 
     private func startListeningLoop() {
         guard listenTask == nil, !dismissed else { return }
+        // ⚠️ Hold-to-talk keeps the microphone CLOSED at rest — that is the entire point of it
+        // being the default. The loop then runs only while the shortcut is held, which is why
+        // `beginPushToTalk()` sets `.commandCapture` BEFORE calling this.
+        // ⚠️ `.awaitingApproval` while armed belongs here too. Without it, hold-to-talk — the
+        // DEFAULT mode — returned immediately from `beginVoiceApproval`'s call, so the approval
+        // window opened no microphone at all and spoken approval was simply inert.
+        guard JarvisConfigManager.shared.activationMode.listensContinuously
+                || stage == .commandCapture
+                || stage == .followUpWindow
+                || (stage == .awaitingApproval && isVoiceApprovalArmed) else {
+            // ⚠️ Four callers log a success sentence ("Resuming voice input…") immediately BEFORE
+            // calling this. Returning silently made the log positively assert that listening had
+            // resumed while no microphone ever opened — the single most misleading line in the
+            // subsystem, because it sends a reader looking at CoreAudio.
+            logger.info("[JARVIS_SESSION]\(self.tag) Listening loop NOT started in \(Self.name(of: self.stage)) — hold-to-talk opens the microphone only while the shortcut is held. CONSEQUENCE: the orb is idle and no session is running; any line above claiming listening resumed refers to intent, not to an open microphone.")
+            return
+        }
         listenGeneration &+= 1
         let generation = listenGeneration
         listenTask = Task { @MainActor [weak self] in
@@ -309,6 +1072,11 @@ final class JarvisSessionController {
             guard let self, self.listenGeneration == generation else { return }
             self.listenTask = nil
             guard !self.dismissed else { return }
+            if let voiceCommand = self.pendingVoiceCommand {
+                self.pendingVoiceCommand = nil
+                self.perform(voiceCommand)
+                return
+            }
             if let command, !command.isEmpty {
                 await self.execute(command)
             }
@@ -318,28 +1086,75 @@ final class JarvisSessionController {
     /// Runs bounded listening sessions back-to-back until a command is captured,
     /// voice becomes unavailable, or this loop is superseded/torn down.
     private func runListeningSessions(generation: Int) async -> String? {
+        // [Phase 5] Apple Speech runs an ENTIRELY separate loop. Deliberately an early branch and
+        // not an interleaved one: the WhisperKit path below took four phases to get right, and an
+        // untested recognizer must not be able to change its behaviour. With the setting on its
+        // default this line is the only cost.
+        // ⚠️ Re-read on EVERY iteration, not once on entry. `runAppleSpeechSessions` owns its own
+        // `while` and returns only on a dispatchable command — so the escape hatch failed exactly
+        // when it was needed, with Apple Speech producing nothing usable and the user switching
+        // back to WhisperKit to recover.
+        if #available(macOS 26.0, *), JarvisConfigManager.shared.recognizer.isAppleSpeech {
+            // ⚠️ Apple Speech builds its OWN engine through the same builder, and `AVAudioNode`
+            // allows one tap per bus. Two input engines on one device is what breaks capture, so
+            // the duplex engine must let go before this branch runs — including when the user
+            // switches recognizer mid-panel, which this loop re-reads every iteration.
+            JarvisDuplexAudio.shared.release(reason: "Apple Speech recognizer selected")
+            return await runAppleSpeechSessions(generation: generation)
+        }
         let service = WhisperRecognitionService.shared
         while !dismissed, generation == listenGeneration {
             // Only the wake-word and capture stages should hold the mic open. Without
             // this, a stage change (profile switch, execution) would leave the loop
             // opening sessions in a stage that has no use for them.
-            guard stage == .passiveListening || stage == .commandCapture else { return nil }
-            guard case .loaded = service.loadingState else {
-                stage = .voiceUnavailable(reason: "No speech model is loaded. Download a Whisper model from the composer's voice settings, then retry.")
+            // ⚠️ `.awaitingApproval` is admitted ONLY while a voice-approval window is armed.
+            // The stage itself has no closing edge — a parked run can sit for hours — so an
+            // unconditional guard here would hold the microphone open in an empty room.
+            guard stage == .passiveListening || stage == .commandCapture || stage == .followUpWindow
+                    || (stage == .awaitingApproval && isVoiceApprovalArmed)
+            else { return nil }
+            // ⚠️ Hold-to-talk must not drift back into always-open listening. The stage can return
+            // to `.passiveListening` while this loop is still running — an expired follow-up
+            // window is exactly that path — and without this the microphone would silently stay
+            // open for the rest of the session, defeating the whole point of the default mode.
+            if !JarvisConfigManager.shared.activationMode.listensContinuously,
+               stage != .commandCapture, stage != .followUpWindow {
+                logger.info("[JARVIS_SESSION]\(self.tag) Closing the microphone — hold-to-talk has no idle listening.")
                 return nil
             }
+            guard case .loaded = service.loadingState else {
+                setStage(.voiceUnavailable(reason: String(localized: "No speech model is loaded. Download a Whisper model from the composer's voice settings, then retry.")), "runListeningSessions")
+                return nil
+            }
+            // ⚠️ The wake word is English orthography matched by substring. A recognizer
+            // transcribing another script can never produce a match, and the failure is
+            // silent — the orb looks alive and simply ignores the user forever.
+            let canMatchWakeWord = JarvisConfigManager.shared.activationMode != .wakeWord
+                || Self.wakeWordCanMatch(language: service.currentLanguage)
+            if wakeWordUnavailable != !canMatchWakeWord {
+                wakeWordUnavailable = !canMatchWakeWord
+                if !canMatchWakeWord {
+                    logger.warning("[JARVIS_ASR]\(self.tag) Speech language \"\(service.currentLanguage ?? "auto")\" cannot produce a wake-word match. CONSEQUENCE: the wake word will never fire; clicking the orb is the only way to speak a command, and the tooltip now says so.")
+                }
+            }
+
             let granted = await AVAudioApplication.requestRecordPermission()
             guard !dismissed, generation == listenGeneration else { return nil }
             guard granted else {
-                stage = .voiceUnavailable(reason: "Microphone access is denied. Enable it in System Settings → Privacy & Security → Microphone.")
+                setStage(.voiceUnavailable(reason: String(localized: "Microphone access is denied. Enable it in System Settings → Privacy & Security → Microphone.")), "runListeningSessions")
                 return nil
             }
 
-            // Fully release the speech synthesizer's audio unit, then let CoreAudio
-            // settle, before claiming the input device.
-            voice.releaseAudio()
-            try? await Task.sleep(nanoseconds: UInt64(Self.audioSettleDelay * 1_000_000_000))
+            await settleAudioBeforeCapture()
             guard !dismissed, generation == listenGeneration else { return nil }
+            // ⚠️ RE-READ THE STAGE. The settle above can take a second, and a push-to-talk key can
+            // be released inside it — the release cannot stop a session that has not opened yet,
+            // so without this the loop went on to open the microphone for a key nobody is holding.
+            guard stage == .passiveListening || stage == .commandCapture || stage == .followUpWindow
+                    || (stage == .awaitingApproval && isVoiceApprovalArmed) else {
+                logger.info("[JARVIS_SESSION]\(self.tag) Abandoning the session before it opened — the stage moved to \(Self.name(of: self.stage)) while audio settled. CONSEQUENCE: the microphone is not opened.")
+                return nil
+            }
 
             liveTranscript = ""
             energyLevels = []
@@ -349,9 +1164,17 @@ final class JarvisSessionController {
             sessionStart = Date()
             lastTranscriptChange = Date()
             lastCommandChange = Date()
+            // ⚠️ The follow-up window is measured from when the microphone is actually LIVE, not
+            // from when the answer ended. Declaring it at the end of speech spends its first
+            // second inside the settle delay above — deaf — and the user starts talking the
+            // moment Jarvis stops. A 5s window that is really 4s of listening is a window that
+            // seems to ignore people.
+            if stage == .followUpWindow, let seconds = JarvisConfigManager.shared.followUp.seconds {
+                followUpDeadline = Date().addingTimeInterval(seconds)
+            }
             isSessionActive = true
             startWatchdog()
-            logger.info("Jarvis mic session opening (stage: \(String(describing: self.stage))).")
+            logger.info("[JARVIS_ASR]\(self.tag) Mic session opening in \(Self.name(of: self.stage)) (mode: \(JarvisConfigManager.shared.activationMode.rawValue), model: \(service.activeModelName), endpointing: \(String(format: "%.1f", Self.commandSilenceCommit))s).")
 
             do {
                 // Blocks until VAD auto-stop, the watchdog's stopStreaming, or an
@@ -366,13 +1189,23 @@ final class JarvisSessionController {
             } catch {
                 isSessionActive = false
                 watchdogTask?.cancel()
-                logger.error("Jarvis listening session failed to start: \(error.localizedDescription)")
-                stage = .voiceUnavailable(reason: "The voice session failed to start. Check that a speech model is loaded, then retry.")
+                logger.error("[JARVIS_ASR]\(self.tag) Mic session failed to start: \(error.localizedDescription). CONSEQUENCE: voice input is now unavailable and the orb shows OFFLINE until the user retries — nothing spoken will be heard.")
+                setStage(.voiceUnavailable(reason: String(localized: "The voice session failed to start. Check that a speech model is loaded, then retry.")), "runListeningSessions")
                 return nil
             }
 
             isSessionActive = false
             watchdogTask?.cancel()
+
+            // ⚠️ Report the outcome BEFORE the dismissed guard. Same bug class as the dead-mic
+            // check: a user who closes the panel because nothing seemed to happen is exactly the
+            // case you most need the log for, and `dismissed` short-circuits everything below.
+            // Observed 2026-09-04: the service reported "transcript: 15 chars, audio: yes" while
+            // Jarvis logged nothing at all about what it heard.
+            let heard = liveTranscript
+            logger.info("[JARVIS_ASR]\(self.tag) Mic session closed after \(String(format: "%.1f", Date().timeIntervalSince(self.sessionStart)))s in \(Self.name(of: self.stage)) — audio: \(self.receivedAudio ? "yes" : "NONE"), heard \(Self.wordCount(heard)) word(s), wake word matched: \(Self.wakeWordRange(in: heard) != nil).")
+            logger.debug("[JARVIS_ASR]\(self.tag) Transcript: \"\(heard)\"")
+
             guard !dismissed, generation == listenGeneration else { return nil }
 
             // No samples at all → the engine never really started, however long the
@@ -381,27 +1214,271 @@ final class JarvisSessionController {
             let duration = Date().timeIntervalSince(sessionStart)
             if !receivedAudio {
                 consecutiveDeadSessions += 1
-                logger.warning("Jarvis mic session delivered NO audio in \(String(format: "%.1f", duration))s (attempt \(self.consecutiveDeadSessions)/\(Self.maxDeadSessions)) — audio engine likely failed to start.")
-                guard consecutiveDeadSessions < Self.maxDeadSessions else {
-                    stage = .voiceUnavailable(reason: "The microphone opened but delivered no audio. Another app may be holding the input device — quit apps using the mic (or check your input device in System Settings → Sound), then retry.")
-                    return nil
+                // Tell the user on the FIRST failure; keep retrying regardless.
+                if !micTroubleDetected {
+                    micTroubleDetected = true
+                    logger.warning("[JARVIS_ASR]\(self.tag) Surfacing a microphone warning after the FIRST dead session while retries continue. CONSEQUENCE: the orb shows trouble instead of a healthy STANDBY, so a wedged audio system is visible in seconds rather than after \(Self.maxDeadSessions) attempts.")
                 }
-                // Escalating backoff gives the HAL time to release the device.
-                let backoff = Double(consecutiveDeadSessions) * 0.8
-                try? await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
-                continue
+                logger.warning("[JARVIS_ASR]\(self.tag) Mic session delivered NO audio in \(String(format: "%.1f", duration))s (attempt \(self.consecutiveDeadSessions)/\(Self.maxDeadSessions)) — the audio engine almost certainly failed to start. CONSEQUENCE: the session LOOKED healthy but heard nothing; backing off and retrying, and surfacing OFFLINE after \(Self.maxDeadSessions) attempts.")
+                switch Self.deadSessionOutcome(consecutive: consecutiveDeadSessions) {
+                case .giveUp:
+                    setStage(.voiceUnavailable(reason: Self.deadAudioUnavailableReason), "runListeningSessions")
+                    return nil
+                case .retry(let backoff):
+                    // Escalating backoff gives the HAL time to release the device.
+                    try? await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
+                    continue
+                }
             }
             consecutiveDeadSessions = 0
-            logger.info("Jarvis mic session ended after \(String(format: "%.1f", duration))s — transcript: \"\(self.liveTranscript)\"")
+            if micTroubleDetected {
+                micTroubleDetected = false
+                logger.notice("[JARVIS_ASR]\(self.tag) Microphone RECOVERED — audio is flowing again.")
+            }
+
+            // ⚠️ Checked BEFORE `.commandCapture`. Inside an armed window the utterance is a
+            // decision about a parked tool, never a new request — forwarding it to the model
+            // would send "yes" as a prompt and leave the run parked.
+            if stage == .awaitingApproval, isVoiceApprovalArmed {
+                let spoken = commandPreview
+                logger.info("[JARVIS_ASR]\(self.tag) Approval window heard \(spoken.split(separator: " ").count) word(s).")
+                handleVoiceApprovalUtterance(spoken)
+                return nil
+            }
 
             if stage == .commandCapture {
                 // commandPreview honors whichever way capture was armed (wake word or click).
                 let command = commandPreview
-                if !command.isEmpty { return command }
-                // Armed but nothing followed — re-arm.
-                stage = .passiveListening
+                if Self.isCancelPhrase(command) {
+                    logger.info("[JARVIS_SESSION]\(self.tag) Capture ended on a spoken cancel — discarding it. CONSEQUENCE: nothing is sent; the loop re-arms for the wake word.")
+                    manualCaptureBaseline = nil
+                    setStage(.passiveListening, "runListeningSessions")
+                } else if let voiceCommand = Self.voiceCommand(in: command) {
+                    // A control phrase never reaches the model. Handled after the loop unwinds so
+                    // the microphone session is fully closed before anything speaks.
+                    logger.info("[JARVIS_SESSION]\(self.tag) Voice command recognised: \(String(describing: voiceCommand)).")
+                    playEarcon(.captured)
+                    pendingVoiceCommand = voiceCommand
+                    return nil
+                } else if Self.isDispatchable(command) {
+                    playEarcon(.captured)
+                    return command
+                } else if !command.isEmpty {
+                    logger.warning("[JARVIS_ASR]\(self.tag) Discarded a \(Self.wordCount(command))-word capture below the \(Self.minimumCommandWords)-word dispatch floor. CONSEQUENCE: nothing is sent and capture re-arms — this is the guard against a Whisper silence-hallucination starting a tool-using run.")
+                    setStage(.passiveListening, "runListeningSessions")
+                } else {
+                    logger.info("[JARVIS_ASR]\(self.tag) Capture armed but nothing was heard. CONSEQUENCE: nothing is sent; the loop re-arms for the wake word or shortcut.")
+                    setStage(.passiveListening, "runListeningSessions")
+                }
             }
             // Passive session ended (recycle / non-wake speech) — loop restarts it.
+        }
+        return nil
+    }
+
+    /// The Apple Speech listening loop.
+    ///
+    /// Structurally simpler than the WhisperKit one for a real reason: `SpeechAnalyzer` reports
+    /// finality explicitly, so there is no stability window to wait out, no 45s session recycle
+    /// (nothing re-decodes a growing buffer) and no blocking call to unwind. The 2.2s the
+    /// WhisperKit path spends deciding "you stopped talking" simply does not exist here.
+    @available(macOS 26.0, *)
+    private func runAppleSpeechSessions(generation: Int) async -> String? {
+        guard JarvisSpeechRecognizer.isAvailable else {
+            logger.error("[JARVIS_APPLE_ASR]\(self.tag) SpeechTranscriber is unavailable on this Mac. CONSEQUENCE: Jarvis cannot listen in Apple Speech mode — switch the recognizer back to WhisperKit in Developer settings.")
+            setStage(.voiceUnavailable(reason: String(localized: "Apple's speech recognizer isn't available on this Mac. Switch the recognizer back to WhisperKit in Jarvis settings.")), "runAppleSpeechSessions")
+            return nil
+        }
+
+        while !dismissed, generation == listenGeneration {
+            // ⚠️ THE ESCAPE HATCH. Re-read the recognizer every iteration: this loop returns only
+            // on a dispatchable command, so with Apple Speech producing nothing usable (the
+            // documented degraded-locale mode) it would re-arm forever and switching back to
+            // WhisperKit in Settings would never take effect — precisely when the user needs it.
+            guard JarvisConfigManager.shared.recognizer.isAppleSpeech else {
+                // Checked at the TOP of an iteration, so no recognizer exists yet to stop — the
+                // previous iteration already tore its own down.
+                logger.notice("[JARVIS_APPLE_ASR]\(self.tag) Recognizer switched away from Apple Speech — leaving the Apple loop. CONSEQUENCE: the caller re-enters and the next session opens on WhisperKit.")
+                return nil
+            }
+            // ⚠️ `.awaitingApproval` is admitted ONLY while a voice-approval window is armed.
+            // The stage itself has no closing edge — a parked run can sit for hours — so an
+            // unconditional guard here would hold the microphone open in an empty room.
+            guard stage == .passiveListening || stage == .commandCapture || stage == .followUpWindow
+                    || (stage == .awaitingApproval && isVoiceApprovalArmed)
+            else { return nil }
+            if !JarvisConfigManager.shared.activationMode.listensContinuously,
+               stage != .commandCapture, stage != .followUpWindow {
+                logger.info("[JARVIS_APPLE_ASR]\(self.tag) Closing the microphone — hold-to-talk has no idle listening.")
+                return nil
+            }
+
+            let granted = await AVAudioApplication.requestRecordPermission()
+            guard !dismissed, generation == listenGeneration else { return nil }
+            guard granted else {
+                setStage(.voiceUnavailable(reason: String(localized: "Microphone access is denied. Enable it in System Settings → Privacy & Security → Microphone.")), "runAppleSpeechSessions")
+                return nil
+            }
+
+            // The synthesizers still hold CoreAudio output until duplex PLAYBACK lands (Phase 4b),
+            // so the settle handshake stays. It is not free, but a dead microphone is worse.
+            await settleAudioBeforeCapture()
+            guard !dismissed, generation == listenGeneration else { return nil }
+            // ⚠️ RE-READ THE STAGE. The settle above can take a second, and a push-to-talk key can
+            // be released inside it — the release cannot stop a session that has not opened yet,
+            // so without this the loop went on to open the microphone for a key nobody is holding.
+            guard stage == .passiveListening || stage == .commandCapture || stage == .followUpWindow
+                    || (stage == .awaitingApproval && isVoiceApprovalArmed) else {
+                logger.info("[JARVIS_SESSION]\(self.tag) Abandoning the session before it opened — the stage moved to \(Self.name(of: self.stage)) while audio settled. CONSEQUENCE: the microphone is not opened.")
+                return nil
+            }
+
+            liveTranscript = ""
+            energyLevels = []
+            manualCaptureBaseline = nil
+            receivedAudio = false
+            lastCommandChange = Date()
+            // ⚠️ The WhisperKit loop sets this and the Apple loop did not, so `sessionStart` was
+            // whatever a previous session left behind — and every age-based check below would have
+            // measured from the wrong instant.
+            sessionStart = Date()
+            if stage == .followUpWindow, let seconds = JarvisConfigManager.shared.followUp.seconds {
+                followUpDeadline = Date().addingTimeInterval(seconds)
+            }
+
+            let recognizer = JarvisSpeechRecognizer()
+            recognizer.correlationTag = tag
+            let gate = JarvisOneShot()
+            do {
+                try await recognizer.start(
+                    voiceProcessing: JarvisConfigManager.shared.duplexAudioEnabled,
+                    onUpdate: { [weak self] state in
+                        Task { @MainActor [weak self] in self?.handleTranscriptUpdate(state) }
+                    },
+                    onFinalized: { Task { @MainActor in gate.resolve("finalized") } }
+                )
+            } catch {
+                logger.error("[JARVIS_APPLE_ASR]\(self.tag) Could not start: \(error.localizedDescription). CONSEQUENCE: voice input is unavailable this session; switch the recognizer back to WhisperKit if this persists.")
+                setStage(.voiceUnavailable(reason: String(localized: "Apple's speech recognizer couldn't start. Switch back to WhisperKit in Jarvis settings, then retry.")), "runAppleSpeechSessions")
+                return nil
+            }
+            logger.info("[JARVIS_APPLE_ASR]\(self.tag) Listening in \(Self.name(of: self.stage)) (duplex: \(JarvisConfigManager.shared.duplexAudioEnabled)).")
+
+            // The only timers that survive: the capture hard cap, and the follow-up window's own
+            // expiry. Everything else the WhisperKit watchdog does exists to compensate for
+            // missing finality, which this recognizer supplies.
+            let bound = Task { @MainActor in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                    guard !Task.isCancelled else { return }
+
+                    // ⚠️⚠️ THE DEAD-MICROPHONE NET, AND IT HAS TO LIVE HERE. This loop has no
+                    // passive recycle — `SpeechAnalyzer` needs none — so a passive session with a
+                    // wedged input device NEVER ENDS, and a post-session check would never run. The
+                    // ticker is the only observer while a session is open, exactly as
+                    // `startWatchdog` is on the WhisperKit path.
+                    //
+                    // ⚠️ Keyed on the TAP, not on transcription: this recognizer reports no buffer
+                    // energy, so "no text" is equally consistent with a quiet room. See
+                    // `JarvisSpeechRecognizer.hasReceivedAudio`.
+                    if !self.receivedAudio, recognizer.hasReceivedAudio {
+                        self.receivedAudio = true
+                    }
+                    let sessionAge = Date().timeIntervalSince(self.sessionStart)
+                    if !self.receivedAudio {
+                        if !self.micTroubleDetected, sessionAge > Self.deadAudioWarningDelay {
+                            self.micTroubleDetected = true
+                            self.logger.warning("[JARVIS_APPLE_ASR]\(self.tag) No audio after \(String(format: "%.1f", sessionAge))s of an OPEN Apple Speech session — the tap has delivered ZERO buffers, so the engine started but is not capturing. CONSEQUENCE: the orb now shows NO AUDIO and offers Repair Audio in its right-click menu; ending the session shortly so the retry ladder can run.")
+                        }
+                        if sessionAge > Self.deadAudioSessionLimit {
+                            gate.resolve("noAudio")
+                            return
+                        }
+                    }
+
+                    if self.stage == .commandCapture,
+                       Date().timeIntervalSince(self.captureArmedAt) > Self.captureHardCap {
+                        gate.resolve("captureHardCap")
+                        return
+                    }
+                    if self.stage == .followUpWindow, let deadline = self.followUpDeadline,
+                       Date() >= deadline {
+                        self.expireFollowUpWindow()
+                        gate.resolve("followUpExpired")
+                        return
+                    }
+                    if self.dismissed || generation != self.listenGeneration {
+                        gate.resolve("superseded")
+                        return
+                    }
+                }
+            }
+
+            let reason = await gate.wait()
+            bound.cancel()
+            // Pass the reason through so a superseded session is not reported as the
+            // format-mismatch signature — that alarm only means anything for a session that ran.
+            let finalText = await recognizer.stop(reason: reason)
+            // Text proves audio even if the tap counter was never sampled; the tap proves it even
+            // in a silent room. Either is enough. (`hasReceivedAudio` is latched across `stop()`.)
+            if recognizer.hasReceivedAudio || !finalText.isEmpty { receivedAudio = true }
+            liveTranscript = finalText
+            logger.info("[JARVIS_APPLE_ASR]\(self.tag) Session ended (\(reason)) — audio: \(self.receivedAudio ? "yes" : "NONE"), heard \(Self.wordCount(finalText)) word(s).")
+            logger.debug("[JARVIS_APPLE_ASR]\(self.tag) Transcript: \"\(finalText)\"")
+
+            guard !dismissed, generation == listenGeneration else { return nil }
+
+            // ⚠️ The same ladder the WhisperKit loop runs, and it was absent here entirely: warn on
+            // the FIRST dead session, keep retrying with escalating backoff, and surface OFFLINE
+            // rather than re-arming forever. Without it a wedged input device left the orb on a
+            // healthy-looking STANDBY indefinitely — and "Repair Audio…", the only remedy for a
+            // wedge that survives relaunching the app, is gated on exactly these two flags, so it
+            // was unreachable in the mode where the wedge was happening.
+            if !receivedAudio {
+                consecutiveDeadSessions += 1
+                logger.warning("[JARVIS_APPLE_ASR]\(self.tag) Apple Speech session delivered NO audio in \(String(format: "%.1f", Date().timeIntervalSince(self.sessionStart)))s (attempt \(self.consecutiveDeadSessions)/\(Self.maxDeadSessions)). CONSEQUENCE: the session LOOKED healthy but heard nothing; backing off and retrying, and surfacing OFFLINE after \(Self.maxDeadSessions) attempts.")
+                switch Self.deadSessionOutcome(consecutive: consecutiveDeadSessions) {
+                case .giveUp:
+                    setStage(.voiceUnavailable(reason: Self.deadAudioUnavailableReason), "runAppleSpeechSessions")
+                    return nil
+                case .retry(let backoff):
+                    // Escalating backoff gives the HAL time to release the device.
+                    try? await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
+                    continue
+                }
+            }
+            consecutiveDeadSessions = 0
+            if micTroubleDetected {
+                micTroubleDetected = false
+                logger.notice("[JARVIS_APPLE_ASR]\(self.tag) Microphone RECOVERED — the tap is delivering audio again.")
+            }
+
+            // Same rule as the WhisperKit path — omitting it here would make the feature
+            // silently do nothing under Apple Speech.
+            if stage == .awaitingApproval, isVoiceApprovalArmed {
+                let spoken = commandPreview
+                logger.info("[JARVIS_ASR]\(self.tag) Approval window heard \(spoken.split(separator: " ").count) word(s).")
+                handleVoiceApprovalUtterance(spoken)
+                return nil
+            }
+
+            if stage == .commandCapture {
+                let command = commandPreview
+                if Self.isCancelPhrase(command) {
+                    manualCaptureBaseline = nil
+                    setStage(.passiveListening, "runAppleSpeechSessions")
+                } else if let voiceCommand = Self.voiceCommand(in: command) {
+                    playEarcon(.captured)
+                    pendingVoiceCommand = voiceCommand
+                    return nil
+                } else if Self.isDispatchable(command) {
+                    playEarcon(.captured)
+                    return command
+                } else {
+                    logger.info("[JARVIS_APPLE_ASR]\(self.tag) Discarded a \(Self.wordCount(command))-word capture below the \(Self.minimumCommandWords)-word dispatch floor. CONSEQUENCE: nothing is sent; capture re-arms.")
+                    setStage(.passiveListening, "runAppleSpeechSessions")
+                }
+            }
         }
         return nil
     }
@@ -416,6 +1493,28 @@ final class JarvisSessionController {
                 guard let self, self.isSessionActive, !Task.isCancelled else { return }
                 let age = Date().timeIntervalSince(self.sessionStart)
 
+                // ⚠️ Detect a dead microphone DURING the session, not only after it returns.
+                // Observed 2026-09-04: the engine failed with -10877, WhisperKit's realtime loop
+                // kept spinning, and the user closed the panel before `startStreaming` ever
+                // returned — so the post-session `!receivedAudio` check was never reached and the
+                // orb showed a healthy STANDBY the entire time it was deaf. The watchdog is the
+                // ONLY observer running while a session is hung, which makes it the only place
+                // this can be caught.
+                if !self.receivedAudio, !self.micTroubleDetected, age > Self.deadAudioWarningDelay {
+                    self.micTroubleDetected = true
+                    self.logger.warning("[JARVIS_ASR]\(self.tag) No audio after \(String(format: "%.1f", age))s of an OPEN mic session — the engine started but is delivering nothing. CONSEQUENCE: the orb now shows NO AUDIO and offers Repair Audio in its right-click menu; retries continue underneath.")
+                }
+
+                // ⚠️ Every `stopStreaming()` below must name its cause. Five distinct endings —
+                // silence-commit, empty-capture timeout, the hard cap, follow-up expiry and the
+                // passive recycle — used to collapse into one identical "Mic session closed" line,
+                // which made a device log unable to answer the first question anyone asks: why did
+                // it stop listening?
+                @MainActor func endSession(_ cause: String) async {
+                    self.logger.info("[JARVIS_ASR]\(self.tag) Ending the mic session — \(cause). CONSEQUENCE: the session closes and its transcript is classified; the loop decides whether to reopen.")
+                    _ = await WhisperRecognitionService.shared.stopStreaming()
+                }
+
                 switch self.stage {
                 case .commandCapture:
                     // Judged on the NORMALIZED command timeline (see lastCommandChange)
@@ -424,15 +1523,52 @@ final class JarvisSessionController {
                     let commandIdle = Date().timeIntervalSince(self.lastCommandChange)
                     let captureAge = Date().timeIntervalSince(self.captureArmedAt)
                     let hasCommand = !self.commandPreview.isEmpty
-                    if (hasCommand && commandIdle > Self.commandSilenceCommit)
-                        || (!hasCommand && commandIdle > Self.emptyCaptureTimeout)
-                        || captureAge > Self.captureHardCap {
-                        _ = await WhisperRecognitionService.shared.stopStreaming()
+                    // While the push-to-talk key is HELD, the user is still speaking by
+                    // definition — only the hard cap may end the capture. Otherwise a pause for
+                    // breath would send half a sentence.
+                    let silenceMayCommit = !self.pushToTalkHeld
+                    if silenceMayCommit && hasCommand && commandIdle > Self.commandSilenceCommit {
+                        await endSession("command stable for \(String(format: "%.1f", commandIdle))s")
+                        return
+                    }
+                    if silenceMayCommit && !hasCommand && commandIdle > Self.emptyCaptureTimeout {
+                        await endSession("nothing was said within \(String(format: "%.1f", Self.emptyCaptureTimeout))s of arming")
+                        return
+                    }
+                    if captureAge > Self.captureHardCap {
+                        await endSession("hard cap — capture ran \(String(format: "%.1f", captureAge))s")
+                        return
+                    }
+                case .followUpWindow:
+                    if let deadline = self.followUpDeadline, Date() >= deadline {
+                        self.expireFollowUpWindow()
+                        await endSession("follow-up window expired")
+                        return
+                    }
+                    // The window still counts against the recycle budget: WhisperKit re-decodes
+                    // its whole un-purged buffer, so an unbounded session degrades either way.
+                    if age > Self.passiveRecycleInterval {
+                        await endSession("recycling — the follow-up session reached \(Int(age))s")
                         return
                     }
                 case .passiveListening:
                     if age > Self.passiveRecycleInterval {
-                        _ = await WhisperRecognitionService.shared.stopStreaming()
+                        await endSession("recycling — the passive session reached \(Int(age))s")
+                        return
+                    }
+                case .awaitingApproval where self.isVoiceApprovalArmed:
+                    // ⚠️ WITHOUT THIS CASE THE FEATURE CANNOT WORK. `default: return` exited on the
+                    // first tick, so nothing ever ended the mic session — and a one-word "approve"
+                    // is only processed once the session closes. The utterance was captured and
+                    // then sat there forever.
+                    let idle = Date().timeIntervalSince(self.lastCommandChange)
+                    let hasWord = !self.commandPreview.isEmpty
+                    if hasWord && idle > Self.commandSilenceCommit {
+                        await endSession("approval answer stable for \(String(format: "%.1f", idle))s")
+                        return
+                    }
+                    if !hasWord && age > Self.emptyCaptureTimeout {
+                        await endSession("no approval answer within \(String(format: "%.1f", Self.emptyCaptureTimeout))s")
                         return
                     }
                 default:
@@ -459,13 +1595,33 @@ final class JarvisSessionController {
             lastCommandChange = Date()
         }
 
-        if stage == .passiveListening, Self.wakeWordRange(in: text) != nil {
-            stage = .commandCapture
+        // Inside the follow-up window ANY speech is the command — not needing the wake word
+        // again is the entire point of the window.
+        if stage == .followUpWindow, !Self.normalizedForStability(commandPreview).isEmpty {
+            armFollowUpCapture()
+        }
+
+        // A spoken cancel aborts the capture rather than becoming the command. Checked before
+        // the wake-word arm so it can only ever fire on an ALREADY-armed capture.
+        if stage == .commandCapture, Self.isCancelPhrase(commandPreview) {
+            cancelCapture()
+            return
+        }
+
+        if stage == .passiveListening,
+           JarvisConfigManager.shared.activationMode == .wakeWord,
+           Self.wakeWordRange(in: text) != nil {
+            setStage(.commandCapture, "handleTranscriptUpdate")
             manualCaptureBaseline = nil
             lastTranscriptChange = Date()
             lastCommandChange = Date()
             captureArmedAt = Date()
-            logger.info("Jarvis wake word detected in: \"\(text)\"")
+            // [JARVIS_ASR] Raw speech stays on the unbuffered debug channel — see the
+            // session-end log for why the level IS the privacy control here.
+            beginTurn()
+            logger.info("[JARVIS_ASR]\(self.tag) Wake word detected — arming command capture.")
+            playEarcon(.listening)
+            logger.debug("[JARVIS_ASR]\(self.tag) Wake word matched in: \"\(text)\"")
             // Surface the orb before the user starts speaking.
             onRequestAttention?()
         }
@@ -485,7 +1641,7 @@ final class JarvisSessionController {
     /// as a near-homophone, and an unrecognized wake word leaves the user with no way
     /// to talk to the HUD at all — so matching is deliberately generous. False
     /// positives only arm command capture, which the user can see and simply not act on.
-    static let wakeWordVariants = ["jarvis", "jarvus", "jervis", "javis", "jarves", "charvis", "travis"]
+    static let wakeWordVariants = [wakeWord, "jarvus", "jervis", "javis", "jarves", "charvis", "travis"]
 
     /// Range of the first accepted wake-word variant in `text`, if any.
     static func wakeWordRange(in text: String) -> Range<String.Index>? {
@@ -501,7 +1657,20 @@ final class JarvisSessionController {
         guard let range = wakeWordRange(in: transcriptText) else {
             return transcriptText.trimmingCharacters(in: commandStrippers)
         }
-        return String(transcriptText[range.upperBound...]).trimmingCharacters(in: commandStrippers)
+        var command = String(transcriptText[range.upperBound...]).trimmingCharacters(in: commandStrippers)
+
+        // ⚠️ Strip REPEATED leading wake words. Observed on device 2026-09-04: Whisper returned
+        // "Jarvis. Jarvis, write an essay on technology." — the user said it twice because the
+        // first attempt did not visibly register — and stripping only the first occurrence sent
+        // "Jarvis, write an essay on technology" to the model. Deliberately LEADING-only: a wake
+        // word later in the sentence is part of the request ("tell Jarvis about it") and must
+        // survive.
+        while let leading = wakeWordRange(in: command), leading.lowerBound == command.startIndex {
+            let stripped = String(command[leading.upperBound...]).trimmingCharacters(in: commandStrippers)
+            if stripped == command { break }   // no progress — do not spin
+            command = stripped
+        }
+        return command
     }
 
     private static let commandStrippers = CharacterSet(charactersIn: ",.!?:;–—-").union(.whitespacesAndNewlines)
@@ -515,25 +1684,285 @@ final class JarvisSessionController {
         return String(text.dropFirst(prefix.count)).trimmingCharacters(in: commandStrippers)
     }
 
+    /// Phrases that control JARVIS rather than being sent to the model.
+    ///
+    /// ⚠️ Matched on the WHOLE normalized utterance, never as a suffix. "repeat the test that
+    /// failed" is a request for the model; only a bare "repeat that" is a command. Swallowing a
+    /// real request because it happens to contain a control word is far worse than missing one.
+    // ⚠️ "read me the answer" is a REPEAT phrase, not a fourth command. The report's answer row is
+    // a 160-character preview; the message itself is the whole answer, and `repeatLastAnswer`
+    // already narrates it properly. A separate command would read the user a truncated copy.
+    static let repeatPhrases = ["repeat that", "say that again", "repeat", "what did you say",
+                                "read me the answer", "read the answer", "read that back"]
+    static let newConversationPhrases = ["new conversation", "new chat", "start over", "forget everything"]
+    static let tellMeMorePhrases = ["tell me more", "go on", "continue", "read the rest",
+                                    "say the rest", "and then", "what else"]
+    static let whatWentWrongPhrases = ["what went wrong", "what failed", "what broke",
+                                       "why did that fail", "what was the problem"]
+    static let whatDidYouChangePhrases = ["what did you change", "what changed", "what files did you change",
+                                          "what did you edit", "show me what changed"]
+
+    /// The control phrase in `command`, if the whole utterance is one. Pure.
+    static func voiceCommand(in command: String) -> JarvisVoiceCommand? {
+        let normalized = normalizedForStability(command)
+        guard !normalized.isEmpty else { return nil }
+        if repeatPhrases.contains(normalized) { return .repeatAnswer }
+        if newConversationPhrases.contains(normalized) { return .newConversation }
+        if tellMeMorePhrases.contains(normalized) { return .tellMeMore }
+        if whatWentWrongPhrases.contains(normalized) { return .whatWentWrong }
+        if whatDidYouChangePhrases.contains(normalized) { return .whatDidYouChange }
+        return nil
+    }
+
+    /// Appended to the query the MODEL sees when the answer will be read aloud.
+    ///
+    /// ⚠️ Only the `userQuery` argument is decorated. `createUserMessage` still persists the clean
+    /// command, so the chat window, the sidebar and the conversation history all show exactly what
+    /// the user said. Without this the model answers in markdown with bullet lists and fenced
+    /// code — the right shape for a screen and the wrong shape for a voice.
+    /// ⚠️ THE LENGTH REQUEST MOVES WITH THE SETTING. A sentence cap can only TRUNCATE; it cannot
+    /// make the model concise. "Just the gist" implemented as a smaller cap over the same
+    /// six-sentence request would end every turn in "there's more in the chat window" — the exact
+    /// failure that forced the automatic cap up from 4 to 6 after the 2026-09-04 device test.
+    /// Asking for the length you intend is what makes brevity a choice rather than a severed
+    /// sentence.
+    static func spokenStyleHint(for mode: JarvisSpokenResponses) -> String {
+        let length: String
+        switch mode {
+        case .gist:
+            length = "Answer in one or two sentences — just the essential point. The user can ask you to go on if they want more."
+        case .automatic, .preferSpoken, .preferSilent:
+            length = "Reply in short plain sentences, and keep it to about six sentences unless the user asks for detail — a spoken answer cannot be skimmed."
+        }
+        return """
+
+
+        (This request was spoken aloud and the answer will be read back by a text-to-speech voice. \
+        \(length) No markdown, no bullet lists, no headings, no tables. \
+        If code is unavoidable, describe it in a sentence rather than printing it.)
+        """
+    }
+
+    /// The query as the model should see it. Pure.
+    static func decoratedQuery(for command: String, mode: JarvisSpokenResponses) -> String {
+        mode.speaksAnswer ? command + spokenStyleHint(for: mode) : command
+    }
+
+    /// Words in `text`, whitespace-separated. Pure.
+    static func wordCount(_ text: String) -> Int {
+        text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).count
+    }
+
+    /// Whether a captured command is worth sending. Pure — see `minimumCommandWords`.
+    static func isDispatchable(_ command: String) -> Bool {
+        wordCount(command) >= minimumCommandWords
+    }
+
+    /// Whether the capture is a spoken cancel rather than a request. Pure.
+    /// Compared on the normalized form so punctuation and casing churn from Whisper's
+    /// temperature-fallback re-decodes cannot defeat the match.
+    static func isCancelPhrase(_ command: String) -> Bool {
+        let normalized = normalizedForStability(command)
+        guard !normalized.isEmpty else { return false }
+        return cancelPhrases.contains { normalized == $0 || normalized.hasSuffix(" " + $0) }
+    }
+
+    /// Whether the configured ASR language can EVER produce a wake-word match. Pure.
+    ///
+    /// ⚠️ `wakeWordVariants` is English orthography matched by case-insensitive substring, and
+    /// the ASR language is the composer's shared `AppSettings.speechLanguageKey`. Set it to a
+    /// non-Latin-script language and the recognizer returns text no variant can match — the orb
+    /// looks alive and simply never responds, with no error logged anywhere. Callers must fall
+    /// back to click-to-speak rather than leaving the user with no way in.
+    static func wakeWordCanMatch(language: String?) -> Bool {
+        guard let language, !language.isEmpty else { return true }   // unset ⇒ auto-detect
+        return language.lowercased().hasPrefix("en")
+    }
+
+    /// The phrase spoken when a run ends. Pure — the honesty guarantee for a voice-only user.
+    ///
+    /// ⚠️ Only `.cancelled` used to be branched, so `.failed` and `.completedWithWarnings` both
+    /// announced "Your task is completed". Because the reply itself is not spoken yet, this
+    /// phrase is the ONLY channel a voice-only user has, and it was reporting success on runs
+    /// that had errored out or been truncated by the circuit breaker.
+    static func announcement(for outcome: ExecutionOutcome?, reason: String?) -> String {
+        switch outcome {
+        case .completed:
+            return completionPhrase
+        case .completedWithWarnings:
+            return String(localized: "I finished, but not cleanly. Check the chat window for details.")
+        case .failed:
+            if let reason, !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return String(localized: "That didn't work. \(reason)")
+            }
+            // ⚠️ The offer, not a trace fetch. Loading the run here would leave the orb silent in
+            // `.announcing` for an unmeasured interval on the one path where the user most needs
+            // an immediate answer. `what went wrong` does the work, on request.
+            return String(localized: "That didn't work. Ask me what went wrong, or check the chat window.")
+        case .cancelled:
+            return String(localized: "Stopped.")
+        case nil:
+            // finalizeMessage stamps an outcome before onComplete fires, so nil means a path
+            // that bypassed finalize entirely — report the uncertainty rather than success.
+            return String(localized: "The run ended, but I couldn't tell how. Check the chat window.")
+        }
+    }
+
+    /// What a push-to-talk key-down should do from a given stage. Pure, so the entry path can be
+    /// pinned by a test — it had none, which is how the `.welcoming` hole below survived an audit.
+    enum PushToTalkAdmission: Equatable {
+        /// The stage is idle and ready; arm capture directly.
+        case arm
+        /// Startup speech is in flight and must be abandoned first — see `.welcoming` below.
+        case cutGreetingAndArm
+        /// Nothing to capture into. The string is spoken to the LOG, not the user.
+        case refuse(String)
+    }
+
+    /// ⚠️⚠️ `.welcoming` IS ADMITTED, AND IT IS THE COMMON CASE — NOT AN EDGE ONE.
+    ///
+    /// `AppDelegate.jarvisPushToTalkDown` opens the panel and arms capture in ONE gesture:
+    /// `show()` then `beginPushToTalk()`, consecutive statements. `show()` runs `begin()`
+    /// SYNCHRONOUSLY, and `begin()` resolves the remembered profile straight into `selectProfile`,
+    /// which sets `.welcoming` on its first line. So the stage this method sees on a cold open is
+    /// never `.passiveListening` — it is `.welcoming`, which the old guard rejected silently.
+    /// Hold-to-talk is the DEFAULT activation mode and this shortcut is its only way in, so every
+    /// cold open lost the whole first utterance and logged nothing explaining it.
+    ///
+    /// A held push-to-talk key is an explicit "I want to talk now", which outranks the greeting.
+    static func pushToTalkAdmission(stage: JarvisStage) -> PushToTalkAdmission {
+        switch stage {
+        case .passiveListening, .commandCapture:
+            return .arm
+        case .welcoming:
+            return .cutGreetingAndArm
+        case .selectingProfile:
+            // Nothing can be sent until a profile is chosen, so this press is genuinely inert.
+            return .refuse("no profile has been chosen yet — pick one in the panel that just opened")
+        case .followUpWindow:
+            // Unreachable today: hold-to-talk never opens a follow-up window (`followUpSeconds`
+            // returns nil for it), and the shortcut is only registered in hold-to-talk.
+            return .arm
+        case .executing, .announcing, .awaitingApproval:
+            return .refuse("a turn is already in flight — wait for it to finish, or interrupt it from the orb")
+        case .voiceUnavailable(let reason):
+            return .refuse("voice input is unavailable: \(reason)")
+        }
+    }
+
+    /// Push-to-talk key DOWN: opens the microphone for as long as the shortcut is held.
+    /// The mic is closed at rest in this mode, so this both arms capture and starts the loop.
+    func beginPushToTalk() {
+        guard !dismissed, !pushToTalkHeld else { return }
+
+        switch Self.pushToTalkAdmission(stage: stage) {
+        case .refuse(let reason):
+            // ⚠️ Never silent. The old guard returned with no line at all, so a device log of the
+            // most common failure in the subsystem contained nothing that even mentioned the press.
+            logger.info("[JARVIS_SESSION]\(self.tag) Push-to-talk pressed in \(Self.name(of: self.stage)) — \(reason). CONSEQUENCE: this press raises the orb but captures NOTHING; nothing spoken while it is held will be heard.")
+            return
+        case .cutGreetingAndArm:
+            // ⚠️ ORDER, AND IT IS THE SAME ORDER `teardown()` DOCUMENTS: drop the hand-back before
+            // stopping the synthesizer. `voice.stop()` cancels the pending completion so
+            // `didFinish` never drains it, and the 20 s watchdog would otherwise fire into a turn
+            // that has moved on — dragging the user out of a capture that is already running.
+            //
+            // ⚠️ On a cold open the greeting has not STARTED yet: this method runs synchronously
+            // after `show()`, before `selectProfile`'s Task gets to speak. `pushToTalkHeld` is
+            // what stops that Task, so it must be set — see the guard in `selectProfile`.
+            logger.info("[JARVIS_SESSION]\(self.tag) Push-to-talk pressed during startup — skipping the greeting and opening the microphone now. CONSEQUENCE: Jarvis does not say hello this turn; without this the entire first utterance was captured by nothing.")
+            speechWatchdogTask?.cancel()
+            speechWatchdogTask = nil
+            pendingSpeechCompletion = nil
+            voice.stop()
+        case .arm:
+            break
+        }
+
+        pushToTalkHeld = true
+        manualCaptureBaseline = nil
+        captureArmedAt = Date()
+        lastCommandChange = Date()
+        setStage(.commandCapture, "beginPushToTalk")
+        beginTurn()
+        logger.info("[JARVIS_SESSION]\(self.tag) Push-to-talk engaged — opening the microphone.")
+        playEarcon(.listening)
+        startListeningLoop()
+        onRequestAttention?()
+    }
+
+    /// Push-to-talk key UP: commits whatever was heard.
+    func endPushToTalk() {
+        guard pushToTalkHeld else { return }
+        pushToTalkHeld = false
+        guard stage == .commandCapture else {
+            // ⚠️ Also never silent. A release that commits nothing is the second half of the
+            // same invisible failure: the press was refused, so there is no capture to end.
+            logger.info("[JARVIS_SESSION]\(self.tag) Push-to-talk released in \(Self.name(of: self.stage)) with no capture armed. CONSEQUENCE: nothing is sent — whatever was said while the key was held was never being recorded.")
+            return
+        }
+        logger.info("[JARVIS_SESSION]\(self.tag) Push-to-talk released — committing \(Self.wordCount(self.commandPreview)) word(s).")
+        if isSessionActive {
+            Task { _ = await WhisperRecognitionService.shared.stopStreaming() }
+        } else {
+            // ⚠️ THE SESSION HAS NOT OPENED YET. `isSessionActive` is not set until after the
+            // permission check and the 1 s settle, so a tap released inside that window stopped
+            // NOTHING and the loop went on to open the microphone for a key that was no longer
+            // held — in the one mode whose entire contract is a closed mic at rest.
+            logger.info("[JARVIS_SESSION]\(self.tag) Released before the session opened — abandoning the capture rather than opening the microphone for a key that is no longer held. CONSEQUENCE: nothing is captured or sent; the orb returns to standby.")
+            manualCaptureBaseline = nil
+            setStage(.passiveListening, "endPushToTalk")
+        }
+    }
+
     /// Click-to-speak: arms command capture without the wake word, mid-session.
     /// The safety net for when Whisper never renders the wake word recognizably.
     func armManualCapture() {
-        guard stage == .passiveListening else { return }
+        // ⚠️ `!dismissed` — see `beginPushToTalk`, which has always had it. A view can outlive the
+        // teardown that closed its panel (an in-flight gesture, a retained hosting view), and
+        // `setStage` now has a SIDE EFFECT: entering `.voiceUnavailable` releases the app-scoped
+        // audio engine. A dead controller reaching that would release an engine a NEW panel had
+        // warmed. Nothing does today; the guard is what keeps that true.
+        guard !dismissed, stage == .passiveListening else { return }
         manualCaptureBaseline = liveTranscript
-        stage = .commandCapture
+        setStage(.commandCapture, "armManualCapture")
         lastTranscriptChange = Date()
         lastCommandChange = Date()
         captureArmedAt = Date()
-        logger.info("Jarvis command capture armed manually.")
+        beginTurn()
+        logger.info("[JARVIS_SESSION]\(self.tag) Command capture armed by click.")
+        playEarcon(.listening)
         onRequestAttention?()
+        // ⚠️ The loop is NOT running at rest in hold-to-talk — the default mode. Without this a
+        // click gave a hot-mic orb, a listening earcon and a dead microphone, escapable only by
+        // right-click Cancel. `startListeningLoop` is a no-op when a loop is already live, so the
+        // wake-word mode is unaffected.
+        startListeningLoop()
+    }
+
+    /// Discards an armed capture WITHOUT sending it and returns to wake-word scanning.
+    ///
+    /// ⚠️ There was no abort path at all: `commitCaptureNow()` sends, and nothing cancelled.
+    /// A user watching a mis-transcription had no way to stop it reaching a profile with shell
+    /// and filesystem tools. The session is ended too, so the discarded speech cannot leak into
+    /// the next command through WhisperKit's cumulative transcript.
+    func cancelCapture() {
+        guard !dismissed, stage == .commandCapture else { return }
+        playEarcon(.interrupted)
+        logger.info("[JARVIS_SESSION]\(self.tag) Capture cancelled by the user — discarding \(Self.wordCount(self.commandPreview)) word(s). CONSEQUENCE: nothing is sent; the loop re-arms for the wake word.")
+        manualCaptureBaseline = nil
+        setStage(.passiveListening, "cancelCapture")
+        if isSessionActive {
+            Task { _ = await WhisperRecognitionService.shared.stopStreaming() }
+        }
     }
 
     /// Siri-style "I'm done talking" tap: ends the capture session immediately and
     /// commits whatever has been heard. The definitive exit when background noise
     /// keeps every automatic stability window from settling.
     func commitCaptureNow() {
-        guard stage == .commandCapture, isSessionActive else { return }
-        logger.info("Jarvis capture committed by user tap.")
+        guard !dismissed, stage == .commandCapture, isSessionActive else { return }
+        logger.info("[JARVIS_SESSION]\(self.tag) Capture committed by user tap — sending \(Self.wordCount(self.commandPreview)) word(s).")
         Task { _ = await WhisperRecognitionService.shared.stopStreaming() }
     }
 
@@ -541,18 +1970,29 @@ final class JarvisSessionController {
 
     private func execute(_ command: String) async {
         guard let mainVM, !dismissed else { return }
-        stage = .executing
+        setStage(.executing, "execute")
         liveTranscript = command
 
         guard let config = backendConfiguration.getRequestConfig() else {
             // Selected profile was deleted mid-session — fall back to the picker.
-            logger.error("Jarvis send aborted — profile not resolvable.")
-            stage = .selectingProfile
+            logger.error("[JARVIS_RUN]\(self.tag) Send ABORTED — the selected profile no longer resolves. CONSEQUENCE: the command the user just spoke is DISCARDED without being sent, and the orb falls back to the profile picker.")
+            setStage(.selectingProfile, "execute")
             loadProfiles()
             return
         }
 
+        // Already stamped by `beginTurn()` when the capture opened; a second stamp here would
+        // split one turn across two ids.
+        if turnID == "—" { beginTurn() }
         let convID = ensureConversation(titleFrom: command, profileID: config.profile.id)
+
+        // Re-applied every turn, not only at conversation creation: the setting can change while
+        // the orb is open, and a stale autonomous grant is exactly the kind of invisible state
+        // this feature must not have.
+        let approvals = JarvisConfigManager.shared.toolApprovals
+        logger.info("[JARVIS_RUN]\(self.tag) Dispatching \(Self.wordCount(command)) word(s) to \"\(config.profile.displayName)\" (approvals: \(approvals.rawValue), conv \(convID.uuidString.prefix(8))).")
+        Task { await SessionToolApprovals.shared.setAutonomous(approvals.isAutonomous, conversationID: convID) }
+        observeInteractions()
         // Bind the profile so restart-resume, ChatOps, and the sidebar all resolve it.
         ChatPersistenceStore.shared.updateBackendForConversation(
             id: convID, backendType: nil, backendEntityId: config.profile.id
@@ -571,6 +2011,7 @@ final class JarvisSessionController {
         let userMessage = await mainVM.messagingCoordinator.createUserMessage(
             conversationID: convID, query: command, files: []
         )
+        userMessage.messageSource = .jarvis   // [Jarvis] attribute voice traffic — set BEFORE persisting
         await ChatPersistenceStore.shared.addMessage(userMessage, toConversation: convID)
         transcript.append(userMessage)
         guard !dismissed else { return }
@@ -593,7 +2034,12 @@ final class JarvisSessionController {
         let agentMessage = mainVM.activeStreamManager.startMessageStream(
             withConfig: config,
             conversationID: convID,
-            userQuery: command,
+            // ⚠️ The MODEL sees a decorated query; the persisted user message above is the clean
+            // command, so the chat window shows exactly what was said.
+            userQuery: Self.decoratedQuery(
+                for: command,
+                mode: JarvisConfigManager.shared.spokenResponses
+            ),
             history: transcript,
             files: [],
             workflowExecutionState: workflowTicket?.state,
@@ -608,31 +2054,273 @@ final class JarvisSessionController {
                 }
             }
         )
+        agentMessage.messageSource = .jarvis   // [Jarvis] attribute voice traffic
         thisStreamID = agentMessage.id
         streamingMessageID = agentMessage.id
         currentAgentMessage = agentMessage
+        // Narrate as it streams. ⚠️ For `.agent` profiles the executor emits the whole answer as
+        // ONE content event, so this degrades to speak-on-completion — correct, but the reason
+        // agent answers feel less live than bot answers.
+        speaker.correlationTag = tag
+        // Both speech paths, or half the spoken lines in a session are unattributable.
+        voice.correlationTag = tag
+        speaker.begin(for: agentMessage)
         transcript.append(agentMessage)
     }
 
     private func handleRunFinished() {
         guard !dismissed else { return }
-        // A user-stopped run skips the completion announcement.
-        if currentAgentMessage?.terminalOutcome == .cancelled {
-            stage = .passiveListening
+        let outcome = currentAgentMessage?.terminalOutcome
+        // A user-stopped run skips the announcement entirely — they know they stopped it.
+        if outcome == .cancelled {
+            logger.info("[JARVIS_RUN]\(self.tag) Run cancelled by the user — resuming listening with no announcement.")
+            setStage(.passiveListening, "handleRunFinished")
             startListeningLoop()
             return
         }
-        stage = .announcing
-        voice.speak(Self.completionPhrase) { [weak self] in
-            guard let self, !self.dismissed else { return }
-            self.stage = .passiveListening
-            self.startListeningLoop()
+        logger.info("[JARVIS_RUN]\(self.tag) Run finished with outcome \(outcome?.rawValue ?? "nil").")
+        setStage(.announcing, "handleRunFinished")
+
+        let handBack: () -> Void = { [weak self] in self?.returnToListening() }
+
+        // A failed or unknown-outcome run must NOT be narrated as if it had answered: stop any
+        // partial narration and say what actually happened instead.
+        guard outcome == .completed || outcome == .completedWithWarnings else {
+            playEarcon(.failed)
+            speaker.cancel()
+            speakWithWatchdog(Self.announcement(for: outcome, reason: currentAgentMessage?.terminalReason),
+                              then: handBack)
+            return
         }
+
+        // Let the narration play out. A warnings outcome gets the caveat APPENDED rather than
+        // substituted, so the user hears both the answer and the warning.
+        let closing = outcome == .completedWithWarnings
+            ? Self.announcement(for: outcome, reason: nil)
+            : nil
+        let narrating = speaker.finish(for: currentAgentMessage, appending: closing, onDrained: handBack)
+        if !narrating {
+            // Nothing was speakable — spoken responses are off, the answer was empty, or it was
+            // all code. Fall back to the phrase so the turn still ends audibly.
+            speakWithWatchdog(Self.announcement(for: outcome, reason: nil), then: handBack)
+        }
+    }
+
+    /// Where a turn ends: the follow-up window if the user enabled one, otherwise wake-word
+    /// standby — or, in hold-to-talk, a closed microphone.
+    ///
+    /// The follow-up window is what makes this feel like a conversation: re-uttering the wake word
+    /// before every sentence is the most conspicuous thing that separates a voice TRIGGER from a
+    /// voice assistant.
+    private func returnToListening() {
+        guard !dismissed else { return }
+        // ⚠️ HOLD-TO-TALK GETS NO FOLLOW-UP WINDOW. The activation row promises "keeps the
+        // microphone closed until you press it", and that promise is the whole reason the mode
+        // exists and is the default on a laptop. A 5 s hot window after every answer — with the
+        // orange indicator lit and nothing held down — contradicts it on every single turn. Two
+        // defaults that were each defensible alone combined into a claim the app did not honour;
+        // the privacy promise is the one that wins.
+        guard let seconds = Self.followUpSeconds(
+            activationMode: JarvisConfigManager.shared.activationMode,
+            followUp: JarvisConfigManager.shared.followUp
+        ) else {
+            if !JarvisConfigManager.shared.activationMode.listensContinuously {
+                logger.info("[JARVIS_SESSION]\(self.tag) No follow-up window in hold-to-talk — the microphone stays closed until the shortcut is pressed. CONSEQUENCE: a follow-up needs the shortcut again; this is what the activation setting promises.")
+            }
+            setStage(.passiveListening, "returnToListening")
+            startListeningLoop()
+            return
+        }
+        followUpDeadline = Date().addingTimeInterval(seconds)
+        setStage(.followUpWindow, "returnToListening")
+        logger.info("[JARVIS_SESSION]\(self.tag) Follow-up window open for \(Int(seconds))s — speech now needs no wake word.")
+        playEarcon(.listening)
+        startListeningLoop()
+    }
+
+    /// How long the follow-up window should stay open after an answer, or nil for none. Pure, so
+    /// the product promise it encodes can be pinned by a test.
+    ///
+    /// ⚠️ Hold-to-talk always returns nil. The activation row promises "keeps the microphone
+    /// closed until you press it"; a 5 s hot window after every answer — orange indicator lit,
+    /// nothing held down — is the opposite of that, and it was the shipped default.
+    static func followUpSeconds(activationMode: JarvisActivationMode,
+                                followUp: JarvisFollowUp) -> TimeInterval? {
+        guard activationMode.listensContinuously else { return nil }
+        return followUp.seconds
+    }
+
+    /// The window closed with nothing said.
+    private func expireFollowUpWindow() {
+        guard stage == .followUpWindow else { return }
+        followUpDeadline = nil
+        setStage(.passiveListening, "expireFollowUpWindow")
+        logger.info("[JARVIS_SESSION]\(self.tag) Follow-up window expired with no speech. CONSEQUENCE: the wake word is required again, and in hold-to-talk the microphone closes until the shortcut is pressed.")
+    }
+
+    /// Speech arrived inside the follow-up window — treat all of it as the command.
+    private func armFollowUpCapture() {
+        followUpDeadline = nil
+        manualCaptureBaseline = nil
+        setStage(.commandCapture, "armFollowUpCapture")
+        captureArmedAt = Date()
+        lastCommandChange = Date()
+        beginTurn()
+        logger.info("[JARVIS_SESSION]\(self.tag) Follow-up speech detected — capturing with no wake word.")
+        onRequestAttention?()
+    }
+
+    /// Re-speaks the last answer. Reuses the streaming speaker so the segmentation, the code
+    /// handling and the voice settings are identical to the original narration.
+    private func repeatLastAnswer() {
+        guard !dismissed else { return }
+        let handBack: () -> Void = { [weak self] in self?.returnToListening() }
+        guard let message = currentAgentMessage else {
+            setStage(.announcing, "repeatLastAnswer")
+            speakWithWatchdog(String(localized: "There's nothing to repeat yet."), then: handBack)
+            return
+        }
+        setStage(.announcing, "repeatLastAnswer")
+        speaker.begin(for: message)
+        if !speaker.finish(for: message, appending: nil, onDrained: handBack) {
+            speakWithWatchdog(String(localized: "There's nothing to repeat yet."), then: handBack)
+        }
+    }
+
+    /// [Phase 6 · F1] What the user asked about the run that just finished.
+    private enum RunNarration {
+        case problems
+        case changes
+    }
+
+    /// Answers a question about the last run, out loud.
+    ///
+    /// ⚠️ EVERY exit path must speak. `perform` is synchronous and the trace fetch is not, so this
+    /// enters `.announcing` immediately and hands back from inside the task — a path that returns
+    /// without speaking leaves the stage with no closing edge and the orb parked forever.
+    private func narrateRun(_ kind: RunNarration) {
+        guard !dismissed else { return }
+        let handBack: () -> Void = { [weak self] in self?.returnToListening() }
+
+        guard let message = currentAgentMessage else {
+            setStage(.announcing, "narrateRun")
+            speakWithWatchdog(String(localized: "There's no run for me to look at yet."), then: handBack)
+            return
+        }
+
+        // ⚠️ `.executing`, NOT `.announcing`, for the fetch. `handleRunFinished` explicitly refuses
+        // to do a trace read inside `.announcing` — that stage's only closing edge is
+        // `speakWithWatchdog`, which cannot be armed until there is something to say, so the whole
+        // fetch window sat unwatched while the orb claimed to be speaking. `.executing` also keeps
+        // the loop from opening a microphone underneath it.
+        setStage(.executing, "narrateRun")
+
+        Task { @MainActor [weak self] in
+            guard let self, !self.dismissed else { return }
+            let sentence: String
+            switch kind {
+            case .problems:
+                let projection = await JarvisRunReportLoader.projection(for: message)
+                sentence = JarvisRunNarration.problemSentence(projection)
+            case .changes:
+                // No trace fetch: the file-level truth lives on the message timeline, not in the
+                // report's tool rows. See the note on `JarvisRunReportLoader.changes`.
+                let (effects, writeToolNames) = JarvisRunReportLoader.changes(in: message)
+                sentence = JarvisRunNarration.changeSentence(effects: effects, writeToolNames: writeToolNames)
+            }
+            // ⚠️ Barge-in must win. The user hears silence during the fetch and clicks the orb;
+            // without this the narration then starts anyway, over an interrupt they just made.
+            guard !self.dismissed, self.stage == .executing else {
+                self.logger.info("[JARVIS_SESSION]\(self.tag) Run narration abandoned — the stage moved to \(Self.name(of: self.stage)) while the trace was loading (a barge-in or a new turn). CONSEQUENCE: nothing is spoken, which is what the interrupt asked for.")
+                return
+            }
+            self.logger.info("[JARVIS_SESSION]\(self.tag) Run narration (\(String(describing: kind))): \(sentence.count) character(s) spoken.")
+            self.setStage(.announcing, "narrateRun")
+            self.speakWithWatchdog(sentence, then: handBack)
+        }
+    }
+
+    /// Speaks whatever a length setting held back from the last answer.
+    ///
+    /// ⚠️ Every exit speaks. Saying nothing here is indistinguishable from the command not being
+    /// recognised, and this is the command a user reaches for precisely because they did not get
+    /// enough the first time.
+    private func speakRemainderOfLastAnswer() {
+        guard !dismissed else { return }
+        let handBack: () -> Void = { [weak self] in self?.returnToListening() }
+        setStage(.announcing, "speakRemainderOfLastAnswer")
+
+        guard let message = currentAgentMessage else {
+            speakWithWatchdog(String(localized: "There's nothing to go on with yet."), then: handBack)
+            return
+        }
+        if !speaker.speakRemainder(of: message, onDrained: handBack) {
+            speakWithWatchdog(String(localized: "That was the whole answer."), then: handBack)
+        }
+    }
+
+    /// Starts a new turn's correlation id.
+    ///
+    /// ⚠️ Called wherever a CAPTURE is armed — wake word, click, push-to-talk, follow-up — so the
+    /// lines describing why a turn never dispatched are filed under that turn rather than under
+    /// the previous one. `execute()` reuses whatever this set; it does not stamp its own.
+    private func beginTurn() {
+        turnID = UUID().uuidString.prefix(4).lowercased()
+    }
+
+    /// Performs a recognised control phrase instead of sending it to the model.
+    private func perform(_ command: JarvisVoiceCommand) {
+        switch command {
+        case .repeatAnswer:
+            repeatLastAnswer()
+        case .whatWentWrong:
+            narrateRun(.problems)
+        case .whatDidYouChange:
+            narrateRun(.changes)
+        case .tellMeMore:
+            speakRemainderOfLastAnswer()
+        case .newConversation:
+            logger.info("[JARVIS_SESSION]\(self.tag) Voice command: new conversation — discarding \(self.transcript.count) turn(s).")
+            speaker.cancel()
+            if let convID = jarvisConversationID {
+                Task {
+                    await ExecutionSuspensionService.shared.cancel(for: convID)
+                    await SessionToolApprovals.shared.setAutonomous(false, conversationID: convID)
+                }
+            }
+            announcedInteractionID = nil
+            transcript.removeAll()
+            jarvisConversationID = nil
+            currentAgentMessage = nil
+            setStage(.announcing, "perform")
+            speakWithWatchdog(String(localized: "Starting fresh."), then: { [weak self] in self?.returnToListening() })
+        }
+    }
+
+    /// Barge-in: stop the narration and go straight back to listening.
+    ///
+    /// ⚠️ A TAP-driven interrupt, not true barge-in. The microphone is still closed while Jarvis
+    /// speaks — there is no acoustic echo cancellation yet (audit blocker B3) — so the user
+    /// cannot talk over the answer. Phase 4's duplex audio graph is what makes that possible;
+    /// until then this is the only way to cut a long answer short.
+    func bargeIn() {
+        guard !dismissed, stage == .announcing else { return }
+        logger.info("[JARVIS_SESSION]\(self.tag) Narration interrupted by the user.")
+        playEarcon(.interrupted)
+        speaker.cancel()
+        voice.stop()
+        pendingSpeechCompletion = nil
+        speechWatchdogTask?.cancel()
+        speechWatchdogTask = nil
+        setStage(.passiveListening, "bargeIn")
+        startListeningLoop()
     }
 
     /// Stop button during execution. onComplete still fires (outcome .cancelled)
     /// and routes back to passive listening without the completion announcement.
     func stopExecution() {
+        guard !dismissed else { return }
+        speaker.cancel()
         guard let id = streamingMessageID else { return }
         mainVM?.activeStreamManager.cancelStream(for: id)
         if let convID = jarvisConversationID {
@@ -644,7 +2332,7 @@ final class JarvisSessionController {
     /// sidebar afterwards), created lazily on the first command.
     private func ensureConversation(titleFrom command: String, profileID: UUID) -> UUID {
         if let existing = jarvisConversationID { return existing }
-        let title = "Jarvis — \(String(command.prefix(48)))"
+        let title = String(localized: "Jarvis — \(String(command.prefix(48)))")
         let conversation = Conversation(
             id: UUID(),
             timestamp: Date(),
@@ -656,27 +2344,396 @@ final class JarvisSessionController {
         return conversation.id
     }
 
+    // MARK: HITL — surfacing a parked run
+
+    /// Watches the shared HITL queue for a park on THIS conversation.
+    ///
+    /// ⚠️ Without this the feature deadlocks. An agent run that parks for approval never fires
+    /// `onComplete`, so `handleRunFinished` never runs, the stage stays `.executing`, and the
+    /// listening loop has already returned with the microphone closed — the orb showed THINKING
+    /// forever and only closing the panel recovered. Re-arms BEFORE handling, because
+    /// `withObservationTracking` is one-shot and a second park enqueued during the handler would
+    /// otherwise go unobserved.
+    private func observeInteractions() {
+        guard let center = mainVM?.interactionCenter else {
+            logger.error("[JARVIS_HITL]\(self.tag) No InteractionCenter on the view model — a parked run cannot be surfaced. CONSEQUENCE: an agent that asks for approval hangs the orb on THINKING with no way to answer from the panel.")
+            return
+        }
+        withObservationTracking {
+            _ = center.pending
+        } onChange: {
+            Task { @MainActor [weak self] in
+                guard let self, !self.dismissed else { return }
+                // ⚠️ STOP OBSERVING WHEN NOTHING IS BOUND, and stop BEFORE the re-arm.
+                //
+                // The tracking re-arms itself, so it outlives the conversation it was armed for:
+                // "new conversation" and a profile switch both clear `jarvisConversationID` while
+                // leaving this loop running. Every HITL raised anywhere in the app then woke a
+                // handler with nothing to do — which used to emit an ERROR claiming a parked run
+                // would hang the orb, on a session that had no run at all.
+                //
+                // Dropping the re-arm here is safe because `execute()` arms it on every dispatch,
+                // after `ensureConversation` — so the next turn restores it, and until then this
+                // costs nothing.
+                guard self.jarvisConversationID != nil else {
+                    self.logger.debug("[JARVIS_HITL]\(self.tag) Interaction queue changed with no Jarvis conversation bound — this is the state after \"new conversation\" or a profile switch. CONSEQUENCE: observation stops here and is re-armed by the next turn's dispatch; nothing is missed because no Jarvis run exists to park.")
+                    return
+                }
+                self.observeInteractions()
+                self.handleInteractionChange()
+            }
+        }
+    }
+
+    private func handleInteractionChange() {
+        // ⚠️ Only the missing centre is an ERROR. A nil conversation is the ordinary state between
+        // turns and is now filtered before the re-arm above; it reaches this guard only if a future
+        // caller bypasses that path, so it is reported without claiming a run is hanging. The old
+        // line asserted "a parked run will NOT be surfaced… it shows THINKING until the panel is
+        // closed" for BOTH cases — false for the common one, and at error level, which sent readers
+        // hunting a deadlock that did not exist.
+        guard let center = mainVM?.interactionCenter else {
+            logger.error("[JARVIS_HITL]\(self.tag) Interaction change ignored — the interaction centre is unavailable. CONSEQUENCE: a parked run will NOT be surfaced on the orb; it shows THINKING until the panel is closed.")
+            return
+        }
+        guard let convID = jarvisConversationID else {
+            logger.debug("[JARVIS_HITL]\(self.tag) Interaction change ignored — no conversation is bound. CONSEQUENCE: none; there is no Jarvis run that could have parked.")
+            return
+        }
+        guard let pending = center.current(for: convID) else {
+            // ⚠️ NOT JUST `.awaitingApproval`. The unrecognised-utterance path spends a second in
+            // `.announcing` saying "I'll leave that one on screen" and then returns to
+            // `.awaitingApproval` — so a request answered on screen during that phrase skipped
+            // this branch entirely, leaving `announcedInteractionID` set and the panel collapsed
+            // into an approval layout with nothing pending.
+            if stage == .awaitingApproval || (stage == .announcing && announcedInteractionID != nil) {
+                logger.info("[JARVIS_HITL]\(self.tag) Request resolved — the run continues.")
+                // ⚠️ The user may have clicked the banner while the spoken window was open. A
+                // still-armed window would leave a "yes" pointing at a resolved operation.
+                disarmVoiceApproval(reason: "request resolved elsewhere")
+                announcedInteractionID = nil
+                setStage(.executing, "HITL resolved")
+            }
+            return
+        }
+        // ⚠️⚠️ #9 — THE ARM MUST FOLLOW THE QUEUE. Disarming only when the queue went EMPTY meant
+        // that if the armed operation resolved while another request was already queued,
+        // `current(for:)` returned the NEW one, the empty branch never ran, and
+        // `voiceApprovalOperationID` kept pointing at the resolved operation — with the mic still
+        // open. A spoken "approve" then committed an operation that was already answered, while a
+        // completely different request sat on screen. Nothing else compares these two ids.
+        if let armed = voiceApprovalOperationID, armed != pending.id {
+            logger.error("[JARVIS_HITL]\(self.tag) The armed approval (op \(armed.uuidString.prefix(8))) is no longer the pending request (now op \(pending.id.uuidString.prefix(8))). CONSEQUENCE: disarming — a spoken approval must never commit an operation the user is not being asked about.")
+            disarmVoiceApproval(reason: "a different request became pending")
+        }
+
+        guard announcedInteractionID != pending.id else { return }
+        announcedInteractionID = pending.id
+
+        let toolSuffix = pending.kind.toolName.map { ", tool \($0)" } ?? ""
+        logger.notice("[JARVIS_HITL]\(self.tag) Run parked on \(Self.kindName(of: pending.kind)) (op \(pending.id.uuidString.prefix(8))\(toolSuffix)). CONSEQUENCE: the run is stopped until answered; the orb now shows the request instead of THINKING.")
+        setStage(.awaitingApproval, "run parked on HITL")
+        playEarcon(.listening)
+        // ⚠️ Say that approval is NEEDED, never the arguments. The user must READ what they are
+        // approving — a spoken paraphrase of a shell command is exactly how a misheard approval
+        // becomes an executed one.
+        // ⚠️ The hand-back is NOT empty. An empty closure here leaves `.awaitingApproval` with no
+        // closing edge: today the microphone is closed in that stage so nothing is stranded, but
+        // the moment duplex listening reaches it (Phase 4) nothing would ever close the mic —
+        // which is the parked-forever shape the HITL observer exists to prevent. Logging the edge
+        // also makes "the prompt finished speaking" visible in a log-only device test.
+        // [Phase 6 · F2] A spoken approval is offered ONLY when the user switched the channel on
+        // AND the policy produced a token. Everything else keeps the original behaviour: say that
+        // approval is needed, name nothing, and leave it on screen.
+        let voiceToken = JarvisConfigManager.shared.voiceApprovals
+            ? JarvisApprovalPolicy.token(for: pending)
+            : nil
+
+        // ⚠️ [#13] A SECOND PARK CUTS THE FIRST PROMPT OFF, and that is correct — but it must not
+        // be silent. This branch is only reached when `announcedInteractionID != pending.id`, i.e.
+        // the request the in-flight phrase describes has ALREADY been resolved, so finishing the
+        // sentence would announce something that is no longer on screen. `speakWithWatchdog`
+        // overwrites `pendingSpeechCompletion`, dropping the first prompt's hand-back — which is
+        // also right here, because that hand-back would arm a voice window for a resolved
+        // operation. What was wrong was that the user heard half a sentence with nothing in the
+        // log to explain it.
+        if pendingSpeechCompletion != nil || voice.isSpeaking {
+            logger.info("[JARVIS_HITL]\(self.tag) A new request arrived while the previous approval prompt was still being spoken — cutting it off. CONSEQUENCE: the first phrase stops mid-sentence and its hand-back is dropped; it described a request that has already been resolved, and the prompt for the one now on screen follows immediately.")
+        }
+        speakWithWatchdog(Self.approvalPrompt(for: pending)) { [weak self] in
+            guard let self, !self.dismissed else { return }
+            guard let voiceToken else {
+                self.logger.info("[JARVIS_HITL]\(self.tag) Approval prompt spoken — waiting on the user. CONSEQUENCE: the run stays parked and the microphone stays closed until the banner is answered.")
+                return
+            }
+            self.beginVoiceApproval(voiceToken)
+        }
+    }
+
+    var isVoiceApprovalArmed: Bool { voiceApprovalOperationID != nil }
+
+    /// How long a spoken "yes" stays valid.
+    ///
+    /// Short on purpose. This is the window in which an open microphone can commit an action, so
+    /// it is sized for a person who is present and listening — not for one who wandered off.
+    private static let voiceApprovalWindow: TimeInterval = 30
+
+    /// Reads back what would run, then opens a bounded window for a spoken confirmation.
+    ///
+    /// ⚠️ TWO-STAGE BY CONSTRUCTION. The first utterance (the prompt) names the tool and its
+    /// arguments; only the SECOND one commits. A single-stage "say yes to approve" would let one
+    /// misheard word authorize something the user never heard described.
+    private func beginVoiceApproval(_ token: JarvisApprovalPolicy.VoiceApproval) {
+        voiceApprovalToken = token
+        logger.notice("[JARVIS_HITL]\(self.tag) Voice approval ARMED for op \(token.operationID.uuidString.prefix(8)) (\(token.toolName)), \(Int(Self.voiceApprovalWindow))s window. CONSEQUENCE: a spoken confirmation can approve THIS operation until the window closes; nothing else.")
+        readBackAndListen(token, repeated: false)
+    }
+
+    /// Speaks the read-back and re-opens the window's microphone and its expiry.
+    ///
+    /// ⚠️ ONE ROUTINE FOR BOTH THE FIRST READING AND A REPEAT, so the sentence that authorizes a
+    /// tool cannot be worded two ways. A user who asks "what is it again?" must hear the SAME
+    /// arguments in the same order — a second, separately-built sentence is a second chance to
+    /// describe the operation differently from the one that will actually run.
+    private func readBackAndListen(_ token: JarvisApprovalPolicy.VoiceApproval, repeated: Bool) {
+        voiceApprovalTask?.cancel()
+        let keywords = JarvisConfigManager.shared.resolvedApprovalKeywords
+        speakWithWatchdog(Self.approvalReadBack(token: token, keywords: keywords)) { [weak self] in
+            guard let self, !self.dismissed else { return }
+            // ⚠️ Deferred to the speech hand-back for a REASON on the repeat path: a repeat is
+            // requested from inside `runListeningSessions`, so `listenTask` is still non-nil at
+            // that moment and `startListeningLoop` would silently no-op. By the time the phrase
+            // has finished the loop has unwound and cleared it.
+            self.startListeningLoop()
+        }
+
+        // The clock restarts with the reading. A user who just asked what the operation was should
+        // get a full window to answer in, not the remainder of the one they spent asking.
+        voiceApprovalTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.voiceApprovalWindow * 1_000_000_000))
+            guard let self, !Task.isCancelled, self.isVoiceApprovalArmed else { return }
+            self.disarmVoiceApproval(reason: repeated ? "window expired after a repeat" : "window expired")
+        }
+    }
+
+    /// The sentence spoken before a voice approval can commit. Pure.
+    ///
+    /// ⚠️ IT NAMES THE USER'S REAL KEYWORDS. Hard-coding "say yes" while the user has configured
+    /// something else is the one bug that makes this feature simply not work — and it would look
+    /// like the microphone failing, not like a wrong word.
+    static func approvalReadBack(token: JarvisApprovalPolicy.VoiceApproval,
+                                 keywords: (approve: [String], deny: [String], problems: [JarvisApprovalKeywords.Problem])) -> String {
+        let approveWord = keywords.approve.first ?? JarvisApprovalKeywords.approveDefault
+        let denyWord = keywords.deny.first ?? JarvisApprovalKeywords.denyDefault
+        return String(localized: "That's \(JarvisApprovalPolicy.spokenToolName(token.toolName)), \(token.spokenArguments). Say \(approveWord) to go ahead, or \(denyWord) to skip it.")
+    }
+
+    /// ⚠️ Closes the microphone's only reason to be open in this stage. Every exit from the
+    /// window — approved, refused, unrecognised, expired, resolved elsewhere — goes through here.
+    /// ⚠️ ALWAYS closes the microphone. The armed window is the ONLY reason `.awaitingApproval`
+    /// holds a session open, so disarming without stopping left a live decoder with nothing that
+    /// could end it: the session watchdog has no `.awaitingApproval` case once the window is gone,
+    /// and WhisperKit's VAD auto-stop needs confirmed text, which a silent room never produces.
+    /// The expiry path always did this; every other exit did not.
+    private func disarmVoiceApproval(reason: String) {
+        guard voiceApprovalToken != nil else { return }
+        voiceApprovalToken = nil
+        voiceApprovalTask?.cancel()
+        voiceApprovalTask = nil
+        logger.info("[JARVIS_HITL]\(self.tag) Voice approval DISARMED (\(reason)) — closing the microphone it opened. CONSEQUENCE: a spoken keyword no longer approves anything; the request stays on screen unless it was answered.")
+        stopListening()
+    }
+
+    /// Handles what the user said inside an armed approval window.
+    ///
+    /// ⚠️ FAILS CLOSED, AND DENYING IS ALSO AN ACTION. Anything that is not an unambiguous
+    /// confirmation leaves the request PENDING on screen rather than denying it — a misheard
+    /// denial would cancel work the user wanted, which is a different harm, not a safer one.
+    /// Only an explicit cancel phrase denies.
+    private func handleVoiceApprovalUtterance(_ spoken: String) {
+        guard let operationID = voiceApprovalOperationID else {
+            logger.info("[JARVIS_HITL]\(self.tag) Heard \(spoken.split(separator: " ").count) word(s) just after the approval window closed. CONSEQUENCE: they were discarded — nothing was approved or denied, and the request is still on screen.")
+            return
+        }
+        let keywords = JarvisConfigManager.shared.resolvedApprovalKeywords
+
+        // ⚠️ DENIAL IS CHECKED FIRST. If a word somehow reaches both lists, the safe reading of an
+        // ambiguous instruction to run a tool is "don't" — and `resolve` has already stripped
+        // collisions out of the approve list for the same reason.
+        if JarvisApprovalPolicy.isDenial(spoken, keywords: keywords.deny) || Self.isCancelPhrase(spoken) {
+            disarmVoiceApproval(reason: "spoken denial")
+            logger.notice("[JARVIS_HITL]\(self.tag) Voice DENIED op \(operationID.uuidString.prefix(8)). CONSEQUENCE: the tool does not run and the agent is told the user refused.")
+            mainVM?.submitToolApproval(operationID: operationID, approved: false)
+            setStage(.executing, "voice approval denied")
+            return
+        }
+
+        // ⚠️ THE GRAMMAR, FOR A QUEUE OF EXACTLY ONE. `queueSize: 1` is not a placeholder — F2
+        // arms one operation at a time by construction, and `ordinals` DROPS out-of-range
+        // positions rather than clamping them, so "approve three" here parses to nothing rather
+        // than quietly becoming "approve the only one". The bare keyword still commits through
+        // `isConfirmation` below; this only adds a TARGET to the same vocabulary, so a user who
+        // changed their commit word changes this too.
+        switch JarvisApprovalPolicy.parseApprovalUtterance(
+            spoken, queueSize: 1,
+            approveKeywords: keywords.approve, denyKeywords: keywords.deny
+        ) {
+        case .denyAll, .deny:
+            disarmVoiceApproval(reason: "spoken denial")
+            logger.notice("[JARVIS_HITL]\(self.tag) Voice DENIED op \(operationID.uuidString.prefix(8)) by a targeted phrase. CONSEQUENCE: the tool does not run and the agent is told the user refused.")
+            mainVM?.submitToolApproval(operationID: operationID, approved: false)
+            setStage(.executing, "voice approval denied")
+            return
+
+        case .openOnScreen:
+            // Asking to see it authorizes NOTHING — it moves the decision to the surface that can
+            // show arguments and let the user edit them, which is the better outcome anyway.
+            disarmVoiceApproval(reason: "user asked to see it on screen")
+            logger.notice("[JARVIS_HITL]\(self.tag) Voice asked to see op \(operationID.uuidString.prefix(8)) on screen. CONSEQUENCE: nothing is approved or denied; the request stays pending and the main window is raised.")
+            openInMainWindow()
+            return
+
+        case .describe:
+            // ⚠️ Re-reads and STAYS ARMED. This is the one branch that must not fail closed: a
+            // user who did not catch the arguments is the user least able to make the decision,
+            // and disarming here would answer "what was that?" by silently closing the channel.
+            guard let token = voiceApprovalToken else { return }
+            logger.notice("[JARVIS_HITL]\(self.tag) Re-reading op \(operationID.uuidString.prefix(8)) on request. CONSEQUENCE: nothing is approved or denied; the same read-back is spoken again and the window restarts.")
+            readBackAndListen(token, repeated: true)
+            return
+
+        case .approve(let positions):
+            // Defensive: `ordinals` cannot return anything but [1] for a queue of one, but this is
+            // the one path that runs a tool, so it asserts rather than assumes.
+            guard positions == [1] else {
+                logger.error("[JARVIS_HITL]\(self.tag) Spoken approval named position(s) \(positions) with ONE request pending. CONSEQUENCE: NOTHING is approved — a target that does not resolve to the pending request must never commit it.")
+                disarmVoiceApproval(reason: "approval named an unresolvable position")
+                setStage(.executing, "voice approval unresolvable")
+                return
+            }
+            approveByVoice(operationID: operationID)
+            return
+
+        case .none:
+            break   // fall through to the bare commit word
+        }
+
+        guard JarvisApprovalPolicy.isConfirmation(spoken, keywords: keywords.approve) else {
+            // No re-ask. A second attempt at the same commit is a second chance to mishear.
+            disarmVoiceApproval(reason: "utterance was not a confirmation")
+            logger.notice("[JARVIS_HITL]\(self.tag) Heard \(spoken.count) character(s) that were not a confirmation. CONSEQUENCE: NOTHING was approved or denied — the request stays on screen for the user to answer there.")
+            setStage(.announcing, "voice approval unrecognised")
+            speakWithWatchdog(String(localized: "I'll leave that one on screen.")) { [weak self] in
+                self?.setStage(.awaitingApproval, "voice approval unrecognised")
+            }
+            return
+        }
+
+        approveByVoice(operationID: operationID)
+    }
+
+    /// ⚠️⚠️ THE ONLY PATH FROM SPEECH TO AN APPROVAL, and it is reachable only from
+    /// `handleVoiceApprovalUtterance`, which is reachable only from an armed window, which is
+    /// armed only when `JarvisApprovalPolicy` produced a token. Do not add another caller.
+    ///
+    /// ⚠️ It calls `submitToolApproval` — a ONE-SHOT resolution — and never
+    /// `SessionToolApprovals.allow`. A durable "allow for this chat" grant created from a
+    /// misheard word would survive the conversation AND the app restart, which is precisely the
+    /// harm this whole channel is shaped to avoid.
+    private func approveByVoice(operationID: UUID) {
+        disarmVoiceApproval(reason: "approved by voice")
+        logger.notice("[JARVIS_HITL]\(self.tag) Voice APPROVED op \(operationID.uuidString.prefix(8)) — one-shot, no durable grant. CONSEQUENCE: this single call runs; the next request for the same tool asks again.")
+        mainVM?.submitToolApproval(operationID: operationID, approved: true)
+        playEarcon(.captured)
+        setStage(.executing, "voice approval granted")
+    }
+
+    /// What Jarvis says when a run parks. Pure.
+    static func approvalPrompt(for pending: PendingHITL) -> String {
+        switch pending.kind {
+        case .toolConfirmation(let confirmation):
+            return String(localized: "I need your approval to run \(spokenToolName(confirmation.toolName)). It's on screen.")
+        case .clarification:
+            return String(localized: "I have a question for you. It's on screen.")
+        case .planReview:
+            return String(localized: "There's a plan for you to review. It's on screen.")
+        case .gate:
+            return String(localized: "I need you to choose how to continue. It's on screen.")
+        }
+    }
+
+    /// `fs_smart_search` reads as "fs smart search", not "fs underscore smart underscore search".
+    static func spokenToolName(_ toolName: String) -> String {
+        toolName.replacingOccurrences(of: "_", with: " ")
+                .replacingOccurrences(of: "-", with: " ")
+                .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Log-friendly interaction kind. Pure.
+    static func kindName(of kind: PendingInteraction) -> String {
+        switch kind {
+        case .toolConfirmation: return "toolConfirmation"
+        case .clarification:    return "clarification"
+        case .planReview:       return "planReview"
+        case .gate:             return "gate"
+        }
+    }
+
+    /// Raises the main window so the user can read and edit arguments. Guarded on the return
+    /// value: the main window can be closed while the app runs from the shortcut, and a handoff
+    /// into nothing is worse than no handoff.
+    func openInMainWindow() {
+        guard let convID = jarvisConversationID else { return }
+        NotificationCenter.default.post(
+            name: GlobalConstants.openConversationNotification,
+            object: nil,
+            userInfo: ["conversationID": convID.uuidString]
+        )
+        if AppDelegate.shared?.activateMainWindow() == true {
+            logger.info("[JARVIS_HITL]\(self.tag) Handed off to the main window.")
+        } else {
+            logger.warning("[JARVIS_HITL]\(self.tag) No main window to hand off to. CONSEQUENCE: the request stays answerable only from the orb — the app is running from the shortcut or status item with its window closed.")
+        }
+    }
+
     // MARK: HITL passthrough (audit-logged wrappers, keyed purely by operationID)
 
+    // ⚠️ The section header called these "audit-logged" and none of them logged. The decision does
+    // survive downstream (`MessagingCoordinator` logs the submission), but with no `[s:…]` tag and
+    // no record of WHICH SURFACE answered — so a log could not tell an orb click from a
+    // main-window click from a spoken approval, which is the first question about any approval.
+
     func approveTool(_ pending: PendingHITL) {
+        logger.notice("[JARVIS_HITL]\(self.tag) APPROVED op \(pending.id.uuidString.prefix(8)) from the orb\(pending.kind.toolName.map { " (tool \($0))" } ?? ""). CONSEQUENCE: the tool runs once; this is a one-shot resolution and grants nothing durable.")
         mainVM?.submitToolApproval(operationID: pending.id, approved: true)
     }
 
     func denyTool(_ pending: PendingHITL) {
+        logger.notice("[JARVIS_HITL]\(self.tag) DENIED op \(pending.id.uuidString.prefix(8)) from the orb\(pending.kind.toolName.map { " (tool \($0))" } ?? ""). CONSEQUENCE: the tool does not run and the agent is told the user refused.")
         mainVM?.submitToolApproval(operationID: pending.id, approved: false)
     }
 
     func submitClarification(_ pending: PendingHITL, text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // ⚠️ Length only — the answer is free text the user typed and re-enters the agent's context.
+        logger.notice("[JARVIS_HITL]\(self.tag) Answered clarification op \(pending.id.uuidString.prefix(8)) from the orb with \(trimmed.count) character(s)\(trimmed.isEmpty ? " (empty — treated as no answer)" : ""). CONSEQUENCE: the run resumes with this text in context.")
         mainVM?.submitClarificationResponse(operationID: pending.id, response: trimmed.isEmpty ? nil : trimmed)
     }
 
     func resolvePlan(_ pending: PendingHITL, approved: Bool) {
-        guard case .planReview(let plan) = pending.kind else { return }
+        guard case .planReview(let plan) = pending.kind else {
+            // ⚠️ This dropped the click with no line ANYWHERE. The pending item can be replaced
+            // between the render and the tap, and the button then simply does nothing — which
+            // reads as a dead button, not as a race.
+            logger.error("[JARVIS_HITL]\(self.tag) Plan decision for op \(pending.id.uuidString.prefix(8)) IGNORED — the pending item is now a \(Self.kindName(of: pending.kind)), not a plan review. CONSEQUENCE: the click did nothing and the run stays parked; the request on screen has changed underneath the user.")
+            return
+        }
+        logger.notice("[JARVIS_HITL]\(self.tag) Plan \(approved ? "APPROVED" : "REJECTED") for op \(pending.id.uuidString.prefix(8)) from the orb (\(plan.subtasks.count) subtask(s)). CONSEQUENCE: \(approved ? "the run proceeds with this plan" : "the run is told the plan was rejected").")
         mainVM?.submitPlanReview(operationID: pending.id, editedPlan: approved ? plan.subtasks : nil)
     }
 
     func chooseGate(_ pending: PendingHITL, option: String) {
+        logger.notice("[JARVIS_HITL]\(self.tag) Gate op \(pending.id.uuidString.prefix(8)) answered from the orb. CONSEQUENCE: the workflow continues down the chosen output port.")
         mainVM?.submitGateChoice(operationID: pending.id, option: option)
     }
 }

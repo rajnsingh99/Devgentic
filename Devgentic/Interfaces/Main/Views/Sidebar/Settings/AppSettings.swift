@@ -64,6 +64,44 @@ struct AppSettings {
     static let chatFontSizeKey = "chatFontSize"
     static let chatLineSpacingKey = "chatLineSpacing"
 
+    // Jarvis — the voice HUD.
+    // ⚠️ Key VALUES must stay free of "key"/"token"/"secret"/"auth"/"path": `BundleExporter`'s
+    // allowlist is asserted by `ObservabilityHygieneTests.testAllowlistContainsNothingSecretShaped`,
+    // which matches on the value, not the symbol. Hence `jarvisShortcutCode`, not `…KeyCode`.
+    static let jarvisEnabledKey = "jarvisEnabled"
+    static let jarvisActivationModeKey = "jarvisActivationMode"
+    static let jarvisShortcutCodeKey = "jarvisShortcutCode"
+    static let jarvisShortcutModifiersKey = "jarvisShortcutModifiers"
+    static let jarvisEndpointingKey = "jarvisEndpointing"
+    static let jarvisSpokenResponsesKey = "jarvisSpokenResponses"
+    static let jarvisFollowUpKey = "jarvisFollowUp"
+    static let jarvisEarconsKey = "jarvisEarcons"
+    static let jarvisToolApprovalsKey = "jarvisToolApprovals"
+    /// Developer-mode escape hatch for the Phase 4 duplex audio graph. Default OFF.
+    static let jarvisDuplexAudioKey = "jarvisDuplexAudio"
+    // [Phase 6 · F3] Ambient run-completion announcements.
+    static let jarvisAmbientAnnouncementsKey = "jarvisAmbientAnnouncements"
+    static let jarvisAmbientThresholdKey = "jarvisAmbientThresholdSeconds"
+    // [Phase 6 · F2] Spoken tool approvals.
+    static let jarvisVoiceApprovalsKey = "jarvisVoiceApprovals"
+    // ⚠️ DELIBERATELY NOT IN `BundleExporter.exportablePreferenceKeys`. These two hold free-form
+    // text the USER TYPED, and that allowlist's contract is that none of its entries carry user
+    // content. The diagnostic value is near zero — which words were configured is inferable from
+    // the approval log lines, which already record counts rather than content.
+    static let jarvisApprovalKeywordsKey = "jarvisApprovalKeywords"
+    static let jarvisDenialKeywordsKey = "jarvisDenialKeywords"
+    /// Which speech recognizer Jarvis uses. Developer-mode until device-proven. Default WhisperKit.
+    static let jarvisRecognizerKey = "jarvisRecognizer"
+    /// Locale for Apple Speech. Empty = follow the system. ⚠️ Apple's models are per-LOCALE and
+    /// must be reserved + installed before use, so this is a model choice, not a preference.
+    static let jarvisSpeechLocaleKey = "jarvisSpeechLocale"
+    /// Empty string is the sentinel for "same voice as chat Read Aloud" — see JarvisVoiceOutput.
+    static let jarvisNarratorVoiceKey = "jarvisNarratorVoice"
+    static let jarvisNarratorRateKey = "jarvisNarratorRate"
+    /// ⚠️ Pre-existing value, written by JarvisSessionController since the MVP. The STRING must
+    /// not change or every user silently loses their remembered profile.
+    static let jarvisProfileIDKey = "jarvisProfileID"
+
     // Speech Playback (Read Aloud)
     static let speechPlaybackRateKey = "speechPlaybackRate"
     static let speechPlaybackVoiceKey = "speechPlaybackVoice"

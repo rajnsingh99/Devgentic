@@ -19,8 +19,17 @@ struct JarvisComposerButton: View {
     @Environment(MainApplicationViewModel.self) private var mainVM
     @Environment(\.appTheme) private var theme
     @State private var isHovered = false
+    /// Self-gating on the enable flag keeps the composer's own layout code free of Jarvis
+    /// conditionals — the button simply isn't there when the feature is off.
+    @State private var config = JarvisConfigManager.shared
 
     var body: some View {
+        if config.isEnabled {
+            button
+        }
+    }
+
+    private var button: some View {
         Button(action: { JarvisPanelController.shared.toggle(mainVM: mainVM) }) {
             Image(systemName: "atom")
                 .font(.system(.body, weight: .semibold))

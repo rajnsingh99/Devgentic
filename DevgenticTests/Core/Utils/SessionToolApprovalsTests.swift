@@ -27,7 +27,7 @@ final class SessionToolApprovalsTests: XCTestCase {
         let convB = UUID()
         let store = SessionToolApprovals(defaults: defaults)
 
-        await store.allow(toolName: "write_file", conversationID: convA)
+        await store.allow(toolName: "write_file", risk: .moderate, conversationID: convA)
 
         let inA = await store.isAllowed(toolName: "write_file", conversationID: convA)
         let inB = await store.isAllowed(toolName: "write_file", conversationID: convB)
@@ -41,7 +41,7 @@ final class SessionToolApprovalsTests: XCTestCase {
         let conv = UUID()
 
         let original = SessionToolApprovals(defaults: defaults)
-        await original.allow(toolName: "execute_shell", conversationID: conv)
+        await original.allow(toolName: "execute_shell", risk: .moderate, conversationID: conv)
 
         // Simulate relaunch: a brand-new actor hydrating from the same durable store.
         let reloaded = SessionToolApprovals(defaults: defaults)
@@ -55,7 +55,7 @@ final class SessionToolApprovalsTests: XCTestCase {
         let conv = UUID()
 
         let store = SessionToolApprovals(defaults: defaults)
-        await store.allow(toolName: "delete_file", conversationID: conv)
+        await store.allow(toolName: "delete_file", risk: .moderate, conversationID: conv)
         await store.clear(conversationID: conv)
 
         let reloaded = SessionToolApprovals(defaults: defaults)
@@ -70,8 +70,8 @@ final class SessionToolApprovalsTests: XCTestCase {
         let convB = UUID()
 
         let store = SessionToolApprovals(defaults: defaults)
-        await store.allow(toolName: "move_file", conversationID: convA)
-        await store.allow(toolName: "move_file", conversationID: convB)
+        await store.allow(toolName: "move_file", risk: .moderate, conversationID: convA)
+        await store.allow(toolName: "move_file", risk: .moderate, conversationID: convB)
         await store.clear(conversationID: convA)
 
         let stillInB = await store.isAllowed(toolName: "move_file", conversationID: convB)
@@ -93,7 +93,7 @@ final class SessionToolApprovalsTests: XCTestCase {
         let nodeB = UUID()
         let store = SessionToolApprovals(defaults: defaults)
 
-        await store.allow(toolName: "write_file", conversationID: conversation, nodeID: nodeA)
+        await store.allow(toolName: "write_file", risk: .moderate, conversationID: conversation, nodeID: nodeA)
 
         let inA = await store.isAllowed(toolName: "write_file", conversationID: conversation, nodeID: nodeA)
         let inB = await store.isAllowed(toolName: "write_file", conversationID: conversation, nodeID: nodeB)
@@ -110,11 +110,11 @@ final class SessionToolApprovalsTests: XCTestCase {
         let node = UUID()
         let store = SessionToolApprovals(defaults: defaults)
 
-        await store.allow(toolName: "read_file", conversationID: conversation, nodeID: node)
+        await store.allow(toolName: "read_file", risk: .moderate, conversationID: conversation, nodeID: node)
         let asConversation = await store.isAllowed(toolName: "read_file", conversationID: conversation)
         XCTAssertFalse(asConversation, "a node grant must not answer a conversation-scoped check")
 
-        await store.allow(toolName: "grep_files", conversationID: conversation)
+        await store.allow(toolName: "grep_files", risk: .moderate, conversationID: conversation)
         let asNode = await store.isAllowed(toolName: "grep_files", conversationID: conversation, nodeID: node)
         XCTAssertFalse(asNode, "a conversation grant must not blanket-approve every node")
     }
@@ -129,10 +129,10 @@ final class SessionToolApprovalsTests: XCTestCase {
         let other = UUID()
         let store = SessionToolApprovals(defaults: defaults)
 
-        await store.allow(toolName: "write_file", conversationID: conversation, nodeID: nodeA)
-        await store.allow(toolName: "write_file", conversationID: conversation, nodeID: nodeB)
-        await store.allow(toolName: "write_file", conversationID: conversation)
-        await store.allow(toolName: "write_file", conversationID: other, nodeID: nodeA)
+        await store.allow(toolName: "write_file", risk: .moderate, conversationID: conversation, nodeID: nodeA)
+        await store.allow(toolName: "write_file", risk: .moderate, conversationID: conversation, nodeID: nodeB)
+        await store.allow(toolName: "write_file", risk: .moderate, conversationID: conversation)
+        await store.allow(toolName: "write_file", risk: .moderate, conversationID: other, nodeID: nodeA)
 
         await store.clear(conversationID: conversation)
 
@@ -150,7 +150,7 @@ final class SessionToolApprovalsTests: XCTestCase {
         let node = UUID()
 
         let original = SessionToolApprovals(defaults: defaults)
-        await original.allow(toolName: "batch_command", conversationID: conversation, nodeID: node)
+        await original.allow(toolName: "batch_command", risk: .moderate, conversationID: conversation, nodeID: node)
 
         let reloaded = SessionToolApprovals(defaults: defaults)
         let sameNode = await reloaded.isAllowed(toolName: "batch_command", conversationID: conversation, nodeID: node)
@@ -182,7 +182,7 @@ final class SessionToolApprovalsTests: XCTestCase {
     func testGrantIsNotServedWhenTheRunIsUnattended() async {
         let store = SessionToolApprovals(defaults: UserDefaults(suiteName: "se6-attendance-\(UUID().uuidString)")!)
         let conv = UUID(), node = UUID()
-        await store.allow(toolName: "send_webhook", conversationID: conv, nodeID: node)
+        await store.allow(toolName: "send_webhook", risk: .moderate, conversationID: conv, nodeID: node)
 
         let attended = await store.isAllowed(toolName: "send_webhook", conversationID: conv, nodeID: node)
         XCTAssertTrue(attended, "the default (attended) task keeps the existing behaviour")

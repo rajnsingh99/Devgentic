@@ -69,6 +69,20 @@ actor SessionToolApprovals {
     private let defaults: UserDefaults
     private var allowed: [Scope: Set<String>] = [:]
 
+    /// Conversations the user put in a blanket "approve everything" mode — Jarvis's Autonomous
+    /// voice setting.
+    ///
+    /// ⚠️ IN-MEMORY ONLY, never persisted, unlike the per-tool grants above. A per-tool grant is
+    /// a deliberate answer to a specific question the user read on a banner; a blanket grant is a
+    /// standing mode, and one that survived relaunch would keep approving long after the intent
+    /// behind it was forgotten. It is re-established from the Jarvis setting each time a voice
+    /// conversation starts, so turning the setting off genuinely turns it off.
+    ///
+    /// ⚠️ Deliberately checked INSIDE `isAllowed` rather than short-circuiting at the call site,
+    /// so it inherits the `canReachAHuman` gate below: a blanket grant given on a live voice
+    /// session must not serve a scheduled run nobody can answer.
+    private var autonomousConversations: Set<UUID> = []
+
     /// `defaults` is injectable so tests can exercise the durable round-trip on an isolated suite;
     /// the shared singleton uses `.standard`.
     init(defaults: UserDefaults = .standard) {
@@ -83,9 +97,47 @@ actor SessionToolApprovals {
     }
 
     /// Marks `toolName` as allowed for this scope for the lifetime of the conversation.
-    func allow(toolName: String, conversationID: UUID, nodeID: UUID? = nil) {
+    /// ⚠️ `risk` IS REQUIRED, AND DESTRUCTIVE IS REFUSED HERE.
+    ///
+    /// This grant is DURABLE: it survives the run and the app restart. Until now the only thing
+    /// stopping a destructive tool from getting one was `if confirmation.risk != .destructive`
+    /// written inside two SwiftUI views — a View convention standing in for what has to be a model
+    /// invariant. Any third caller that forgot the check would have persisted a permanent grant to
+    /// delete or run shell.
+    ///
+    /// This is defence for the NEXT caller. It changes no current behaviour: both existing sites
+    /// already guard, so nothing that reaches here today is refused.
+    func allow(toolName: String, risk: HITLRiskTier, conversationID: UUID, nodeID: UUID? = nil) {
+        guard risk != .destructive else {
+            logger.error("[HITL] REFUSED a durable 'allow for this chat' grant for destructive tool '\(toolName)' (conv \(conversationID.uuidString.prefix(8))). CONSEQUENCE: no grant was stored — this tool will ask again every time, which is the intended behaviour for something irreversible. The caller should not have offered the option.")
+            return
+        }
         allowed[Scope(conversationID: conversationID, nodeID: nodeID), default: []].insert(toolName)
         persist()
+    }
+
+    /// Puts a conversation into (or out of) blanket-approval mode. See `autonomousConversations`.
+    ///
+    /// ⚠️ AUTONOMOUS MEANS AUTONOMOUS — INCLUDING `execute_shell`. Confirmed as intended by the
+    /// project owner 2026-09-05: this is the "approve everything in this conversation" switch, and
+    /// a version that quietly withheld the destructive tools would be a worse lie than no switch
+    /// at all. What keeps it safe is its SHAPE, not a tool filter: it is chosen deliberately from
+    /// a typed settings picker (never by voice), held in memory only so it cannot survive a
+    /// relaunch, scoped to one conversation, and gated above on `canReachAHuman` so it can never
+    /// serve a scheduled run. Do not add a risk filter here.
+    ///
+    /// The spoken approval channel (`JarvisApprovalPolicy`) is a DIFFERENT question and is
+    /// deliberately far narrower — see its header.
+    func setAutonomous(_ enabled: Bool, conversationID: UUID) {
+        let changed = enabled
+            ? autonomousConversations.insert(conversationID).inserted
+            : autonomousConversations.remove(conversationID) != nil
+        guard changed else { return }
+        logger.notice("[HITL] Autonomous approval \(enabled ? "ENABLED" : "disabled") for conversation \(conversationID.uuidString.prefix(8)). CONSEQUENCE: while enabled, every tool in this conversation is approved without a prompt; the grant is in-memory only and does not survive relaunch.")
+    }
+
+    func isAutonomous(conversationID: UUID) -> Bool {
+        autonomousConversations.contains(conversationID)
     }
 
     /// Whether the user already chose "Allow for this chat" for this tool **in this scope**.
@@ -114,12 +166,17 @@ actor SessionToolApprovals {
             }
             return false
         }
+        if autonomousConversations.contains(conversationID) {
+            logger.notice("[HITL] '\(toolName)' auto-approved by AUTONOMOUS mode (conv \(conversationID.uuidString.prefix(8))). CONSEQUENCE: no prompt was shown and the user did not see this tool's arguments.")
+            return true
+        }
         return allowed[Scope(conversationID: conversationID, nodeID: nodeID)]?.contains(toolName) ?? false
     }
 
     /// Drops all allowances for a conversation — every node scope within it included, since the
     /// conversation is what is being deleted.
     func clear(conversationID: UUID) {
+        autonomousConversations.remove(conversationID)
         let doomed = allowed.keys.filter { $0.conversationID == conversationID }
         guard !doomed.isEmpty else { return }
         for scope in doomed { allowed.removeValue(forKey: scope) }

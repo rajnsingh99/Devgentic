@@ -138,7 +138,7 @@ final class UnattendedApprovalTests: XCTestCase {
 
         // The attended-session grant, exactly as the banner writes it (conversation + node scope).
         await SessionToolApprovals.shared.allow(
-            toolName: "send_webhook", conversationID: conversationID, nodeID: action)
+            toolName: "send_webhook", risk: .moderate, conversationID: conversationID, nodeID: action)
 
         let events = try await execute(scenario, attended: false)
 
@@ -155,7 +155,7 @@ final class UnattendedApprovalTests: XCTestCase {
         mockProvider.scriptTool(name: "send_webhook", output: "sent", requiresConfirmation: true)
 
         await SessionToolApprovals.shared.allow(
-            toolName: "send_webhook", conversationID: conversationID, nodeID: action)
+            toolName: "send_webhook", risk: .moderate, conversationID: conversationID, nodeID: action)
 
         let events = try await execute(scenario, attended: true)
 

@@ -16,6 +16,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     case theme = "Theme"
     case chatOps = "ChatOps"
     case quickAccess = "Quick Access"
+    case jarvis = "Jarvis"
     case about = "About"
 
     var id: String { self.rawValue }
@@ -33,6 +34,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .theme:            return "Theme"
         case .chatOps:          return "ChatOps"
         case .quickAccess:      return "Quick Access"
+        case .jarvis:           return "Jarvis"
         case .about:            return "About"
         }
     }
@@ -54,6 +56,8 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
             return "paperplane.fill"
         case .quickAccess:
             return "bolt.circle"
+        case .jarvis:
+            return "atom"
         case .about:
             return "info.circle"
         }
@@ -69,6 +73,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .theme: return String(localized: "Colors and typography")
         case .chatOps: return String(localized: "Remote Telegram control")
         case .quickAccess: return String(localized: "Global shortcut and panel")
+        case .jarvis: return String(localized: "Voice assistant and listening")
         case .about: return String(localized: "Version and licenses")
         }
     }
@@ -91,6 +96,8 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
             ChatOpsSettingsView()
         case .quickAccess:
             QuickAccessSettingsView()
+        case .jarvis:
+            JarvisSettingsView()
         case .about:
             VStack(spacing: 16) {
                 Image(systemName: "bolt.fill")

@@ -504,7 +504,24 @@ enum BundleExporter {
             AppSettings.speechPlaybackRateKey,
             AppSettings.speechPlaybackVoiceKey,
             AppSettings.speechPauseOnCodeKey,
-        AppSettings.morningBriefIncludeAISummaryKey
+        AppSettings.morningBriefIncludeAISummaryKey,
+            // Jarvis. Exported because a voice bug report is undebuggable without knowing how the
+            // user had activation and endpointing configured — none of these carry user content.
+            AppSettings.jarvisEnabledKey,
+            AppSettings.jarvisActivationModeKey,
+            AppSettings.jarvisEndpointingKey,
+            AppSettings.jarvisSpokenResponsesKey,
+            AppSettings.jarvisFollowUpKey,
+            AppSettings.jarvisEarconsKey,
+            AppSettings.jarvisToolApprovalsKey,
+            AppSettings.jarvisDuplexAudioKey,
+            AppSettings.jarvisRecognizerKey,
+            AppSettings.jarvisAmbientAnnouncementsKey,
+            AppSettings.jarvisAmbientThresholdKey,
+            AppSettings.jarvisVoiceApprovalsKey,
+            AppSettings.jarvisSpeechLocaleKey,
+            AppSettings.jarvisNarratorVoiceKey,
+            AppSettings.jarvisNarratorRateKey
     ]
 
     /// Extracts exactly the allowlisted preferences from a defaults store.

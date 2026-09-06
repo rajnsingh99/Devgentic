@@ -103,12 +103,30 @@ class WhisperRecognitionService {
     // MARK: - Published State
     private(set) var loadingState: ModelLoadingState = .idle
 
+    /// Which surface currently holds the single app-wide stream slot, if any.
+    ///
+    /// The ledger is private so nothing outside can corrupt the slot bookkeeping, but "who has
+    /// the microphone" is the single most useful diagnostic this subsystem has: when a surface is
+    /// refused with `.sessionBusy` the user sees an error naming a panel they may have forgotten
+    /// is open. Exposing the owner (never the session) lets a settings pane answer it directly.
+    var activeVoiceOwner: VoiceSurface? { ledger.active?.owner }
+
+    /// The Whisper model currently selected, for diagnostics.
+    var activeModelName: String { currentModelName }
+
     // MARK: - Private State
     private var whisperKit: WhisperKit?
     private var streamTranscriber: AudioStreamTranscriber?
     /// [V1/V2/V6] Bookkeeping for the single app-wide stream slot — who holds it,
     /// whether a stop is on record, and which teardown is authoritative.
     private var ledger = VoiceSessionLedger()
+    /// [Phase 4b] A BORROWED reference to the panel-scoped duplex engine — never owned here.
+    ///
+    /// ⚠️ Its lifetime is the PANEL session (`JarvisDuplexAudio`), not the stream session. Tying
+    /// it to the stream session meant rebuilding voice processing after every answer, seconds
+    /// after AVSpeechSynthesizer released its audio unit, and it captured nothing. Do not add a
+    /// `stopEngine` call anywhere in this file.
+    private var jarvisDuplexProcessor: JarvisAudioProcessor?
     private var currentModelName: String
     private var _currentLanguage: String?
     private var _isAutoStopEnabled: Bool
@@ -306,6 +324,17 @@ class WhisperRecognitionService {
             options.usePrefillPrompt = false
         }
 
+        // ⚠️ BORROWED, never built here. The engine is owned by `JarvisDuplexAudio` for the whole
+        // panel session: building one per stream session meant constructing voice processing
+        // seconds after AVSpeechSynthesizer released its audio unit, and it captured nothing.
+        // A cold engine yields nil, which falls through to WhisperKit's own below — that fallback
+        // is why a duplex failure never fails a session, and it must stay.
+        let duplexProcessor = JarvisDuplexAudio.shared.borrow(for: owner)
+        if duplexProcessor != nil {
+            logger.log("[VOICE] Session \(session.shortID) using the panel-scoped Jarvis DUPLEX engine (echo cancellation active).")
+        }
+        jarvisDuplexProcessor = duplexProcessor
+
         logger.log("Creating AudioStreamTranscriber...")
         let transcriber = AudioStreamTranscriber(
             audioEncoder: whisperKit.audioEncoder,
@@ -313,7 +342,11 @@ class WhisperRecognitionService {
             segmentSeeker: whisperKit.segmentSeeker,
             textDecoder: whisperKit.textDecoder,
             tokenizer: tokenizer,
-            audioProcessor: whisperKit.audioProcessor,
+            // [Phase 4a] Jarvis may supply its OWN engine with echo cancellation enabled, through
+            // WhisperKit's public `AudioProcessing` seam — no fork. Everything else (composer,
+            // QuickAccess) keeps WhisperKit's engine untouched, and Jarvis falls back to it the
+            // moment the flag is off or the duplex engine refuses to start.
+            audioProcessor: duplexProcessor ?? whisperKit.audioProcessor,
             decodingOptions: options,
             useVAD: true,
             stateChangeCallback: { [weak self] oldState, newState in
@@ -392,6 +425,15 @@ class WhisperRecognitionService {
         let finalText = buildFinalTranscript()
         self.streamTranscriber = nil
         self.onStateChangeCallback = nil
+        // ⚠️⚠️ THE ENGINE IS BORROWED — DO NOT STOP IT HERE. Its lifetime is the PANEL session,
+        // owned by `JarvisDuplexAudio`; stopping it per stream session is exactly the bug this
+        // phase fixed, because rebuilding voice processing after every answer never captures.
+        // Only the reference is dropped. Release is the panel's job and is wired at each of its
+        // teardown paths: panel close, system sleep/lock, Repair Audio, profile switch, duplex
+        // toggled off, recognizer switched to Apple Speech, and app termination.
+        // ⚠️ A live AVAudioEngine at process death still wedges coreaudiod into `_StartIO error
+        // 35` — that hazard is now wider, not gone.
+        jarvisDuplexProcessor = nil
         self.consecutiveSilenceCount = 0
         logger.log("[VOICE] Session \(session.shortID) FINALIZED (owner: \(session.owner.rawValue), reason: \(reason), transcript: \(finalText.count) chars, audio: \(sessionSawAudio ? "yes" : "NONE — engine likely failed to start")).")
         return finalText

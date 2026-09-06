@@ -25,8 +25,21 @@ final class JarvisVoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
 
     private var synthesizer: AVSpeechSynthesizer?
     private var completion: (() -> Void)?
+    /// [Phase 4b] Used INSTEAD of `synthesizer` while the panel-scoped duplex engine is up and
+    /// cancelling echo. ⚠️ Both short phrases and the answer narration must go through it: leave
+    /// ONE plain synthesizer in the session and its asynchronous audio-unit teardown still races
+    /// the microphone, so `audioSettleDelay` could never be removed.
+    private lazy var duplexSpeaker = JarvisDuplexSpeaker()
 
-    var isSpeaking: Bool { synthesizer?.isSpeaking ?? false }
+    /// ⚠️ Must be set by the owner. `JarvisStreamingSpeaker` sets it on its speaker and this one
+    /// did not, so every duplex line for the greeting, the approval prompt, the completion phrase
+    /// and "Starting fresh" printed with an EMPTY correlation tag — unattributable to a session in
+    /// exactly the log a device test reads.
+    var correlationTag: String = "" {
+        didSet { duplexSpeaker.correlationTag = correlationTag }
+    }
+
+    var isSpeaking: Bool { (synthesizer?.isSpeaking ?? false) || duplexSpeaker.isSpeaking }
 
     /// Speaks a short phrase; `completion` fires on the main actor when playback
     /// finishes naturally. A new `speak` or a `stop` cancels the pending completion
@@ -40,19 +53,49 @@ final class JarvisVoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
         }
         self.completion = completion
 
+        if let target = JarvisDuplexAudio.shared.playbackTarget {
+            duplexSpeaker.enqueue(trimmed, on: target.player, engineFormat: target.format) { [weak self] in
+                guard let self else { return }
+                let pending = self.completion
+                self.completion = nil
+                pending?()
+            }
+            return
+        }
+
         let synthesizer = AVSpeechSynthesizer()
         synthesizer.delegate = self
         self.synthesizer = synthesizer
 
         let utterance = AVSpeechUtterance(string: trimmed)
-        // Match the chat Read-Aloud preferences so Jarvis speaks with the same voice.
-        let multiplier = UserDefaults.standard.float(forKey: AppSettings.speechPlaybackRateKey)
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * (multiplier > 0 ? multiplier : 1.0)
-        if let voiceID = UserDefaults.standard.string(forKey: AppSettings.speechPlaybackVoiceKey),
-           let voice = AVSpeechSynthesisVoice(identifier: voiceID) {
+        Self.applyVoiceSettings(to: utterance)
+        synthesizer.speak(utterance)
+    }
+
+    /// Applies the user's Jarvis voice and rate to an utterance.
+    ///
+    /// Shared with `JarvisStreamingSpeaker` so the greeting, the answer and the completion phrase
+    /// cannot drift apart — a narration that changes voice halfway through an answer is worse
+    /// than one that never speaks.
+    ///
+    /// ⚠️ The Read-Aloud fallback IS the pre-settings behaviour and must stay. Jarvis used to read
+    /// the Read-Aloud keys directly, so picking a voice for reading a chat message silently
+    /// changed the assistant's voice too. The empty-string sentinel keeps that coupling for
+    /// anyone who never chooses a Jarvis voice, and breaks it the moment they do.
+    static func applyVoiceSettings(to utterance: AVSpeechUtterance) {
+        let config = JarvisConfigManager.shared
+        let readAloudRate = UserDefaults.standard.float(forKey: AppSettings.speechPlaybackRateKey)
+        let multiplier = config.narratorRate > 0
+            ? config.narratorRate
+            : (readAloudRate > 0 ? readAloudRate : 1.0)
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * multiplier
+
+        let voiceID: String? = config.usesReadAloudVoice
+            ? UserDefaults.standard.string(forKey: AppSettings.speechPlaybackVoiceKey)
+            : config.narratorVoiceID
+        if let voiceID, let voice = AVSpeechSynthesisVoice(identifier: voiceID) {
             utterance.voice = voice
         }
-        synthesizer.speak(utterance)
     }
 
     /// Stops any in-flight phrase and drops the pending completion.
@@ -61,6 +104,7 @@ final class JarvisVoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
         if let synthesizer, synthesizer.isSpeaking {
             synthesizer.stopSpeaking(at: .immediate)
         }
+        duplexSpeaker.cancel()
         releaseAudio()
     }
 
@@ -69,6 +113,10 @@ final class JarvisVoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
     func releaseAudio() {
         synthesizer?.delegate = nil
         synthesizer = nil
+        // ⚠️ Releases the duplex SYNTHESIZER only. The engine itself is panel-scoped and shared
+        // with capture — tearing it down here would rebuild voice processing before every turn,
+        // which is precisely the failure this phase removed.
+        duplexSpeaker.releaseAudio()
     }
 
     // MARK: - AVSpeechSynthesizerDelegate

@@ -184,6 +184,10 @@ final class SchedulerCoordinator {
                 }
                 )
             }
+            // Attribute the unattended run, exactly as ChatOps and QuickAccess attribute theirs.
+            // ⚠️ Must be set AFTER `startMessageStream` returns — every caller assigns here, so
+            // the mirror's didStartStream always sees `.localUI` and cannot be used to classify.
+            agentMessage.messageSource = .scheduled
             messageBox = agentMessage // Fill the box so the closure can read it
 
             // ✅ The shared-slot claim that used to live here was DELETED 2026-08-17 (design doc

@@ -15,6 +15,26 @@
 import AppKit
 import SwiftUI
 
+/// Which presentation the panel is showing, and therefore how big it is.
+///
+/// Was a Bool (picker vs orb) until Phase 3 needed a third size for the approval banner. An enum
+/// rather than another flag because the next presentation will not be the last one either.
+enum JarvisPanelMode: Equatable {
+    case picker
+    case orb
+    case approval
+
+    var size: NSSize {
+        switch self {
+        case .picker:   return NSSize(width: 460, height: 560)
+        case .orb:      return NSSize(width: 300, height: 220)
+        // Tall enough to show a tool's arguments, which the user MUST be able to read before
+        // approving — the whole safety argument for not accepting a spoken "yes".
+        case .approval: return NSSize(width: 380, height: 400)
+        }
+    }
+}
+
 // MARK: - Panel
 
 /// Borderless transparent panel hosting the Jarvis orb.
@@ -68,15 +88,25 @@ final class JarvisPanelController {
     static let shared = JarvisPanelController()
 
     /// Compact orb: the steady-state presentation.
-    static let orbSize = NSSize(width: 300, height: 220)
+    static let orbSize = JarvisPanelMode.orb.size
     /// Profile picker: first run, or an explicit switch from the config bubble.
-    static let pickerSize = NSSize(width: 460, height: 560)
+    static let pickerSize = JarvisPanelMode.picker.size
 
-    private static let originXKey = "jarvisPanelOriginX"
-    private static let originYKey = "jarvisPanelOriginY"
+    /// Session state, not a preference — deliberately NOT in AppSettings (see its Jarvis note).
+    /// Internal rather than private so `JarvisConfigManager.resetAll()` can clear a panel that a
+    /// crash or a disconnected display stranded off-screen: the panel is borderless with no
+    /// titlebar, so there is otherwise no in-app way to get it back.
+    /// `nonisolated`: JarvisConfigManager is main-thread-confined but NOT @MainActor (it is read
+    /// from AppDelegate's nonisolated lifecycle code), and it needs these to clear a stranded
+    /// panel position. A plain `static let` on a @MainActor type inherits that isolation.
+    nonisolated static let originXKey = "jarvisPanelOriginX"
+    nonisolated static let originYKey = "jarvisPanelOriginY"
 
     private var panel: JarvisPanel?
-    private var session: JarvisSessionController?
+    /// ⚠️ Readable so the settings pane can reach a RUNNING session. Several settings are read
+    /// once — at panel open, or when a run parks — and a change made while the orb is open was
+    /// simply invisible to it. Writes stay private: only this controller owns the lifetime.
+    private(set) var session: JarvisSessionController?
     private let logger = DGLogger(category: "JarvisPanel")
 
     var isOpen: Bool { panel != nil }
@@ -86,7 +116,7 @@ final class JarvisPanelController {
     // MARK: Presentation
 
     func toggle(mainVM: MainApplicationViewModel) {
-        if isOpen { close() } else { show(mainVM: mainVM) }
+        if isOpen { close(reason: "shortcut or composer toggle") } else { show(mainVM: mainVM) }
     }
 
     func show(mainVM: MainApplicationViewModel) {
@@ -109,12 +139,12 @@ final class JarvisPanelController {
         let startsInPicker = controller.stage == .selectingProfile
         let size = startsInPicker ? Self.pickerSize : Self.orbSize
         let panel = JarvisPanel(contentRect: NSRect(origin: .zero, size: size))
-        panel.onCancel = { [weak self] in self?.close() }
+        panel.onCancel = { [weak self] in self?.close(reason: "Escape key") }
 
         let root = JarvisFloatingView(
             controller: controller,
-            onModeChange: { [weak self] isPicker in self?.resize(toPicker: isPicker) },
-            onClose: { [weak self] in self?.close() }
+            onModeChange: { [weak self] mode in self?.resize(to: mode) },
+            onClose: { [weak self] in self?.close(reason: "orb close button") }
         )
         panel.contentView = NSHostingView(rootView: root)
         panel.setFrameOrigin(restoredOrigin(for: size))
@@ -124,10 +154,19 @@ final class JarvisPanelController {
         // keyboard focus from the chat composer behind it. (Clicking the panel still
         // makes it key, which is when Esc-to-close becomes available.)
         panel.orderFrontRegardless()
-        logger.info("Jarvis panel opened (picker: \(startsInPicker)).")
+        logger.info("[JARVIS_PANEL] Panel OPENED (picker: \(startsInPicker)). CONSEQUENCE: a session controller now exists and the listening loop starts once a profile is chosen.")
     }
 
-    func close() {
+    func close(reason: String = "unspecified") {
+        // ⚠️ A close on an already-closed panel is a no-op in every line below, but it used to log
+        // one anyway — so a device log could show two CLOSED lines around a single OPEN, which
+        // reads as a lifecycle bug and sends the reader looking for a second presentation that
+        // never happened. `toggle`, Escape, the orb button and `applyJarvisHotkeyConfig` can all
+        // reach here, and only the last one checks `isOpen` first.
+        guard panel != nil || session != nil else {
+            logger.debug("[JARVIS_PANEL] Close (\(reason)) with no panel open — nothing to do. CONSEQUENCE: none; this is a duplicate or late close, not a second teardown.")
+            return
+        }
         session?.teardown()
         session = nil
         if let panel {
@@ -136,17 +175,23 @@ final class JarvisPanelController {
             panel.close()
         }
         panel = nil
-        logger.info("Jarvis panel closed.")
+        logger.info("[JARVIS_PANEL] Panel CLOSED (\(reason)). CONSEQUENCE: the session is torn down — voice loop stopped, run cancelled, audio engine released.")
     }
+
+    /// Push-to-talk edges from the global shortcut. Forwarded rather than exposing `session`,
+    /// which stays private so the config manager remains the only channel into a running orb.
+    func beginPushToTalk() { session?.beginPushToTalk() }
+    func endPushToTalk() { session?.endPushToTalk() }
 
     // MARK: Geometry
 
     /// Resize between orb and picker, keeping the panel's visual center fixed so it
     /// doesn't appear to jump when the picker collapses to the orb.
-    private func resize(toPicker isPicker: Bool) {
+    private func resize(to mode: JarvisPanelMode) {
         guard let panel else { return }
-        let target = isPicker ? Self.pickerSize : Self.orbSize
+        let target = mode.size
         guard panel.frame.size != target else { return }
+        logger.info("[JARVIS_PANEL] Resizing to \(String(describing: mode)) (\(Int(target.width))×\(Int(target.height))).")
 
         let current = panel.frame
         var origin = NSPoint(
@@ -176,7 +221,7 @@ final class JarvisPanelController {
             x: screen.visibleFrame.midX - size.width / 2,
             y: screen.visibleFrame.midY - size.height / 2
         )
-        logger.info("Jarvis recentering — panel was off-screen.")
+        logger.info("[JARVIS_PANEL] Recentering — the panel was off-screen. CONSEQUENCE: the orb moves to the default position; a saved frame from a disconnected display is the usual cause.")
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.3
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
