@@ -36,6 +36,73 @@ class BackendOrchestrationService {
         logger.info("BackendOrchestrationService initialized with AgentConnect.")
     }
     
+    // MARK: - The duplicate-query strip
+
+    /// What `strippingCurrentQuery` did, so the caller can log it and a test can assert it.
+    enum CurrentQueryStripOutcome: Equatable {
+        case strippedByID(index: Int, of: Int)
+        case strippedByText
+        /// An id WAS supplied and matched nothing. The run proceeds; the caller logs loudly.
+        case idNotFound(id: UUID, rows: Int)
+        case nothingToStrip
+    }
+
+    /// Removes the message currently being asked from the history that travels WITH it, so the
+    /// model is not handed its own live question as a prior turn.
+    ///
+    /// ⚠️ BY ID when the caller supplies one, and by SCANNING rather than peeking at `.last`.
+    /// Both halves matter, and text-equality at `.last` failed on both:
+    ///
+    ///   - IDENTITY. Jarvis sends the model a DECORATED query (command + a spoken-style hint)
+    ///     while persisting the clean command, so the text comparison never matched, the message
+    ///     survived, and `pairTurns` emitted it as an orphan marked wasCancelled / "Agent never
+    ///     responded to this query" — every voice turn told the model its own question had
+    ///     already been abandoned. The id is the same on both sides; only the text differs, which
+    ///     is exactly why identity is the right test. `promptOverride` DECLARES that divergence
+    ///     at the API; it is this rule that ACTS on it.
+    ///   - POSITION. `.last` is only the current message if history is ascending. On a descending
+    ///     array it is the OLDEST row — so the strip could not fire at all, and worse, for a
+    ///     RECURRING scheduled task (same prompt every firing) that oldest row had IDENTICAL text
+    ///     and `removeLast()` silently deleted the conversation's first turn.
+    ///
+    /// ⚠️ THE TEXT PATH IS GATED ON THE ID BEING ABSENT, NOT ON THE LOOKUP FAILING. It was
+    /// written as `else if let lastMsg = …` chained to the id LOOKUP, which meant a supplied id
+    /// that matched nothing fell through to text equality and `removeLast()` deleted a row that
+    /// was NOT the current question — reintroducing, through the fallback, the exact deletion the
+    /// id scan exists to prevent — while logging "no message id was supplied" and pre-empting the
+    /// `idNotFound` error that was written for that state. Keep the `currentUserMessageID == nil`
+    /// guard on the text branch.
+    ///
+    /// `nonisolated static` over plain values so the rule is testable with no service, no
+    /// backend and no network — the policy tests used to run against a hand-copy of it.
+    nonisolated static func strippingCurrentQuery(
+        from history: [ChatMessage],
+        userQuery: String,
+        currentUserMessageID: UUID?
+    ) -> (history: [ChatMessage], outcome: CurrentQueryStripOutcome) {
+        var history = history
+
+        if let currentUserMessageID {
+            guard let index = history.firstIndex(where: { $0.id == currentUserMessageID }) else {
+                return (history, .idNotFound(id: currentUserMessageID, rows: history.count))
+            }
+            let count = history.count
+            history.remove(at: index)
+            return (history, .strippedByID(index: index, of: count))
+        }
+
+        if let lastMsg = history.last,
+           lastMsg.sender == .user,
+           let lastContent = lastMsg.content.textContent,
+           lastContent.trimmingCharacters(in: .whitespacesAndNewlines)
+               == userQuery.trimmingCharacters(in: .whitespacesAndNewlines) {
+            history.removeLast()
+            return (history, .strippedByText)
+        }
+
+        return (history, .nothingToStrip)
+    }
+
     // MARK: - Streaming Message Logic
     
     /// Streams a response from the appropriate backend profile (Bot or Agent).
@@ -44,6 +111,7 @@ class BackendOrchestrationService {
         withConfig config: BackendRequestConfig,
         conversationID: UUID,
         userQuery: String,
+        currentUserMessageID: UUID? = nil,
         history: [ChatMessage],
         files: [FileSystemItem],
         context: TraceContext,
@@ -82,16 +150,30 @@ class BackendOrchestrationService {
                 // Captured from the ORIGINAL history, before any trimming.
                 let retrievalExcludedIDs = Set(history.map { $0.id })
 
-                // Prevent duplicate current query in history (User UX vs LLM Context)
-                if let lastMsg = conversationHistory.last,
-                   lastMsg.sender == .user,
-                   let lastContent = lastMsg.content.textContent,
-                   lastContent.trimmingCharacters(in: .whitespacesAndNewlines) == userQuery.trimmingCharacters(in: .whitespacesAndNewlines) {
-
-                    logger.debug("Removing duplicated current message from history to prevent double-prompting. (Trace: \(context.traceID))")
-                    conversationHistory.removeLast()
+                // Prevent duplicate current query in history (User UX vs LLM Context).
+                // The rule itself lives in `strippingCurrentQuery` so it can be tested against
+                // the real implementation instead of a copy; this call site owns the logging.
+                let strip = Self.strippingCurrentQuery(
+                    from: conversationHistory,
+                    userQuery: userQuery,
+                    currentUserMessageID: currentUserMessageID
+                )
+                conversationHistory = strip.history
+                switch strip.outcome {
+                case .strippedByID(let index, let count):
+                    logger.debug("[HISTORY] Current message stripped from history BY ID at index \(index) of \(count). (Trace: \(context.traceID))")
+                case .strippedByText:
+                    logger.notice("[HISTORY] Current message stripped by TEXT — no message id was supplied by the caller. Every production caller passes one via `startMessageStream`; a text strip means a NEW call site is bypassing that, and text equality silently fails whenever the model-facing query differs from the persisted row (the Jarvis decoration case). (Trace: \(context.traceID))")
+                case .idNotFound(let id, let count):
+                    // ⚠️ The id was supplied and did NOT match anything in history. Loud because the
+                    // run proceeds and looks fine: the question is asked twice — once as the
+                    // request's query and again as the last row of its own history — and
+                    // `pairTurns` reports that row as a turn the agent never answered.
+                    logger.error("[HISTORY] ⚠️ Current message NOT FOUND in history — id \(id.uuidString.prefix(8)), \(count) row(s) after sanitising. CONSEQUENCE: the query is DOUBLE-PROMPTED (once as the request, once inside the history blob) and `EpisodicHistoryFormatter.pairTurns` will emit it as an orphan marked \"Agent never responded to this query\", telling the model its own question was abandoned. Expected only when history legitimately excludes it (a regenerate/resume cut). (Trace: \(context.traceID))")
+                case .nothingToStrip:
+                    break
                 }
-                
+
                 // The typed query is the ONLY thing that rides `userInput` → the system
                 // <task> block. File and knowledge payloads travel as separate context
                 // fields below (2026-07 redesign: no more prompt-prepending).

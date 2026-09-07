@@ -289,25 +289,67 @@ final class ShellInterpolationGuardTests: XCTestCase {
             throw XCTSkip("tool sources not reachable — running outside a checkout")
         }
 
-        // Files that hand a model-supplied pattern to a search binary, and how many distinct
-        // argv branches each builds (rg + grep fallback).
+        // ⚠️ EXACT counts, and only argv-CONSTRUCTING shapes. This test used to count every line
+        // containing the literal `"--"` and assert `>=` a minimum, which made it unable to fail
+        // on a real regression (verified 2026-09-06):
+        //
+        //   - The raw counts were 6 / 3 / 1 against minimums of 4 / 2 / 1, so TWO separators
+        //     could be deleted from `CodingAssistantTools.swift` and the test still passed.
+        //   - One match in each of the two larger files was not a separator at all:
+        //     `if !line.isEmpty && !line.hasPrefix("--")` parses ripgrep's group separator out of
+        //     the tool's OUTPUT. A guard against option injection was being satisfied, in part,
+        //     by output-parsing code.
+        //
+        // Counting only `+= ["--"` and `.append("--")` and requiring equality means removing any
+        // one separator fails, and an unrelated `"--"` string elsewhere in the file cannot mask
+        // it. Invariant 12 (`architecture_readme.md` §7).
         let expected: [String: Int] = [
-            "CodingAssistantTools.swift": 4,       // code_search rg+grep, find_definition rg+grep
+            "CodingAssistantTools.swift": 5,       // code_search rg+grep, find_definition rg+grep, +1
             "CodingAssistantSplitTools.swift": 2,  // shared runner rg+grep
             "FileUtilityTools.swift": 1,           // grep_files
         ]
 
-        for (name, minimum) in expected {
+        // `args += ["--", …]` or `args.append("--")`. Nothing else counts.
+        let constructing = try NSRegularExpression(
+            pattern: #"(\+=\s*\[\s*"--"|\.append\(\s*"--"\s*\))"#)
+
+        for (name, expectedCount) in expected {
             let url = toolsRoot.appendingPathComponent("Local/\(name)")
             let source = try String(contentsOf: url, encoding: .utf8)
             let separators = source.components(separatedBy: "\n")
                 .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
-                .filter { $0.contains(#""--""#) }
+                .filter { line in
+                    constructing.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil
+                }
                 .count
-            XCTAssertGreaterThanOrEqual(separators, minimum,
-                "\(name) has \(separators) `--` separators, expected at least \(minimum). A "
-                + "search argv is missing its end-of-options marker, so a `-`-leading pattern "
-                + "reaches the binary's own option parser.")
+            XCTAssertEqual(separators, expectedCount,
+                "\(name) builds \(separators) `--` separators into argv, expected exactly "
+                + "\(expectedCount). FEWER: a search argv lost its end-of-options marker, so a "
+                + "`-`-leading model pattern reaches the binary's own option parser (invariant 12). "
+                + "MORE: a new search branch was added — confirm it separates BEFORE the "
+                + "model-supplied value, then raise this number deliberately.")
+        }
+    }
+
+    /// The count above is only meaningful if it is counting the right thing. This pins the two
+    /// known non-separator uses so a future reader cannot "helpfully" fold them back into the
+    /// scan — they parse ripgrep's OUTPUT and have nothing to do with option injection.
+    func testTheSeparatorScanIgnoresOutputParsing() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let toolsRoot = repoRoot.appendingPathComponent("Devgentic/Interfaces/Main/Views/Tooling")
+        guard FileManager.default.fileExists(atPath: toolsRoot.path) else {
+            throw XCTSkip("tool sources not reachable — running outside a checkout")
+        }
+
+        for name in ["CodingAssistantTools.swift", "CodingAssistantSplitTools.swift"] {
+            let source = try String(contentsOf: toolsRoot.appendingPathComponent("Local/\(name)"),
+                                    encoding: .utf8)
+            XCTAssertTrue(source.contains(#"!line.hasPrefix("--")"#),
+                "\(name): the output-parsing use of `\"--\"` is gone. If it was removed, drop this "
+                + "assertion; if it was RENAMED into something the separator scan matches, the "
+                + "count in testEverySearchToolPassesAnEndOfOptionsSeparator is now inflated by it.")
         }
     }
 }

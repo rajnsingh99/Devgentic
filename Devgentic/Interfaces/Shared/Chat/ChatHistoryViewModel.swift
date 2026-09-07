@@ -156,21 +156,42 @@ final class ChatHistoryViewModel {
     // This allows O(1) appending of history pages instead of O(n) insertion at index 0.
     var currentChatMessages: [ChatMessage] = []
 
-    /// The history the NEXT request would actually carry, OLDEST-FIRST — resolved exactly the
-    /// way `MessagingCoordinator` resolves it, through the same `BackendHistoryResolver`.
+    /// The history the NEXT request would actually carry, OLDEST-FIRST — resolved through the same
+    /// `BackendHistoryResolver` the request path uses.
+    ///
+    /// ⚠️ "Exactly the way `MessagingCoordinator` resolves it" is what this used to say, and it is
+    /// false twice over: the request path resolves in `ActiveStreamManager.deriveHistory`, not in
+    /// `MessagingCoordinator` (whose own resolver survives only for `resumeRun`), and it passes
+    /// `inMemory: [userMessage]` where this passes `currentChatMessages`. The two are the same
+    /// FUNCTION with different in-memory inputs, which the resolver treats differently — it keeps
+    /// in-memory-only rows unconditionally. Sharing the resolver is what makes them comparable;
+    /// it is not what makes them equal.
     ///
     /// The context gauge must size the REQUEST, not this view model's `currentChatMessages`,
     /// which is a pagination window (20 on open, +10 per scroll, cap 300). Sizing from the
     /// window made the ring climb as the user scrolled while the prompt never changed, and
     /// made a freshly-opened long conversation under-read its own history by up to 15×.
+    /// ⚠️ Sharing the resolver is NECESSARY BUT NOT SUFFICIENT for the two to agree, and the
+    /// omission is where they legitimately differ by one row. The request path omits the whole
+    /// unfinished TURN (`incompleteTurnIDs`) because a half-written turn makes `pairTurns` report
+    /// the question as answered with nothing. The gauge prices tokens rather than building a
+    /// transcript, so it omits only the live REPLY (`liveReplyIDs`): the question is a settled,
+    /// persisted row the next request certainly carries, and subtracting it made the ring FALL at
+    /// the moment of send and jump back at completion. Omitting the reply is still right — the
+    /// store holds its partial text (`flushInFlight`), so counting it makes the ring climb
+    /// through a run and drop when the row is replaced by the final answer.
     func resolveContextHistory(for conversationID: UUID) async -> [ChatMessage] {
         let resolved = await BackendHistoryResolver.resolve(
             conversationID: conversationID,
             inMemory: currentChatMessages,
             persistence: persistenceService
         )
-        logger.debug("[CTXGAUGE] Resolved \(resolved.history.count) message(s) for sizing (stored \(resolved.storedCount), resident window \(currentChatMessages.count))\(resolved.capHit ? ", CAP HIT" : "") — conv \(conversationID.uuidString.prefix(8))")
-        return resolved.history
+        // Replies only — see the note above on why this is NOT the request path's turn-level set.
+        let omitting = activeStreamManager.liveReplyIDs()
+        let sized = omitting.isEmpty ? resolved.history
+                                     : resolved.history.filter { !omitting.contains($0.id) }
+        logger.debug("[CTXGAUGE] Resolved \(sized.count) message(s) for sizing (stored \(resolved.storedCount), resident window \(currentChatMessages.count), omitted \(resolved.history.count - sized.count) in-flight repl\(resolved.history.count - sized.count == 1 ? "y" : "ies"))\(resolved.capHit ? ", CAP HIT" : "") — conv \(conversationID.uuidString.prefix(8))")
+        return sized
     }
 
     /// Splices a history-compaction checkpoint into the live conversation.
@@ -854,7 +875,41 @@ final class ChatHistoryViewModel {
     /// event to the conversation being left and drops a tab into the incoming conversation's
     /// freshly cleared viewer (which then suppresses that conversation's restore, because
     /// `restoreCodeViewerSession` only fires on an empty viewer).
-    private var destinationConversationID: UUID? {
+    /// ⚠️ NOT `private` any more, and not a Code-Viewer concept. The question it answers —
+    /// "which conversation does an event arriving right now belong to?" — is the one every
+    /// consumer of a mid-switch event has to ask. `ConversationSyncService` was answering it with
+    /// `currentChatMessages.first?.conversationId`, i.e. by POSITION, which is the weakest
+    /// definition in the codebase and gated a live stream insert on it.
+    ///
+    /// ⚠️ THIS IS VIEWER IDENTITY, AND IT MUST STAY THAT WAY. It deliberately does NOT lead the
+    /// selection. `ConversationSwitchCoordinator` debounces 250 ms and may await an MLX + Ollama
+    /// `unloadModel()` before `loadConversation` runs, so for that whole span this still names the
+    /// OUTGOING conversation — which is CORRECT, because the rows and Code Viewer tabs on screen
+    /// are still that conversation's.
+    ///
+    /// ⚠️ IT IS NOT CONSTANT ACROSS A SWITCH, so do not read the sentence above as "it is always
+    /// the outgoing conversation until the swap". `loadingConversationID` is the first operand and
+    /// is assigned at the TOP of `loadConversation`, so from there until the array assignment at
+    /// the bottom this names the INCOMING conversation while `currentChatMessages` still holds the
+    /// outgoing rows. That span is deliberately invisible — `isInitiallyLoadingConversation` goes
+    /// true two lines later and `ChatHistoryView` drops the transcript to `.opacity(0)` behind a
+    /// ProgressView — and it ends with the array being replaced wholesale. A consumer that cannot
+    /// tolerate the incoming answer during a load must additionally check
+    /// `isInitiallyLoadingConversation`; `ConversationSyncService`'s comment works the two spans
+    /// through in full.
+    ///
+    /// A `pendingDestinationConversationID` that led the selection was added on 2026-09-06 and
+    /// REMOVED on 2026-09-07. Folding it in here broke the Code Viewer in both directions: a
+    /// live-write `completed` for the still-displayed conversation was dropped, leaving its tab
+    /// pulsing "agent is writing this file" forever (that guard's own log line states exactly
+    /// this consequence), while a `began` for the incoming conversation was filed into the
+    /// outgoing viewer and then stashed under the wrong conversation. Splitting it into a separate
+    /// `routingDestinationConversationID` fixed the breakage but left a property no production
+    /// code read — machinery set on every switch and cleared on every load for no reader — so the
+    /// whole chain went. If a future SEND path needs "where is the user going?", that is a
+    /// genuinely different question: re-introduce it for that consumer, with that consumer, and do
+    /// not route viewer state through it.
+    var destinationConversationID: UUID? {
         loadingConversationID ?? viewerOwningConversationID
     }
 

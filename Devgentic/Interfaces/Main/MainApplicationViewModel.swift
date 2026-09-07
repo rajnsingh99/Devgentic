@@ -527,13 +527,19 @@ final class MainApplicationViewModel {
             backendConfiguration: backendConfiguration
         )
 
-        // Scheduler / remote-bridge message flow. Must come after
-        // messagingCoordinator since it reaches through the VM for the
-        // shared `createUserMessage` factory.
+        // Scheduler / remote-bridge message flow.
+        //
+        // ⚠️ This said "Must come after messagingCoordinator since it reaches through the VM for
+        // the shared `createUserMessage` factory". It no longer reaches through the VM for that:
+        // it takes the static `MessagingCoordinator.makeUserMessage` with an injected
+        // `FileProcessorService`. (The ordering was never a real construction constraint even
+        // then — the reach was lazy, at send time.) The order below is now free.
         schedulerCoordinator = SchedulerCoordinator(
             viewModel: self,
             persistenceService: persistenceService,
-            activeStreamManager: activeStreamManager
+            activeStreamManager: activeStreamManager,
+            fileProcessorService: fileProcessorService,
+            runRegistry: self
         )
 
         // ChatOps lifecycle lives in its own coordinator. We build it here

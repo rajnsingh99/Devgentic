@@ -24,6 +24,10 @@ final class ActiveStreamManager {
 
     private(set) var activeStreams: [UUID: ChatMessage] = [:]
 
+    /// Live assistant message id → the id of the user question it is answering. Written and
+    /// cleared in lockstep with `activeStreams`; see `incompleteTurnIDs`.
+    @ObservationIgnored private var liveRunQuestionIDs: [UUID: UUID] = [:]
+
     // MARK: - Dependencies
     @ObservationIgnored private var activeTasks: [UUID: Task<Void, Never>] = [:]
 
@@ -224,17 +228,177 @@ final class ActiveStreamManager {
     }
 
 
+    /// Ids belonging to a turn that is still being WRITTEN, and therefore must not appear in any
+    /// run's history — every live assistant message plus the question it is answering — except
+    /// `keeping`, the question the calling run is itself asking.
+    ///
+    /// ⚠️ WHY THE WHOLE TURN, not just the assistant row. Dropping a live reply while keeping its
+    /// question makes that question the trailing unanswered message, and `pairTurns`' orphan
+    /// handler then emits it as `wasCancelled: true` /
+    /// "Agent never responded to this query" — a LOUDER falsehood than the one being fixed,
+    /// because it also fires `renderTerminationElement`. An unfinished turn is simply not part of
+    /// history yet; asserting nothing about it is the only honest option.
+    ///
+    /// ⚠️ WHY IT MUST BE APPLIED AFTER `resolve`, not by filtering `inMemory`. `flushInFlight`
+    /// upserts the in-flight assistant row into the STORE at every tool boundary and on the first
+    /// content flush, so the store returns it within ~100 ms regardless of what the caller passes
+    /// in memory. Filtering only the in-memory side would not remove the row — it would swap the
+    /// live copy for a staler disk copy, since `BackendHistoryResolver.merge` lets in-memory win.
+    ///
+    /// ⚠️ AND WHY NOT `lifecycleState`. Nothing resets a persisted `.streaming` row at launch, so
+    /// a force-quit during a long agent run leaves one on disk indefinitely. Filtering the store
+    /// on lifecycle would erase every crash-interrupted turn — including completed tool work —
+    /// from all future context in that conversation, which is far more common than this race.
+    /// Keying on ids of runs that are live IN THIS PROCESS cannot make that mistake.
+    ///
+    /// `nonisolated static` over plain values so the rule is testable with no manager.
+    nonisolated static func incompleteTurnIDs(
+        liveRuns: [UUID: UUID],
+        keeping keepID: UUID?
+    ) -> Set<UUID> {
+        var ids: Set<UUID> = []
+        for (assistantID, questionID) in liveRuns {
+            ids.insert(assistantID)
+            ids.insert(questionID)
+        }
+        if let keepID { ids.remove(keepID) }
+        return ids
+    }
+
+    /// ⚠️ THE SINGLE SOURCE both consumers of history must use.
+    ///
+    /// `BackendHistoryResolver`'s header states the rule this upholds: "There are two consumers
+    /// and they MUST agree: the request path, which sends it, and the context gauge, which sizes
+    /// it." Sharing the resolver was necessary but not sufficient — once the request began OMITTING
+    /// in-flight turns, a gauge that still counted them was measuring a payload that would never
+    /// ship. Both now ask this.
+    ///
+    /// - Parameter keeping: the question the calling run is itself asking, which is never omitted.
+    func incompleteTurnIDs(keeping keepID: UUID? = nil) -> Set<UUID> {
+        Self.incompleteTurnIDs(liveRuns: liveRunQuestionIDs, keeping: keepID)
+    }
+
+    /// The live ASSISTANT rows, and nothing else — the context gauge's omission.
+    ///
+    /// ⚠️ NOT `incompleteTurnIDs()`. The two consumers must agree about what the next request
+    /// CARRIES, not about which ids are in flight, and on that question they differ by one row.
+    /// The request path omits a whole turn because a HALF-WRITTEN turn poisons `pairTurns` — the
+    /// question would be reported as answered with nothing. The gauge is not building a
+    /// transcript; it is pricing tokens, and the question it would drop is a settled, persisted
+    /// row that the next request certainly carries.
+    ///
+    /// Using the request path's set here made the ring FALL at the moment of send — the just-sent
+    /// question was subtracted from the size of a request that had just included it — and jump
+    /// back when streaming ended. The reply is still omitted: `flushInFlight` upserts the partial
+    /// assistant row into the store within ~100 ms, and pricing a half-written answer makes the
+    /// ring climb through a run and then drop as the row is replaced.
+    func liveReplyIDs() -> Set<UUID> {
+        Set(liveRunQuestionIDs.keys)
+    }
+
+    /// The history a run will actually carry, OLDEST-FIRST — derived from the store and the
+    /// message being sent, rather than accepted from the surface that started the run.
+    ///
+    /// ⚠️ THE ONLY in-memory input is `[userMessage]` — the message racing its own persist on the
+    /// surfaces that do not await it. In-flight streams are NOT passed in: `flushInFlight` upserts
+    /// the live assistant row into the STORE within ~100 ms, so they arrive from the resolver on
+    /// their own, and `omitting` then REMOVES them. Live-run state reaches this method only as
+    /// that subtraction — never as an added source. (An earlier version of this comment said the
+    /// method "holds both the message being sent and any in-flight streams", and a still earlier
+    /// one said in-flight rows are "never in the store while running". Both were false, and
+    /// `DerivedHistoryContractTests` has a scan that fails the build if `inMemory:` grows again.)
+    /// The UI's `currentChatMessages` was over-supply — passing it is what let QuickAccess ship
+    /// its 20-message pagination window as model history.
+    ///
+    /// - Parameter omitting: ids of messages belonging to a turn still being written, from
+    ///   `incompleteTurnIDs`. Applied AFTER the resolve, for the `flushInFlight` reason above —
+    ///   filtering the in-memory side alone removes nothing. The current `userMessage` is never
+    ///   omitted, whatever the set says.
+    /// - Parameter before: the assistant message being rewritten (regenerate / resume). When set,
+    ///   the run replays only what preceded it, via `MessagingCoordinator.historySlice` — reused
+    ///   rather than reimplemented so both callers keep one definition of "before".
+    ///
+    ///   ⚠️ ON THIS PATH THE CUT IS ALWAYS BY TIMESTAMP, never by identity, and the slice's own
+    ///   doc describes identity as the primary branch because its OTHER caller
+    ///   (`resolveBackendHistory(before:)`) does reach it. Here the boundary is the live assistant
+    ///   row, so its id is always in `omitting` and `settled` never contains it — `firstIndex`
+    ///   cannot match. The two cuts differ only for a row whose timestamp exactly TIES the
+    ///   boundary's, which nothing in this codebase is known to produce (timestamps are assigned
+    ///   once at init, and compaction checkpoints are deliberately offset by +0.001s). Treat the
+    ///   identity branch as unreachable from here rather than as the normal case.
+    ///
+    /// `static` over plain values so the derivation is testable with no manager and no view model.
+    static func deriveHistory(
+        userMessage: ChatMessage,
+        omitting: Set<UUID> = [],
+        before boundary: ChatMessage?,
+        persistence: ChatPersistenceProtocol
+    ) async -> [ChatMessage] {
+        let resolved = await BackendHistoryResolver.resolve(
+            conversationID: userMessage.conversationId,
+            inMemory: [userMessage],
+            persistence: persistence
+        )
+        let settled = omitting.isEmpty
+            ? resolved.history
+            : resolved.history.filter { $0.id == userMessage.id || !omitting.contains($0.id) }
+        let final = boundary.map { MessagingCoordinator.historySlice(before: $0, in: settled) } ?? settled
+
+        // ⚠️ THE COMPOSITION LINE. `MessagingCoordinator.resolveBackendHistory` used to emit this on
+        // every send; when the resolve moved in here the request path went SILENT — no surface
+        // logged what the model was actually given. Restored at the one place every run passes
+        // through, so a field log can answer "what history did this turn carry, and what was left
+        // out?" without reproducing.
+        let omittedCount = resolved.history.count - settled.count
+        let cutCount = settled.count - final.count
+        var notes: [String] = []
+        if resolved.capHit {
+            notes.append("CAP HIT (\(BackendHistoryResolver.messageLimit)) → older turns are omitted from direct context and rely on RAG retrieval")
+        }
+        if omittedCount > 0 {
+            notes.append("\(omittedCount) row(s) omitted as an UNFINISHED TURN (a live run's reply and the question it is answering) → the model is told nothing about a turn still being written, deliberately")
+        }
+        if cutCount > 0 {
+            notes.append("\(cutCount) row(s) cut at or after the message being rewritten → regenerate/resume replays only what preceded it. The cut is by TIMESTAMP (strictly-earlier survives), so a row that TIES the boundary is cut too")
+        }
+        logger.info("[HISTORY] Derived \(final.count) message(s) for the request — stored: \(resolved.storedCount), source: \(userMessage.messageSource.rawValue), conversationID: \(userMessage.conversationId.uuidString.prefix(8)), messageID: \(userMessage.id.uuidString.prefix(8))\(notes.isEmpty ? "" : " — " + notes.joined(separator: "; "))")
+        return final
+    }
+
+    /// Index of the first message that is OLDER than the one before it, or nil if `history` is
+    /// oldest-first. The check behind the `[HISTORY]` guard-rail in `startMessageStream`.
+    ///
+    /// Equal timestamps do NOT trip it: a tie is unordered, not descending, and
+    /// `BackendHistoryResolver.merge` can legitimately produce one (it sorts by timestamp over a
+    /// dictionary's values). Only a strict inversion is evidence a caller built history backwards.
+    ///
+    /// `nonisolated static` over plain values so the rule is unit-testable with no manager, no
+    /// persistence and no view model — the `RunAdmissionPolicy` shape.
+    nonisolated static func firstDescendingPair(in history: [ChatMessage]) -> Int? {
+        guard history.count > 1 else { return nil }
+        for index in 1..<history.count where history[index].timestamp < history[index - 1].timestamp {
+            return index
+        }
+        return nil
+    }
+
+    @discardableResult
     func startMessageStream(
         withConfig config: BackendRequestConfig,
-        conversationID: UUID,
-        userQuery: String,
-        history: [ChatMessage],
+        userMessage: ChatMessage,
+        promptOverride: String? = nil,
         files: [FileSystemItem],
         updating existingMessage: ChatMessage? = nil,
         workflowExecutionState: WorkflowExecutionState? = nil,
         resumeState: TimelineReconstruction? = nil,
         onComplete: @escaping () -> Void
     ) -> ChatMessage {
+
+        // Both derived from the message rather than passed alongside it, so they cannot disagree
+        // with it. `conversationID` used to be a separate argument that every caller had to keep
+        // in sync with the message it was sending.
+        let conversationID = userMessage.conversationId
+        let userQuery = promptOverride ?? userMessage.content.textContent ?? ""
         
         // ⚠️ GUARD-RAIL: a workflow profile started without workflow bookkeeping.
         //
@@ -292,7 +456,13 @@ final class ActiveStreamManager {
                 backendEntityId: config.profile.id
             )
             agentMessage.profileType = config.profile.profileType
-            logger.notice("🚀 [STREAM_START] Created message \(agentMessage.id.uuidString) for conversation \(conversationID.uuidString).")
+            // ⚠️ Reads `messageSource` off the USER's message, which every surface must set BEFORE
+            // calling this — `.jarvis`, `.quickAccess`, `.scheduled`, the ChatOps sources, else the
+            // `.localUI` default for a typed send. The scheduler set it only on the AGENT message
+            // until 2026-09-07, so scheduled runs reported `localUI` here; if a new surface appears
+            // and forgets, this line under-reports rather than lying loudly, so treat `localUI` on a
+            // run you did not type as a missing attribution rather than proof of a manual send.
+            logger.notice("🚀 [STREAM_START] Created message \(agentMessage.id.uuidString) for conversation \(conversationID.uuidString) — started by \(userMessage.messageSource.rawValue), profile '\(config.profile.displayName)' (\(config.profile.profileType.rawValue))\(promptOverride != nil ? ", model-facing query DIFFERS from the displayed message (promptOverride)" : "").")
         }
 
         // [G1 Piece 1] Mark the run in-flight and stamp the model identity that's about to run.
@@ -308,6 +478,11 @@ final class ActiveStreamManager {
         }
 
         activeStreams[agentMessage.id] = agentMessage
+        // The question this run is answering, recorded from the caller rather than inferred.
+        // `ChatMessage` has no parent link, so without this the only way to find a live reply's
+        // question would be POSITION or TIMESTAMP — the identity-by-inference class this whole
+        // change set removes. See `incompleteTurnIDs`.
+        liveRunQuestionIDs[agentMessage.id] = userMessage.id
         streamStartedAt[agentMessage.id] = Date()
         for delegate in liveMirrorDelegates {
             delegate.activeStreamManager(self, didStartStream: agentMessage, for: conversationID)
@@ -338,6 +513,19 @@ final class ActiveStreamManager {
                 workflowExecutionState?.traceID = traceContext.traceID
 
                 let profileType = config.profile.profileType.rawValue
+                // ⚠️ EVERY turn still being written is excluded — this run's own (its placeholder is
+                // registered before this task starts, and is EMPTY here) and any CONCURRENT run's.
+                // Concurrency in one conversation is reachable: the scheduler, Jarvis and the
+                // ChatOps bridge carry no admission check. Including an unfinished turn makes
+                // `pairTurns` report the question as answered with nothing —
+                // "(Terminated by user before any tools ran)" — while the run is still going.
+                let history = await Self.deriveHistory(
+                    userMessage: userMessage,
+                    omitting: self.incompleteTurnIDs(keeping: userMessage.id),
+                    before: existingMessage,
+                    persistence: self.persistenceService
+                )
+
                 logger.info("[TRACE_INIT] traceID: \(traceContext.traceID), spanID: \(traceContext.spanID), profileType: \(profileType), messageID: \(agentMessage.id.uuidString.prefix(8)), conversationID: \(conversationID.uuidString.prefix(8))")
 
                 Task {
@@ -374,12 +562,27 @@ final class ActiveStreamManager {
                 // [M6] Log the query LENGTH, not its text — the raw prompt is user content and this
                 // line goes to the unified OS log (readable via Console / sysdiagnose). traceID +
                 // history/file counts are enough to correlate the handoff.
+                // ⚠️ DERIVED, never accepted. Callers no longer supply history, so a surface
+                // CANNOT hand over a pagination window, a private transcript, or a descending
+                // store dump — the three shapes that produced `architecture_readme.md` §7
+                // invariant #8's only live violation. This is the same move
+                // `LLM_Execution_Concurrency_Design.md:55-59` made for `streamingMessageID`:
+                // delete the storage, derive the value, and the wrong call becomes
+                // unrepresentable rather than guarded against.
+
+                // Retained as a SELF-check, not a caller check. Nothing outside can get this
+                // wrong any more, so a trip here means the resolver itself regressed.
+                if let disorder = Self.firstDescendingPair(in: history) {
+                    logger.error("[HISTORY] ⚠️ Derived history is not oldest-first — conv \(conversationID.uuidString.prefix(8)), \(history.count) message(s), first out-of-order pair at index \(disorder). CONSEQUENCE: `pairTurns` walks forward, so every reply is matched to the WRONG question, the newest agent turn is dropped, and the oldest user message is emitted as an orphan marked \"Agent never responded to this query\". Callers no longer supply history, so this is a regression in BackendHistoryResolver.merge, not a caller bug.")
+                }
+
                 logger.info("[STREAM_HANDOFF] Passing to BackendOrchestrationService — traceID: \(traceContext.traceID), query: \(userQuery.count) chars, history: \(history.count) msgs, files: \(files.count)")
 
                 let stream = self.backendOrchestrationService.streamMessage(
                     withConfig: config,
                     conversationID: conversationID,
                     userQuery: userQuery,
+                    currentUserMessageID: userMessage.id,
                     history: history,
                     files: files,
                     context: traceContext,
@@ -1472,6 +1675,7 @@ final class ActiveStreamManager {
         }
         
         activeStreams.removeValue(forKey: message.id)
+        liveRunQuestionIDs.removeValue(forKey: message.id)   // in lockstep with activeStreams
         streamStartedAt.removeValue(forKey: message.id)
         for delegate in liveMirrorDelegates {
             delegate.activeStreamManager(self, didEndStream: message)
@@ -1515,3 +1719,8 @@ final class ActiveStreamManager {
         }
     }
 }
+
+// The send path's chokepoint, as a seam. See `MessageStreamStarting` for why it is this narrow
+// and why a surface's hand-off is worth pinning. Both members already exist with the required
+// shapes, so this is a declaration of intent rather than an adapter.
+extension ActiveStreamManager: MessageStreamStarting {}

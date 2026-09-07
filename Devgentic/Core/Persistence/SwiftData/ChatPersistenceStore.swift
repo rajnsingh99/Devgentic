@@ -42,12 +42,24 @@ protocol ChatPersistenceProtocol: Sendable {
     /// up to 1000 rows, on the main actor, triggered by pressing ⌘F. The corpus never reads any
     /// of that. Defaulted so lightweight test conformers aren't forced to implement it.
     func fetchSearchDocuments(for conversationId: UUID, limit: Int) async -> [SearchDocument]
+
+    /// The `limit` most-recent NON-EMPTY conversations, newest first, for a recents menu.
+    ///
+    /// ⚠️ On the protocol rather than at the caller because QuickAccess used to reach through
+    /// `persistence.modelContainer?.mainContext` and run its own `FetchDescriptor` — the one use
+    /// that pinned it to the concrete `ChatPersistenceStore` and made the whole panel
+    /// untestable. Handing back rows instead of a container is the same shape as
+    /// `fetchUserMessagesWithAttachedTextFiles` and `fetchSearchDocuments`, and for the same
+    /// reason: a caller that needs data should be given data, not a database to query.
+    /// Defaulted so lightweight test conformers aren't forced to implement it.
+    func recentConversations(limit: Int) -> [(id: UUID, title: String)]
 }
 
 extension ChatPersistenceProtocol {
     func fetchMessage(withId id: UUID) async -> ChatMessage? { nil }
     func fetchUserMessagesWithAttachedTextFiles(for conversationId: UUID) async -> [ChatMessage] { [] }
     func fetchSearchDocuments(for conversationId: UUID, limit: Int) async -> [SearchDocument] { [] }
+    func recentConversations(limit: Int) -> [(id: UUID, title: String)] { [] }
 }
 
 // MARK: - SwiftData Chat Persistence Store
@@ -181,6 +193,45 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
             logger.error("[CodeViewer] Attachment-source fallback scan failed: \(error.localizedDescription)")
             return []
         }
+    }
+
+    /// [QA revival P2c] The N most-recent NON-empty conversations for the recents menu.
+    ///
+    /// Moved here from `QuickAccessSessionViewModel` (2026-09-07): the panel held a `FetchDescriptor`
+    /// against `modelContainer.mainContext`, which forced it to depend on this concrete class
+    /// rather than `ChatPersistenceProtocol`. A direct descriptor is still right — `@Query` cannot
+    /// run in the panel's `NSHostingView` (no `modelContext` in its environment) — it just belongs
+    /// on the store.
+    ///
+    /// `messages.isEmpty` is not reliable inside a `#Predicate`, so emptiness is filtered in Swift
+    /// and the fetch is bounded at `limit * 6` rather than scanning the table. That can
+    /// occasionally under-fill when the newest rows are mostly empty, which is acceptable for a
+    /// menu and is why the bound is a multiple rather than `limit`.
+    func recentConversations(limit: Int) -> [(id: UUID, title: String)] {
+        guard let context = modelContainer?.mainContext else {
+            // Silent-empty otherwise: the recents menu simply renders nothing and looks like a
+            // user with no history, which is indistinguishable from a store that never came up.
+            logger.error("[HISTORY] Recents menu requested before the SwiftData container was configured — returning 0 conversations. CONSEQUENCE: the QuickAccess recents list renders EMPTY and is indistinguishable from a genuinely empty history; the panel offers no way to reach an existing conversation until the container is up.")
+            return []
+        }
+        var descriptor = FetchDescriptor<ConversationSD>(sortBy: [SortDescriptor(\.timestamp, order: .reverse)])
+        descriptor.fetchLimit = limit * 6
+        let rows: [ConversationSD]
+        do {
+            rows = try context.fetch(descriptor)
+        } catch {
+            // The sibling arms of this method's guard chain log; this one used to swallow.
+            logger.error("[HISTORY] Recents menu fetch FAILED: \(error.localizedDescription). CONSEQUENCE: the QuickAccess recents list renders EMPTY and is indistinguishable from a genuinely empty history; the panel offers no way to reach an existing conversation this session.")
+            return []
+        }
+        // ⚠️ `ConversationSD.displayTitle` is the SIDEBAR extension: `userDefinedTitle` or the
+        // literal "New Conversation". It has no first-message fallback, unlike the `Conversation`
+        // struct's version reached via `toRowStruct()`, which derives a title from the first
+        // non-empty message. So an untitled conversation reads "New Conversation" here and its
+        // derived title everywhere else. Pre-existing (this expression moved here verbatim from
+        // QuickAccess); recorded rather than changed, because changing it changes what the menu
+        // shows and that is a product call.
+        return rows.lazy.filter { !$0.messages.isEmpty }.prefix(limit).map { (id: $0.id, title: $0.displayTitle) }
     }
 
     func fetchMessages(for conversationId: UUID, offset: Int, limit: Int) async -> [ChatMessage] {

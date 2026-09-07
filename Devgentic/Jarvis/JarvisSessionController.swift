@@ -4,9 +4,10 @@
 //
 //  [Jarvis MVP] The brain of the voice HUD: stage machine, wake-word listening loop,
 //  and the send pipeline. Sends ride the EXACT same path as a chat-interface send —
-//  the QuickAccess panel's blueprint (createUserMessage → persistence.addMessage →
+//  the QuickAccess panel's blueprint (voiceTurn → persistence.addMessage →
 //  ActiveStreamManager.startMessageStream with a per-call BackendRequestConfig) —
-//  so a Jarvis run is indistinguishable from a typed chat turn downstream.
+//  so a Jarvis run is indistinguishable from a typed chat turn downstream. (The first step read
+//  `createUserMessage` until 2026-09-06; Jarvis no longer reaches that method at all.)
 //
 //  Voice-loop design constraints (from WhisperRecognitionService's semantics):
 //  - `startStreaming` BLOCKS the calling task until the session ends; the await
@@ -269,6 +270,21 @@ final class JarvisSessionController {
     // MARK: Private state
 
     @ObservationIgnored private weak var mainVM: MainApplicationViewModel?
+
+    /// ⚠️ INJECTED, not `ChatPersistenceStore.shared`. Three call sites here reached the singleton
+    /// directly, which meant any test touching the dispatch wrote to the real SwiftData store —
+    /// so nothing did, and this surface shipped its send path with 269 tests around it and none
+    /// through it. Typed as the protocol, matching every comparable type in the app
+    /// (`ActiveStreamManager`, `ChatHistoryViewModel`, `MessagingCoordinator`,
+    /// `SchedulerCoordinator`, and now `QuickAccessSessionViewModel`).
+    ///
+    /// Defaulted to `.shared` so the one production construction site
+    /// (`JarvisPanelController.swift:128`) is unchanged.
+    @ObservationIgnored private let persistence: ChatPersistenceProtocol
+
+    init(persistence: ChatPersistenceProtocol = ChatPersistenceStore.shared) {
+        self.persistence = persistence
+    }
     @ObservationIgnored private let backendConfiguration = BackendConfiguration()
     @ObservationIgnored private let voice = JarvisVoiceOutput()
     /// Narrates the assistant's answer as it streams (Phase 1).
@@ -350,7 +366,22 @@ final class JarvisSessionController {
     @ObservationIgnored private var pendingVoiceCommand: JarvisVoiceCommand?
 
     @ObservationIgnored private var jarvisConversationID: UUID?
-    @ObservationIgnored private var transcript: [ChatMessage] = []   // oldest-first
+    /// How many voice turns this session has sent, for the two log lines that report what a
+    /// profile switch or a "new conversation" command discards.
+    ///
+    /// ⚠️ WAS `transcript: [ChatMessage]`, holding every user and agent message of the session.
+    /// Its only real consumer was `history: transcript` on the `startMessageStream` call; once
+    /// history became DERIVED (2026-09-06) nothing read the elements — only `.count`, twice — so
+    /// the array was retaining full agent messages, streamed content and timeline events included,
+    /// to produce an Int. An `Int` carries that signal, and the signal is worth keeping: it is
+    /// what distinguishes "this voice session has said nothing" from "its turns went somewhere
+    /// else".
+    ///
+    /// ⚠️ THE NUMBER CHANGED, and older logs are not comparable. The array was appended twice per
+    /// turn — once for the user's message and once for the agent's, both inside `execute(_:)` —
+    /// so `transcript.count` was about DOUBLE the turn count those lines have always claimed to
+    /// report. This counts turns, once, at the user's message.
+    @ObservationIgnored private var spokenTurnCount: Int = 0
     @ObservationIgnored private var streamingMessageID: UUID?
     /// Dead-mic sessions in a row (see audioSettleDelay).
     @ObservationIgnored private var consecutiveDeadSessions = 0
@@ -484,12 +515,12 @@ final class JarvisSessionController {
         if let convID = jarvisConversationID {
             Task { await ExecutionSuspensionService.shared.cancel(for: convID) }
         }
-        logger.info("[JARVIS_SESSION]\(self.tag) Profile switch — discarding \(self.transcript.count) turn(s) and starting a new conversation. CONSEQUENCE: the new profile starts with empty history and any autonomous grant on the old conversation is revoked.")
+        logger.info("[JARVIS_SESSION]\(self.tag) Profile switch — discarding \(self.spokenTurnCount) turn(s) and starting a new conversation. CONSEQUENCE: the new profile starts with empty history and any autonomous grant on the old conversation is revoked.")
         if let convID = jarvisConversationID {
             Task { await SessionToolApprovals.shared.setAutonomous(false, conversationID: convID) }
         }
         announcedInteractionID = nil
-        transcript.removeAll()
+        spokenTurnCount = 0
         jarvisConversationID = nil
         currentAgentMessage = nil
         loadProfiles()
@@ -1716,10 +1747,18 @@ final class JarvisSessionController {
 
     /// Appended to the query the MODEL sees when the answer will be read aloud.
     ///
-    /// ⚠️ Only the `userQuery` argument is decorated. `createUserMessage` still persists the clean
+    /// ⚠️ ONLY THE MODEL'S COPY IS DECORATED. The hint travels as `promptOverride`, declared at
+    /// `startMessageStream`; the message `voiceTurn` builds and persists carries the clean
     /// command, so the chat window, the sidebar and the conversation history all show exactly what
     /// the user said. Without this the model answers in markdown with bullet lists and fenced
     /// code — the right shape for a screen and the wrong shape for a voice.
+    ///
+    /// ⚠️ This said "only the `userQuery` argument is decorated. `createUserMessage` still
+    /// persists the clean command" — the shape before 2026-09-06, when the divergence was an
+    /// UNDECLARED mismatch between `userQuery` and the row in `history`. That mismatch is exactly
+    /// what defeated the duplicate-query strip (it compared TEXT) and made every voice turn reach
+    /// the model as an orphan marked "Agent never responded to this query". Decorating anything
+    /// other than the override — the persisted row above all — brings that back.
     /// ⚠️ THE LENGTH REQUEST MOVES WITH THE SETTING. A sentence cap can only TRUNCATE; it cannot
     /// make the model concise. "Just the gist" implemented as a smaller cap over the same
     /// six-sentence request would end every turn in "there's more in the chat window" — the exact
@@ -1746,6 +1785,45 @@ final class JarvisSessionController {
     /// The query as the model should see it. Pure.
     static func decoratedQuery(for command: String, mode: JarvisSpokenResponses) -> String {
         mode.speaksAnswer ? command + spokenStyleHint(for: mode) : command
+    }
+
+    /// The two halves of a voice turn: the message that is PERSISTED and DISPLAYED, and the
+    /// model-facing text when it must differ from it.
+    ///
+    /// ⚠️ THE ID IS THE CONTRACT. The chat window shows the clean spoken command; the model gets
+    /// the command plus a spoken-style hint. Those are two different STRINGS that must remain ONE
+    /// message — `BackendOrchestrationService` strips the current question out of history by ID,
+    /// and if the persisted row and the row handed to the send path were ever different objects
+    /// the strip would miss, the question would survive into the blob, and `pairTurns` would emit
+    /// it as an orphan marked "Agent never responded to this query". That is exactly the defect
+    /// every voice turn shipped with while the strip compared TEXT.
+    ///
+    /// `promptOverride` is nil when the decoration is a no-op (`.preferSilent`), so a divergence
+    /// exists in the type only when it exists in fact.
+    ///
+    /// `static` + internal so the contract is testable without a `MainApplicationViewModel` —
+    /// constructing one runs `ChatOpsCoordinator.bootstrap()`, which opens real Telegram/Discord/
+    /// Slack connections when the developer has them enabled. Same reason
+    /// `SchedulerCoordinator.prepareScheduledRequest` and `MessagingCoordinator.deliverCheckpoint`
+    /// are extracted. Pinned by `JarvisDispatchTests`.
+    ///
+    /// - Parameter fileProcessorService: only reached for attachments, and a voice turn never has
+    ///   any (`files: []`) — required by the shared factory, unused on this path.
+    static func voiceTurn(
+        command: String,
+        conversationID: UUID,
+        mode: JarvisSpokenResponses,
+        fileProcessorService: FileProcessorService
+    ) async -> (userMessage: ChatMessage, promptOverride: String?) {
+        let userMessage = await MessagingCoordinator.makeUserMessage(
+            conversationID: conversationID,
+            query: command,
+            files: [],
+            fileProcessorService: fileProcessorService
+        )
+        userMessage.messageSource = .jarvis   // attribute voice traffic — set BEFORE persisting
+        let decorated = decoratedQuery(for: command, mode: mode)
+        return (userMessage, decorated == command ? nil : decorated)
     }
 
     /// Words in `text`, whitespace-separated. Pure.
@@ -1994,7 +2072,7 @@ final class JarvisSessionController {
         Task { await SessionToolApprovals.shared.setAutonomous(approvals.isAutonomous, conversationID: convID) }
         observeInteractions()
         // Bind the profile so restart-resume, ChatOps, and the sidebar all resolve it.
-        ChatPersistenceStore.shared.updateBackendForConversation(
+        persistence.updateBackendForConversation(
             id: convID, backendType: nil, backendEntityId: config.profile.id
         )
 
@@ -2008,12 +2086,18 @@ final class JarvisSessionController {
             userInfo: ["conversationID": convID.uuidString]
         )
 
-        let userMessage = await mainVM.messagingCoordinator.createUserMessage(
-            conversationID: convID, query: command, files: []
+        // Both halves built together so the persisted row and the model's copy cannot drift
+        // apart — see `voiceTurn`. A voice turn carries no attachments, so the factory's
+        // file-processing dependency is never exercised here.
+        let turn = await Self.voiceTurn(
+            command: command,
+            conversationID: convID,
+            mode: JarvisConfigManager.shared.spokenResponses,
+            fileProcessorService: FileProcessorService()
         )
-        userMessage.messageSource = .jarvis   // [Jarvis] attribute voice traffic — set BEFORE persisting
-        await ChatPersistenceStore.shared.addMessage(userMessage, toConversation: convID)
-        transcript.append(userMessage)
+        let userMessage = turn.userMessage
+        await persistence.addMessage(userMessage, toConversation: convID)
+        spokenTurnCount += 1
         guard !dismissed else { return }
 
         // Identity guard for the completion closure: onComplete fires on EVERY
@@ -2033,14 +2117,14 @@ final class JarvisSessionController {
         )
         let agentMessage = mainVM.activeStreamManager.startMessageStream(
             withConfig: config,
-            conversationID: convID,
+            userMessage: userMessage,
             // ⚠️ The MODEL sees a decorated query; the persisted user message above is the clean
-            // command, so the chat window shows exactly what was said.
-            userQuery: Self.decoratedQuery(
-                for: command,
-                mode: JarvisConfigManager.shared.spokenResponses
-            ),
-            history: transcript,
+            // command, so the chat window shows exactly what was said. `promptOverride` DECLARES
+            // that divergence — it used to be an undeclared mismatch between `userQuery` and the
+            // message in `history`, which is precisely what defeated
+            // `BackendOrchestrationService`'s duplicate-query strip (it compared TEXT) and made
+            // every voice turn arrive as an orphan marked "Agent never responded to this query".
+            promptOverride: turn.promptOverride,
             files: [],
             workflowExecutionState: workflowTicket?.state,
             onComplete: { [weak self] in
@@ -2065,7 +2149,6 @@ final class JarvisSessionController {
         // Both speech paths, or half the spoken lines in a session are unattributable.
         voice.correlationTag = tag
         speaker.begin(for: agentMessage)
-        transcript.append(agentMessage)
     }
 
     private func handleRunFinished() {
@@ -2280,7 +2363,7 @@ final class JarvisSessionController {
         case .tellMeMore:
             speakRemainderOfLastAnswer()
         case .newConversation:
-            logger.info("[JARVIS_SESSION]\(self.tag) Voice command: new conversation — discarding \(self.transcript.count) turn(s).")
+            logger.info("[JARVIS_SESSION]\(self.tag) Voice command: new conversation — discarding \(self.spokenTurnCount) turn(s).")
             speaker.cancel()
             if let convID = jarvisConversationID {
                 Task {
@@ -2289,7 +2372,7 @@ final class JarvisSessionController {
                 }
             }
             announcedInteractionID = nil
-            transcript.removeAll()
+            spokenTurnCount = 0
             jarvisConversationID = nil
             currentAgentMessage = nil
             setStage(.announcing, "perform")
@@ -2339,7 +2422,7 @@ final class JarvisSessionController {
             userDefinedTitle: title,
             backendEntityId: profileID
         )
-        ChatPersistenceStore.shared.addConversation(from: conversation)
+        persistence.addConversation(from: conversation)
         jarvisConversationID = conversation.id
         return conversation.id
     }
@@ -2562,8 +2645,10 @@ final class JarvisSessionController {
         // collisions out of the approve list for the same reason.
         if JarvisApprovalPolicy.isDenial(spoken, keywords: keywords.deny) || Self.isCancelPhrase(spoken) {
             disarmVoiceApproval(reason: "spoken denial")
-            logger.notice("[JARVIS_HITL]\(self.tag) Voice DENIED op \(operationID.uuidString.prefix(8)). CONSEQUENCE: the tool does not run and the agent is told the user refused.")
-            mainVM?.submitToolApproval(operationID: operationID, approved: false)
+            submitHITL("Voice DENIED", operationID: operationID,
+                       consequence: "the tool does not run and the agent is told the user refused.") {
+                $0.submitToolApproval(operationID: operationID, approved: false)
+            }
             setStage(.executing, "voice approval denied")
             return
         }
@@ -2580,8 +2665,10 @@ final class JarvisSessionController {
         ) {
         case .denyAll, .deny:
             disarmVoiceApproval(reason: "spoken denial")
-            logger.notice("[JARVIS_HITL]\(self.tag) Voice DENIED op \(operationID.uuidString.prefix(8)) by a targeted phrase. CONSEQUENCE: the tool does not run and the agent is told the user refused.")
-            mainVM?.submitToolApproval(operationID: operationID, approved: false)
+            submitHITL("Voice DENIED by a targeted phrase", operationID: operationID,
+                       consequence: "the tool does not run and the agent is told the user refused.") {
+                $0.submitToolApproval(operationID: operationID, approved: false)
+            }
             setStage(.executing, "voice approval denied")
             return
 
@@ -2642,8 +2729,10 @@ final class JarvisSessionController {
     /// harm this whole channel is shaped to avoid.
     private func approveByVoice(operationID: UUID) {
         disarmVoiceApproval(reason: "approved by voice")
-        logger.notice("[JARVIS_HITL]\(self.tag) Voice APPROVED op \(operationID.uuidString.prefix(8)) — one-shot, no durable grant. CONSEQUENCE: this single call runs; the next request for the same tool asks again.")
-        mainVM?.submitToolApproval(operationID: operationID, approved: true)
+        submitHITL("Voice APPROVED — one-shot, no durable grant", operationID: operationID,
+                   consequence: "this single call runs; the next request for the same tool asks again.") {
+            $0.submitToolApproval(operationID: operationID, approved: true)
+        }
         playEarcon(.captured)
         setStage(.executing, "voice approval granted")
     }
@@ -2703,21 +2792,50 @@ final class JarvisSessionController {
     // no record of WHICH SURFACE answered — so a log could not tell an orb click from a
     // main-window click from a spoken approval, which is the first question about any approval.
 
+    /// Routes a HITL decision to the view model, or reports that it went NOWHERE.
+    ///
+    /// ⚠️ THE LINES ABOVE EACH CALL SITE ALREADY STATED AN OUTCOME — "the tool runs once", "the run
+    /// resumes with this text in context" — and were emitted BEFORE a bare `mainVM?.submitX(…)`
+    /// with no else branch. When that weak reference is nil the submission never happens, so the
+    /// log did not merely go quiet: it asserted a result that did not occur. A log that lies is
+    /// worse than one that is missing, because it ends the investigation.
+    ///
+    /// Every decision now routes through here, so the claim is only made once the submission is
+    /// actually going out, and a new decision kind cannot reintroduce the silent path.
+    private func submitHITL(_ decision: String, operationID: UUID, consequence: String,
+                            _ submit: (MainApplicationViewModel) -> Void) {
+        guard let mainVM else {
+            logger.error("[JARVIS_HITL]\(self.tag) \(decision) for op \(operationID.uuidString.prefix(8)) went NOWHERE — the controller outlived its MainApplicationViewModel. CONSEQUENCE: the user's decision was DISCARDED, the run stays parked forever waiting on an answer that will never arrive, and the orb keeps presenting it as answerable. conversationID: \(self.jarvisConversationID?.uuidString.prefix(8) ?? "none")")
+            return
+        }
+        logger.notice("[JARVIS_HITL]\(self.tag) \(decision) op \(operationID.uuidString.prefix(8)). CONSEQUENCE: \(consequence)")
+        submit(mainVM)
+    }
+
     func approveTool(_ pending: PendingHITL) {
-        logger.notice("[JARVIS_HITL]\(self.tag) APPROVED op \(pending.id.uuidString.prefix(8)) from the orb\(pending.kind.toolName.map { " (tool \($0))" } ?? ""). CONSEQUENCE: the tool runs once; this is a one-shot resolution and grants nothing durable.")
-        mainVM?.submitToolApproval(operationID: pending.id, approved: true)
+        submitHITL("APPROVED from the orb\(pending.kind.toolName.map { " (tool \($0))" } ?? "")",
+                   operationID: pending.id,
+                   consequence: "the tool runs once; this is a one-shot resolution and grants nothing durable.") {
+            $0.submitToolApproval(operationID: pending.id, approved: true)
+        }
     }
 
     func denyTool(_ pending: PendingHITL) {
-        logger.notice("[JARVIS_HITL]\(self.tag) DENIED op \(pending.id.uuidString.prefix(8)) from the orb\(pending.kind.toolName.map { " (tool \($0))" } ?? ""). CONSEQUENCE: the tool does not run and the agent is told the user refused.")
-        mainVM?.submitToolApproval(operationID: pending.id, approved: false)
+        submitHITL("DENIED from the orb\(pending.kind.toolName.map { " (tool \($0))" } ?? "")",
+                   operationID: pending.id,
+                   consequence: "the tool does not run and the agent is told the user refused.") {
+            $0.submitToolApproval(operationID: pending.id, approved: false)
+        }
     }
 
     func submitClarification(_ pending: PendingHITL, text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         // ⚠️ Length only — the answer is free text the user typed and re-enters the agent's context.
-        logger.notice("[JARVIS_HITL]\(self.tag) Answered clarification op \(pending.id.uuidString.prefix(8)) from the orb with \(trimmed.count) character(s)\(trimmed.isEmpty ? " (empty — treated as no answer)" : ""). CONSEQUENCE: the run resumes with this text in context.")
-        mainVM?.submitClarificationResponse(operationID: pending.id, response: trimmed.isEmpty ? nil : trimmed)
+        submitHITL("Answered clarification from the orb with \(trimmed.count) character(s)\(trimmed.isEmpty ? " (empty — treated as no answer)" : "")",
+                   operationID: pending.id,
+                   consequence: "the run resumes with this text in context.") {
+            $0.submitClarificationResponse(operationID: pending.id, response: trimmed.isEmpty ? nil : trimmed)
+        }
     }
 
     func resolvePlan(_ pending: PendingHITL, approved: Bool) {
@@ -2728,12 +2846,18 @@ final class JarvisSessionController {
             logger.error("[JARVIS_HITL]\(self.tag) Plan decision for op \(pending.id.uuidString.prefix(8)) IGNORED — the pending item is now a \(Self.kindName(of: pending.kind)), not a plan review. CONSEQUENCE: the click did nothing and the run stays parked; the request on screen has changed underneath the user.")
             return
         }
-        logger.notice("[JARVIS_HITL]\(self.tag) Plan \(approved ? "APPROVED" : "REJECTED") for op \(pending.id.uuidString.prefix(8)) from the orb (\(plan.subtasks.count) subtask(s)). CONSEQUENCE: \(approved ? "the run proceeds with this plan" : "the run is told the plan was rejected").")
-        mainVM?.submitPlanReview(operationID: pending.id, editedPlan: approved ? plan.subtasks : nil)
+        submitHITL("Plan \(approved ? "APPROVED" : "REJECTED") from the orb (\(plan.subtasks.count) subtask(s))",
+                   operationID: pending.id,
+                   consequence: approved ? "the run proceeds with this plan." : "the run is told the plan was rejected.") {
+            $0.submitPlanReview(operationID: pending.id, editedPlan: approved ? plan.subtasks : nil)
+        }
     }
 
     func chooseGate(_ pending: PendingHITL, option: String) {
-        logger.notice("[JARVIS_HITL]\(self.tag) Gate op \(pending.id.uuidString.prefix(8)) answered from the orb. CONSEQUENCE: the workflow continues down the chosen output port.")
-        mainVM?.submitGateChoice(operationID: pending.id, option: option)
+        submitHITL("Gate answered from the orb (option '\(option)')",
+                   operationID: pending.id,
+                   consequence: "the workflow continues down the chosen output port.") {
+            $0.submitGateChoice(operationID: pending.id, option: option)
+        }
     }
 }

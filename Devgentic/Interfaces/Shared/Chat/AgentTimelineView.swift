@@ -1263,10 +1263,18 @@ struct ActionDetailView: View {
     /// A nil `origin` outside a load still delivers: the viewer's owner has not moved, so there is
     /// nothing to be wrong about.
     ///
-    /// Deliberately conservative — a same-conversation reload in flight drops too, because the
-    /// chat view model publishes no destination identity to tell the two apart (its
-    /// `destinationConversationID` is private). Re-clicking costs the user one click; the other
-    /// error destroys the incoming conversation's tabs and unsaved drafts.
+    /// Deliberately conservative — a same-conversation reload in flight drops too. Re-clicking
+    /// costs the user one click; the other error destroys the incoming conversation's tabs and
+    /// unsaved drafts.
+    ///
+    /// ⚠️ The stated REASON was "the chat view model publishes no destination identity to tell the
+    /// two apart (its `destinationConversationID` is private)". That was true until 2026-09-06,
+    /// when the property was made internal for `ConversationSyncService`; it would now distinguish
+    /// the two cases (on a same-conversation reload the destination IS the origin). The
+    /// conservatism is therefore a CHOICE from here on, not a constraint — and a cheap one, since
+    /// `loadConversation` skips `resetCodeViewer()` on a same-conversation reload, so there is no
+    /// emptied viewer to plant into. Anyone tightening this must change the CALL SITE too, which
+    /// still passes the positional `currentChatMessages.first?.conversationId` as `current`.
     ///
     /// `nonisolated static` and pure so the rule is unit-testable; the `Task`/read plumbing is not.
     nonisolated static func shouldDeliverOpen(origin: UUID?, current: UUID?, isLoadInFlight: Bool) -> Bool {

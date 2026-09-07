@@ -175,4 +175,81 @@ final class GaugeHistorySourceTests: XCTestCase {
         XCTAssertFalse(small.capHit)
     }
 
+
+    // MARK: - Agreement is not just "same resolver" (2026-09-06)
+
+    /// ⚠️ THE AGREEMENT, restated after the request path began OMITTING in-flight turns.
+    ///
+    /// Sharing `BackendHistoryResolver` was necessary but not sufficient. Once
+    /// `ActiveStreamManager.deriveHistory` started dropping turns that are still being written,
+    /// a gauge that still counted them would size a payload that will never ship — the ring would
+    /// climb while a concurrent scheduled or ChatOps run streamed, for context the model never
+    /// receives. Both consumers must apply the SAME omission, from the same object.
+    func testTheGaugeOmitsExactlyWhatTheRequestOmits() {
+        let myQuestion = UUID(), myReply = UUID()
+        let theirQuestion = UUID(), theirReply = UUID()
+        let liveRuns = [myReply: myQuestion, theirReply: theirQuestion]
+
+        // The request keeps the question it is asking; the gauge has no question yet.
+        let requestOmits = ActiveStreamManager.incompleteTurnIDs(liveRuns: liveRuns, keeping: myQuestion)
+        let gaugeOmits = ActiveStreamManager.incompleteTurnIDs(liveRuns: liveRuns, keeping: nil)
+
+        XCTAssertEqual(gaugeOmits, requestOmits.union([myQuestion]),
+                       "they differ by exactly one message — the one the request is about to send, "
+                       + "which does not exist yet when the gauge runs")
+        XCTAssertTrue(requestOmits.isSubset(of: gaugeOmits),
+                      "the gauge never counts something the request would omit")
+        for id in [myReply, theirReply, theirQuestion] {
+            XCTAssertTrue(gaugeOmits.contains(id), "every unfinished-turn row is omitted by both")
+        }
+    }
+
+    /// With nothing in flight — the ordinary case — the two are identical and the omission costs
+    /// nothing. If this ever fails, the gauge has started subtracting something on its own.
+    func testWithNothingInFlightTheGaugeAndRequestOmitNothing() {
+        XCTAssertTrue(ActiveStreamManager.incompleteTurnIDs(liveRuns: [:], keeping: nil).isEmpty)
+        XCTAssertTrue(ActiveStreamManager.incompleteTurnIDs(liveRuns: [:], keeping: UUID()).isEmpty)
+    }
+
+    /// ⚠️ WIRING. The two properties above are worth nothing if either consumer stops asking.
+    /// Source-scanned in the `ToolRegistryDriftTests` idiom, because this is precisely the kind of
+    /// agreement that decays silently — the gauge drifted from the request once already, which is
+    /// why this file exists.
+    func testBothConsumersAskTheSameObjectForTheOmission() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        guard FileManager.default.fileExists(atPath: repoRoot.appendingPathComponent("Devgentic").path) else {
+            throw XCTSkip("sources not reachable — running outside a checkout")
+        }
+        func code(_ path: String) throws -> [String] {
+            try String(contentsOf: repoRoot.appendingPathComponent(path), encoding: .utf8)
+                .components(separatedBy: "\n")
+                .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+        }
+
+        let request = try code("Devgentic/Core/Utils/ActiveStreamManager.swift")
+        XCTAssertTrue(request.contains { $0.contains("omitting: self.incompleteTurnIDs(keeping: userMessage.id)") },
+                      "the REQUEST path must omit in-flight turns, keeping its own question")
+
+        // ⚠️ THE GAUGE ASKS THE SAME OBJECT, FOR A DIFFERENT SET — and that is deliberate.
+        // It used to call `incompleteTurnIDs()` (turn-level, `keeping: nil`), which subtracted
+        // the just-sent QUESTION as well as the live reply. The ring therefore FELL at the moment
+        // of send — the question was removed from the size of a request that had just included
+        // it — and jumped back when streaming ended. The question is a settled, persisted row the
+        // next request certainly carries; only the half-written REPLY should be omitted.
+        let gauge = try code("Devgentic/Interfaces/Shared/Chat/ChatHistoryViewModel.swift")
+        XCTAssertTrue(gauge.contains { $0.contains("activeStreamManager.liveReplyIDs()") },
+                      "the GAUGE must omit the live REPLY — sharing the resolver is not enough "
+                      + "once the request omits rows the resolver returns")
+        XCTAssertFalse(gauge.contains { $0.contains("activeStreamManager.incompleteTurnIDs()") },
+                       "…and must NOT use the request path's turn-level set: that subtracts the "
+                       + "just-sent question and makes the ring drop on send")
+
+        // Both sets still come off the SAME live-run state, which is the property that keeps the
+        // two consumers from drifting apart the way they did before either omitted anything.
+        XCTAssertTrue(request.contains { $0.contains("Set(liveRunQuestionIDs.keys)") },
+                      "liveReplyIDs must be derived from the same liveRunQuestionIDs the request "
+                      + "path uses — a second, separately-maintained source is the divergence")
+    }
 }

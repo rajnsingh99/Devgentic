@@ -769,9 +769,18 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     /// Tagged at creation time by ActiveStreamManager — eliminates runtime profile store lookups.
     var profileType: ProfileType?
 
-    /// Where this message originated from (local Mac UI, Telegram, Discord, etc.).
-    /// Transient — not persisted to CoreData. Used by RemoteMirrorService to decide
-    /// whether to mirror stream events to a remote transport.
+    /// Where this message originated from (local Mac UI, Telegram, Discord, Jarvis, QuickAccess,
+    /// a scheduled task).
+    ///
+    /// ⚠️ TRANSIENT — no column, and `ChatMessageSD.toChatMessage()` does not restore it, so every
+    /// reloaded row reads `.localUI` whatever it was sent as. Anything that needs durable
+    /// attribution needs a different mechanism; do not add a claim here that survives a relaunch.
+    ///
+    /// ⚠️ This said "Used by RemoteMirrorService to decide whether to mirror stream events to a
+    /// remote transport". `RemoteMirrorService` contains no reference to it (checked 2026-09-07).
+    /// The live readers are two log interpolations in `ActiveStreamManager` (`[HISTORY]` and
+    /// `[STREAM_START]`, naming the surface that started a run) and `JarvisAmbientRunWatcher`,
+    /// which reads it off the AGENT message to decide whether to announce a finished run.
     var messageSource: MessageSource = .localUI
     
     var content: MessageContent

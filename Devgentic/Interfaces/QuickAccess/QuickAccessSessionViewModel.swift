@@ -34,8 +34,28 @@ final class QuickAccessSessionViewModel {
     // MARK: - Injected graph (all reached through the one shared MainApplicationViewModel)
 
     @ObservationIgnored private weak var mainAppViewModel: MainApplicationViewModel?
-    @ObservationIgnored private let activeStreamManager: ActiveStreamManager
-    @ObservationIgnored private let persistence: ChatPersistenceStore
+
+    /// ⚠️ The SEAM, not the concrete manager. The panel starts a run and cancels the one it
+    /// started — exactly the two members of `MessageStreamStarting` — so it depends on that and
+    /// nothing wider.
+    ///
+    /// ⚠️ WHAT THAT BUYS HERE, precisely: a COMPILE-TIME narrowing. It does not, on this surface,
+    /// let a test observe the hand-off — the init below takes a `MainApplicationViewModel` and
+    /// reads the manager off it, deliberately (see the note there), so no double can be
+    /// substituted. `SchedulerCoordinator` gets both benefits because its manager is injected;
+    /// this one gets the narrowing only, until `mainAppViewModel` itself is narrowed. An earlier
+    /// version of this comment claimed the observability benefit and was contradicted 90 lines
+    /// below by the init that makes it impossible.
+    @ObservationIgnored private let activeStreamManager: any MessageStreamStarting
+
+    /// ⚠️ The PROTOCOL, not `ChatPersistenceStore`. Every comparable type already takes it
+    /// (`ActiveStreamManager`, `ChatHistoryViewModel`, `ConversationSwitchCoordinator`,
+    /// `MessagingCoordinator`, `SchedulerCoordinator`); the panel was the last holdout, and a
+    /// parameter typed as the concrete class accepts only the real SwiftData store — so any test
+    /// that constructed this view model wrote to a real container. The one use that pinned it,
+    /// a `FetchDescriptor` over `modelContainer.mainContext`, now lives on the store itself as
+    /// `recentConversations(limit:)`.
+    @ObservationIgnored private let persistence: ChatPersistenceProtocol
     @ObservationIgnored private let logger = DGLogger(category: "QuickAccessSessionViewModel")
 
     // MARK: - Session state
@@ -58,9 +78,17 @@ final class QuickAccessSessionViewModel {
     private(set) var isPreparingSend = false
     var isSending: Bool { streamingMessageID != nil || isPreparingSend }
 
-    /// [C3] The in-flight transcript load (prepareSession / openConversation). send() awaits
-    /// this before assembling history, so a fast first send never races a half-loaded transcript
-    /// (which would ship empty history and make the model forget a resumed conversation).
+    /// [C3] The in-flight transcript load (prepareSession / openConversation). `send()` awaits it
+    /// before building its turn.
+    ///
+    /// ⚠️ NOT for history any more. This said the await stops a fast first send from "shipping
+    /// empty history"; the panel no longer assembles history at all — `ActiveStreamManager`
+    /// derives it from the STORE, so a half-loaded transcript cannot shrink what the model sees.
+    /// The await is still load-bearing for two other reasons, both verified: `openConversation`
+    /// sets `conversationID` inside this task, so a send that overtook it would file the turn
+    /// against a conversation the panel has not adopted; and the load assigns
+    /// `currentChatMessages`, so one landing after the panel inserts its user row would wipe that
+    /// row out of the visible transcript.
     @ObservationIgnored private var loadTask: Task<Void, Never>?
 
     /// [C10] Observes external SwiftData writes so the panel transcript refreshes when another
@@ -79,9 +107,53 @@ final class QuickAccessSessionViewModel {
     /// `.imageGen` (image-output UX). This is why the panel never "runs a workflow".
     static let allowedProfileTypes: Set<ProfileType> = [.bot, .agent]
 
+    /// The panel's user turn: the message that is persisted, displayed AND handed to the send
+    /// path — one object, so they cannot diverge.
+    ///
+    /// ⚠️ The panel sends NO `promptOverride`. Unlike Jarvis it does not decorate the query, so
+    /// the model's text and the displayed text are the same string — and the duplicate-query strip
+    /// keys on this message's ID either way. The absence is the contract: if a future change ever
+    /// gives the panel its own prompt decoration, it must travel as `promptOverride` rather than by
+    /// mutating this message, or the displayed row and the model's copy drift apart. That drift is
+    /// exactly what made every Jarvis voice turn arrive as an orphan.
+    ///
+    /// ⚠️ It also builds NO HISTORY. The panel used to hand over a reversed slice of
+    /// `currentChatMessages` — its PAGINATION WINDOW, a hard 20 rows that never grew because
+    /// QuickAccess never calls `loadMoreMessages` — as model history. `ActiveStreamManager` derives
+    /// history now, so the panel and the main window are given the same conversation.
+    ///
+    /// `static` + internal so the contract is testable without a `MainApplicationViewModel`
+    /// (constructing one runs `ChatOpsCoordinator.bootstrap()`, which opens real Telegram/Discord/
+    /// Slack connections). ⚠️ The store is no longer a blocker — `persistence` was widened to
+    /// `ChatPersistenceProtocol` on 2026-09-07 — but the view model is, so the contract still lives
+    /// here rather than being driven through `submitQuery`. Pinned by `QuickAccessDispatchTests`.
+    static func panelTurn(
+        query: String,
+        conversationID: UUID,
+        files: [FileSystemItem],
+        fileProcessorService: FileProcessorService
+    ) async -> ChatMessage {
+        let userMessage = await MessagingCoordinator.makeUserMessage(
+            conversationID: conversationID,
+            query: query,
+            files: files,
+            fileProcessorService: fileProcessorService
+        )
+        userMessage.messageSource = .quickAccess   // [Q2] attribute panel traffic
+        return userMessage
+    }
+
     init(mainAppViewModel: MainApplicationViewModel,
-         persistence: ChatPersistenceStore = .shared) {
+         persistence: ChatPersistenceProtocol = ChatPersistenceStore.shared) {
         self.mainAppViewModel = mainAppViewModel
+        // ⚠️ NOT injectable, deliberately — an `activeStreamManager:` parameter was added here on
+        // 2026-09-07 and removed the same day. It would have produced a CHIMERA: the panel's
+        // send/stop would reach the injected spy while `chatHistoryViewModel` below kept the real
+        // manager, because `ChatHistoryViewModel.init` requires the CONCRETE type (it needs
+        // `activeStreams` and `incompleteTurnIDs`, neither of which is on `MessageStreamStarting`
+        // — that protocol is scoped to owning ONE run). A spy would report a stream the panel's
+        // own transcript never reflects. Injecting it needs `ChatHistoryViewModel` widened first;
+        // until then this object holds exactly one manager.
         self.activeStreamManager = mainAppViewModel.activeStreamManager
         self.persistence = persistence
         self.chatHistoryViewModel = ChatHistoryViewModel(
@@ -226,18 +298,13 @@ final class QuickAccessSessionViewModel {
     }
 
     /// [QA revival P2c] The N most-recent NON-empty conversations for the recents menu.
-    /// Direct FetchDescriptor because @Query can't run in the panel's NSHostingView (no
-    /// modelContext in its environment). `messages.isEmpty` isn't reliable in a #Predicate, so
-    /// filter in Swift.
+    ///
+    /// The `FetchDescriptor` that used to live here moved onto `ChatPersistenceProtocol`
+    /// (2026-09-07) — it was the single use that forced this type to depend on the concrete
+    /// `ChatPersistenceStore`, and with it gone the panel can be built against a test double.
+    /// The bound and the Swift-side emptiness filter are documented at the implementation.
     func recentConversations(limit: Int = 5) -> [(id: UUID, title: String)] {
-        guard let context = persistence.modelContainer?.mainContext else { return [] }
-        var descriptor = FetchDescriptor<ConversationSD>(sortBy: [SortDescriptor(\.timestamp, order: .reverse)])
-        // [Q5] Bound the fetch. We skip empty conversations in Swift (messages.isEmpty isn't
-        // reliable in a #Predicate), so pull a small multiple of `limit` rather than the whole
-        // table — may occasionally under-fill if the newest rows are mostly empty, fine for a menu.
-        descriptor.fetchLimit = limit * 6
-        let rows = (try? context.fetch(descriptor)) ?? []
-        return rows.lazy.filter { !$0.messages.isEmpty }.prefix(limit).map { (id: $0.id, title: $0.displayTitle) }
+        persistence.recentConversations(limit: limit)
     }
 
     /// [C10] Coalesced reload after external SwiftData writes. Only when the panel is IDLE
@@ -298,7 +365,7 @@ final class QuickAccessSessionViewModel {
         }
 
         // [M5] Reserve the in-flight slot SYNCHRONOUSLY, before the awaits below. A second submit
-        // arriving during loadTask/createUserMessage/addMessage now sees isPreparingSend and is
+        // arriving during loadTask / panelTurn / addMessage now sees isPreparingSend and is
         // rejected (.rejectedBusy) instead of starting a duplicate stream.
         isPreparingSend = true
 
@@ -307,9 +374,9 @@ final class QuickAccessSessionViewModel {
             // over by then, so isSending stays continuously true) or if we bail early.
             defer { isPreparingSend = false }
 
-            // [C3] Wait for any in-flight resume/open load to finish so history is assembled
-            // against the FULL transcript — otherwise a fast first send on a resumed conversation
-            // ships only the new message and the model answers with no memory of prior turns.
+            // [C3] Wait for any in-flight resume/open load to finish — for conversation IDENTITY
+            // and for the visible transcript, NOT for history (which is derived from the store;
+            // see the `loadTask` property comment).
             await loadTask?.value
 
             let title = query.isEmpty ? (files.first?.name ?? String(localized: "Attachment")) : query
@@ -318,18 +385,24 @@ final class QuickAccessSessionViewModel {
             persistence.updateBackendForConversation(id: convID, backendType: nil, backendEntityId: config.profile.id)
 
             // Factory does the same text/image attachment classification as the main send path.
-            let userMessage = await mainVM.messagingCoordinator.createUserMessage(
-                conversationID: convID, query: query, files: files
+            // Built through `panelTurn` so the persisted row and the row handed to the send path
+            // are one object — see that function for why the absence of a `promptOverride` and the
+            // absence of a history slice are both part of the contract.
+            let userMessage = await Self.panelTurn(
+                query: query,
+                conversationID: convID,
+                files: files,
+                fileProcessorService: mainVM.messagingCoordinator.fileProcessor
             )
-            userMessage.messageSource = .quickAccess // [Q2] attribute panel traffic
             await persistence.addMessage(userMessage, toConversation: convID)
             chatHistoryViewModel.currentChatMessages.insert(userMessage, at: 0)
 
-            // startMessageStream wants chronological (oldest→newest); currentChatMessages is
-            // newest-first, so reverse.
-            let history = chatHistoryViewModel.currentChatMessages
-                .filter { $0.conversationId == convID }
-                .reversed()
+            // ⚠️ The reversed `currentChatMessages` slice that used to be built here is GONE.
+            // It was the panel's PAGINATION WINDOW — a hard 20 messages that never grew, since
+            // QuickAccess never calls `loadMoreMessages` — shipped as model history. The panel
+            // now gets exactly what the main window gets, because `ActiveStreamManager` derives
+            // it (`architecture_readme.md` §7 invariant #8: "Never substitute the view's
+            // `currentChatMessages`: that is a pagination window, not the conversation").
 
             // [C2] Identity for the completion guard. ActiveStreamManager fires onComplete on
             // EVERY termination (including a cancelled/stopped stream); without matching against
@@ -349,11 +422,13 @@ final class QuickAccessSessionViewModel {
             )
             let agentMessage = activeStreamManager.startMessageStream(
                 withConfig: config,
-                conversationID: convID,
-                userQuery: query,
-                history: Array(history),
+                userMessage: userMessage,
+                // Spelled out because a protocol witness carries no default arguments.
+                promptOverride: nil,
                 files: files,
+                updating: nil,
                 workflowExecutionState: workflowTicket?.state,
+                resumeState: nil,
                 onComplete: { [weak self] in
                     DispatchQueue.main.async {
                         // ⚠️ finalize BEFORE the identity guard. That guard exists so a stopped
@@ -411,41 +486,122 @@ final class QuickAccessSessionViewModel {
     // wrappers are keyed purely by operationID — no main-window-selection side effects — so
     // they're safe for the panel's (possibly non-selected) conversation.
 
+    /// Routes a HITL decision to the view model, or reports that it went NOWHERE.
+    ///
+    /// (The two lines that used to open this block — "Approve a tool-confirmation. `allowForChat`
+    /// registers a durable per-conversation grant BEFORE resuming" — describe `approveTool`, not
+    /// this function, which has no `allowForChat` parameter and never touches
+    /// `SessionToolApprovals`. They were inserted above rather than below the existing
+    /// `approveTool` doc and silently annexed it. Moved back.)
+    ///
+    /// ⚠️ Every decision on this surface used to be a bare `mainAppViewModel?.submitX(…)` with no
+    /// else branch. When that reference is nil the user taps Approve and **nothing happens**: no
+    /// submission, no log line, no UI change — the run stays parked and the banner keeps waiting,
+    /// with nothing in the log to explain it. That is the exact shape the production-logging
+    /// directive calls a silent drop, and it is `.error` rather than `.warning` precisely because
+    /// the app carries on looking fine.
+    ///
+    /// Funnelling every decision through here also means a NEW decision kind cannot reintroduce
+    /// the silent path by forgetting the guard.
+    ///
+    /// ⚠️ One decision does not need the view model — gate CANCEL has no VM wrapper and goes
+    /// straight to `ExecutionSuspensionService`. It routes through `submitHITLDirect` rather than
+    /// calling the service inline, so it is still logged and still attributed to this surface;
+    /// four of five arms carrying a `[HITL]` line and the fifth carrying none showed up in the
+    /// field as three of four Escape presses.
+    private func submitHITL(_ decision: String,
+                            operationID: UUID,
+                            detail: String,
+                            _ submit: (MainApplicationViewModel) -> Void) {
+        guard let vm = mainAppViewModel else {
+            logger.error("[HITL] \(decision) for op \(operationID.uuidString.prefix(8)) went NOWHERE — the QuickAccess panel outlived its MainApplicationViewModel. CONSEQUENCE: the user's decision was DISCARDED, the run stays parked forever waiting on an answer that will never arrive, and the banner keeps showing as if it were still actionable. conversationID: \(conversationID?.uuidString.prefix(8) ?? "none")")
+            return
+        }
+        logger.notice("[HITL] \(decision) op \(operationID.uuidString.prefix(8)) from the QuickAccess panel\(detail.isEmpty ? "" : " — " + detail). conversationID: \(conversationID?.uuidString.prefix(8) ?? "none")")
+        submit(vm)
+    }
+
+    /// The same attribution and logging for a decision that reaches its service DIRECTLY.
+    ///
+    /// Gate cancel is the only one: `submitGateChoice` takes a non-optional option, so there is
+    /// no view-model wrapper for "no choice". That makes it the one arm with no VM to be missing
+    /// — hence no `.error` twin — but it is still a user decision that must be visible in a log
+    /// alongside the other four, with the same surface attribution.
+    private func submitHITLDirect(_ decision: String,
+                                  operationID: UUID,
+                                  detail: String,
+                                  _ submit: @escaping () async -> Void) {
+        logger.notice("[HITL] \(decision) op \(operationID.uuidString.prefix(8)) from the QuickAccess panel\(detail.isEmpty ? "" : " — " + detail). conversationID: \(conversationID?.uuidString.prefix(8) ?? "none")")
+        Task { await submit() }
+    }
+
     /// Approve a tool-confirmation. `allowForChat` registers a durable per-conversation grant
-    /// BEFORE resuming (order matters — the executor consults SessionToolApprovals first).
+    /// BEFORE resuming — order matters, because the executor consults `SessionToolApprovals`
+    /// first, and a grant registered after the resume arrives too late for the run it was meant
+    /// to unblock.
     func approveTool(_ pending: PendingHITL, allowForChat: Bool) {
         let opID = pending.id
         if allowForChat, case .toolConfirmation(let c) = pending.kind, let convID = conversationID {
             Task { @MainActor in
+                // ⚠️ Order matters: the durable grant is registered BEFORE the resume, or the run
+                // continues and the next request for the same tool asks again anyway.
                 await SessionToolApprovals.shared.allow(toolName: c.toolName, risk: c.risk, conversationID: convID)
-                mainAppViewModel?.submitToolApproval(operationID: opID, approved: true)
+                self.submitHITL("APPROVED", operationID: opID,
+                                detail: "tool \(c.toolName), DURABLE grant for this conversation — subsequent calls to this tool will NOT ask again until the conversation ends") {
+                    $0.submitToolApproval(operationID: opID, approved: true)
+                }
             }
         } else {
-            mainAppViewModel?.submitToolApproval(operationID: opID, approved: true)
+            submitHITL("APPROVED", operationID: opID,
+                       detail: "one-shot — the next request for the same tool asks again") {
+                $0.submitToolApproval(operationID: opID, approved: true)
+            }
         }
     }
 
     func denyTool(_ pending: PendingHITL) {
-        mainAppViewModel?.submitToolApproval(operationID: pending.id, approved: false)
+        submitHITL("DENIED", operationID: pending.id,
+                   detail: "the tool does not run and the agent is told the user refused") {
+            $0.submitToolApproval(operationID: pending.id, approved: false)
+        }
     }
 
     func submitClarification(_ pending: PendingHITL, text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        mainAppViewModel?.submitClarificationResponse(operationID: pending.id, response: trimmed.isEmpty ? nil : trimmed)
+        // ⚠️ Length only — the answer is free text the user typed and re-enters the agent's context.
+        submitHITL("Answered clarification", operationID: pending.id,
+                   detail: "\(trimmed.count) character(s)\(trimmed.isEmpty ? " (empty — treated as no answer)" : ""); the run resumes with this text in context") {
+            $0.submitClarificationResponse(operationID: pending.id, response: trimmed.isEmpty ? nil : trimmed)
+        }
     }
 
     func resolvePlan(_ pending: PendingHITL, approved: Bool) {
-        guard case .planReview(let plan) = pending.kind else { return }
-        mainAppViewModel?.submitPlanReview(operationID: pending.id, editedPlan: approved ? plan.subtasks : nil)
+        guard case .planReview(let plan) = pending.kind else {
+            // ⚠️ Dropped the click with no line anywhere. The pending item can be replaced between
+            // the render and the tap, and the button then simply does nothing — which reads as a
+            // dead button rather than as a race.
+            logger.error("[HITL] Plan decision for op \(pending.id.uuidString.prefix(8)) IGNORED — the pending item is no longer a plan review. CONSEQUENCE: the click did nothing and the run stays parked; the request on screen changed underneath the user.")
+            return
+        }
+        submitHITL("Plan \(approved ? "APPROVED" : "REJECTED")", operationID: pending.id,
+                   detail: "\(plan.subtasks.count) subtask(s); \(approved ? "the run proceeds with this plan" : "the run is told the plan was rejected")") {
+            $0.submitPlanReview(operationID: pending.id, editedPlan: approved ? plan.subtasks : nil)
+        }
     }
 
     func chooseGate(_ pending: PendingHITL, option: String?) {
         // submitGateChoice takes a non-optional option; a nil choice (cancel) has no VM wrapper,
         // so route that straight to the suspension service.
         if let option {
-            mainAppViewModel?.submitGateChoice(operationID: pending.id, option: option)
+            submitHITL("Gate answered", operationID: pending.id,
+                       detail: "option '\(option)' — the workflow continues down that output port") {
+                $0.submitGateChoice(operationID: pending.id, option: option)
+            }
         } else {
-            Task { await ExecutionSuspensionService.shared.resumeGate(for: pending.id, chosenOption: nil) }
+            submitHITLDirect("Gate cancelled", operationID: pending.id,
+                             detail: "no option chosen — the workflow resumes down its default path") {
+                await ExecutionSuspensionService.shared.resumeGate(for: pending.id, chosenOption: nil)
+            }
         }
     }
 
