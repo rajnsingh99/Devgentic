@@ -75,3 +75,38 @@ logs/response_synthesizer_edge1_log.txt
 # their build products are not.
 ToolHarness/.build/
 MCPHarness/.build/
+
+# ── Public-release working notes ─────────────────────────────────────────────────
+# ⚠️ These are PRIVATE remediation notes and must never be published. They name the
+# commits that still hold personal data (a government ID, home paths) and the private
+# Bitbucket workspace — publishing them would index the PII instead of removing it,
+# which is the opposite of their purpose. Untracked 2026-09-10; they stay on disk.
+Public_Release_Checklist.md
+Public_Release_Roadmap.md
+SCRUB_MANIFEST.md
+#
+# ⚠️ The internal readiness / design / audit registers are the same class: they enumerate
+# open defects by name and cite commit hashes. D10 (2026-09-10) decided they do not ship.
+# Matched by SHAPE, not one-by-one — `git add -A` swept ChatOps_Production_Readiness.md
+# into a commit precisely because the earlier rules named individual files.
+*_Production_Readiness*.md
+*_Readiness*.md
+*_Audit*.md
+*_Design*.md
+*_Prompt*.md
+*_Plan*.md
+
+# ── SQLite sidecars beside the SwiftData store fixtures ──────────────────────────
+# Opening a .store in WAL mode creates -wal and -shm beside it, so any test run that
+# reads the fixtures leaves six untracked files. They are per-run state, never fixture
+# content, and a later `git add -A` would sweep them in — which is exactly how a stray
+# binary reached HEAD in 2faad1c. The .store files themselves stay tracked.
+*.store-wal
+*.store-shm
+
+# ── Stray compiled scratch binaries at the repo root ─────────────────────────────
+# `swiftc foo.swift` with no -o writes an executable named `main` next to the source.
+# One reached HEAD in 2faad1c via `git add -A` and shipped in the tip commit.
+# ⚠️ The leading slash is deliberate: it anchors this to the repo ROOT only, so it can
+# never shadow a legitimate file or directory called `main` deeper in the tree.
+/main
