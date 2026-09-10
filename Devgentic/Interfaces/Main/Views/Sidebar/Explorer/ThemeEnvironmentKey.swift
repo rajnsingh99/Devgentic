@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  ThemeEnvironmentKey.swift
 //  Devgentic
@@ -20,6 +22,10 @@ private struct AppAccentColorKey: EnvironmentKey {
     static let defaultValue: Color? = nil
 }
 
+private struct SurfaceStyleKey: EnvironmentKey {
+    static let defaultValue: SurfaceStyle = .glassmorphic
+}
+
 extension EnvironmentValues {
     /// The currently active application theme.
     var appTheme: any Theme {
@@ -31,6 +37,12 @@ extension EnvironmentValues {
     var appAccentColor: Color? {
         get { self[AppAccentColorKey.self] }
         set { self[AppAccentColorKey.self] = newValue }
+    }
+
+    /// The current surface presentation style (Liquid Glass vs. Solid Matte).
+    var surfaceStyle: SurfaceStyle {
+        get { self[SurfaceStyleKey.self] }
+        set { self[SurfaceStyleKey.self] = newValue }
     }
 }
 
@@ -45,5 +57,10 @@ extension View {
     /// Injects an accent color override into the environment.
     func appAccentColor(_ color: Color?) -> some View {
         environment(\.appAccentColor, color)
+    }
+
+    /// Injects a surface style into the environment for this view and its descendants.
+    func appSurfaceStyle(_ style: SurfaceStyle) -> some View {
+        environment(\.surfaceStyle, style)
     }
 }

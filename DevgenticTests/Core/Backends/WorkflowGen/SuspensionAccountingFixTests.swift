@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  SuspensionAccountingFixTests.swift
 //  DevgenticTests
@@ -59,7 +61,7 @@ final class SuspensionAccountingFixTests: XCTestCase {
 
         let secondInstalled = await waitForInstalls(above: baseline, count: 1)
         XCTAssertTrue(secondInstalled)
-        await svc.resumeGate(for: op, chosenOption: "picked")
+        await svc.resumeGate(for: op, chosenOption: "picked", resolvedBy: .localUI)
         let secondResult = await second.value
         XCTAssertEqual(secondResult, "picked")
 
@@ -86,7 +88,7 @@ final class SuspensionAccountingFixTests: XCTestCase {
         XCTAssertFalse(firstResult, "the overwritten waiter resolves denied")
 
         _ = await waitForInstalls(above: baseline, count: 1)
-        await svc.resume(for: op, approved: true)
+        await svc.resume(for: op, approved: true, resolvedBy: .localUI)
         let secondResult = await second.value
         XCTAssertTrue(secondResult)
 
@@ -156,7 +158,7 @@ final class SuspensionAccountingFixTests: XCTestCase {
 
         let parked = Task { await svc.suspend(for: op, conversationID: conv) }
         _ = await waitForInstalls(above: baseline, count: 1)
-        await svc.resume(for: op, approved: false)
+        await svc.resume(for: op, approved: false, resolvedBy: .localUI)
 
         let approved = await parked.value
         XCTAssertFalse(approved)

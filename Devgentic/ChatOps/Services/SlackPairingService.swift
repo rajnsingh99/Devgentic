@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  SlackPairingService.swift
 //  Devgentic
@@ -93,6 +95,8 @@ final class SlackPairingService {
         let deadline = Date().addingTimeInterval(pairingTimeout)
 
         let stream = await socketClient.start()
+        /// Per-origin failed attempts for THIS window only — see `PairingAttemptLedger`.
+        var ledger = PairingAttemptLedger()
 
         for await event in stream {
             guard Date() < deadline && !Task.isCancelled else { break }
@@ -105,8 +109,31 @@ final class SlackPairingService {
                 guard slackEvent.bot_id == nil else { continue }
                 guard let text = slackEvent.text else { continue }
 
-                let normalized = text.uppercased().trimmingCharacters(in: .whitespaces)
-                guard normalized == "PAIR \(pin)" else { continue }
+                let attempt = PairingAttemptPolicy.classify(text, expectedPIN: pin)
+                guard attempt != .unrelated else { continue }
+
+                // ⚠️ THE SENDER, NOT THE CHANNEL — see the note in DiscordPairingService. Slack's
+                // `user` is optional on a message event, and an unattributable one must not be
+                // counted against everybody.
+                guard let origin = slackEvent.user else {
+                    logger.error("[CHATOPS] A Slack pairing message arrived with no sender, so it cannot be attributed. CONSEQUENCE: it is ignored and NOT counted against any origin's attempts — counting it globally is what would let an unattributable message lock the user out.")
+                    continue
+                }
+
+                if ledger.isBlocked(origin) {
+                    logger.info("[CHATOPS] Ignoring a pairing message from user \(origin) — it has already spent its \(PairingAttemptLedger.attemptsPerOrigin) attempts this window. CONSEQUENCE: nothing further from that origin can pair, including a correct PIN. The window stays OPEN for every other channel, deliberately: aborting it would let a stranger stop the user pairing with ten messages.")
+                    continue
+                }
+
+                if attempt == .wrongPIN {
+                    switch ledger.recordFailure(from: origin) {
+                    case .listening(let remaining):
+                        logger.error("[CHATOPS] Failed pairing attempt from user \(origin) (\(remaining) left before it is ignored; \(ledger.totalFailures) failures from \(ledger.distinctOrigins) origin(s) this window). CONSEQUENCE: pairing did NOT happen and the window stays open. One origin repeating is a typo; several origins guessing is not, and the PIN space is 900,000 against a 300-second window. The attempted digits are deliberately not recorded — see PairingAttemptPolicy.")
+                    case .blocked:
+                        logger.error("[CHATOPS] user \(origin) has now spent all \(PairingAttemptLedger.attemptsPerOrigin) pairing attempts and will be IGNORED for the rest of this window, including a correct PIN. CONSEQUENCE: if this was the user mistyping, they must restart pairing from Settings to get a fresh window; if it was someone guessing, that origin can no longer reach the PIN. The window itself stays open for other channels.")
+                    }
+                    continue
+                }
 
                 guard let channelID = slackEvent.channel else { continue }
 
@@ -117,10 +144,14 @@ final class SlackPairingService {
                 logger.info("Slack pairing successful with channel \(channelID).")
 
                 let apiClient = SlackAPIClient(botToken: botToken)
-                _ = try? await apiClient.postMessage(
-                    channel: channelID,
-                    text: "✅ Paired with Devgentic! Use /help to see available commands."
-                )
+                do {
+                    _ = try await apiClient.postMessage(
+                        channel: channelID,
+                        text: "✅ Paired with Devgentic! Use /help to see available commands."
+                    )
+                } catch {
+                    logger.error("[CHATOPS] Slack pairing succeeded for channel \(channelID) but the confirmation could not be posted: \(error.localizedDescription). CONSEQUENCE: the user sees no acknowledgement that pairing worked and will reasonably try again, even though the app is now paired.")
+                }
 
                 await socketClient.stop()
                 onPairingComplete?()

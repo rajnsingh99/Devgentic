@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 // Views/Messages/ErrorMessageView.swift (Example location)
 //  THEME: Migrated to centralized AppTheme via @Environment(\.appTheme).
 

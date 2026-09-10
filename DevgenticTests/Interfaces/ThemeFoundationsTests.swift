@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  ThemeFoundationsTests.swift
 //  DevgenticTests
@@ -171,5 +173,24 @@ final class ThemeFoundationsTests: XCTestCase {
         manager.applyChatLineSpacing(4)
         XCTAssertEqual(manager.chatFontSize, 15)
         XCTAssertEqual(manager.chatLineSpacing, 4)
+    }
+
+    func testSurfaceStyleDefaultsAndPersistence() {
+        let manager = ThemeManager()
+
+        // Verify raw values
+        XCTAssertEqual(SurfaceStyle.glassmorphic.rawValue, "glassmorphic")
+        XCTAssertEqual(SurfaceStyle.solid.rawValue, "solid")
+        XCTAssertEqual(SurfaceStyle.allCases.count, 2)
+
+        // Switch to solid
+        manager.applySurfaceStyle(.solid)
+        XCTAssertEqual(manager.surfaceStyle, .solid)
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "selectedSurfaceStyle"), "solid")
+
+        // Switch back to glassmorphic
+        manager.applySurfaceStyle(.glassmorphic)
+        XCTAssertEqual(manager.surfaceStyle, .glassmorphic)
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "selectedSurfaceStyle"), "glassmorphic")
     }
 }

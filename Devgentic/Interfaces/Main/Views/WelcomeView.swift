@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  WelcomeView.swift
 //  Devgentic
@@ -313,8 +315,7 @@ struct WelcomeView: View {
         }
         .padding(12)
         .frame(maxWidth: 520)
-        // MARK: Liquid Glass for diagnostics disclosure
-        .glassEffect(.regular, in: .rect(cornerRadius: 12))
+        .appSurface(in: .rect(cornerRadius: 12), elevation: .card)
     }
 
 }
@@ -384,16 +385,12 @@ private struct QuickActionCard: View {
                 Spacer()
             }
             .padding(14)
-            // MARK: Liquid Glass card style
-            .glassEffect(.regular, in: .rect(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(
-                        isHovering ? accentColors.first!.opacity(0.4) : theme.surfaceOverlayStrong,
-                        lineWidth: 1
-                    )
+            .appSurface(
+                in: .rect(cornerRadius: 12),
+                elevation: .card,
+                strokeColor: isHovering ? accentColors.first!.opacity(0.4) : nil
             )
-            .shadow(color: isHovering ? accentColors.first!.opacity(0.15) : theme.primaryText.opacity(0.03), radius: isHovering ? 12 : 6, x: 0, y: 4)
+            .shadow(color: isHovering ? accentColors.first!.opacity(0.15) : Color.clear, radius: isHovering ? 8 : 0, x: 0, y: 3)
             .scaleEffect(isHovering ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)

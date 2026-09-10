@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  ThemeManager.swift
 //  Devgentic
@@ -41,6 +43,39 @@ enum CodeViewerThemeOverride: String, CaseIterable {
     }
 }
 
+// MARK: - Surface Presentation Style
+
+/// Controls whether the application renders using Apple Liquid Glass (translucent materials,
+/// ambient auras, specular highlights) or Solid Matte (deep opaque surfaces, razor-sharp 1px
+/// hairlines, zero blur).
+enum SurfaceStyle: String, CaseIterable, Identifiable {
+    case glassmorphic = "glassmorphic"
+    case solid = "solid"
+
+    var id: String { rawValue }
+
+    var displayName: LocalizedStringKey {
+        switch self {
+        case .glassmorphic: return "Glassmorphic (Liquid Glass)"
+        case .solid: return "Solid Matte (Pro Minimal)"
+        }
+    }
+
+    var subtitle: LocalizedStringKey {
+        switch self {
+        case .glassmorphic: return "Translucent acrylic materials, ambient colored auras, and specular highlights."
+        case .solid: return "Deep opaque surfaces, razor-sharp 1px hairline borders, and zero background glare."
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .glassmorphic: return "sparkles"
+        case .solid: return "square.fill"
+        }
+    }
+}
+
 // MARK: - Theme Manager
 
 /// A class that manages the application's themes.
@@ -57,6 +92,7 @@ enum CodeViewerThemeOverride: String, CaseIterable {
     private static let selectedThemeKey = "selectedThemeID"
     private static let codeViewerThemeKey = "codeViewerThemeOverride"
     private static let accentColorKey = "selectedAccentColor"
+    private static let surfaceStyleKey = "selectedSurfaceStyle"
 
     /// The array of all themes available in the application.
     let availableThemes: [any Theme] = [
@@ -78,6 +114,9 @@ enum CodeViewerThemeOverride: String, CaseIterable {
 
     /// The customizable accent color override.
     private(set) var selectedAccentColor: AppAccentColor
+
+    /// The surface presentation style (Liquid Glass vs. Solid Matte).
+    private(set) var surfaceStyle: SurfaceStyle
 
     // MARK: - Chat Font Customization
     /// The font size for chat message body text. Default: 15pt (matches fontBody).
@@ -124,6 +163,10 @@ enum CodeViewerThemeOverride: String, CaseIterable {
         let savedAccent = UserDefaults.standard.string(forKey: Self.accentColorKey)
         let accent = savedAccent.flatMap { AppAccentColor(rawValue: $0) } ?? .default
         self.selectedAccentColor = accent
+
+        // Load the saved surface style (default: glassmorphic).
+        let savedSurface = UserDefaults.standard.string(forKey: Self.surfaceStyleKey)
+        self.surfaceStyle = savedSurface.flatMap { SurfaceStyle(rawValue: $0) } ?? .glassmorphic
 
         // Load chat font settings (default: 15pt body, 4pt line spacing)
         let savedFontSize = UserDefaults.standard.object(forKey: AppSettings.chatFontSizeKey) as? CGFloat
@@ -172,6 +215,12 @@ enum CodeViewerThemeOverride: String, CaseIterable {
         self.selectedAccentColor = accent
         self.currentTheme = ThemeDecorator(base: baseTheme, accentColorOverride: accent, codeThemeOverride: codeViewerThemeOverride)
         UserDefaults.standard.set(accent.rawValue, forKey: Self.accentColorKey)
+    }
+
+    /// Applies a new surface presentation style (Liquid Glass vs. Solid Matte).
+    func applySurfaceStyle(_ style: SurfaceStyle) {
+        self.surfaceStyle = style
+        UserDefaults.standard.set(style.rawValue, forKey: Self.surfaceStyleKey)
     }
 
     // MARK: - Chat Font Actions

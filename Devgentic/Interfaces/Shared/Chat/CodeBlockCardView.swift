@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  CodeBlockCardView.swift
 //  Devgentic
@@ -81,9 +83,7 @@ struct CodeBlockCardView: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            // MARK: Liquid Glass
-            .glassEffect(.regular, in: .rect(cornerRadius: 12))
+            .appSurface(in: .rect(cornerRadius: 12), elevation: .card)
             .scaleEffect(isHovering ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)

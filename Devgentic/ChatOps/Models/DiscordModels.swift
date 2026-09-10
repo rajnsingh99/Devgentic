@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  DiscordModels.swift
 //  Devgentic
@@ -209,9 +211,27 @@ struct DiscordInteraction: Codable, Sendable {
     let message: DiscordMessage?
     let member: DiscordGuildMember?
 
+    /// The text a user typed into one field of a submitted modal.
+    ///
+    /// ⚠️ VALUES ARRIVE ONE ACTIONROW DEEP: `data.components` is a list of ActionRows, each holding
+    /// the single Text Input Discord requires it to hold. Reading `data.components` directly and
+    /// looking for a `custom_id` finds only rows, which have none — so the obvious flat read
+    /// returns nil for every submission and looks like "the user submitted nothing".
+    func submittedValue(forCustomID customID: String) -> String? {
+        data?.components?
+            .compactMap(\.components)
+            .flatMap { $0 }
+            .first { $0.custom_id == customID }?
+            .value
+    }
+
     /// Interaction types.
     static let applicationCommand = 2
     static let messageComponent = 3
+    /// ⚠️ A user submitting a MODAL. It was unmodelled, and the bridge's interaction switch ended
+    /// in a bare `return`, so a submission was dropped with no ack and no log — which Discord shows
+    /// the user as a red "Something went wrong" three seconds later, with nothing recorded anywhere.
+    static let modalSubmit = 5
 }
 
 /// Data payload within an interaction.
@@ -219,6 +239,11 @@ struct DiscordInteractionData: Codable, Sendable {
     let custom_id: String?
     let component_type: Int?
     let name: String?
+
+    /// ⚠️ A MODAL SUBMISSION'S VALUES, nested one ActionRow deep. This was absent, so
+    /// `interaction.data?.components` did not compile and a submitted answer could not be reached
+    /// at all. See `DiscordInteraction.submittedValue(forCustomID:)`.
+    let components: [DiscordComponent]?
 }
 
 /// Guild member (contains user info within a guild context).
@@ -236,9 +261,23 @@ struct DiscordComponent: Codable, Sendable {
     let custom_id: String?
     let components: [DiscordComponent]?
 
+    /// ⚠️ THE FIELD A SUBMITTED ANSWER ARRIVES IN. Without it every modal submission decoded as
+    /// nil — the answer was on the wire and unreadable. Absent on outbound buttons, and `Codable`
+    /// omits nil optionals, so nothing changes for them.
+    let value: String?
+
+    /// Greyed hint inside a text input. Discord caps it at 100 characters.
+    let placeholder: String?
+
     /// Component types.
     static let actionRow = 1
     static let button = 2
+    /// A single-line or paragraph text field. Only legal inside a modal.
+    static let textInput = 4
+
+    /// Text input styles.
+    static let shortInput = 1
+    static let paragraphInput = 2
 
     /// Button styles.
     static let primaryStyle = 1    // Blurple
@@ -246,14 +285,36 @@ struct DiscordComponent: Codable, Sendable {
     static let successStyle = 3    // Green
     static let dangerStyle = 4     // Red
 
-    /// Factory: creates an ActionRow containing the given button components.
-    static func actionRow(_ buttons: [DiscordComponent]) -> DiscordComponent {
-        DiscordComponent(type: Self.actionRow, style: nil, label: nil, custom_id: nil, components: buttons)
+    /// Factory: creates an ActionRow containing the given components.
+    static func actionRow(_ children: [DiscordComponent]) -> DiscordComponent {
+        DiscordComponent(type: Self.actionRow, style: nil, label: nil, custom_id: nil,
+                         components: children, value: nil, placeholder: nil)
     }
 
     /// Factory: creates a Button component.
     static func button(label: String, customID: String, style: Int) -> DiscordComponent {
-        DiscordComponent(type: Self.button, style: style, label: label, custom_id: customID, components: nil)
+        DiscordComponent(type: Self.button, style: style, label: label, custom_id: customID,
+                         components: nil, value: nil, placeholder: nil)
+    }
+
+    /// Factory: creates a paragraph Text Input for a modal.
+    ///
+    /// ⚠️ LABEL AND PLACEHOLDER ARE RAW TEXT. Discord renders NO markdown inside a modal, so
+    /// running them through the message-path escaper would show the user literal backslashes.
+    /// Truncated to Discord's documented caps (label 45, placeholder 100) because exceeding either
+    /// rejects the whole interaction response — and the only feedback is a failed modal.
+    ///
+    /// ⚠️ Each Text Input must be the SOLE child of its own ActionRow; Discord rejects two in one.
+    static func textInput(customID: String, label: String, placeholder: String? = nil) -> DiscordComponent {
+        DiscordComponent(
+            type: Self.textInput,
+            style: Self.paragraphInput,
+            label: String(label.prefix(45)),
+            custom_id: customID,
+            components: nil,
+            value: nil,
+            placeholder: placeholder.map { String($0.prefix(100)) }
+        )
     }
 }
 
@@ -281,12 +342,35 @@ struct DiscordInteractionResponsePayload: Codable, Sendable {
     static let deferredUpdateMessage = 6    // For button clicks — acknowledges without visible response
     static let channelMessageWithSource = 4 // Respond with a new message
     static let updateMessage = 7            // Edit the original interaction message
+    /// ⚠️ Opens a MODAL, and it IS the acknowledgement — Discord permits exactly one initial
+    /// response per interaction, so a modal cannot follow a deferred ack. Every gate that decides
+    /// whether to open one must therefore run BEFORE any ack.
+    static let modal = 9
 }
 
 /// Callback data within an interaction response.
 struct DiscordInteractionCallbackData: Codable, Sendable {
     let content: String?
     let components: [DiscordComponent]?
+
+    /// ⚠️ REQUIRED BY A TYPE-9 (modal) RESPONSE, and their absence was the single hard blocker on
+    /// opening one: the body could not be expressed, however willing the transport was.
+    /// `custom_id` comes back on the submission and is what names the operation being answered.
+    let custom_id: String?
+    /// Shown as the modal's heading. Discord caps it at 45 characters.
+    let title: String?
+
+    /// ⚠️ Explicit, with defaults, so the message-shaped call sites that predate the modal fields
+    /// keep compiling unchanged.
+    init(content: String? = nil,
+         components: [DiscordComponent]? = nil,
+         custom_id: String? = nil,
+         title: String? = nil) {
+        self.content = content
+        self.components = components
+        self.custom_id = custom_id
+        self.title = title.map { String($0.prefix(45)) }
+    }
 }
 
 // MARK: - Slash Commands
@@ -308,12 +392,16 @@ enum DiscordAPIError: LocalizedError, Sendable {
     case rateLimited(retryAfter: Double)
     case invalidToken
     case gatewayDisconnected(reason: String)
+    /// The Gateway closed with a code that reconnecting cannot fix — see `DiscordGatewayClosePolicy`.
+    case gatewayClosedPermanently(code: Int, reason: String)
     case decodingError(String)
 
     var errorDescription: String? {
         switch self {
         case .apiError(let status, let msg):
             return "Discord API error (\(status)): \(msg)"
+        case .gatewayClosedPermanently(let code, let reason):
+            return "Discord Gateway closed permanently (code \(code)): \(reason)"
         case .rateLimited(let retry):
             return "Discord rate limited — retry after \(retry)s"
         case .invalidToken:

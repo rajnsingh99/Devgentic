@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
+
 import XCTest
 @testable import devgentic
 
@@ -59,7 +62,7 @@ final class WorkflowParkAccountingTests: XCTestCase {
 
         let parked = try await park(op, in: conv, expecting: 1)
         try await Task.sleep(for: .milliseconds(1200))     // the park spans the entire nominal budget
-        await ExecutionSuspensionService.shared.resumeGate(for: op, chosenOption: "X")
+        await ExecutionSuspensionService.shared.resumeGate(for: op, chosenOption: "X", resolvedBy: .localUI)
         _ = await parked.value
 
         let (firedAt, error) = await sentinel.value
@@ -90,7 +93,7 @@ final class WorkflowParkAccountingTests: XCTestCase {
         XCTAssertEqual(duringA, 0, "convA parked nothing — it must accrue no credit from convB's gate")
 
         try await Task.sleep(for: .milliseconds(200))
-        await ExecutionSuspensionService.shared.resumeGate(for: op, chosenOption: "X")
+        await ExecutionSuspensionService.shared.resumeGate(for: op, chosenOption: "X", resolvedBy: .localUI)
         _ = await parked.value
 
         let afterA = await ExecutionSuspensionService.shared.cumulativeParkedTime(for: convA)
@@ -111,9 +114,9 @@ final class WorkflowParkAccountingTests: XCTestCase {
         let p2 = try await park(op2, in: conv, expecting: 2)
         try await Task.sleep(for: .milliseconds(300))
 
-        await ExecutionSuspensionService.shared.resumeGate(for: op2, chosenOption: "X")
+        await ExecutionSuspensionService.shared.resumeGate(for: op2, chosenOption: "X", resolvedBy: .localUI)
         _ = await p2.value
-        await ExecutionSuspensionService.shared.resumeGate(for: op1, chosenOption: "X")
+        await ExecutionSuspensionService.shared.resumeGate(for: op1, chosenOption: "X", resolvedBy: .localUI)
         _ = await p1.value
 
         let credited = await ExecutionSuspensionService.shared.cumulativeParkedTime(for: conv)
@@ -145,7 +148,7 @@ final class WorkflowParkAccountingTests: XCTestCase {
         XCTAssertTrue(bSuspended, "convB is still waiting on its human")
 
         // Leave the process-wide singleton drained for whatever runs next.
-        await ExecutionSuspensionService.shared.resumeGate(for: opB, chosenOption: "X")
+        await ExecutionSuspensionService.shared.resumeGate(for: opB, chosenOption: "X", resolvedBy: .localUI)
         _ = await parkedB.value
         await assertDrained()
     }
@@ -187,7 +190,7 @@ final class WorkflowParkAccountingTests: XCTestCase {
         XCTAssertTrue(bStillParked)
         XCTAssertFalse(aStillParked)
 
-        await ExecutionSuspensionService.shared.resumeGate(for: opB, chosenOption: "chosen")
+        await ExecutionSuspensionService.shared.resumeGate(for: opB, chosenOption: "chosen", resolvedBy: .localUI)
         let resolvedB = await taskB.value
         XCTAssertEqual(resolvedB, "chosen", "B must still resolve with the USER's answer")
         await assertDrained()
@@ -217,7 +220,7 @@ final class WorkflowParkAccountingTests: XCTestCase {
         XCTAssertGreaterThan(second, first,
                              "the survivor's park window closed early — every later node in this conversation would now time out on wall-clock")
 
-        await ExecutionSuspensionService.shared.resumeGate(for: opB, chosenOption: nil)
+        await ExecutionSuspensionService.shared.resumeGate(for: opB, chosenOption: nil, resolvedBy: .localUI)
         _ = await taskB.value
 
         // Now that nothing is parked the window is closed and the total is frozen.
@@ -279,7 +282,7 @@ final class WorkflowParkAccountingTests: XCTestCase {
         let conv = UUID(), node = UUID(), op = UUID()
 
         let task = try await parkNode(op, in: conv, node: node, expecting: 1)
-        await ExecutionSuspensionService.shared.resumeGate(for: op, chosenOption: "yes")
+        await ExecutionSuspensionService.shared.resumeGate(for: op, chosenOption: "yes", resolvedBy: .localUI)
         _ = await task.value
 
         let stale = await ExecutionSuspensionService.shared.isSuspended(node: node, in: conv)

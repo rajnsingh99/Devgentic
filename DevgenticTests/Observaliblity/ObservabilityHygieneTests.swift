@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  ObservabilityHygieneTests.swift
 //  devgenticTests
@@ -12,9 +14,9 @@ import XCTest
 
 final class LogSubsystemTests: XCTestCase {
 
-    /// The constant must BE the app, not a lookalike. The bundle identifier is `com.dev.devgentic`
+    /// The constant must BE the app, not a lookalike. The bundle identifier is `app.devgentic.macos`
     /// while 29 sites hardcoded `"com.devgentic"` — a string that matches nothing, so
-    /// `log stream --predicate 'subsystem == "com.dev.devgentic"'` returned none of them.
+    /// `log stream --predicate 'subsystem == "app.devgentic.macos"'` returned none of them.
     func testSubsystemIsTheRealBundleIdentifier() {
         XCTAssertEqual(DGLogger.subsystem, Bundle.main.bundleIdentifier,
                        "the subsystem must be the running bundle, never a literal")

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
+
 import Foundation
 
 /// Decision a provider's per-line decoder returns for each streamed line.

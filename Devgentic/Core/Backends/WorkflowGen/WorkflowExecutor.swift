@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  WorkflowExecutor.swift
 //  Devgentic
@@ -4102,7 +4104,7 @@ actor WorkflowExecutor: Executor {
                         }
                         group.addTask {
                             try await Task.sleep(for: .seconds(timeout))
-                            await ExecutionSuspensionService.shared.resumeGate(for: operationID, chosenOption: nil)
+                            await ExecutionSuspensionService.shared.resumeGate(for: operationID, chosenOption: nil, resolvedBy: nil)   // gate deadline — nobody answered
                             return nil
                         }
                         let result = try await group.next()!

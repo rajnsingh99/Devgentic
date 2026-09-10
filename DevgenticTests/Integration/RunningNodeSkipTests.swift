@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  RunningNodeSkipTests.swift
 //  DevgenticTests
@@ -382,7 +384,7 @@ final class RunningNodeSkipTests: XCTestCase {
         }
         if approved == nil {
             // Rescue the stranded park so it cannot leak into later tests, THEN fail.
-            await ExecutionSuspensionService.shared.resume(for: op, approved: false)
+            await ExecutionSuspensionService.shared.resume(for: op, approved: false, resolvedBy: .localUI)
         }
         XCTAssertEqual(approved, false,
                        "the skip must drain the node's park — without the belt-and-braces cancelNode this waits forever")

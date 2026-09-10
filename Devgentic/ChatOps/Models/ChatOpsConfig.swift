@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  ChatOpsConfig.swift
 //  Devgentic
@@ -64,7 +66,7 @@ final class ChatOpsConfigManager {
     static let shared = ChatOpsConfigManager()
 
     private let keychain = SecureKeyStorage()
-    private static let keychainService = Bundle.main.bundleIdentifier ?? "com.devgentic.app"
+    private static let keychainService = Bundle.main.bundleIdentifier ?? "app.devgentic.macos"
 
     var connectionState: ChatOpsConnectionState = .disconnected
 
@@ -139,15 +141,19 @@ final class ChatOpsConfigManager {
         }
     }
 
+    /// ⚠️ FORWARDS OVER `RemoteSessionStore` — see that file. This used to read and write
+    /// `UserDefaults` inline, as did its Discord and Slack twins: three copies of one concept.
+    /// The storage is unchanged (same key, no migration); only the code path is now single.
+    /// The `access`/`withMutation` wrappers are kept so `@Observable` invalidation still works —
+    /// nothing observes these three today, but a settings row showing the bound conversation would.
     var activeConversationID: UUID? {
         get {
             access(keyPath: \.activeConversationID)
-            guard let str = UserDefaults.standard.string(forKey: AppSettings.chatOpsActiveConversationIDKey) else { return nil }
-            return UUID(uuidString: str)
+            return RemoteSessionStore.shared.activeConversation(for: .telegram)
         }
         set {
             withMutation(keyPath: \.activeConversationID) {
-                UserDefaults.standard.set(newValue?.uuidString, forKey: AppSettings.chatOpsActiveConversationIDKey)
+                RemoteSessionStore.shared.setActiveConversation(newValue, for: .telegram)
             }
         }
     }
@@ -232,15 +238,15 @@ final class ChatOpsConfigManager {
         }
     }
 
+    /// Forwards over `RemoteSessionStore`; see `activeConversationID`.
     var discordActiveConversationID: UUID? {
         get {
             access(keyPath: \.discordActiveConversationID)
-            guard let str = UserDefaults.standard.string(forKey: AppSettings.chatOpsDiscordActiveConversationIDKey) else { return nil }
-            return UUID(uuidString: str)
+            return RemoteSessionStore.shared.activeConversation(for: .discord)
         }
         set {
             withMutation(keyPath: \.discordActiveConversationID) {
-                UserDefaults.standard.set(newValue?.uuidString, forKey: AppSettings.chatOpsDiscordActiveConversationIDKey)
+                RemoteSessionStore.shared.setActiveConversation(newValue, for: .discord)
             }
         }
     }
@@ -353,15 +359,15 @@ final class ChatOpsConfigManager {
         }
     }
 
+    /// Forwards over `RemoteSessionStore`; see `activeConversationID`.
     var slackActiveConversationID: UUID? {
         get {
             access(keyPath: \.slackActiveConversationID)
-            guard let str = UserDefaults.standard.string(forKey: AppSettings.chatOpsSlackActiveConversationIDKey) else { return nil }
-            return UUID(uuidString: str)
+            return RemoteSessionStore.shared.activeConversation(for: .slack)
         }
         set {
             withMutation(keyPath: \.slackActiveConversationID) {
-                UserDefaults.standard.set(newValue?.uuidString, forKey: AppSettings.chatOpsSlackActiveConversationIDKey)
+                RemoteSessionStore.shared.setActiveConversation(newValue, for: .slack)
             }
         }
     }

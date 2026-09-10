@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  ExecutionSuspensionService.swift
 //  Devgentic
@@ -24,12 +26,26 @@ enum HITLResolvedKey {
     static let conversationID = "conversationID"
     static let operationID = "operationID"
     static let approved = "approved"
+    /// WHO answered the prompt, as a `MessageSource.rawValue`. ABSENT means no human answered —
+    /// a timeout or a force-cancel — which is a different fact from "answered on the Mac" and is
+    /// why this is optional rather than defaulted to a surface.
+    ///
+    /// ⚠️ The ChatOps mirror edits the remote prompt in place when it resolves, and without this it
+    /// had nothing to go on: it hard-coded "(from Mac)" and therefore told a Telegram user that the
+    /// button they had just tapped on Telegram was answered on the Mac.
+    static let source = "source"
     /// [HITL/C1] Precise, type-specific resolution outcome for the trace span:
     /// permission → approved/denied, clarification → answered/skipped,
     /// plan review → approved/rejected, any cancel/deadline → cancelled.
     static let outcome = "outcome"
 }
 
+/// ⚠️ EVERY RESOLUTION INSIDE THIS FILE PASSES `resolvedBy: nil`, and that is deliberate: a
+/// double-suspension cleanup, a `Task.isCancelled` check, an `onCancel` teardown and a deadline are
+/// machines, not people. `resolvedBy` is REQUIRED rather than defaulted precisely so each of these
+/// had to say so — when it was added, the compiler surfaced ten such call sites that the previous
+/// hard-coded remote copy had been reporting to users as "(from Mac)".
+///
 /// Manages the "Pause/Resume" state of Agent execution.
 /// Uses Swift Concurrency continuations to bridge the gap between
 /// the synchronous-feeling Agent Loop and the asynchronous User Interaction.
@@ -191,7 +207,7 @@ actor ExecutionSuspensionService {
         // fresh UUID today), but exactly the accounting trap `drainOperation` documents.
         if activeContinuations[operationID] != nil {
             logger.warning("[Suspension] Overwriting existing suspension for operation \(operationID). Auto-denying previous. CONSEQUENCE: the earlier waiter resolves as denied and its park closes; this new suspension parks fresh.")
-            resume(for: operationID, approved: false)
+            resume(for: operationID, approved: false, resolvedBy: nil)
         }
 
         operationToConversation[operationID] = conversationID
@@ -208,7 +224,7 @@ actor ExecutionSuspensionService {
                 activeContinuations[operationID] = continuation
                 // If cancellation already happened before we parked, deny right away.
                 if Task.isCancelled {
-                    resume(for: operationID, approved: false, outcome: "cancelled")
+                    resume(for: operationID, approved: false, resolvedBy: nil, outcome: "cancelled")
                 }
             }
         } onCancel: {
@@ -216,7 +232,7 @@ actor ExecutionSuspensionService {
             // await immediately rather than leaving it to the watchdog. The WAITER resolves as
             // denied (false is the Bool contract's only safe answer); the AUDIT outcome says
             // "cancelled" — teardown is not a user decision.
-            Task { await self.resume(for: operationID, approved: false, outcome: "cancelled") }
+            Task { await self.resume(for: operationID, approved: false, resolvedBy: nil, outcome: "cancelled") }
         }
     }
 
@@ -230,7 +246,7 @@ actor ExecutionSuspensionService {
     ///     the user denied a tool they were never able to answer — the notification twin of the
     ///     honest-park-resolution rule (a cancelled park is not a denial). `approved` itself stays
     ///     false on teardown: the waiter's contract is Bool and false is the only safe answer.
-    func resume(for operationID: UUID, approved: Bool, editedArguments: [String: JSONValue]? = nil, outcome: String? = nil) {
+    func resume(for operationID: UUID, approved: Bool, resolvedBy: MessageSource?, editedArguments: [String: JSONValue]? = nil, outcome: String? = nil) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
         operationToNode.removeValue(forKey: operationID)
         operationToRunToken.removeValue(forKey: operationID)
@@ -252,7 +268,9 @@ actor ExecutionSuspensionService {
         logger.info("[Suspension] Resuming operation \(operationID) with approval: \(approved)")
         continuation.resume(returning: approved)
 
-        postResolved(name: .hitlPermissionResolved, operationID: operationID, conversationID: conversationID, extraInfo: [HITLResolvedKey.approved: approved, HITLResolvedKey.outcome: outcome ?? (approved ? "approved" : "denied")])
+        var resolvedInfo: [String: Any] = [HITLResolvedKey.approved: approved, HITLResolvedKey.outcome: outcome ?? (approved ? "approved" : "denied")]
+        if let resolvedBy { resolvedInfo[HITLResolvedKey.source] = resolvedBy.rawValue }
+        postResolved(name: .hitlPermissionResolved, operationID: operationID, conversationID: conversationID, extraInfo: resolvedInfo)
     }
 
     /// [HITL/A3] Returns and clears any user-edited arguments for an approved tool, so dispatch runs
@@ -273,7 +291,7 @@ actor ExecutionSuspensionService {
         // park's accounting balances — see the `suspend` twin for the parkDepth leak this avoids.
         if clarificationContinuations[operationID] != nil {
             logger.warning("[Clarification] Overwriting existing clarification for operation \(operationID). Auto-cancelling previous. CONSEQUENCE: the earlier waiter resolves nil and its park closes; this new suspension parks fresh.")
-            resumeClarification(for: operationID, userInput: nil)
+            resumeClarification(for: operationID, userInput: nil, resolvedBy: nil)
         }
 
         operationToConversation[operationID] = conversationID
@@ -289,18 +307,18 @@ actor ExecutionSuspensionService {
             await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
                 clarificationContinuations[operationID] = continuation
                 if Task.isCancelled {
-                    resumeClarification(for: operationID, userInput: nil, outcome: "cancelled")
+                    resumeClarification(for: operationID, userInput: nil, resolvedBy: nil, outcome: "cancelled")
                 }
             }
         } onCancel: {
-            Task { await self.resumeClarification(for: operationID, userInput: nil, outcome: "cancelled") }
+            Task { await self.resumeClarification(for: operationID, userInput: nil, resolvedBy: nil, outcome: "cancelled") }
         }
     }
 
     /// Resumes a clarification suspension with the user's text input.
     /// `outcome` override: nil derives "answered"/"skipped" from `userInput`; teardown paths pass
     /// "cancelled" — a torn-down question was not skipped by the user (see `resume(for:)`).
-    func resumeClarification(for operationID: UUID, userInput: String?, outcome: String? = nil) {
+    func resumeClarification(for operationID: UUID, userInput: String?, resolvedBy: MessageSource?, outcome: String? = nil) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
         operationToNode.removeValue(forKey: operationID)
         operationToRunToken.removeValue(forKey: operationID)
@@ -314,7 +332,9 @@ actor ExecutionSuspensionService {
         logger.info("[Clarification] Resuming operation \(operationID) with user input.")
         continuation.resume(returning: userInput)
 
-        postResolved(name: .hitlClarificationResolved, operationID: operationID, conversationID: conversationID, extraInfo: [HITLResolvedKey.outcome: outcome ?? (userInput != nil ? "answered" : "skipped")])
+        var resolvedInfo: [String: Any] = [HITLResolvedKey.outcome: outcome ?? (userInput != nil ? "answered" : "skipped")]
+        if let resolvedBy { resolvedInfo[HITLResolvedKey.source] = resolvedBy.rawValue }
+        postResolved(name: .hitlClarificationResolved, operationID: operationID, conversationID: conversationID, extraInfo: resolvedInfo)
     }
 
     // MARK: - Plan Review Suspension (indefinite — container owns the deadline)
@@ -330,7 +350,7 @@ actor ExecutionSuspensionService {
         // park's accounting balances — see the `suspend` twin for the parkDepth leak this avoids.
         if planReviewContinuations[operationID] != nil {
             logger.warning("[PlanReview] Overwriting existing plan review for operation \(operationID). Auto-cancelling previous. CONSEQUENCE: the earlier waiter resolves nil and its park closes; this new suspension parks fresh.")
-            resumePlanReview(for: operationID, editedPlan: nil)
+            resumePlanReview(for: operationID, editedPlan: nil, resolvedBy: nil)
         }
 
         operationToConversation[operationID] = conversationID
@@ -348,18 +368,18 @@ actor ExecutionSuspensionService {
             await withCheckedContinuation { (continuation: CheckedContinuation<[SubTask]?, Never>) in
                 planReviewContinuations[operationID] = continuation
                 if Task.isCancelled {
-                    resumePlanReview(for: operationID, editedPlan: nil, outcome: "cancelled")
+                    resumePlanReview(for: operationID, editedPlan: nil, resolvedBy: nil, outcome: "cancelled")
                 }
             }
         } onCancel: {
-            Task { await self.resumePlanReview(for: operationID, editedPlan: nil, outcome: "cancelled") }
+            Task { await self.resumePlanReview(for: operationID, editedPlan: nil, resolvedBy: nil, outcome: "cancelled") }
         }
     }
 
     /// Resumes a plan review suspension with the user-edited plan or nil for rejection.
     /// `outcome` override: nil derives "approved"/"rejected" from `editedPlan`; teardown paths pass
     /// "cancelled" — a torn-down review was not rejected by the user (see `resume(for:)`).
-    func resumePlanReview(for operationID: UUID, editedPlan: [SubTask]?, outcome: String? = nil) {
+    func resumePlanReview(for operationID: UUID, editedPlan: [SubTask]?, resolvedBy: MessageSource?, outcome: String? = nil) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
         operationToNode.removeValue(forKey: operationID)
         operationToRunToken.removeValue(forKey: operationID)
@@ -373,7 +393,9 @@ actor ExecutionSuspensionService {
         logger.info("[PlanReview] Resuming operation \(operationID) with \(editedPlan != nil ? "approved plan (\(editedPlan!.count) subtasks)" : "rejection").")
         continuation.resume(returning: editedPlan)
 
-        postResolved(name: .hitlPlanReviewResolved, operationID: operationID, conversationID: conversationID, extraInfo: [HITLResolvedKey.outcome: outcome ?? (editedPlan != nil ? "approved" : "rejected")])
+        var resolvedInfo: [String: Any] = [HITLResolvedKey.outcome: outcome ?? (editedPlan != nil ? "approved" : "rejected")]
+        if let resolvedBy { resolvedInfo[HITLResolvedKey.source] = resolvedBy.rawValue }
+        postResolved(name: .hitlPlanReviewResolved, operationID: operationID, conversationID: conversationID, extraInfo: resolvedInfo)
     }
 
     // MARK: - Gate Suspension (workflow Gate — per-option routing, E1)
@@ -385,7 +407,7 @@ actor ExecutionSuspensionService {
         // for the parkDepth leak this avoids.
         if gateContinuations[operationID] != nil {
             logger.warning("[Gate] Overwriting existing gate suspension for operation \(operationID). Auto-cancelling previous. CONSEQUENCE: the earlier waiter resolves nil and its park closes; this new suspension parks fresh.")
-            resumeGate(for: operationID, chosenOption: nil)
+            resumeGate(for: operationID, chosenOption: nil, resolvedBy: nil)
         }
 
         operationToConversation[operationID] = conversationID
@@ -400,16 +422,16 @@ actor ExecutionSuspensionService {
             await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
                 gateContinuations[operationID] = continuation
                 if Task.isCancelled {
-                    resumeGate(for: operationID, chosenOption: nil)
+                    resumeGate(for: operationID, chosenOption: nil, resolvedBy: nil)
                 }
             }
         } onCancel: {
-            Task { await self.resumeGate(for: operationID, chosenOption: nil) }
+            Task { await self.resumeGate(for: operationID, chosenOption: nil, resolvedBy: nil) }
         }
     }
 
     /// Resumes a gate suspension with the user's chosen option (nil = cancelled / timed out / rejected).
-    func resumeGate(for operationID: UUID, chosenOption: String?) {
+    func resumeGate(for operationID: UUID, chosenOption: String?, resolvedBy: MessageSource?) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
         operationToNode.removeValue(forKey: operationID)
         operationToRunToken.removeValue(forKey: operationID)
@@ -423,7 +445,9 @@ actor ExecutionSuspensionService {
         logger.info("[Gate] Resuming operation \(operationID) with choice: \(chosenOption ?? "<none>")")
         continuation.resume(returning: chosenOption)
 
-        postResolved(name: .hitlGateResolved, operationID: operationID, conversationID: conversationID, extraInfo: [HITLResolvedKey.outcome: chosenOption ?? "cancelled"])
+        var resolvedInfo: [String: Any] = [HITLResolvedKey.outcome: chosenOption ?? "cancelled"]
+        if let resolvedBy { resolvedInfo[HITLResolvedKey.source] = resolvedBy.rawValue }
+        postResolved(name: .hitlGateResolved, operationID: operationID, conversationID: conversationID, extraInfo: resolvedInfo)
     }
 
     // MARK: - Cancellation & Status
@@ -540,6 +564,9 @@ actor ExecutionSuspensionService {
         endPark(conversationID)
         editedArgs.removeValue(forKey: opID)
 
+        // ⚠️ NO `HITLResolvedKey.source` on any of these posts, and that absence is the message:
+        // a force-cancel or a deadline is not a person answering. A surface that renders an
+        // attribution must say nothing rather than name the Mac, which is what it used to do.
         // Post the matching resolved notification (mirrors resume*/timeout) so every surface —
         // the legacy banners, the unified InteractionCenter, and the ChatOps remote mirror —
         // clears immediately on cancel rather than relying on a downstream finalize backstop.

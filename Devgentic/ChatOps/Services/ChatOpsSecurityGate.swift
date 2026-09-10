@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  ChatOpsSecurityGate.swift
 //  Devgentic
@@ -56,11 +58,22 @@ actor ChatOpsSecurityGate {
     func canExecute(_ command: ChatOpsCommand, tier: ChatOpsSecurityTier) -> Bool {
         switch command {
         // Always allowed at any tier
-        case .conversations, .status, .help, .unknown:
+        // ⚠️ `.conversationPage` sits with `.conversations` because it IS one — the same read,
+        // from a different offset. Anything stricter would let a user list their conversations and
+        // then be refused the second page of the same list.
+        case .conversations, .conversationPage, .searchConversations, .conversationHistory,
+             .status, .help, .profiles, .unknown:
             return true
 
         // Requires at least .standard
-        case .newConversation, .freeText, .cancel, .switchConversation, .clarificationResponse:
+        // ⚠️ `.selectProfile` / `.useProfile` REBIND the conversation's agent, so they sit with the
+        // other state-changing verbs rather than with the read-only ones. They deliberately do NOT
+        // need `.full`: choosing which configured profile answers is not tool approval.
+        // ⚠️ `.answerClarification` sits with `.clarificationResponse` because it IS one — the same
+        // act reached through a modal instead of a typed reply. Putting it with the `.full` group
+        // would make the button openable and the answer refusable, which reads as a broken modal.
+        case .newConversation, .freeText, .cancel, .switchConversation, .clarificationResponse,
+             .answerClarification, .selectProfile, .useProfile:
             return tier == .standard || tier == .full
 
         // Requires .full — a gate choice unblocks downstream execution, like a tool approval.
@@ -78,7 +91,8 @@ actor ChatOpsSecurityGate {
         switch command {
         case .approveHITL, .denyHITL, .gateChoiceHITL:  // operationID ignored for tier check
             return "Tool approval requires *Full Access* security tier.\nChange this in Devgentic → Settings → ChatOps."
-        case .newConversation, .freeText, .cancel, .switchConversation, .clarificationResponse:
+        case .newConversation, .freeText, .cancel, .switchConversation, .clarificationResponse,
+             .answerClarification, .selectProfile, .useProfile:
             return "This action requires at least *Standard* security tier.\nChange this in Devgentic → Settings → ChatOps."
         default:
             return "This action is not permitted under the current security tier."

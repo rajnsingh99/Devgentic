@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  DiscordAPIClient.swift
 //  Devgentic
@@ -121,13 +123,25 @@ actor DiscordAPIClient {
 
     /// Registers slash commands for a specific guild.
     func registerSlashCommands(applicationID: String, guildID: String) async throws {
-        let commands: [DiscordSlashCommand] = [
-            DiscordSlashCommand(name: "conversations", description: "List recent conversations", type: DiscordSlashCommand.chatInput),
-            DiscordSlashCommand(name: "new", description: "Start a new conversation", type: DiscordSlashCommand.chatInput),
-            DiscordSlashCommand(name: "status", description: "Show current agent status", type: DiscordSlashCommand.chatInput),
-            DiscordSlashCommand(name: "cancel", description: "Stop the active agent", type: DiscordSlashCommand.chatInput),
-            DiscordSlashCommand(name: "help", description: "Show available commands", type: DiscordSlashCommand.chatInput)
-        ]
+        // ⚠️ DERIVED FROM `ChatOpsVerbTable`, not a hand-written list. This was five literals
+        // against a table that had grown to eight verbs, so `/profiles` was registered nowhere and
+        // could only be reached by typing it as a message — a shipped command invisible in the very
+        // menu Discord users browse.
+        //
+        // ⚠️ ARGUMENT-TAKING VERBS ARE DELIBERATELY EXCLUDED. `DiscordSlashCommand` has no `options`
+        // field to declare a parameter and `DiscordInteractionData` has none to read one, so a
+        // registered `/use` or `/search` would arrive with its argument missing and answer with a
+        // usage hint every time — worse than not offering it. They stay reachable by typing
+        // `/search foo` as an ordinary message, which does carry the argument.
+        let commands: [DiscordSlashCommand] = ChatOpsVerb.presentationOrder
+            .filter { !$0.takesArgument }
+            .map { verb in
+                DiscordSlashCommand(
+                    name: verb.canonicalName,
+                    description: verb.helpDescription,
+                    type: DiscordSlashCommand.chatInput
+                )
+            }
 
         let url = URL(string: "\(baseURL)/applications/\(applicationID)/guilds/\(guildID)/commands")!
         var urlRequest = URLRequest(url: url)

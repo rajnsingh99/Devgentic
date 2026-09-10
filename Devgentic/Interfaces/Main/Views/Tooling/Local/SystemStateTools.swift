@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  SystemStateTools.swift
 //  Devgentic
@@ -112,22 +114,31 @@ struct PushLocalNotificationTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        let center = UNUserNotificationCenter.current()
-        let options: UNAuthorizationOptions = [.alert, .sound]
-        
-        let access = try await center.requestAuthorization(options: options)
-        guard access else {
-            return "Error: Notification permission denied."
+        // ⚠️ ROUTED THROUGH THE DISPATCHER, NOT `UNUserNotificationCenter` DIRECTLY. This tool used
+        // to build its own `UNMutableNotificationContent` and call `center.add(request)`, which made
+        // it the one notification path in the app that no user setting could stop: neither the
+        // "Enable Notifications" master switch nor the per-channel switches in Settings had any
+        // effect on it, because it never touched the dispatcher they gate. An agent could notify a
+        // user who had switched notifications off.
+        //
+        // ⚠️ It also called `requestAuthorization` itself, prompting for system permission from
+        // inside a tool call. `LocalNotificationChannel.send` already handles every authorization
+        // state — including `.denied`, which it reports with a message naming System Settings —
+        // so that prompt is not lost, it is just no longer duplicated here.
+        let delivered = await NotificationDispatcher.shared.dispatch(
+            AppNotificationPayload(
+                title: arguments.title,
+                body: arguments.body,
+                metadata: ["source": "push_local_notification"]
+            )
+        )
+
+        guard delivered > 0 else {
+            // Truthful, and actionable: the previous implementation said "pushed successfully"
+            // for anything that did not throw.
+            return "Notification not delivered. Notifications are switched off in Devgentic's "
+                + "settings, or no notification channel is enabled. Nothing was shown to the user."
         }
-        
-        let content = UNMutableNotificationContent()
-        content.title = arguments.title
-        content.body = arguments.body
-        content.sound = .default
-        
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        try await center.add(request)
-        
-        return "Notification pushed successfully."
+        return "Notification pushed successfully to \(delivered) channel(s)."
     }
 }

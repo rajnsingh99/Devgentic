@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  HonestParkResolutionTests.swift
 //  DevgenticTests
@@ -147,7 +149,7 @@ final class HonestParkResolutionTests: XCTestCase {
         // Answer "Deny" as a user would, once the banner's operationID arrives.
         let denier = Task {
             for await opID in await Self.confirmationOperationIDs(from: stream, into: { events.append($0) }) {
-                await ExecutionSuspensionService.shared.resume(for: opID, approved: false)
+                await ExecutionSuspensionService.shared.resume(for: opID, approved: false, resolvedBy: .localUI)
             }
         }
         _ = await denier.result

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  SlackTransport.swift
 //  Devgentic
@@ -26,118 +28,21 @@ final class SlackTransport: ChatOpsTransport, @unchecked Sendable {
     // MARK: - ChatOpsTransport
 
     func sendTextMessage(chatID: String, text: String) async throws {
-        try await apiClient.postMessage(channel: chatID, text: text)
+        // ⚠️ THE EGRESS FLOOR. Sanitised HERE rather than in the API client so it happens BEFORE
+        // chunking — a credential split across two chunks matches no pattern in either half and
+        // would walk straight through a client-side pass.
+        try await apiClient.postMessage(channel: chatID, text: RemoteEgressSanitizer.credentialsOnly(text))
     }
 
     func sendChunkedMessage(chatID: String, text: String) async throws {
-        try await apiClient.sendChunkedMessage(channel: chatID, text: text)
-    }
-
-    func sendHITLPrompt(
-        chatID: String,
-        operationID: UUID,
-        type: HITLType
-    ) async throws -> String {
-        switch type {
-        case .toolConfirmation(let toolName, let params):
-            let truncatedParams = String(params.prefix(500))
-            let messageText = "⚠️ *Tool Approval Required*\n\n*Tool:* \(toolName)\n*Params:* \(truncatedParams)"
-
-            let approveButton = SlackBlockElement.button(
-                text: "✅ Approve",
-                actionID: "hitl:approve:\(operationID.uuidString)",
-                value: "approve",
-                style: SlackBlockElement.primaryStyle
-            )
-            let denyButton = SlackBlockElement.button(
-                text: "❌ Deny",
-                actionID: "hitl:deny:\(operationID.uuidString)",
-                value: "deny",
-                style: SlackBlockElement.dangerStyle
-            )
-
-            let blocks: [SlackBlock] = [
-                .sectionBlock(text: messageText),
-                .actionsBlock(elements: [approveButton, denyButton], blockID: "hitl_\(operationID.uuidString)")
-            ]
-
-            let result = try await apiClient.postMessage(
-                channel: chatID,
-                text: messageText, // Fallback for notifications
-                blocks: blocks
-            )
-            return result.ts
-
-        case .clarification(let question):
-            let messageText = "💬 *Agent needs clarification:*\n\n\(question)\n\nReply with your answer, or type /skip to skip."
-
-            let result = try await apiClient.postMessage(
-                channel: chatID,
-                text: messageText
-            )
-            return result.ts
-
-        case .planReview(let subtaskDescriptions):
-            let planList = subtaskDescriptions.enumerated()
-                .map { "  \($0.offset + 1). \($0.element)" }
-                .joined(separator: "\n")
-            let messageText = "📋 *Plan Review Required*\n\nThe agent has generated a plan with \(subtaskDescriptions.count) step(s):\n\n\(planList)\n\nTap to approve or reject (edit on the Mac app):"
-
-            // [D1] Approve/reject buttons → kind-aware handleApproval → resumePlanReview.
-            let approveButton = SlackBlockElement.button(
-                text: "✅ Approve",
-                actionID: "hitl:approve:\(operationID.uuidString)",
-                value: "approve",
-                style: SlackBlockElement.primaryStyle
-            )
-            let rejectButton = SlackBlockElement.button(
-                text: "❌ Reject",
-                actionID: "hitl:deny:\(operationID.uuidString)",
-                value: "deny",
-                style: SlackBlockElement.dangerStyle
-            )
-            let blocks: [SlackBlock] = [
-                .sectionBlock(text: messageText),
-                .actionsBlock(elements: [approveButton, rejectButton], blockID: "hitl_\(operationID.uuidString)")
-            ]
-
-            let result = try await apiClient.postMessage(
-                channel: chatID,
-                text: messageText,
-                blocks: blocks
-            )
-            return result.ts
-
-        case .gate(let prompt, let options):
-            // [D1] One Slack button per gate option; tap → "hitl:gate:<opID>:<idx>".
-            let messageText = "🚦 *Decision Required*\n\n\(prompt)\n\nChoose an option:"
-            let buttons = options.enumerated().map { idx, opt in
-                SlackBlockElement.button(
-                    text: String(opt.prefix(70)),   // under Slack's 75-char button-text cap
-                    actionID: "hitl:gate:\(operationID.uuidString):\(idx)",
-                    value: "gate_\(idx)",
-                    style: nil
-                )
-            }
-            // Slack caps an actions block at 5 elements — chunk into rows of 5 like Discord.
-            var blocks: [SlackBlock] = [.sectionBlock(text: messageText)]
-            for start in stride(from: 0, to: buttons.count, by: 5) {
-                blocks.append(.actionsBlock(
-                    elements: Array(buttons[start..<min(start + 5, buttons.count)]),
-                    blockID: "hitl_\(operationID.uuidString)_\(start)"
-                ))
-            }
-
-            let result = try await apiClient.postMessage(
-                channel: chatID,
-                text: messageText,
-                blocks: blocks
-            )
-            return result.ts
-        }
+        // ⚠️ THE EGRESS FLOOR. Sanitised HERE rather than in the API client so it happens BEFORE
+        // chunking — a credential split across two chunks matches no pattern in either half and
+        // would walk straight through a client-side pass.
+        try await apiClient.sendChunkedMessage(channel: chatID, text: RemoteEgressSanitizer.credentialsOnly(text))
     }
 
     func editMessage(chatID: String, messageID: String, newText: String) async throws {
+        let newText = RemoteEgressSanitizer.credentialsOnly(newText)
         try await apiClient.updateMessage(
             channel: chatID,
             ts: messageID,
@@ -148,5 +53,38 @@ final class SlackTransport: ChatOpsTransport, @unchecked Sendable {
 
     func sendTypingIndicator(chatID: String) async throws {
         // Slack has no bot typing indicator — no-op
+    }
+}
+
+// MARK: - Remote view rendering (C3)
+
+extension SlackTransport {
+
+    nonisolated var capabilities: RemoteCapabilities { SlackRemoteRenderer.capabilities }
+
+    @discardableResult
+    func render(_ view: RemoteView, to destination: RemoteDestination) async throws -> String? {
+        // ⚠️ THE VIEW, NOT THE RENDERED TEXT. Slack puts the body in BLOCKS as well as the
+        // fallback text, and every platform puts conversation titles on BUTTON LABELS — and a
+        // title is auto-set to the user's first prompt. Cleaning `draft.text` would miss both.
+        let view = view.sanitizedForEgress()
+        let channel = destination.channel
+        guard let draft = SlackRemoteRenderer.draft(for: view) else {
+            if case .silent(let silence) = view {
+                RemoteRenderLog.silence(silence, channel: channel, logger: logger)
+            }
+            return nil
+        }
+        // ⚠️ `.interactionReply` degrades to a channel post. Slack CAN reply into an interaction —
+        // `response_url` is decoded on both interactive and slash payloads (SlackModels.swift:89,
+        // :111) — but nothing reads it today, and inventing that path here would be a second
+        // untested code path in a commit whose job is to change no observable behaviour.
+        let result = try await apiClient.postMessage(
+            channel: channel.channelID,
+            text: draft.text,
+            blocks: draft.blocks
+        )
+        RemoteRenderLog.posted(view, channel: channel, logger: logger)
+        return result.ts
     }
 }

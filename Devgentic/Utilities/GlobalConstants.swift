@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  GlobalConstants.swift
 //  Devgentic
@@ -42,10 +44,21 @@ struct GlobalConstants {
     // --- Diagnostics / Bug Reports ---
     /// Public issue-tracker "new issue" URL the "Report on GitHub" button in the diagnostic
     /// export opens, with `?title=&body=` query params (GitHub's new-issue format).
-    /// **Set this to your public repo when you create it** — e.g.
-    /// "https://github.com/<owner>/<repo>/issues/new". The app's own git remote is a private
-    /// Bitbucket repo, so this is a placeholder until a public tracker exists.
-    static let issueTrackerNewIssueURL = "https://github.com/devgentic/devgentic/issues/new"
+    /// ⚠️ This is a PUBLIC destination: whatever the export sheet puts in the query params is
+    /// pre-filled into an issue body on github.com. The bundle itself is attached by hand — only
+    /// the title and a short body travel through this URL.
+    static let issueTrackerNewIssueURL = "https://github.com/rajnsingh99/devgentic/issues/new"
+
+    /// The project's public homepage — a GitHub Pages project site, live from the first release.
+    ///
+    /// Sent to OpenRouter as `HTTP-Referer` for app attribution (see `AgentConnect`). It is a
+    /// STATIC project identifier, not telemetry: no user or machine data is derived from it, and
+    /// the app already identifies itself to that provider via `X-Title`.
+    ///
+    /// ⚠️ Tied to the GitHub account and repo name, because GitHub Pages derives the URL from
+    /// them. Attaching a custom domain later does NOT require changing this — GitHub 301-redirects
+    /// this path — but RENAMING the account or repo breaks it, and breaks the Sparkle feed with it.
+    static let homepageURL = "https://rajnsingh99.github.io/devgentic/"
 
     // --- Notification Name ---
     static let showQuickAccessPanelNotification = Notification.Name("devgentic.showQuickAccessPanel")

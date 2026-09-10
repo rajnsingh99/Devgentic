@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  DevgenticApp.swift
 //  Devgentic
@@ -143,7 +145,7 @@ struct DevgenticApp: App {
                 // launch instead of becoming permanent.
                 //
                 // ⚠️ EXCEPT under the DEBUG environment override. The test host is the real app and
-                // `UserDefaults.standard` is the real `com.dev.devgentic` domain — only the STORE is
+                // `UserDefaults.standard` is the real `app.devgentic.macos` domain — only the STORE is
                 // redirected by `DEVGENTIC_STORE_URL`, not the defaults. Recording here would stamp
                 // the current schema's fingerprint on behalf of a temporary store the real app has
                 // never opened, so the developer's next real launch would see "unchanged" and sweep a
@@ -652,6 +654,7 @@ struct DevgenticApp: App {
             MainApplicationView()
                 .environment(themeManager)
                 .environment(\.appTheme, themeManager.currentTheme)
+                .environment(\.surfaceStyle, themeManager.surfaceStyle)
                 .environment(mainApplicationViewModel)
                 .environment(mainApplicationViewModel.explorerViewModel)
                 .environment(chatHistoryViewModel)
@@ -751,6 +754,7 @@ struct DevgenticApp: App {
                 FileWindowViewer(fileURL: url)
                     .environment(themeManager)
                     .environment(\.appTheme, themeManager.currentTheme)
+                    .environment(\.surfaceStyle, themeManager.surfaceStyle)
                     .tint(themeManager.currentTheme.accentColor)
             }
         }
@@ -764,6 +768,7 @@ struct DevgenticApp: App {
             TrendsView()
                 .environment(themeManager)
                 .environment(\.appTheme, themeManager.currentTheme)
+                .environment(\.surfaceStyle, themeManager.surfaceStyle)
                 .frame(minWidth: 760, minHeight: 560)
                 .tint(themeManager.currentTheme.accentColor)
         }

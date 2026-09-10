@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  TelegramTransport.swift
 //  Devgentic
@@ -30,118 +32,21 @@ final class TelegramTransport: ChatOpsTransport, @unchecked Sendable {
     // MARK: - ChatOpsTransport
 
     func sendTextMessage(chatID: String, text: String) async throws {
-        try await apiClient.sendMessage(chatID: Int64(chatID)!, text: text, parseMode: nil)
+        // ⚠️ THE EGRESS FLOOR. Sanitised HERE rather than in the API client so it happens BEFORE
+        // chunking — a credential split across two chunks matches no pattern in either half and
+        // would walk straight through a client-side pass.
+        try await apiClient.sendMessage(chatID: Int64(chatID)!, text: RemoteEgressSanitizer.credentialsOnly(text), parseMode: nil)
     }
 
     func sendChunkedMessage(chatID: String, text: String) async throws {
-        try await apiClient.sendChunkedMessage(chatID: Int64(chatID)!, text: text, parseMode: nil)
-    }
-
-    func sendHITLPrompt(
-        chatID: String,
-        operationID: UUID,
-        type: HITLType
-    ) async throws -> String {
-        let numericChatID = Int64(chatID)!
-
-        switch type {
-        case .toolConfirmation(let toolName, let params):
-            let truncatedParams = String(params.prefix(500))
-            let messageText = """
-            ⚠️ Tool Approval Required
-
-            Tool: \(toolName)
-            Params: \(truncatedParams)
-
-            Tap to approve or deny:
-            """
-
-            let keyboard = InlineKeyboardMarkup(
-                inline_keyboard: [[
-                    InlineKeyboardButton(text: "✅ Approve", callbackData: "hitl:approve:\(operationID.uuidString)"),
-                    InlineKeyboardButton(text: "❌ Deny", callbackData: "hitl:deny:\(operationID.uuidString)")
-                ]]
-            )
-
-            let message = try await apiClient.sendMessage(
-                chatID: numericChatID,
-                text: messageText,
-                parseMode: nil,
-                replyMarkup: .inline(keyboard)
-            )
-            return "\(message.message_id)"
-
-        case .clarification(let question):
-            let messageText = """
-            💬 Agent needs clarification:
-
-            \(question)
-
-            Reply with your answer, or type /skip to skip.
-            """
-
-            let message = try await apiClient.sendMessage(
-                chatID: numericChatID,
-                text: messageText,
-                parseMode: nil
-            )
-            return "\(message.message_id)"
-
-        case .planReview(let subtaskDescriptions):
-            let planList = subtaskDescriptions.enumerated()
-                .map { "  \($0.offset + 1). \($0.element)" }
-                .joined(separator: "\n")
-            let messageText = """
-            📋 Plan Review Required
-
-            The agent has generated a plan with \(subtaskDescriptions.count) step(s):
-
-            \(planList)
-
-            Tap to approve or reject (edit on the Mac app):
-            """
-
-            // [D1] Approve/reject buttons — the kind-aware handleApproval routes these to resumePlanReview.
-            let keyboard = InlineKeyboardMarkup(
-                inline_keyboard: [[
-                    InlineKeyboardButton(text: "✅ Approve", callbackData: "hitl:approve:\(operationID.uuidString)"),
-                    InlineKeyboardButton(text: "❌ Reject", callbackData: "hitl:deny:\(operationID.uuidString)")
-                ]]
-            )
-
-            let message = try await apiClient.sendMessage(
-                chatID: numericChatID,
-                text: messageText,
-                parseMode: nil,
-                replyMarkup: .inline(keyboard)
-            )
-            return "\(message.message_id)"
-
-        case .gate(let prompt, let options):
-            // [D1] One button per gate option; the tap routes back via "hitl:gate:<opID>:<idx>".
-            let messageText = """
-            🚦 Decision Required
-
-            \(prompt)
-
-            Choose an option:
-            """
-            let rows = options.enumerated().map { idx, opt in
-                [InlineKeyboardButton(text: String(opt.prefix(70)), callbackData: "hitl:gate:\(operationID.uuidString):\(idx)")]
-            }
-            let keyboard = InlineKeyboardMarkup(inline_keyboard: rows)
-
-            let message = try await apiClient.sendMessage(
-                chatID: numericChatID,
-                text: messageText,
-                parseMode: nil,
-                replyMarkup: .inline(keyboard)
-            )
-            return "\(message.message_id)"
-        }
+        // ⚠️ THE EGRESS FLOOR. Sanitised HERE rather than in the API client so it happens BEFORE
+        // chunking — a credential split across two chunks matches no pattern in either half and
+        // would walk straight through a client-side pass.
+        try await apiClient.sendChunkedMessage(chatID: Int64(chatID)!, text: RemoteEgressSanitizer.credentialsOnly(text), parseMode: nil)
     }
 
     func editMessage(chatID: String, messageID: String, newText: String) async throws {
+        let newText = RemoteEgressSanitizer.credentialsOnly(newText)
         try await apiClient.editMessageText(
             chatID: Int64(chatID)!,
             messageID: Int(messageID)!,
@@ -152,5 +57,50 @@ final class TelegramTransport: ChatOpsTransport, @unchecked Sendable {
 
     func sendTypingIndicator(chatID: String) async throws {
         try await apiClient.sendTypingAction(chatID: Int64(chatID)!)
+    }
+}
+
+// MARK: - Remote view rendering (C3)
+//
+// In this file rather than beside the other two renderers because `apiClient` is `private`, and
+// `private` in Swift is file-scoped.
+
+extension TelegramTransport {
+
+    nonisolated var capabilities: RemoteCapabilities { TelegramRemoteRenderer.capabilities }
+
+    @discardableResult
+    func render(_ view: RemoteView, to destination: RemoteDestination) async throws -> String? {
+        // ⚠️ THE VIEW, NOT THE RENDERED TEXT. Slack puts the body in BLOCKS as well as the
+        // fallback text, and every platform puts conversation titles on BUTTON LABELS — and a
+        // title is auto-set to the user's first prompt. Cleaning `draft.text` would miss both.
+        let view = view.sanitizedForEgress()
+        let channel = destination.channel
+        guard let draft = TelegramRemoteRenderer.draft(for: view) else {
+            if case .silent(let silence) = view {
+                RemoteRenderLog.silence(silence, channel: channel, logger: logger)
+            }
+            return nil
+        }
+        // ⚠️ Throws instead of `Int64(chatID)!`. The force-unwraps elsewhere in this file are safe
+        // only because their sole producer builds the string from an `Int64`; new code does not
+        // inherit that assumption.
+        guard let chatID = Int64(channel.channelID) else {
+            logger.error("[CHATOPS/RENDER] Telegram channel id \"\(channel.channelID)\" is not numeric, so the view was NOT posted. CONSEQUENCE: the remote user receives no reply at all and the command appears to have been ignored.")
+            throw RemoteRenderError.unaddressableChannel(provider: .telegram, channelID: channel.channelID)
+        }
+        // ⚠️ `destination` is always a channel post: Telegram has no interaction-reply channel, so
+        // `.interactionReply` degrades to the same call rather than failing.
+        let message = try await apiClient.sendMessage(
+            chatID: chatID,
+            text: draft.text,
+            parseMode: draft.parse_mode,
+            // ⚠️ WAS `draft.reply_markup.map { .inline($0) }`. That literal re-wrap was the second
+            // half of the barrier: even once the renderer could express a `ForceReply`, this line
+            // would have forced it back into an inline keyboard. The draft now names its own kind.
+            replyMarkup: draft.reply_markup
+        )
+        RemoteRenderLog.posted(view, channel: channel, logger: logger)
+        return "\(message.message_id)"
     }
 }

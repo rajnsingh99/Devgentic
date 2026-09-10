@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  ChatInputAreaView.swift
 //  Devgentic
@@ -49,6 +51,7 @@ struct ChatInputAreaView: View {
     /// Injected at the `WindowGroup`, which is this view's only call site.
     @Environment(ToastManager.self) private var toastManager
     @Environment(\.appTheme) private var theme
+    @Environment(\.surfaceStyle) private var surfaceStyle
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -64,7 +67,7 @@ struct ChatInputAreaView: View {
 
     // MARK: - Layout Constants
     private var textEditorMinHeight: CGFloat {
-        max(32, themeManager.chatFontSize + 14)
+        max(44, themeManager.chatFontSize + 24)
     }
     private let textEditorMaxHeight: CGFloat = 200
 
@@ -402,34 +405,15 @@ struct ChatInputAreaView: View {
     // MARK: - Main Input Area
     private var mainInputArea: some View {
         let isFocused = isInputFocused.wrappedValue
-        return VStack(spacing: 4) {
+        return VStack(spacing: 6) {
             editorAndPlaceholderArea
             toolbarArea
         }
-        .padding(.top, 4)
-        .glassEffect(.regular, in: .rect(cornerRadius: 18))
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(theme.secondaryBackground.opacity(0.45))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(
-                    LinearGradient(
-                        colors: isFocused
-                            ? [theme.accentColor.opacity(0.35), theme.accentColor.opacity(0.12)]
-                            : [Color.white.opacity(0.12), Color.white.opacity(0.03)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1.0
-                )
-        )
-        .shadow(
-            color: isFocused ? theme.accentColor.opacity(0.10) : Color.black.opacity(0.16),
-            radius: isFocused ? 10 : 6,
-            x: 0,
-            y: 3
+        .padding(.top, 6)
+        .appSurface(
+            in: .rect(cornerRadius: 18),
+            elevation: .elevated,
+            isFocused: isFocused
         )
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isFocused)
         .transition(.opacity)
@@ -507,7 +491,7 @@ struct ChatInputAreaView: View {
         }
         // Top padding removed — textContainerInset.height (10pt) already provides
         // vertical inset inside the NSTextView. Stacking both caused 20pt top gap.
-        .padding(EdgeInsets(top: 0, leading: 12, bottom: 4, trailing: 12))
+        .padding(EdgeInsets(top: 2, leading: 14, bottom: 2, trailing: 14))
         .focused(isInputFocused)
         .disabled(!isInputEnabled)
         .opacity(isInputEnabled ? 1.0 : 0.6)
@@ -595,8 +579,7 @@ struct ChatInputAreaView: View {
                         """)
                 }
             }
-            .padding(.horizontal, 15)
-            .padding(.bottom, 6)
+            .padding(.horizontal, 4)
 
             InputToolbarView(
                 isInputEnabled: isInputEnabled,
@@ -679,8 +662,8 @@ struct ChatInputAreaView: View {
                 }
             )
         }
-        .padding(.horizontal, 12)
-        .padding(.bottom, 12)
+        .padding(.horizontal, 14)
+        .padding(.bottom, 10)
     }
 
     /// Send from the toolbar button — pulls the ATTRIBUTED text from the editor (preserves

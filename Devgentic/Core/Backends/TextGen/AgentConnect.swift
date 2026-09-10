@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  AgentConnect.swift
 //  Devgentic
@@ -1208,9 +1210,14 @@ class AgentConnect: @unchecked Sendable {
                 timeout: 300.0,
                 options: options,
                 rateLimitKey: rlKey,
-                // Optional OpenRouter attribution. HTTP-Referer is omitted until the
-                // app has a public homepage to point at.
-                extraHeaders: ["X-Title": "Devgentic"]
+                // OpenRouter attribution. Both headers are static project identifiers —
+                // nothing about the user, the machine or the prompt is conveyed — and sending
+                // the pair is what lists the app on OpenRouter's public app rankings.
+                // `HTTP-Referer` was omitted while there was no public homepage; there is one now.
+                extraHeaders: [
+                    "X-Title": "Devgentic",
+                    "HTTP-Referer": GlobalConstants.homepageURL,
+                ]
             )
             return OpenAILLMProvider(config: config, providerCategory: .openRouter)
 

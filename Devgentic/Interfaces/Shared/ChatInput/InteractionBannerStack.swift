@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  InteractionBannerStack.swift
 //  Devgentic
@@ -165,9 +167,11 @@ struct CrossConversationInputChip: View {
                     .foregroundColor(theme.warningColor)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
-                    .glassEffect(.regular, in: Capsule())
-                    .overlay(Capsule().stroke(theme.warningColor.opacity(0.22), lineWidth: 0.5))
-                    .shadow(color: Color.black.opacity(0.18), radius: 12, x: 0, y: 5)
+                    .appSurface(
+                        in: Capsule(),
+                        elevation: .elevated,
+                        strokeColor: theme.warningColor.opacity(0.3)
+                    )
                 }
                 .buttonStyle(.plain)
                 .fixedSize(horizontal: true, vertical: false)
@@ -595,7 +599,7 @@ private struct PermissionInteractionBanner: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        .appSurface(in: .rect(cornerRadius: 16), elevation: .elevated)
     }
 
     /// A4: trust this tool for the rest of THIS conversation — persisted (survives restart) and
@@ -763,7 +767,7 @@ private struct ClarificationInteractionBanner: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        .appSurface(in: .rect(cornerRadius: 16), elevation: .elevated)
         .onAppear { if !hasOptions { isFocused = true } }  // no field to focus in options mode
     }
 
@@ -877,7 +881,7 @@ private struct GateInteractionBanner: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        .appSurface(in: .rect(cornerRadius: 16), elevation: .elevated)
     }
 
     private func countdownText(now: Date) -> String? {
@@ -1070,7 +1074,7 @@ private struct PlanReviewInteractionBanner: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        .appSurface(in: .rect(cornerRadius: 16), elevation: .elevated)
         .onAppear { editableSubtasks = planReview.subtasks }
     }
 

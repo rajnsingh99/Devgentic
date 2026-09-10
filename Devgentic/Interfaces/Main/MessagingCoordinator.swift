@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  MessagingCoordinator.swift
 //  Devgentic
@@ -712,7 +714,7 @@ final class MessagingCoordinator {
     func submitToolApproval(operationID: UUID, approved: Bool, editedArguments: [String: JSONValue]? = nil) {
         logger.info("[HITL] Submitting approval decision: \(approved) for operation \(operationID)\(editedArguments != nil ? " (edited args)" : "")")
         Task {
-            await ExecutionSuspensionService.shared.resume(for: operationID, approved: approved, editedArguments: editedArguments)
+            await ExecutionSuspensionService.shared.resume(for: operationID, approved: approved, resolvedBy: .localUI, editedArguments: editedArguments)
         }
     }
 
@@ -720,7 +722,7 @@ final class MessagingCoordinator {
     func submitClarificationResponse(operationID: UUID, response: String?) {
         logger.info("[ASK_USER] Submitting clarification response for operation \(operationID)")
         Task {
-            await ExecutionSuspensionService.shared.resumeClarification(for: operationID, userInput: response)
+            await ExecutionSuspensionService.shared.resumeClarification(for: operationID, userInput: response, resolvedBy: .localUI)
         }
     }
 
@@ -728,7 +730,7 @@ final class MessagingCoordinator {
     func submitPlanReview(operationID: UUID, editedPlan: [SubTask]?) {
         logger.info("[PLAN_REVIEW] Submitting plan review for \(operationID), approved: \(editedPlan != nil)")
         Task {
-            await ExecutionSuspensionService.shared.resumePlanReview(for: operationID, editedPlan: editedPlan)
+            await ExecutionSuspensionService.shared.resumePlanReview(for: operationID, editedPlan: editedPlan, resolvedBy: .localUI)
         }
     }
 
@@ -736,7 +738,7 @@ final class MessagingCoordinator {
     func submitGateChoice(operationID: UUID, option: String) {
         logger.info("[GATE] Submitting gate choice '\(option)' for operation \(operationID)")
         Task {
-            await ExecutionSuspensionService.shared.resumeGate(for: operationID, chosenOption: option)
+            await ExecutionSuspensionService.shared.resumeGate(for: operationID, chosenOption: option, resolvedBy: .localUI)
         }
     }
 

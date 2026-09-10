@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  UserMessageView.swift
 //  Devgentic
@@ -264,33 +266,19 @@ struct UserBubbleShape: Shape {
 }
 
 struct UserBubbleModifier: ViewModifier {
+    @Environment(\.surfaceStyle) private var surfaceStyle
+    @Environment(\.appTheme) private var theme
+
     func body(content: Content) -> some View {
         content
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .foregroundColor(.primary) // Auto-adapts to light/dark
-            // MARK: Liquid Glass
-            .glassEffect(.regular, in: .rect(cornerRadius: 16))
-            // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
-            // .background(
-            //     UserBubbleShape()
-            //         .fill(.ultraThinMaterial) // Native glass effect
-            //         .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2) // Floating depth
-            // )
-            // .overlay(
-            //     UserBubbleShape()
-            //         .stroke(
-            //             LinearGradient(
-            //                 gradient: Gradient(colors: [
-            //                     Color.white.opacity(0.3),
-            //                     Color.white.opacity(0.05)
-            //                 ]),
-            //                 startPoint: .topLeading,
-            //                 endPoint: .bottomTrailing
-            //             ),
-            //             lineWidth: 1
-            //         )
-            // )
+            .appSurface(
+                in: .rect(cornerRadius: 16),
+                elevation: .card,
+                solidFillOverride: theme.surfaceOverlayStrong
+            )
     }
 }
 

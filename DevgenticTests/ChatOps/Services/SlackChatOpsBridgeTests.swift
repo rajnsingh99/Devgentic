@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  SlackChatOpsBridgeTests.swift
 //  DevgenticTests
@@ -166,5 +168,60 @@ final class SlackChatOpsBridgeTests: XCTestCase {
 
         let payload = try JSONDecoder().decode(SlackInteractivePayload.self, from: json)
         XCTAssertEqual(payload.channel?.id, "C0123456789")
+    }
+
+    // MARK: - The channel allowlist and its missing-evidence case
+
+    /// ⚠️⚠️ THE SAME BYPASS DISCORD CARRIED, IN THE SAME SHAPE. `authorizeSlack` decides by
+    /// comparing its argument against `slackAuthorizedChannelID`, and the caller passed
+    /// `payload.channel?.id ?? config.slackAuthorizedChannelID` — so a payload with no channel was
+    /// authorized by construction.
+    ///
+    /// ⚠️ VIEW SUBMISSIONS ARE THE ONE REAL NO-CHANNEL CASE and they never reach this gate: they are
+    /// routed to `resolveClarificationModal` first, which documents its own exemption and still
+    /// applies the tier gate. That is why refusing here is safe rather than a regression to the
+    /// modal flow.
+    ///
+    /// Mutation that must turn this red: pass `replyChannelID` to `authorizeSlack`, or restore the
+    /// single `let channelID = payload.channel?.id ?? config.slackAuthorizedChannelID`.
+    func testTheChannelAllowlistIsNeverGivenTheFallbackValue() throws {
+        let source = try Self.readBridgeSource()
+        let start = try XCTUnwrap(source.range(of: "private func handleInteraction("),
+                                  "handleInteraction was renamed — this test no longer guards anything")
+        let rest = source[start.upperBound...]
+        let end = rest.range(of: "\n    /// Opens the free-text modal")?.lowerBound ?? rest.endIndex
+        let body = String(rest[..<end])
+
+        XCTAssertTrue(body.contains("authorizeSlack(channelID: originChannelID"),
+                      "the allowlist must be given the payload's own channel, never a default")
+        XCTAssertFalse(body.contains("authorizeSlack(channelID: replyChannelID"),
+                       "feeding the reply address to the gate reintroduces the bypass")
+        XCTAssertTrue(body.contains("let originChannelID = payload.channel?.id\n"),
+                      "the evidence value must have no fallback at all")
+    }
+
+    /// ⚠️ THE ROUTING THAT MAKES THE REFUSAL SAFE. If a view submission ever reached the actions
+    /// path it would now be refused for having no channel, and the user's typed answer would be
+    /// dropped — so the order of these two branches is load-bearing for the fix above.
+    func testViewSubmissionsAreRoutedBeforeTheChannelGate() throws {
+        let source = try Self.readBridgeSource()
+        let start = try XCTUnwrap(source.range(of: "private func handleInteraction("))
+        let rest = String(source[start.upperBound...])
+
+        let submissionBranch = try XCTUnwrap(rest.range(of: "SlackInteractivePayload.viewSubmission"))
+        let channelGate = try XCTUnwrap(rest.range(of: "authorizeSlack(channelID:"))
+        XCTAssertLessThan(submissionBranch.lowerBound, channelGate.lowerBound,
+                          "a view submission reaching the channel gate would have its answer dropped")
+    }
+
+    private static func readBridgeSource() throws -> String {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let url = repoRoot.appendingPathComponent("Devgentic/ChatOps/Services/SlackChatOpsBridge.swift")
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw XCTSkip("SlackChatOpsBridge.swift not reachable — running outside a checkout")
+        }
+        return try String(contentsOf: url, encoding: .utf8)
     }
 }

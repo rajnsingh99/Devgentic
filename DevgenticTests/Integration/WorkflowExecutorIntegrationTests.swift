@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  WorkflowExecutorIntegrationTests.swift
 //  DevgenticTests
@@ -2448,7 +2450,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             events.append(event)
             if case .requestGate(_, _, let opID, _, _, _, _, _) = event {
                 try await Task.sleep(for: .milliseconds(2200))
-                await ExecutionSuspensionService.shared.resumeGate(for: opID, chosenOption: "Billing")
+                await ExecutionSuspensionService.shared.resumeGate(for: opID, chosenOption: "Billing", resolvedBy: .localUI)
             }
         }
 
@@ -5661,7 +5663,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
                        "the FOREIGN run's park must survive this run's Stop — draining it force-denies a tool the other run's user never answered")
 
         // Rescue: the foreign run's user approves, and the waiter gets THE USER's answer.
-        await ExecutionSuspensionService.shared.resume(for: foreignOp, approved: true)
+        await ExecutionSuspensionService.shared.resume(for: foreignOp, approved: true, resolvedBy: .localUI)
         let foreignResult = await foreignTask.value
         XCTAssertTrue(foreignResult, "the foreign waiter must receive the user's real answer, not a forced denial")
     }
@@ -5715,7 +5717,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(20))
         }
         if !bothDrained {
-            await ExecutionSuspensionService.shared.resume(for: tokenlessOp, approved: false)
+            await ExecutionSuspensionService.shared.resume(for: tokenlessOp, approved: false, resolvedBy: .localUI)
         }
         XCTAssertTrue(bothDrained,
                       "the root Stop must sweep the conversation's token-less parks — nothing else can ever resolve an MCP consent raised outside the run's task tree")

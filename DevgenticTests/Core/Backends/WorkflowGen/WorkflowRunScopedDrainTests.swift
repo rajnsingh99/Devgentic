@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  WorkflowRunScopedDrainTests.swift
 //  DevgenticTests
@@ -81,7 +83,7 @@ final class WorkflowRunScopedDrainTests: XCTestCase {
         // ⚠️ Rescue BEFORE awaiting (the suite's mandatory discipline — see the token-less test):
         // an UNDER-drain regression leaves opA parked, and awaiting it after the failed assertion
         // is a runner hang that poisons the whole batch, not a red test.
-        if !drained.contains(opA) { await service.resumeGate(for: opA, chosenOption: nil) }
+        if !drained.contains(opA) { await service.resumeGate(for: opA, chosenOption: nil, resolvedBy: nil) }
         let aResult = await taskA.value
         XCTAssertNil(aResult, "run A's gate resolves nil (cancelled)")
 
@@ -90,7 +92,7 @@ final class WorkflowRunScopedDrainTests: XCTestCase {
         XCTAssertTrue(bStillParked, "run B's confirmation must still be awaiting the user")
 
         // Rescue B so the singleton doesn't leak into later suites; the real user approves.
-        await service.resume(for: opB, approved: true)
+        await service.resume(for: opB, approved: true, resolvedBy: .localUI)
         let bResult = await taskB.value
         XCTAssertTrue(bResult, "run B's waiter must receive the USER's answer, not a forced denial")
     }
@@ -112,8 +114,8 @@ final class WorkflowRunScopedDrainTests: XCTestCase {
         // ⚠️ Rescue BEFORE awaiting: a failed assertion does not stop an XCTest, and awaiting a
         // park the mutated drain skipped is a runner HANG, not a red test — the exact trap the
         // skip-store tests document. Resuming an already-drained op is a logged no-op.
-        if !drained.contains(opTokenless) { await service.resumeGate(for: opTokenless, chosenOption: nil) }
-        if !drained.contains(opA) { await service.resumeGate(for: opA, chosenOption: nil) }
+        if !drained.contains(opTokenless) { await service.resumeGate(for: opTokenless, chosenOption: nil, resolvedBy: nil) }
+        if !drained.contains(opA) { await service.resumeGate(for: opA, chosenOption: nil, resolvedBy: nil) }
         let tokenlessResult = await tokenlessTask.value
         let aResult = await aTask.value
         XCTAssertNil(tokenlessResult)
@@ -134,7 +136,7 @@ final class WorkflowRunScopedDrainTests: XCTestCase {
         let stillParked = await service.isSuspended(for: conv2)
         XCTAssertTrue(stillParked, "conv2's park must survive conv1's run drain")
 
-        await service.resumeGate(for: opOther, chosenOption: "ok")
+        await service.resumeGate(for: opOther, chosenOption: "ok", resolvedBy: .localUI)
         _ = await otherTask.value
     }
 
@@ -165,7 +167,7 @@ final class WorkflowRunScopedDrainTests: XCTestCase {
         // ⚠️ Rescue BEFORE awaiting — an over-filtering regression leaves opB parked, and the
         // await would hang the runner instead of letting the red assertion above stand.
         if !drainedByA.contains(opB) && !drainedByB.contains(opB) {
-            await service.resume(for: opB, approved: false)
+            await service.resume(for: opB, approved: false, resolvedBy: nil)
         }
         let bResult = await bTask.value
         XCTAssertFalse(bResult, "a drained confirmation resolves false")

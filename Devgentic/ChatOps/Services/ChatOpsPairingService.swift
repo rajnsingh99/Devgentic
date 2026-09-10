@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  ChatOpsPairingService.swift
 //  Devgentic
@@ -77,10 +79,16 @@ final class ChatOpsPairingService {
         // Send farewell message if we have a valid connection
         if let token = config.botToken, let chatID = config.authorizedChatID {
             let client = TelegramAPIClient(botToken: token)
-            _ = try? await client.sendMessage(
-                chatID: chatID,
-                text: "Devgentic ChatOps disconnected. Goodbye!"
-            )
+            // ⚠️ THE USER'S ONLY NOTICE THAT THE BOT IS GONE, and it is sent before the credentials
+            // are wiped — there is no second chance after this line.
+            do {
+                _ = try await client.sendMessage(
+                    chatID: chatID,
+                    text: "Devgentic ChatOps disconnected. Goodbye!"
+                )
+            } catch {
+                logger.error("[CHATOPS] Failed to send the Telegram farewell before unpairing: \(error.localizedDescription). CONSEQUENCE: the credentials are wiped anyway, so the bot simply stops answering with no goodbye — the user is left unsure whether it is disconnected or broken, and nothing can retry because the token is gone a moment later.")
+            }
         }
 
         config.reset()
@@ -92,6 +100,8 @@ final class ChatOpsPairingService {
     private func pollForPairing(botToken: String, pin: String) async {
         let client = TelegramAPIClient(botToken: botToken)
         var lastUpdateID = 0
+        /// Per-origin failed attempts for THIS window only — see `PairingAttemptLedger`.
+        var ledger = PairingAttemptLedger()
         let deadline = Date().addingTimeInterval(pairingTimeout)
 
         while !Task.isCancelled && Date() < deadline {
@@ -101,9 +111,45 @@ final class ChatOpsPairingService {
                 for update in updates {
                     lastUpdateID = max(lastUpdateID, update.update_id)
 
-                    guard let text = update.message?.text?.uppercased().trimmingCharacters(in: .whitespaces),
-                          text == "PAIR \(pin)",
-                          let chatID = update.chatID else {
+                    // ⚠️ CLASSIFY BEFORE SKIPPING. This was a bare `continue`, so a wrong PIN left
+                    // no trace at all — you could not tell anyone had tried, and there was no data
+                    // from which to set a lockout threshold.
+                    guard let raw = update.message?.text else { continue }
+                    let attempt = PairingAttemptPolicy.classify(raw, expectedPIN: pin)
+                    guard attempt != .unrelated else { continue }
+
+                    // ⚠️ THE ORIGIN IS THE UNIT OF THE LOCKOUT, so an update that cannot be
+                    // attributed must not be counted against anyone — least of all everyone.
+                    guard let chatID = update.chatID else {
+                        logger.error("[CHATOPS] A pairing message arrived with no chat id, so it can neither be attributed nor authorized. CONSEQUENCE: it is ignored and NOT counted against any origin's attempts — counting it globally is what would let an unattributable message lock the user out.")
+                        continue
+                    }
+
+                    // ⚠️ THE SENDER, NOT THE CHAT, MATCHING DISCORD AND SLACK. In a DM the two are
+                    // the same thing, but in a GROUP every member shares one chat id — so counting
+                    // per chat would let any member's guesses lock out everyone else in the group,
+                    // including the person actually pairing. Authorization still binds the CHAT
+                    // (`authorizedChatID` below); only the lockout is per person.
+                    //
+                    // ⚠️ Falling back to the chat id when `from` is absent is deliberate: channel
+                    // posts have no sender, and refusing to count them at all would leave a gap the
+                    // lockout is meant to close.
+                    let origin = update.message?.from?.id.description ?? String(chatID)
+
+                    // ⚠️ BEFORE THE PIN IS ACTED ON. A lockout that still honours a correct guess
+                    // from a spent origin is not a lockout.
+                    if ledger.isBlocked(origin) {
+                        logger.info("[CHATOPS] Ignoring a pairing message from chat \(origin) — it has already spent its \(PairingAttemptLedger.attemptsPerOrigin) attempts this window. CONSEQUENCE: nothing further from that origin can pair, including a correct PIN. The window stays OPEN for every other chat, deliberately: aborting it would let a stranger stop the user pairing with ten messages.")
+                        continue
+                    }
+
+                    if attempt == .wrongPIN {
+                        switch ledger.recordFailure(from: origin) {
+                        case .listening(let remaining):
+                            logger.error("[CHATOPS] Failed pairing attempt from chat \(origin) (\(remaining) left before it is ignored; \(ledger.totalFailures) failures from \(ledger.distinctOrigins) origin(s) this window). CONSEQUENCE: pairing did NOT happen and the window stays open. One origin repeating is a typo; several origins guessing is not, and the PIN space is 900,000 against a 300-second window. The attempted digits are deliberately not recorded — see PairingAttemptPolicy.")
+                        case .blocked:
+                            logger.error("[CHATOPS] chat \(origin) has now spent all \(PairingAttemptLedger.attemptsPerOrigin) pairing attempts and will be IGNORED for the rest of this window, including a correct PIN. CONSEQUENCE: if this was the user mistyping, they must restart pairing from Settings to get a fresh window; if it was someone guessing, that origin can no longer reach the PIN. The window itself stays open for other chats.")
+                        }
                         continue
                     }
 
@@ -115,12 +161,23 @@ final class ChatOpsPairingService {
                     logger.info("Pairing successful with chat_id \(chatID)")
 
                     // Send confirmation and register bot commands
-                    _ = try? await client.sendMessage(
-                        chatID: chatID,
-                        text: "Paired with Devgentic! Use /help to see available commands.",
-                        replyMarkup: .reply(Self.persistentKeyboard)
-                    )
-                    try? await client.setMyCommands(Self.botCommands)
+                    // ⚠️⚠️ THIS SEND CARRIES THE PERSISTENT KEYBOARD, which is the only way it is
+                    // ever installed. Losing it is not a lost greeting — the user is paired but has
+                    // no buttons at all, and nothing re-sends it on a later message.
+                    do {
+                        _ = try await client.sendMessage(
+                            chatID: chatID,
+                            text: "Paired with Devgentic! Use /help to see available commands.",
+                            replyMarkup: .reply(Self.persistentKeyboard)
+                        )
+                    } catch {
+                        logger.error("[CHATOPS] Pairing succeeded for chat \(chatID) but the confirmation could not be sent: \(error.localizedDescription). CONSEQUENCE: the user gets no confirmation AND no persistent reply keyboard — pairing worked, but the bot looks unresponsive and offers no buttons. Nothing re-sends it; only re-pairing installs the keyboard.")
+                    }
+                    do {
+                        try await client.setMyCommands(Self.botCommands)
+                    } catch {
+                        logger.error("[CHATOPS] Pairing succeeded for chat \(chatID) but the command menu could not be registered: \(error.localizedDescription). CONSEQUENCE: Telegram's ☰ menu stays empty, so every command must be typed from memory. Nothing retries until the next pairing.")
+                    }
 
                     // Auto-start the ChatOps bridge
                     onPairingComplete?()
@@ -150,13 +207,17 @@ final class ChatOpsPairingService {
 
     // MARK: - Bot Menu Commands
 
-    static let botCommands: [BotCommand] = [
-        BotCommand(command: "conversations", description: "List recent conversations"),
-        BotCommand(command: "new", description: "Start a new conversation"),
-        BotCommand(command: "status", description: "Show current agent status"),
-        BotCommand(command: "cancel", description: "Stop the active agent"),
-        BotCommand(command: "help", description: "Show available commands")
-    ]
+    /// ⚠️ DERIVED FROM `ChatOpsVerbTable`, not hand-written. This was the THIRD hand-maintained copy
+    /// of the verb list — after `/help` and Discord's slash registration — and like both of them it
+    /// had drifted, offering five of eight.
+    ///
+    /// ⚠️ EVERY VERB IS OFFERED HERE, including argument-taking ones, and that is the difference
+    /// from Discord. Telegram's menu inserts the command into the composer and the user types the
+    /// rest, so `/search` arrives with its query; Discord's registration has no way to declare or
+    /// carry a parameter, so argument-taking verbs are excluded there.
+    static let botCommands: [BotCommand] = ChatOpsVerb.presentationOrder.map { verb in
+        BotCommand(command: verb.canonicalName, description: verb.helpDescription)
+    }
 
     // MARK: - Persistent Reply Keyboard
 

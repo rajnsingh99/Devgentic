@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  ThemeSettingsView.swift
 //  Devgentic
@@ -91,6 +93,44 @@ struct ThemeSettingsView: View {
                         }
                         .padding(.vertical, 8)
                         .padding(.horizontal, 4)
+                    }
+                }
+
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.25))
+                    .frame(height: 1)
+
+                // MARK: - Surface Style Section
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "sparkles.rectangle.stack")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(theme.accentColor)
+
+                            Text("SURFACE PRESENTATION")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .tracking(1.8)
+                                .foregroundColor(theme.secondaryText)
+                        }
+
+                        Text("Choose between Apple Liquid Glass or a razor-sharp solid matte pro workspace.")
+                            .font(theme.fontSubheadline)
+                            .foregroundColor(theme.secondaryText)
+                    }
+
+                    HStack(spacing: 16) {
+                        ForEach(SurfaceStyle.allCases) { style in
+                            SurfaceStyleCard(
+                                style: style,
+                                isSelected: themeManager.surfaceStyle == style,
+                                theme: theme
+                            ) {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                                    themeManager.applySurfaceStyle(style)
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -672,10 +712,11 @@ struct InteractiveMiniChatPreviewView: View {
                             .foregroundColor(theme.primaryText)
                             .padding(.horizontal, 16)
                             .padding(.vertical, 10)
-                            .glassEffect(.regular, in: .rect(cornerRadius: 16))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 16)
-                                    .stroke(theme.accentColor.opacity(0.2), lineWidth: 1)
+                            .appSurface(
+                                in: .rect(cornerRadius: 16),
+                                elevation: .card,
+                                strokeColor: theme.accentColor.opacity(0.2),
+                                solidFillOverride: theme.surfaceOverlayStrong
                             )
 
                         Image(systemName: "person.circle.fill")
@@ -786,6 +827,69 @@ struct InteractiveMiniChatPreviewView: View {
             customUserMessage = trimmed
             inputDraft = ""
         }
+    }
+}
+
+// MARK: - Surface Style Option Card
+
+private struct SurfaceStyleCard: View {
+    let style: SurfaceStyle
+    let isSelected: Bool
+    let theme: any Theme
+    let onSelect: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: style.icon)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
+                        .frame(width: 24, height: 24)
+                        .background(
+                            Circle()
+                                .fill(isSelected ? theme.accentColor.opacity(0.15) : theme.surfaceOverlay)
+                        )
+
+                    Text(style.displayName)
+                        .font(theme.fontFootnote.weight(isSelected ? .bold : .semibold))
+                        .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
+
+                    Spacer()
+
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(theme.accentColor)
+                    }
+                }
+
+                Text(style.subtitle)
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.secondaryText)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isSelected ? theme.accentColor.opacity(0.08) : (isHovering ? theme.surfaceOverlay : theme.secondaryBackground))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(
+                        isSelected
+                            ? theme.accentColor.opacity(0.5)
+                            : (isHovering ? theme.secondaryText.opacity(0.25) : theme.dividerColor.opacity(0.5)),
+                        lineWidth: isSelected ? 1.5 : 1
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
     }
 }
 

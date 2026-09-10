@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  TelemetrySanitizer.swift
 //  Devgentic
@@ -222,6 +224,10 @@ struct TelemetrySanitizer {
     // MARK: - Sensitive key dictionaries
 
     /// Keys whose values are ALWAYS secret. Redacted in `.standard` and `.strict` levels.
+    /// ⚠️ ALSO READ BY `RemoteEgressSanitizer`, which composes the credential passes without the
+    /// path/IP/email folding a `Level` would drag in. Adding a key here strengthens both.
+    static let standardSecretKeysForEgress: [String] = standardSecretKeys
+
     private static let standardSecretKeys: [String] = [
         "apiKey", "api_key", "API_KEY",
         "password", "passwd", "pwd",

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  MainApplicationView.swift
 //  Devgentic
@@ -36,6 +38,7 @@ struct MainApplicationView: View {
     @Environment(MainViewRouter.self) private var router
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.appTheme) private var theme
+    @Environment(\.surfaceStyle) private var surfaceStyle
 
     @FocusState private var isInputFocused: Bool
     
@@ -144,31 +147,33 @@ struct MainApplicationView: View {
             ZStack {
                 theme.primaryBackground
                 
-                // Ambient Aura Glows (Provides texture for Liquid Glass refraction)
-                if theme.colorScheme != .light {
-                    GeometryReader { geo in
-                        ZStack {
-                            Circle()
-                                .fill(theme.accentColor.opacity(0.06))
-                                .frame(width: geo.size.width * 0.45, height: geo.size.width * 0.45)
-                                .blur(radius: 130)
-                                .offset(x: -geo.size.width * 0.15, y: -geo.size.height * 0.1)
-                            
-                            Circle()
-                                .fill(Color.orange.opacity(0.035))
-                                .frame(width: geo.size.width * 0.4, height: geo.size.width * 0.4)
-                                .blur(radius: 110)
-                                .offset(x: geo.size.width * 0.35, y: geo.size.height * 0.25)
+                // Ambient Aura Glows (Provides texture for Liquid Glass refraction; suppressed in Solid Matte)
+                if surfaceStyle == .glassmorphic {
+                    if theme.colorScheme != .light {
+                        GeometryReader { geo in
+                            ZStack {
+                                Circle()
+                                    .fill(theme.accentColor.opacity(0.06))
+                                    .frame(width: geo.size.width * 0.45, height: geo.size.width * 0.45)
+                                    .blur(radius: 130)
+                                    .offset(x: -geo.size.width * 0.15, y: -geo.size.height * 0.1)
+                                
+                                Circle()
+                                    .fill(Color.orange.opacity(0.035))
+                                    .frame(width: geo.size.width * 0.4, height: geo.size.width * 0.4)
+                                    .blur(radius: 110)
+                                    .offset(x: geo.size.width * 0.35, y: geo.size.height * 0.25)
+                            }
                         }
-                    }
-                } else {
-                    GeometryReader { geo in
-                        ZStack {
-                            Circle()
-                                .fill(theme.accentColor.opacity(0.04))
-                                .frame(width: geo.size.width * 0.4, height: geo.size.width * 0.4)
-                                .blur(radius: 100)
-                                .offset(x: -geo.size.width * 0.1, y: -geo.size.height * 0.1)
+                    } else {
+                        GeometryReader { geo in
+                            ZStack {
+                                Circle()
+                                    .fill(theme.accentColor.opacity(0.04))
+                                    .frame(width: geo.size.width * 0.4, height: geo.size.width * 0.4)
+                                    .blur(radius: 100)
+                                    .offset(x: -geo.size.width * 0.1, y: -geo.size.height * 0.1)
+                            }
                         }
                     }
                 }
@@ -449,7 +454,12 @@ struct MainApplicationView: View {
                 .padding(.horizontal)
                 .padding(.top, 4)
                 .padding(.bottom, 15)
-                .shadow(color: SwiftUI.Color.black.opacity(0.2), radius: 10, x: 0, y: 5)
+                .shadow(
+                    color: surfaceStyle == .glassmorphic ? SwiftUI.Color.black.opacity(0.15) : .clear,
+                    radius: 10,
+                    x: 0,
+                    y: 5
+                )
             }
             // Floating mode picker — overlays above the input area
             .overlay(alignment: .top) {
@@ -546,6 +556,7 @@ struct MainApplicationView: View {
 private struct InterfaceModePicker: View {
     @Environment(MainApplicationViewModel.self) private var viewModel
     @Environment(\.appTheme) private var theme
+    @Environment(\.surfaceStyle) private var surfaceStyle
     @Namespace private var modeAnimation
 
     var body: some View {
@@ -557,20 +568,33 @@ private struct InterfaceModePicker: View {
         .padding(4)
         .background(
             Capsule()
-                .fill(theme.secondaryBackground.opacity(0.65))
+                .fill(
+                    surfaceStyle == .solid
+                        ? (theme.isDark ? Color(hex: "#1E1E22") : Color.white)
+                        : theme.secondaryBackground.opacity(0.65)
+                )
         )
         .overlay(
             Capsule()
                 .strokeBorder(
-                    LinearGradient(
-                        colors: [Color.white.opacity(0.16), Color.white.opacity(0.04)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
+                    surfaceStyle == .solid
+                        ? AnyShapeStyle(theme.isDark ? Color.white.opacity(0.1) : Color.black.opacity(0.08))
+                        : AnyShapeStyle(
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.16), Color.white.opacity(0.04)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        ),
                     lineWidth: 1
                 )
         )
-        .shadow(color: Color.black.opacity(0.22), radius: 10, x: 0, y: 4)
+        .shadow(
+            color: Color.black.opacity(surfaceStyle == .solid ? (theme.isDark ? 0.3 : 0.08) : 0.22),
+            radius: surfaceStyle == .solid ? 6 : 10,
+            x: 0,
+            y: surfaceStyle == .solid ? 2 : 4
+        )
         .animation(.spring(response: 0.35, dampingFraction: 0.75), value: viewModel.interfaceMode)
     }
 }

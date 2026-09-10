@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  SchemaMigrationTests.swift
 //  DevgenticTests
@@ -169,7 +171,7 @@ final class SchemaMigrationTests: XCTestCase {
         // `Bundle.main` under `TEST_HOST` IS devgentic.app; the identifier lookup is a belt-and-braces
         // fallback for any future host arrangement.
         let appBundle = try XCTUnwrap(
-            Bundle(identifier: "com.dev.devgentic") ?? Bundle.main,
+            Bundle(identifier: "app.devgentic.macos") ?? Bundle.main,
             "Could not resolve the app bundle — the deployment floor cannot be verified."
         )
         let raw = try XCTUnwrap(

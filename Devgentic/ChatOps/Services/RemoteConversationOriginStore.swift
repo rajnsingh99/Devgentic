@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  RemoteConversationOriginStore.swift
 //  Devgentic
@@ -79,9 +81,20 @@ enum RemoteConversationOriginStore {
     }
 
     private static func load() -> [String: String] {
-        guard let data = UserDefaults.standard.data(forKey: AppSettings.remoteConversationOriginsKey),
-              let map = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
-        return map
+        guard let data = UserDefaults.standard.data(forKey: AppSettings.remoteConversationOriginsKey) else {
+            // ⚠️ NOT AN ERROR. No key means no remote conversation has been created yet, which is
+            // the ordinary first-run state — logging it as a failure would cry wolf on every launch.
+            return [:]
+        }
+        do {
+            return try JSONDecoder().decode([String: String].self, from: data)
+        } catch {
+            // ⚠️ THIS ONE IS A REAL LOSS, and it read as "no remote conversations exist". The
+            // save path already logs its own failure with a consequence; the load path did not,
+            // so a corrupted map silently un-labelled EVERY remote conversation at once.
+            logger.error("[CHATOPS] Could not decode the remote-origin map (\(data.count) bytes): \(error.localizedDescription). CONSEQUENCE: every conversation created from chat loses its recorded origin at once and falls back to the title heuristic, so conversations named after the user's own first message no longer show as remote anywhere in the UI. The next save overwrites the unreadable data, making this permanent.")
+            return [:]
+        }
     }
 
     private static func save(_ map: [String: String]) {

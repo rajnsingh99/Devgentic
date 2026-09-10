@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  QuickAccessSessionViewModel.swift
 //  Devgentic
@@ -600,7 +602,7 @@ final class QuickAccessSessionViewModel {
         } else {
             submitHITLDirect("Gate cancelled", operationID: pending.id,
                              detail: "no option chosen — the workflow resumes down its default path") {
-                await ExecutionSuspensionService.shared.resumeGate(for: pending.id, chosenOption: nil)
+                await ExecutionSuspensionService.shared.resumeGate(for: pending.id, chosenOption: nil, resolvedBy: .quickAccess)
             }
         }
     }

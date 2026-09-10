@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  RecordingOverlayView.swift
 //  Devgentic
@@ -43,13 +45,8 @@ struct RecordingOverlayView: View {
             .padding(.bottom, 12)
         }
         .frame(minHeight: 58)
-        // Match mainInputArea chrome exactly (Liquid Glass + surfaceOverlay stroke)
-        // so toggling voice input doesn't visibly swap materials.
-        .glassEffect(.regular, in: .rect(cornerRadius: 16))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(theme.surfaceOverlay, lineWidth: 1)
-        )
+        // Match mainInputArea chrome exactly so toggling voice input doesn't visibly swap materials.
+        .appSurface(in: .rect(cornerRadius: 18), elevation: .elevated)
         .transition(.opacity.combined(with: .scale(scale: 0.95)))
     }
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  StoreRecoveryTests.swift
 //  DevgenticTests
@@ -289,7 +291,7 @@ final class StoreRecoveryTests: XCTestCase {
     /// They must be enumerable so the confirmation dialog can say so rather than implying a
     /// completeness it does not deliver.
     func testCompanionStoresAreReportedWhenTheyExist() throws {
-        let companions = StoreRecovery.companionStores(bundleIdentifier: "com.dev.devgentic")
+        let companions = StoreRecovery.companionStores(bundleIdentifier: "app.devgentic.macos")
         // Only existing ones are returned, so on a clean machine this is legitimately empty;
         // assert the contract rather than a machine-specific count.
         for companion in companions {

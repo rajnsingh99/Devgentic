@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  NotificationSettingsView.swift
 //  Devgentic
@@ -16,6 +18,12 @@ struct NotificationSettingsView: View {
     @State private var testSent = false
     @State private var permissionStatus: UNAuthorizationStatus = .notDetermined
     @State private var testErrorMessage: String? = nil
+
+    /// The registered channels, as values. Empty until the first refresh lands — registration is
+    /// asynchronous (`DevgenticApp` and `ChatOpsCoordinator` each register from a detached `Task`),
+    /// so an empty card here is a real state and not a bug.
+    @State private var channels: [NotificationChannelInfo] = []
+    @State private var channelErrorMessage: String? = nil
 
     var body: some View {
         ScrollView {
@@ -66,50 +74,97 @@ struct NotificationSettingsView: View {
                 }
 
                 // Channels
+                //
+                // ⚠️ THIS CARD USED TO BE FOUR HARDCODED ROWS — "Local Notification" plus Slack,
+                // Discord and Telegram marked "Coming soon" — and it never asked the dispatcher
+                // anything. Both halves of that were wrong by the time it was read: the ChatOps
+                // channel (Telegram, Discord AND Slack) is registered and delivering, so the pane
+                // advertised as unbuilt something that already worked, and offered no way to turn
+                // it on or off. The rows now come from the registry, so a channel registered later
+                // appears here without this file changing.
                 SettingsCard(title: "Channels", icon: "square.grid.2x2.fill", theme: theme) {
-                    ChannelRow(
-                        name: "Local Notification",
-                        description: permissionStatus == .denied
-                            ? "Permission denied — tap Open Settings above"
-                            : "macOS system notifications",
-                        icon: "bell.badge",
-                        isEnabled: permissionStatus != .denied,
-                        isComingSoon: false,
-                        theme: theme
-                    )
+                    // ⚠️ A NOTICE, NOT A DISABLED STATE. These switches used to grey out when the
+                    // master switch was off, which said the same thing but also took the controls
+                    // away. This re-renders correctly only because `isGloballyEnabled` is now an
+                    // observed property — as an `@ObservationIgnored @AppStorage` it would have
+                    // rendered once and then gone stale, which is why the old code could not have
+                    // used a conditional here.
+                    if !config.isGloballyEnabled {
+                        HStack(spacing: 8) {
+                            Image(systemName: "info.circle.fill")
+                                .font(.system(size: 12))
+                                .foregroundColor(theme.secondaryText.opacity(0.7))
+                                .accessibilityHidden(true)
+                            Text("Notifications are switched off above, so nothing is delivered on any channel. These switches still record your choice.")
+                                .font(.system(size: 11))
+                                .foregroundColor(theme.secondaryText)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 12)
+                    }
 
-                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+                    if channels.isEmpty {
+                        HStack(spacing: 12) {
+                            Image(systemName: "hourglass")
+                                .font(.system(size: 14))
+                                .foregroundColor(theme.secondaryText.opacity(0.6))
+                                .frame(width: 24, alignment: .center)
+                                .accessibilityHidden(true)
+                            Text("No delivery channels are registered yet.")
+                                .font(.system(size: 12))
+                                .foregroundColor(theme.secondaryText)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 14)
+                    } else {
+                        ForEach(Array(channels.enumerated()), id: \.element.id) { index, info in
+                            if index > 0 {
+                                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+                            }
+                            ChannelRow(
+                                name: info.displayName,
+                                description: description(for: info),
+                                icon: icon(for: info),
+                                isEnabled: info.isEnabled,
+                                showsUnavailableWarning: isUnavailable(info),
+                                theme: theme
+                            ) {
+                                Toggle("", isOn: Binding(
+                                    get: { info.isEnabled },
+                                    set: { setChannel(info, enabled: $0) }
+                                ))
+                                .toggleStyle(.switch)
+                                .labelsHidden()
+                                .tint(theme.accentColor)
+                                // ⚠️ NOT `.disabled(!config.isGloballyEnabled)`, which is what this
+                                // was. It trapped the user: switching the master off greyed out
+                                // every channel switch, so no combination of controls gave ChatOps
+                                // mirroring without desktop banners, and a channel could not be
+                                // pre-configured before switching notifications on. Delivery is
+                                // enforced in `dispatch()`; this pane records intent, and recording
+                                // intent while the master switch is off is fine — the notice at the
+                                // top of this card says so plainly instead of greying things out.
+                                .accessibilityLabel(Text(verbatim: info.displayName))
+                            }
+                        }
+                    }
 
-                    ChannelRow(
-                        name: "Slack Webhook",
-                        description: "Coming soon",
-                        icon: "number",
-                        isEnabled: false,
-                        isComingSoon: true,
-                        theme: theme
-                    )
-
-                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
-
-                    ChannelRow(
-                        name: "Discord Webhook",
-                        description: "Coming soon",
-                        icon: "gamecontroller",
-                        isEnabled: false,
-                        isComingSoon: true,
-                        theme: theme
-                    )
-
-                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
-
-                    ChannelRow(
-                        name: "Telegram Bot",
-                        description: "Coming soon",
-                        icon: "paperplane",
-                        isEnabled: false,
-                        isComingSoon: true,
-                        theme: theme
-                    )
+                    if let channelErrorMessage {
+                        Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+                        HStack(spacing: 6) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.red)
+                                .font(.system(.caption))
+                                .accessibilityHidden(true)
+                            Text(verbatim: channelErrorMessage)
+                                .font(.system(.caption))
+                                .foregroundColor(.red)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                    }
                 }
 
                 // Test Notification
@@ -131,7 +186,15 @@ struct NotificationSettingsView: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
-                        .disabled(!config.isGloballyEnabled || permissionStatus == .denied)
+                        // ⚠️ DELIBERATELY NOT `.disabled(!config.isGloballyEnabled ...)`. A
+                        // diagnostic control that refuses to run cannot diagnose: greying this out
+                        // when notifications are off tells the user nothing they did not already
+                        // know, while running it and naming the real cause tells them exactly which
+                        // of the three gates — master switch, channel switch, OS permission — is
+                        // stopping delivery. (This modifier was ALSO reading a value SwiftUI never
+                        // refreshed; that defect is fixed at its source now, but the reasoning above
+                        // is why the modifier stays gone.)
+                        .disabled(permissionStatus == .denied)
                     }
 
                     if let errorMsg = testErrorMessage {
@@ -154,10 +217,17 @@ struct NotificationSettingsView: View {
         }
         .task {
             await refreshPermissionStatus()
+            await refreshChannels()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             // Re-check when user returns from System Settings.
-            Task { await refreshPermissionStatus() }
+            // ⚠️ Channels are re-read too, and not only for tidiness: registration happens from two
+            // detached `Task`s at launch, so a pane opened early can genuinely render before the
+            // ChatOps channel exists. This is the second chance to show it.
+            Task {
+                await refreshPermissionStatus()
+                await refreshChannels()
+            }
         }
     }
 
@@ -169,14 +239,98 @@ struct NotificationSettingsView: View {
                 body: "Devgentic notifications are working correctly.",
                 conversationID: nil
             )
-            await NotificationDispatcher.shared.dispatch(payload)
+            // ⚠️ "Test Sent!" USED TO BE UNCONDITIONAL, which was survivable only while the pane
+            // had no channel switches. Now that it does, a user can switch every channel off, press
+            // Test and — before this — be told it was sent. The whole point of a test button is
+            // that its answer can be trusted.
+            let delivered = await NotificationDispatcher.shared.dispatch(payload)
+            // ⚠️ `delivered == 0` HAS TWO CAUSES AND THEY NEED DIFFERENT ANSWERS: the master switch
+            // (or a per-conversation mute) suppressed it, or every channel is switched off. An `Int`
+            // cannot tell them apart, so the cause is re-derived from the same pure policy the
+            // dispatcher used. Naming the wrong one on the ONE screen whose job is diagnosing
+            // delivery is worse than saying nothing.
+            let masterSwitchAllowedIt = NotificationGatePolicy.shouldDeliver(conversationID: nil)
             await MainActor.run {
-                testSent = true
+                if delivered > 0 {
+                    testSent = true
+                } else if !masterSwitchAllowedIt {
+                    testErrorMessage = "Notifications are switched off — turn on “Enable Notifications” above."
+                } else {
+                    testErrorMessage = "No channel accepted the test. Check the channel switches above."
+                }
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 testSent = false
             }
         }
+    }
+
+    // MARK: - Channels
+
+    /// Reads the registry. The dispatcher is an actor and its channels are mutable class instances,
+    /// so what crosses back is `NotificationChannelInfo` values — see the type's own warning.
+    @MainActor
+    private func refreshChannels() async {
+        channels = await NotificationDispatcher.shared.channelSnapshots()
+    }
+
+    /// Flips one channel.
+    ///
+    /// ⚠️ OPTIMISTIC WRITE, AUTHORITATIVE RE-READ. The switch moves immediately so it does not lag
+    /// under the pointer, but the local array is not the truth — the actor is. The re-read is what
+    /// makes a rejected change visibly snap back instead of leaving the pane showing a setting that
+    /// was never applied.
+    @MainActor
+    private func setChannel(_ info: NotificationChannelInfo, enabled: Bool) {
+        channelErrorMessage = nil
+        if let index = channels.firstIndex(where: { $0.id == info.id }) {
+            channels[index] = NotificationChannelInfo(
+                id: info.id,
+                displayName: info.displayName,
+                isEnabled: enabled,
+                requiresConfiguration: info.requiresConfiguration
+            )
+        }
+        Task {
+            let applied = await NotificationDispatcher.shared.setEnabled(enabled, for: info.id)
+            await refreshChannels()
+            if !applied {
+                channelErrorMessage = "\(info.displayName) is no longer registered — the change was not applied."
+            }
+        }
+    }
+
+    /// ⚠️ Falls back rather than rendering a blank slot: a channel registered after this file was
+    /// written still gets a row, which is the entire point of reading the registry.
+    private func icon(for info: NotificationChannelInfo) -> String {
+        switch info.id {
+        case "local_notification": return "bell.badge"
+        case "chatops":            return "paperplane"
+        default:                   return "square.grid.2x2"
+        }
+    }
+
+    private func description(for info: NotificationChannelInfo) -> LocalizedStringKey {
+        switch info.id {
+        case "local_notification":
+            return permissionStatus == .denied
+                ? "Permission denied — use Open Settings above"
+                : "macOS system notifications"
+        case "chatops":
+            return "Mirrored to your paired Telegram, Discord and Slack channels"
+        default:
+            return info.requiresConfiguration
+                ? "Needs configuration before it can deliver"
+                : "Registered delivery channel"
+        }
+    }
+
+    /// ⚠️ Only claims a channel cannot deliver where that is actually KNOWN here. Local delivery is
+    /// checkable (the system permission). Whether ChatOps has a paired channel is not visible from
+    /// a snapshot, and a warning triangle guessed from `requiresConfiguration` alone would sit
+    /// permanently next to a channel that is working.
+    private func isUnavailable(_ info: NotificationChannelInfo) -> Bool {
+        info.id == "local_notification" && permissionStatus == .denied
     }
 
     @MainActor
@@ -194,13 +348,21 @@ struct NotificationSettingsView: View {
 
 // MARK: - Reusable Custom Channel Row with Hover States
 
-private struct ChannelRow: View {
-    let name: LocalizedStringKey
+/// ⚠️ `name` IS A RUNTIME STRING, not a `LocalizedStringKey`, and it is rendered with
+/// `Text(verbatim:)`. It carries a channel's own `displayName` out of the registry; passing a
+/// runtime value where a `LocalizedStringKey` is expected asks the bundle for a translation keyed by
+/// that literal text and silently renders the key when there is none. `description` stays a
+/// `LocalizedStringKey` because every one of its values is still a literal in this file.
+///
+/// ⚠️ `isComingSoon` IS GONE. It only ever dimmed rows for channels this app had already built.
+private struct ChannelRow<Control: View>: View {
+    let name: String
     let description: LocalizedStringKey
     let icon: String
     let isEnabled: Bool
-    let isComingSoon: Bool
+    let showsUnavailableWarning: Bool
     let theme: any Theme
+    @ViewBuilder let control: Control
 
     @State private var isHovered = false
 
@@ -208,14 +370,14 @@ private struct ChannelRow: View {
         HStack(spacing: 16) {
             Image(systemName: icon)
                 .font(.system(size: 14))
-                .foregroundColor(isComingSoon ? theme.secondaryText.opacity(0.4) : (isEnabled ? theme.accentColor : .orange))
+                .foregroundColor(isEnabled ? theme.accentColor : theme.secondaryText.opacity(0.5))
                 .frame(width: 24, alignment: .center)
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(name)
+                Text(verbatim: name)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(isComingSoon ? theme.secondaryText.opacity(0.5) : theme.primaryText)
+                    .foregroundColor(theme.primaryText)
                 Text(description)
                     .font(.system(size: 11))
                     .foregroundColor(theme.secondaryText.opacity(0.8))
@@ -223,24 +385,14 @@ private struct ChannelRow: View {
 
             Spacer()
 
-            if isComingSoon {
-                Text("Soon")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundColor(theme.secondaryText.opacity(0.5))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(theme.secondaryText.opacity(0.08))
-                    .clipShape(Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(theme.secondaryText.opacity(0.15), lineWidth: 0.5)
-                    )
-            } else if !isEnabled {
+            if showsUnavailableWarning {
                 Image(systemName: "exclamationmark.circle.fill")
                     .foregroundColor(.orange.opacity(0.8))
                     .font(.system(size: 14))
                     .accessibilityHidden(true)
             }
+
+            control
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)

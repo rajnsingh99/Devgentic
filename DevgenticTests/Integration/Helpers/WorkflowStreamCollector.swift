@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  WorkflowStreamCollector.swift
 //  DevgenticTests
@@ -182,7 +184,7 @@ enum WorkflowStreamCollector {
             events.append(event)
             if case .requestGate(_, _, let operationID, _, _, _, _, _) = event {
                 try await Task.sleep(for: .milliseconds(50))
-                await ExecutionSuspensionService.shared.resumeGate(for: operationID, chosenOption: option)
+                await ExecutionSuspensionService.shared.resumeGate(for: operationID, chosenOption: option, resolvedBy: .localUI)
             }
         }
         return events

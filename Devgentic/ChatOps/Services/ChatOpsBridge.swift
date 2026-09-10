@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  ChatOpsBridge.swift
 //  Devgentic
@@ -29,6 +31,10 @@ final class ChatOpsBridge {
     private var listener: TelegramListener?
     private let securityGate = ChatOpsSecurityGate()
     private var telegramTransport: TelegramTransport?
+
+    /// [C5a] Decides what the READ-ONLY verbs show. Holds no transport, so it cannot post — the
+    /// bridge renders whatever it returns. `/new`, `switch:` and `/cancel` still live below.
+    private var commands: ChatOpsCommandService?
     var remoteMirrorService: RemoteMirrorService?
     private let config = ChatOpsConfigManager.shared
 
@@ -36,16 +42,6 @@ final class ChatOpsBridge {
 
     private var listeningTask: Task<Void, Never>?
     private(set) var isRunning: Bool = false
-
-    /// [D1] True when a clarification is pending for the active conversation — decides whether an inbound
-    /// plain-text reply is parsed as a clarification answer vs a new message. Derived from the unified
-    /// InteractionCenter (the old ChatOpsHITLBridge.awaitingClarification was dead state — only a
-    /// never-posted notification set it, so Telegram clarification replies never registered).
-    private var isAwaitingClarification: Bool {
-        guard let convID = config.activeConversationID,
-              let center = viewModel?.interactionCenter else { return false }
-        return center.items(for: convID).contains { if case .clarification = $0.kind { return true }; return false }
-    }
 
     init(viewModel: MainApplicationViewModel) {
         self.viewModel = viewModel
@@ -71,6 +67,18 @@ final class ChatOpsBridge {
         // Create RemoteMirrorService if ViewModel provides ActiveStreamManager
         if let asm = viewModel?.activeStreamManager {
             self.remoteMirrorService = RemoteMirrorService(activeStreamManager: asm)
+        }
+
+        // ⚠️ `conversations:` is injected explicitly rather than reached through
+        // `viewModel.persistenceService` — that property is typed `ChatPersistenceProtocol`, which
+        // `ConversationReading` is deliberately not part of, so a cast would silently no-op.
+        if let vm = viewModel {
+            self.commands = ChatOpsCommandService(
+                provider: .telegram,
+                runControl: vm,
+                commanding: vm,
+                conversations: ChatPersistenceStore.shared
+            )
         }
 
         isRunning = true
@@ -117,21 +125,44 @@ final class ChatOpsBridge {
 
         // 2. Acknowledge callback queries immediately to remove spinner
         if let callbackQuery = update.callback_query {
-            try? await apiClient?.answerCallbackQuery(id: callbackQuery.id)
+            // ⚠️ THE ACK IS WHAT CLEARS THE SPINNER ON THE BUTTON. A swallowed failure leaves the
+            // tap looking permanently in-flight, which reads as "the app hung" rather than "the
+            // network blipped" — and it was the only ack on this path, so nothing retried it.
+            do {
+                try await apiClient?.answerCallbackQuery(id: callbackQuery.id)
+            } catch {
+                logger.error("[CHATOPS] Failed to acknowledge a Telegram callback query \(callbackQuery.id): \(error.localizedDescription). CONSEQUENCE: the tapped button keeps its loading spinner indefinitely, so the user cannot tell whether their tap registered; the command itself still runs below.")
+            }
+        }
+
+        // 2b. ⚠️ A REPLY ANSWERS THE MESSAGE IT REPLIES TO, and that beats every inference. The
+        //     clarification prompt now carries a `ForceReply`, so Telegram sends the answer back
+        //     with `reply_to_message` — the only thing on the wire that says WHICH clarification is
+        //     being answered. Checked BEFORE parsing, because the parser cannot see it and would
+        //     fall back to the provider cursor, which is what made a second parked clarification
+        //     unanswerable and let a `/new` in between misroute the answer into a new agent run.
+        if let repliedTo = update.message?.reply_to_message?.message_id,
+           let text = update.message?.text,
+           let operationID = await remoteMirrorService?.operationID(forRemoteMessageID: "\(repliedTo)") {
+            logger.info("[CHATOPS] A Telegram reply to message \(repliedTo) resolved clarification \(operationID) by correlation rather than by the conversation cursor.")
+            await remoteMirrorService?.handleClarification(operationID: operationID, text: text)
+            return
         }
 
         // 3. Parse command
         let command = ChatOpsCommand.parse(
             text: update.message?.text,
             callbackData: update.callback_query?.data,
-            awaitingClarification: isAwaitingClarification
+            awaitingClarification: commands?.isAwaitingClarification ?? false
         )
 
         // 4. Tier enforcement
         guard await securityGate.canExecute(command, tier: config.securityTier) else {
             if let chatID = update.chatID {
                 let msg = await securityGate.denialMessage(for: command, tier: config.securityTier)
-                _ = try? await apiClient?.sendMessage(chatID: chatID, text: msg)
+                let tierName = config.securityTier.rawValue
+                logger.error("[CHATOPS] A Telegram \(String(describing: command)) from chat \(chatID) was refused by the \(tierName) security tier. CONSEQUENCE: the command did nothing; without this line a tier refusal left no trace at all.")
+                await tell(chatID, msg, whenLost: "the remote user is not told why their command was refused, so a tier-blocked command and a dead bridge look identical to them — and the refusal itself is logged nowhere else.")
             }
             return
         }
@@ -141,240 +172,86 @@ final class ChatOpsBridge {
 
         switch command {
         case .conversations:
-            await handleConversations(chatID: chatID)
+            await render(commands?.conversationList(offset: 0), to: chatID)
+        case .conversationPage(let offset):
+            await render(commands?.conversationList(offset: offset), to: chatID)
+        case .searchConversations(let query):
+            await render(commands?.searchConversations(query: query), to: chatID)
+        case .conversationHistory(let argument):
+            await render(commands?.conversationHistory(argument: argument), to: chatID)
         case .newConversation:
-            await handleNewConversation(chatID: chatID)
+            await render(commands?.newConversation(), to: chatID)
         case .status:
-            await handleStatus(chatID: chatID)
+            await render(commands?.status(), to: chatID)
         case .cancel:
-            await handleCancel(chatID: chatID)
+            await render(await commands?.cancelRun(), to: chatID)
         case .help:
-            await handleHelp(chatID: chatID)
+            await render(commands?.help(), to: chatID)
         case .switchConversation(let uuid):
-            await handleSwitchConversation(to: uuid, chatID: chatID)
+            await render(commands?.switchConversation(to: uuid), to: chatID)
+        case .profiles:
+            await render(commands?.profileList(), to: chatID)
+        case .selectProfile(let profileID):
+            await render(commands?.selectProfile(profileID), to: chatID)
+        case .useProfile(let name):
+            await render(commands?.useProfile(named: name), to: chatID)
         case .approveHITL(let operationID):
             await remoteMirrorService?.handleApproval(operationID: operationID, approved: true)
         case .denyHITL(let operationID):
             await remoteMirrorService?.handleApproval(operationID: operationID, approved: false)
         case .gateChoiceHITL(let operationID, let optionIndex):
             await remoteMirrorService?.handleGate(operationID: operationID, optionIndex: optionIndex)
+        case .answerClarification:
+            // ⚠️ TELEGRAM NEVER EMITS THIS. It has no modal, so its clarification prompt carries a
+            // `ForceReply` instead and the answer arrives correlated by `reply_to_message`. The arm
+            // exists because the callback grammar is shared across all three platforms, and it
+            // degrades rather than going silent: a token from anywhere else still gets an answer.
+            await tell(chatID,
+                       "Reply to the clarification message with your answer — Telegram has no form dialog.",
+                       whenLost: "the user tapped an Answer button that Telegram cannot honour and is told nothing, so the run stays parked with no visible way to answer it.")
         case .clarificationResponse(let text):
-            // [HITL/P6] Resolve the pending clarification's operationID from the unified
-            // InteractionCenter (single source of truth) for this conversation.
-            if let convID = config.activeConversationID,
-               let center = viewModel?.interactionCenter {
-                let pendingOpID = center.items(for: convID)
-                    .first(where: { if case .clarification = $0.kind { return true }; return false })?
-                    .id
-                if let opID = pendingOpID {
-                    await remoteMirrorService?.handleClarification(operationID: opID, text: text)
-                }
-            }
+            await resolveClarification(text)
         case .freeText(let text):
             await handleFreeText(text, chatID: chatID)
         case .pairingAttempt:
-            // Handled by PairingService, not the bridge
-            break
+            // ⚠️ GENUINELY OWNED ELSEWHERE — `ChatOpsPairingService` polls `getUpdates` on its own
+            // while unpaired, so this arm is correct to post nothing. Logged at `debug` rather than
+            // `info` because it is the expected path, not a drop.
+            logger.debug("[CHATOPS/SILENT] A Telegram pairing attempt reached the bridge and was ignored. CONSEQUENCE: none — ChatOpsPairingService owns pairing and answers it on its own polling loop; a reply here would duplicate that.")
         case .unknown:
-            break
+            // ⚠️ A REAL DROP, and it was a bare `break`. Reached by a plain message matching no verb
+            // and by a button whose callback token no longer parses — a stale button from a
+            // superseded grammar, which Telegram scrollback keeps forever.
+            logger.info("[CHATOPS/SILENT] A Telegram input parsed to `.unknown` in chat \(chatID) and was dropped. CONSEQUENCE: the user received NO reply at all and cannot tell whether the bot is alive; if this was a button tap, its token no longer parses and every copy of that button in scrollback is inert.")
         }
     }
 
     // MARK: - Command Handlers
-
-    private func handleConversations(chatID: Int64) async {
-        let conversations = fetchRecentConversations(limit: 10)
-
-        if conversations.isEmpty {
-            _ = try? await apiClient?.sendMessage(chatID: chatID, text: "No conversations yet. Use /new to create one.")
-            return
-        }
-
-        let buttons: [[InlineKeyboardButton]] = conversations.map { conversationSD in
-            let title = conversationSD.toRowStruct().displayTitle
-            let convID = conversationSD.id
-            let isActive = convID == config.activeConversationID ? "⭐ " : ""
-            let label = "\(isActive)\(title)"
-            return [InlineKeyboardButton(text: String(label.prefix(60)), callbackData: "switch:\(convID.uuidString)")]
-        }
-
-        var allButtons = buttons
-        allButtons.append([InlineKeyboardButton(text: "➕ New Conversation", callbackData: "action:new")])
-
-        let keyboard = InlineKeyboardMarkup(inline_keyboard: allButtons)
-
-        _ = try? await apiClient?.sendMessage(
-            chatID: chatID,
-            text: "📋 *Your Conversations:*",
-            replyMarkup: .inline(keyboard)
-        )
-    }
-
-    private func handleNewConversation(chatID: Int64) async {
-        guard let vm = viewModel else { return }
-
-        // Use the currently selected profile, or the first available agent profile
-        guard let profile = resolveProfile() else {
-            _ = try? await apiClient?.sendMessage(chatID: chatID, text: "⚠️ No agent profile configured. Set one in Devgentic Settings.")
-            return
-        }
-
-        // Reuse an existing empty conversation instead of creating duplicates.
-        // Check the most recent conversations for one with zero messages.
-        if let emptyConv = findReusableEmptyConversation() {
-            let reusedID = emptyConv.id
-            config.activeConversationID = reusedID
-            vm.selectedConversationID = reusedID
-
-            _ = try? await apiClient?.sendMessage(
-                chatID: chatID,
-                text: "✅ Switched to existing empty conversation.\nJust type your message to start."
-            )
-            logger.info("[ChatOps] Reused empty conversation \(reusedID.uuidString) instead of creating a new one.")
-            return
-        }
-
-        let convID = vm.createConversationForScheduledTask(profileID: profile, title: "Telegram Chat")
-        // [CF-39] Record the provenance now, while it is a FACT. The placeholder used to infer it
-        // by matching this title back, which a rename silently defeats.
-        RemoteConversationOriginStore.record(.telegram, for: convID)
-        config.activeConversationID = convID
-
-        // Auto-navigate Mac UI to the new conversation
-        vm.selectedConversationID = convID
-        logger.info("[ChatOps] Mac UI navigated to new conversation \(convID.uuidString).")
-
-        _ = try? await apiClient?.sendMessage(
-            chatID: chatID,
-            text: "✅ New conversation created and set as active.\nJust type your message to start."
-        )
-        logger.info("Created new conversation via Telegram: \(convID.uuidString)")
-    }
-
-    private func handleStatus(chatID: Int64) async {
-        guard let vm = viewModel else { return }
-
-        // Conversation-scoped 2026-08-17 (design doc increment 1): this used to read the
-        // app-global `vm.streamingMessageID`, so /status reported "streaming" whenever ANY
-        // conversation was busy — including a main-window run the remote user has nothing to
-        // do with — and reported idle the moment an unrelated run cleared the slot.
-        let isStreaming = config.activeConversationID.map { vm.activeStreamManager.hasActiveStream(inConversation: $0) } ?? false
-        let activeConvTitle: String
-        if let activeID = config.activeConversationID,
-           let conversationSD = vm.persistenceService.getConversation(withId: activeID) {
-            activeConvTitle = conversationSD.toRowStruct().displayTitle
-        } else {
-            activeConvTitle = "None"
-        }
-
-        let allConversations = fetchRecentConversations(limit: 100)
-        let tier = config.securityTier.rawValue
-        let hitlPending = isAwaitingClarification ? "Yes" : "No"
-
-        let statusText = """
-        📊 *Devgentic Status*
-
-        🗣 Active Conversation: \(activeConvTitle)
-        ⚡ Agent Streaming: \(isStreaming ? "Yes" : "No")
-        🔐 Security Tier: \(tier)
-        ⏳ HITL Pending: \(hitlPending)
-        📋 Total Conversations: \(allConversations.count)
-        """
-
-        _ = try? await apiClient?.sendMessage(chatID: chatID, text: statusText)
-    }
-
-    private func handleCancel(chatID: Int64) async {
-        guard let conversationID = config.activeConversationID else {
-            _ = try? await apiClient?.sendMessage(chatID: chatID, text: "No active conversation to cancel.")
-            return
-        }
-
-        // [WF-SE10] Cancel the RUN, not just its parked question. This handler used to call
-        // only `ExecutionSuspensionService.cancel(for:)` and then claim the agent was
-        // cancelled — but that merely denies a parked HITL; the stream kept executing (and a
-        // denied Gate manufactured a red "not answered" failure that routed the run down its
-        // error branch, WF-CC1). `cancelStreams` is the same teardown the in-app Stop button
-        // uses: cancellation cascades into any parked suspension and finalizes the message.
-        let hadActiveRun = viewModel?.activeStreamManager.hasActiveStream(inConversation: conversationID) ?? false
-        viewModel?.activeStreamManager.cancelStreams(forConversation: conversationID)
-        // Belt-and-braces for a parked interaction with no live stream task (the pre-fix
-        // shape); after a stream cancel this finds nothing and no-ops.
-        await ExecutionSuspensionService.shared.cancel(for: conversationID)
-
-        let reply = hadActiveRun
-            ? "🛑 Cancelled the active run for this conversation."
-            : "No run is currently active for this conversation — cleared any pending approvals."
-        _ = try? await apiClient?.sendMessage(chatID: chatID, text: reply)
-        logger.info("[CHATOPS] /cancel via Telegram for conversation \(conversationID.uuidString) — hadActiveRun=\(hadActiveRun). CONSEQUENCE: the stream task itself was cancelled (not just the parked HITL), so the run stops instead of continuing after the bot claims it was cancelled.")
-    }
-
-    private func handleHelp(chatID: Int64) async {
-        let helpText = """
-        🤖 *Devgentic ChatOps*
-
-        *Commands:*
-        /conversations — List your conversations
-        /new — Start a new conversation
-        /status — Current agent status
-        /cancel — Stop the active agent
-        /help — Show this message
-
-        *How it works:*
-        1. Use /conversations to pick a conversation
-        2. Type your message — it routes to the agent
-        3. The agent responds right here
-
-        *Security Tier:* \(config.securityTier.rawValue)
-        """
-
-        _ = try? await apiClient?.sendMessage(chatID: chatID, text: helpText)
-    }
-
-    private func handleSwitchConversation(to uuid: UUID, chatID: Int64) async {
-        guard let vm = viewModel else { return }
-
-        guard let conversationSD = vm.persistenceService.getConversation(withId: uuid) else {
-            _ = try? await apiClient?.sendMessage(chatID: chatID, text: "⚠️ Conversation not found.")
-            return
-        }
-
-        config.activeConversationID = uuid
-
-        // Auto-navigate Mac UI to the switched conversation
-        vm.selectedConversationID = uuid
-        logger.info("[ChatOps] Mac UI navigated to conversation \(uuid.uuidString).")
-
-        let title = conversationSD.toRowStruct().displayTitle
-        _ = try? await apiClient?.sendMessage(
-            chatID: chatID,
-            text: "✅ Switched to: *\(title)*\n\nJust type your message to continue."
-        )
-        logger.info("Switched to conversation \(uuid.uuidString) via Telegram.")
-    }
 
     private func handleFreeText(_ text: String, chatID: Int64) async {
         guard let vm = viewModel else { return }
 
         // Ensure there's an active conversation
         guard let conversationID = config.activeConversationID else {
-            _ = try? await apiClient?.sendMessage(
-                chatID: chatID,
-                text: "No active conversation. Use /conversations to pick one or /new to create one."
-            )
+            await tell(chatID,
+                       "No active conversation. Use /conversations to pick one or /new to create one.",
+                       whenLost: "the user is not told their prompt was dropped for want of an active conversation, so they wait for an answer that is never coming.")
             return
         }
 
         // Resolve the backend profile for this conversation
-        guard let profile = resolveProfileForConversation(conversationID) else {
-            _ = try? await apiClient?.sendMessage(
-                chatID: chatID,
-                text: "⚠️ No agent profile found for this conversation."
-            )
+        guard let profile = commands?.profile(boundTo: conversationID) else {
+            await tell(chatID, "⚠️ No agent profile found for this conversation.",
+                       whenLost: "the user is not told their prompt was dropped because the conversation resolves to no backend profile, so they wait for an answer that is never coming.")
             return
         }
 
-        // Send typing indicator
+        // Send typing indicator.
+        // ⚠️ DELIBERATELY SWALLOWED, and this comment is why the next reader should leave it alone.
+        // A typing indicator is pure decoration with no consequence to name: it expires on its own,
+        // the reply arrives regardless, and logging a line per message for a cosmetic call would
+        // bury the drops that DO matter. This is the one send on this path that is allowed to fail
+        // in silence.
         _ = try? await apiClient?.sendTypingAction(chatID: chatID)
 
         let requestConfig = BackendRequestConfig(profile: profile)
@@ -401,64 +278,103 @@ final class ChatOpsBridge {
         )
     }
 
-    // MARK: - Profile Resolution
 
-    /// Resolves the backend profile for a given conversation from its `backendEntityId`.
-    private func resolveProfileForConversation(_ conversationID: UUID) -> BackendProfileModel? {
-        guard let vm = viewModel else { return nil }
-
-        let conversationSD = vm.persistenceService.getConversation(withId: conversationID)
-        guard let profileID = conversationSD?.backendEntityId else { return nil }
-
-        return ((try? BackendProfileStore.shared.fetchProfiles()) ?? []).first { $0.id == profileID }
-    }
-
-    /// Resolves a default profile for new conversations — prefers agent profiles.
-    private func resolveProfile() -> BackendProfileModel? {
-        let profiles = (try? BackendProfileStore.shared.fetchSharedProfiles()) ?? []
-
-        // First try the currently selected profile in the UI
-        if let vm = viewModel,
-           let selectedID = vm.backendConfiguration.selectedProfileID,
-           let profile = profiles.first(where: { $0.id == selectedID }) {
-            return profile
+    /// [C8] Answers the parked clarification. ⚠️ The operation id is derived at the moment of the
+    /// reply, not remembered from when the prompt was sent — a run cancelled in between leaves no
+    /// pending item, and answering a stale id would resume a continuation that no longer exists.
+    /// ⚠️ THE IMPRECISE PATH, kept for a user who TYPES an answer instead of replying to the
+    /// prompt. It resolves the oldest clarification parked in whatever conversation the provider
+    /// cursor currently names. A reply is correlated exactly and never reaches here — see the
+    /// `reply_to_message` branch in `handleUpdate`.
+    private func resolveClarification(_ text: String) async {
+        guard let operationID = commands?.pendingClarificationOperationID() else {
+            logger.error("[CHATOPS] A clarification answer arrived but no clarification is pending for the bound conversation. CONSEQUENCE: the reply was DROPPED rather than submitted as a new agent turn, and the remote user received no acknowledgement.")
+            return
         }
-
-        // Fall back to first agent profile
-        return profiles.first { $0.profileType == .agent } ?? profiles.first
+        await remoteMirrorService?.handleClarification(operationID: operationID, text: text)
     }
 
-    // MARK: - Persistence Helpers
 
-    /// Finds the most recent empty conversation that can be reused instead of creating a new one.
-    private func findReusableEmptyConversation() -> ConversationSD? {
-        // Fast path: check if the current active conversation is already empty
-        if let activeID = config.activeConversationID,
-           let activeSD = viewModel?.persistenceService.getConversation(withId: activeID),
-           activeSD.messages.isEmpty {
-            logger.info("[ChatOps] Active conversation \(activeID.uuidString) is empty — reusing.")
-            return activeSD
+    /// Posts a plain-text message that EXPLAINS something to the remote user, and logs when it does
+    /// not arrive.
+    ///
+    /// ⚠️⚠️ EVERY CALLER OF THIS IS A "HERE IS WHY NOTHING HAPPENED" MESSAGE — a tier denial, an
+    /// unbound conversation, a missing profile. They were all `_ = try? await apiClient?.send…`, so
+    /// the one message whose entire job is to explain a failure was itself dropped in silence: the
+    /// user's command did nothing, the explanation never arrived, and NO line was written anywhere.
+    /// A tier-blocked command and a crashed bridge looked identical from both sides.
+    ///
+    /// ⚠️ `whenLost` IS REQUIRED, NOT DEFAULTED, and that is the anti-drift mechanism — the same one
+    /// `resolvedBy:` and `offset:` use elsewhere in this subsystem. A new call site cannot be added
+    /// without stating what the user loses when the message does not arrive, and a default would be
+    /// one generic sentence quietly inherited by all of them.
+    private func tell(_ chatID: Int64, _ text: String, whenLost consequence: String) async {
+        guard let apiClient else {
+            logger.error("[CHATOPS] No Telegram API client while telling the user: \"\(text.prefix(60))\". CONSEQUENCE: \(consequence)")
+            return
         }
-
-        // Slow path: query for recent empty conversations
-        guard let context = ChatPersistenceStore.shared.modelContainer?.mainContext else { return nil }
-        var descriptor = FetchDescriptor<ConversationSD>(
-            sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
-        )
-        descriptor.fetchLimit = 10
-        guard let results = try? context.fetch(descriptor) else { return nil }
-        return results.first { $0.messages.isEmpty }
+        do {
+            _ = try await apiClient.sendMessage(chatID: chatID, text: RemoteEgressSanitizer.credentialsOnly(text), parseMode: nil)
+        } catch {
+            logger.error("[CHATOPS] Failed to tell the Telegram user \"\(text.prefix(60))\": \(error.localizedDescription). CONSEQUENCE: \(consequence)")
+        }
     }
 
-    /// Fetches recent conversations from SwiftData.
-    private func fetchRecentConversations(limit: Int) -> [ConversationSD] {
-        guard let context = ChatPersistenceStore.shared.modelContainer?.mainContext else { return [] }
-        var descriptor = FetchDescriptor<ConversationSD>(
-            sortBy: [
-                SortDescriptor(\.timestamp, order: .reverse)
-            ]
-        )
-        descriptor.fetchLimit = limit
-        return (try? context.fetch(descriptor)) ?? []
+    /// [C5a] Posts a decided view. ⚠️ Unlike the `_ = try? await apiClient?.sendMessage(...)` it
+    /// replaces, a failure is LOGGED rather than swallowed — the wire behaviour is unchanged, but a
+    /// send that silently vanished now leaves a trace.
+    private func render(_ view: RemoteView?, to chatID: Int64) async {
+        guard let view else {
+            logger.error("[CHATOPS] A command produced no view for chat \(chatID) because the command service was never built — start() ran without a view model. CONSEQUENCE: the remote user receives NO reply and the command looks ignored.")
+            return
+        }
+        guard let transport = telegramTransport else {
+            logger.error("[CHATOPS] No Telegram transport while rendering a view for chat \(chatID). CONSEQUENCE: the remote user receives NO reply and the command looks ignored.")
+            return
+        }
+        do {
+            try await transport.render(view, to: .channel(RemoteChannel(telegramChatID: chatID)))
+        } catch {
+            logger.error("[CHATOPS] Failed to render a view to Telegram chat \(chatID): \(error.localizedDescription). CONSEQUENCE: the remote user receives NO reply for a command that succeeded locally.")
+        }
+    }
+}
+
+// MARK: - Announcing (slice 3)
+
+/// ⚠️ The BRIDGE conforms, not the transport: a transport renders to a destination it is given,
+/// while announcing means knowing this provider's OWN paired channel. Only the bridge knows both.
+extension ChatOpsBridge: RemoteAnnouncing {
+
+    var provider: RemoteChannel.Provider { .telegram }
+
+    /// ⚠️ Requires a live listener AND a paired channel. A bridge that was stopped, or was never
+    /// paired, must announce nothing — otherwise a notification would be addressed to a channel the
+    /// user has disconnected.
+    var canAnnounce: Bool {
+        isRunning && config.botToken != nil && config.authorizedChatID != nil
+    }
+
+    func isMirroring(_ conversationID: UUID?) -> Bool {
+        // ⚠️ nil is NOT a duplicate: an app-wide notification (a finished download) belongs to no
+        // conversation, so nothing is already reporting it.
+        guard let conversationID else { return false }
+        return remoteMirrorService?.isMirroring(conversationID) ?? false
+    }
+
+    func announce(_ view: RemoteView) async -> Bool {
+        // ⚠️ Split rather than `.map { String($0) }` inline — Swift cannot parse a trailing closure
+        // inside a `guard` condition.
+        guard let transport = telegramTransport, let chatID = config.authorizedChatID else {
+            logger.error("[CHATOPS] Cannot announce on \(self.provider.rawValue) — no transport or no paired channel. CONSEQUENCE: this notification reaches the Mac only, and the remote user is never told.")
+            return false
+        }
+        do {
+            try await transport.render(view, to: .channel(RemoteChannel(telegramChatID: chatID)))
+        } catch {
+            logger.error("[CHATOPS] Failed to announce on \(self.provider.rawValue): \(error.localizedDescription). CONSEQUENCE: the notification is lost — announcements are fire-and-forget and nothing retries them.")
+            return false
+        }
+        return true
     }
 }

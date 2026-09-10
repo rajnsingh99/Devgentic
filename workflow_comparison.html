@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Devgentic Workflow — Platform Comparison & Gap Analysis</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #1c2333;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --orange: #d29922;
+    --purple: #bc8cff;
+    --pink: #f778ba;
+    --cyan: #39d2c0;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif; line-height: 1.6; padding: 40px 20px; }
+  .container { max-width: 1300px; margin: 0 auto; }
+  h1 { font-size: 2rem; font-weight: 700; margin-bottom: 6px; background: linear-gradient(135deg, var(--accent), var(--purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  h2 { font-size: 1.4rem; font-weight: 600; margin: 48px 0 16px; color: var(--text); border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  h3 { font-size: 1.1rem; font-weight: 600; margin: 24px 0 8px; color: var(--accent); }
+  .subtitle { color: var(--text-muted); font-size: 1rem; margin-bottom: 40px; }
+  p, li { color: var(--text); font-size: 0.92rem; }
+
+  /* Tables */
+  .table-wrap { overflow-x: auto; margin: 16px 0 32px; border-radius: 12px; border: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  thead { background: var(--surface2); }
+  th { padding: 12px 16px; text-align: left; font-weight: 600; color: var(--accent); border-bottom: 2px solid var(--border); white-space: nowrap; }
+  th:first-child { border-radius: 12px 0 0 0; }
+  th:last-child { border-radius: 0 12px 0 0; }
+  td { padding: 10px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover { background: rgba(88,166,255,0.04); }
+  td:first-child { font-weight: 600; color: var(--text); white-space: nowrap; min-width: 160px; }
+
+  /* Platform column headers */
+  .col-n8n { color: var(--red) !important; }
+  .col-langgraph { color: var(--green) !important; }
+  .col-flowise { color: var(--cyan) !important; }
+  .col-dify { color: var(--purple) !important; }
+  .col-crewai { color: var(--orange) !important; }
+  .col-devgentic { color: var(--pink) !important; }
+
+  /* Status badges */
+  .yes { color: var(--green); font-weight: 600; }
+  .no { color: var(--red); font-weight: 600; }
+  .partial { color: var(--orange); font-weight: 600; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+  .badge-yes { background: rgba(63,185,80,0.12); color: var(--green); border: 1px solid rgba(63,185,80,0.25); }
+  .badge-no { background: rgba(248,81,73,0.12); color: var(--red); border: 1px solid rgba(248,81,73,0.25); }
+  .badge-partial { background: rgba(210,153,34,0.12); color: var(--orange); border: 1px solid rgba(210,153,34,0.25); }
+  .badge-need { background: rgba(247,120,186,0.12); color: var(--pink); border: 1px solid rgba(247,120,186,0.25); }
+
+  /* Cards */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 20px; }
+  .card:hover { border-color: rgba(88,166,255,0.3); }
+  .card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .card-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 1.1rem; flex-shrink: 0; }
+  .card-title { font-size: 1.05rem; font-weight: 600; }
+  .card-body { color: var(--text-muted); font-size: 0.88rem; }
+
+  /* Grid */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+  /* Priority section */
+  .priority-item { display: flex; align-items: flex-start; gap: 12px; padding: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 10px; }
+  .priority-rank { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.8rem; flex-shrink: 0; }
+  .p-critical { background: rgba(248,81,73,0.15); color: var(--red); border: 1px solid rgba(248,81,73,0.3); }
+  .p-high { background: rgba(210,153,34,0.15); color: var(--orange); border: 1px solid rgba(210,153,34,0.3); }
+  .p-medium { background: rgba(88,166,255,0.15); color: var(--accent); border: 1px solid rgba(88,166,255,0.3); }
+  .p-low { background: rgba(139,148,158,0.15); color: var(--text-muted); border: 1px solid rgba(139,148,158,0.3); }
+  .priority-content { flex: 1; }
+  .priority-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 4px; }
+  .priority-desc { color: var(--text-muted); font-size: 0.85rem; }
+
+  .highlight-row td { background: rgba(247,120,186,0.06) !important; }
+  .divider { border: none; border-top: 1px solid var(--border); margin: 40px 0; }
+
+  ul { padding-left: 20px; margin: 8px 0; }
+  li { margin-bottom: 4px; font-size: 0.88rem; }
+  code { background: var(--surface2); padding: 2px 6px; border-radius: 4px; font-size: 0.82rem; color: var(--cyan); }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Workflow Architecture — Competitive Analysis</h1>
+<p class="subtitle">Deep comparison of n8n, LangGraph, Flowise, Dify, and CrewAI against Devgentic's current workflow system.<br>Goal: Identify what we need to build a robust, highly adaptable, private-first workflow engine.</p>
+
+<!-- ============================================================ -->
+<h2>1. Platform Overview</h2>
+<!-- ============================================================ -->
+
+<div class="grid-3">
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon" style="background:rgba(248,81,73,0.12); color:var(--red);">n8</div>
+      <div class="card-title">n8n</div>
+    </div>
+    <div class="card-body">
+      General-purpose workflow automation with 1000+ integrations. AI via LangChain cluster nodes. Stack-based sequential engine. Self-hosted or cloud.
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon" style="background:rgba(63,185,80,0.12); color:var(--green);">LG</div>
+      <div class="card-title">LangGraph</div>
+    </div>
+    <div class="card-body">
+      Code-first cyclic graph engine for agent runtimes. Explicit loop support, checkpointing, state machines. Python/JS SDK. Most architecturally expressive.
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon" style="background:rgba(57,210,192,0.12); color:var(--cyan);">Fw</div>
+      <div class="card-title">Flowise</div>
+    </div>
+    <div class="card-body">
+      Low-code LangChain visual builder. Chatflow (DAG) + AgentFlow (cyclic). Deep RAG pipeline support. AI-first, limited non-AI automation.
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon" style="background:rgba(188,140,255,0.12); color:var(--purple);">Df</div>
+      <div class="card-title">Dify</div>
+    </div>
+    <div class="card-body">
+      Visual LLM app builder with typed nodes (LLM, Code, IF/ELSE, Iteration, HTTP). Chatflow vs Workflow modes. Plugin architecture. MCP support.
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon" style="background:rgba(210,153,34,0.12); color:var(--orange);">Cr</div>
+      <div class="card-title">CrewAI</div>
+    </div>
+    <div class="card-body">
+      Multi-agent role-playing framework. Agent/Task/Crew model. Sequential + Hierarchical processes. Flows for deterministic orchestration. 4-type memory.
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon" style="background:rgba(247,120,186,0.12); color:var(--pink);">Dg</div>
+      <div class="card-title">Devgentic (Current)</div>
+    </div>
+    <div class="card-body">
+      Native macOS visual DAG builder. Bot + Agent nodes. Sequential topological execution. Context forwarding with truncation. 4 agent architectures per node.
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2>2. Core Feature Comparison</h2>
+<!-- ============================================================ -->
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+  <th>Capability</th>
+  <th class="col-n8n">n8n</th>
+  <th class="col-langgraph">LangGraph</th>
+  <th class="col-flowise">Flowise</th>
+  <th class="col-dify">Dify</th>
+  <th class="col-crewai">CrewAI</th>
+  <th class="col-devgentic">Devgentic</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>Visual Builder</td>
+  <td><span class="badge badge-yes">Yes</span></td>
+  <td><span class="badge badge-no">Code only</span></td>
+  <td><span class="badge badge-yes">Yes</span></td>
+  <td><span class="badge badge-yes">Yes</span></td>
+  <td><span class="badge badge-partial">Studio (enterprise)</span></td>
+  <td><span class="badge badge-yes">Yes</span></td>
+</tr>
+
+<tr>
+  <td>Sequential Execution</td>
+  <td><span class="badge badge-yes">Yes</span></td>
+  <td><span class="badge badge-yes">Yes</span></td>
+  <td><span class="badge badge-yes">Yes</span></td>
+  <td><span class="badge badge-yes">Yes</span></td>
+  <td><span class="badge badge-yes">Yes</span></td>
+  <td><span class="badge badge-yes">Yes</span></td>
+</tr>
+
+<tr>
+  <td>Parallel Execution</td>
+  <td><span class="badge badge-no">No*</span> sequential branches</td>
+  <td><span class="badge badge-yes">Yes</span> superstep fan-out</td>
+  <td><span class="badge badge-partial">AgentFlow only</span></td>
+  <td><span class="badge badge-yes">Yes</span> up to 10 branches</td>
+  <td><span class="badge badge-no">No</span></td>
+  <td><span class="badge badge-no">No</span></td>
+</tr>
+
+<tr>
+  <td>Conditional Branching</td>
+  <td><span class="badge badge-yes">IF + Switch</span></td>
+  <td><span class="badge badge-yes">Conditional edges</span></td>
+  <td><span class="badge badge-yes">Condition node</span></td>
+  <td><span class="badge badge-yes">IF/ELIF/ELSE</span></td>
+  <td><span class="badge badge-partial">Flows only</span></td>
+  <td><span class="badge badge-no">No</span></td>
+</tr>
+
+<tr>
+  <td>Loops / Cycles</td>
+  <td><span class="badge badge-partial">Loop node + manual wiring</span></td>
+  <td><span class="badge badge-yes">Native cyclic graphs</span></td>
+  <td><span class="badge badge-yes">Loop node (AgentFlow)</span></td>
+  <td><span class="badge badge-yes">Iteration + Loop node</span></td>
+  <td><span class="badge badge-partial">Via Flows</span></td>
+  <td><span class="badge badge-no">No</span> cycle detection blocks</td>
+</tr>
+
+<tr>
+  <td>Human-in-the-Loop</td>
+  <td><span class="badge badge-yes">Wait node (webhook/form)</span></td>
+  <td><span class="badge badge-yes">interrupt() + checkpoint</span></td>
+  <td><span class="badge badge-yes">Human Input node</span></td>
+  <td><span class="badge badge-yes">Human Input node</span></td>
+  <td><span class="badge badge-partial">Custom via Flows</span></td>
+  <td><span class="badge badge-partial">Per-node ask_user only</span></td>
+</tr>
+
+<tr>
+  <td>Sub-Workflows</td>
+  <td><span class="badge badge-yes">Execute Sub-workflow</span></td>
+  <td><span class="badge badge-yes">Subgraphs</span></td>
+  <td><span class="badge badge-yes">Execute Flow node</span></td>
+  <td><span class="badge badge-yes">Workflow-as-Tool</span></td>
+  <td><span class="badge badge-yes">Crews inside Flows</span></td>
+  <td><span class="badge badge-no">No</span></td>
+</tr>
+
+<tr>
+  <td>Error Handling</td>
+  <td><span class="badge badge-yes">Try/catch, retry, error branch</span></td>
+  <td><span class="badge badge-yes">State-based + checkpoints</span></td>
+  <td><span class="badge badge-partial">Node-level</span></td>
+  <td><span class="badge badge-partial">Continue-on-error</span></td>
+  <td><span class="badge badge-partial">Auto-retry</span></td>
+  <td><span class="badge badge-partial">Skip failed, skip downstream</span></td>
+</tr>
+
+<tr>
+  <td>Code / Transform Node</td>
+  <td><span class="badge badge-yes">JS / Python</span></td>
+  <td><span class="badge badge-yes">Any Python fn</span></td>
+  <td><span class="badge badge-yes">Custom Function</span></td>
+  <td><span class="badge badge-yes">Python / JS + Jinja2</span></td>
+  <td><span class="badge badge-yes">Python functions</span></td>
+  <td><span class="badge badge-no">No</span></td>
+</tr>
+
+<tr>
+  <td>Data Model</td>
+  <td>Array of items <code>{json, binary}</code></td>
+  <td>Typed state dict with reducers</td>
+  <td>Node output references</td>
+  <td>Variables + selectors</td>
+  <td>Task output strings</td>
+  <td>Truncated text (2K/node, 6K total)</td>
+</tr>
+
+<tr>
+  <td>Multi-Port Nodes</td>
+  <td><span class="badge badge-yes">IF/Switch = multi-output</span></td>
+  <td><span class="badge badge-yes">Conditional edges</span></td>
+  <td><span class="badge badge-partial">Condition nodes</span></td>
+  <td><span class="badge badge-yes">IF/ELSE branches</span></td>
+  <td><span class="badge badge-no">No</span></td>
+  <td><span class="badge badge-no">No</span> single in/out</td>
+</tr>
+
+<tr>
+  <td>Merge / Aggregation</td>
+  <td><span class="badge badge-yes">Merge node (5 modes)</span></td>
+  <td><span class="badge badge-yes">State reducers</span></td>
+  <td><span class="badge badge-partial">Implicit</span></td>
+  <td><span class="badge badge-yes">Variable Assigner</span></td>
+  <td><span class="badge badge-partial">Context param</span></td>
+  <td><span class="badge badge-partial">ContextCompressor</span></td>
+</tr>
+
+<tr>
+  <td>Checkpointing / Resume</td>
+  <td><span class="badge badge-yes">Wait node serializes state</span></td>
+  <td><span class="badge badge-yes">Full checkpoint system</span></td>
+  <td><span class="badge badge-partial">Limited</span></td>
+  <td><span class="badge badge-partial">Session state (Chatflow)</span></td>
+  <td><span class="badge badge-partial">Long-term memory</span></td>
+  <td><span class="badge badge-no">No</span></td>
+</tr>
+
+<tr>
+  <td>Execution History</td>
+  <td><span class="badge badge-yes">Full per-node I/O</span></td>
+  <td><span class="badge badge-yes">Checkpoint timeline</span></td>
+  <td><span class="badge badge-partial">Logs</span></td>
+  <td><span class="badge badge-yes">Run logs</span></td>
+  <td><span class="badge badge-partial">Task outputs</span></td>
+  <td><span class="badge badge-partial">ExecutionLog (in-memory)</span></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. AI / Agent Capabilities</h2>
+<!-- ============================================================ -->
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+  <th>AI Capability</th>
+  <th class="col-n8n">n8n</th>
+  <th class="col-langgraph">LangGraph</th>
+  <th class="col-flowise">Flowise</th>
+  <th class="col-dify">Dify</th>
+  <th class="col-crewai">CrewAI</th>
+  <th class="col-devgentic">Devgentic</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>Agent Architectures</td>
+  <td>6 types (ReAct, Plan&amp;Execute, Tools, SQL, etc.)</td>
+  <td>Any (ReAct, P&amp;E, Reflexion, Supervisor, Swarm)</td>
+  <td>ReAct, Sequential via LangGraph</td>
+  <td>Function Calling + ReAct</td>
+  <td>Sequential + Hierarchical</td>
+  <td>ReAct, Plan&amp;Execute, Reflexion, Supervisor</td>
+</tr>
+<tr>
+  <td>Multi-Agent Orchestration</td>
+  <td><span class="badge badge-partial">Via sub-workflows</span></td>
+  <td><span class="badge badge-yes">Supervisor + Swarm</span></td>
+  <td><span class="badge badge-yes">AgentFlow multi-agent</span></td>
+  <td><span class="badge badge-partial">Agent nodes in workflow</span></td>
+  <td><span class="badge badge-yes">Core feature (Crews)</span></td>
+  <td><span class="badge badge-yes">Workflow DAG chains agents</span></td>
+</tr>
+<tr>
+  <td>Tool Integration</td>
+  <td>1000+ app nodes + MCP client</td>
+  <td>Python callables + LangChain tools</td>
+  <td>LangChain tools + custom</td>
+  <td>50+ built-in + MCP + custom</td>
+  <td>Hundreds + enterprise connectors</td>
+  <td>DevgenticTool protocol + MCP</td>
+</tr>
+<tr>
+  <td>RAG Pipeline</td>
+  <td><span class="badge badge-yes">Full (loader→splitter→embed→store→retrieve)</span></td>
+  <td><span class="badge badge-yes">Via LangChain</span></td>
+  <td><span class="badge badge-yes">Native pipeline</span></td>
+  <td><span class="badge badge-yes">Knowledge Retrieval node</span></td>
+  <td><span class="badge badge-partial">Via tools</span></td>
+  <td><span class="badge badge-yes">RAGIndexingService + strategies</span></td>
+</tr>
+<tr>
+  <td>LLM Provider Support</td>
+  <td>15+ (OpenAI, Anthropic, Ollama, etc.)</td>
+  <td>All via LangChain</td>
+  <td>All via LangChain.js</td>
+  <td>Major cloud + Ollama</td>
+  <td>Major cloud providers</td>
+  <td>Anthropic, OpenAI, Google, Ollama, MLX</td>
+</tr>
+<tr>
+  <td>Local / Private Models</td>
+  <td><span class="badge badge-yes">Ollama</span></td>
+  <td><span class="badge badge-yes">Any</span></td>
+  <td><span class="badge badge-yes">Ollama, LocalAI</span></td>
+  <td><span class="badge badge-yes">Ollama</span></td>
+  <td><span class="badge badge-yes">Ollama, LM Studio</span></td>
+  <td><span class="badge badge-yes">Ollama + MLX on-device</span></td>
+</tr>
+<tr>
+  <td>Conversation Memory</td>
+  <td>7 memory sub-node types</td>
+  <td>State + checkpointer</td>
+  <td>Buffer, summary, vector</td>
+  <td>Chatflow session memory</td>
+  <td>4-type system (STM/LTM/Entity/Contextual)</td>
+  <td>Architecture-specific strategies</td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Node Type Comparison</h2>
+<!-- ============================================================ -->
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+  <th>Node Category</th>
+  <th class="col-n8n">n8n</th>
+  <th class="col-dify">Dify</th>
+  <th class="col-flowise">Flowise</th>
+  <th class="col-devgentic">Devgentic</th>
+  <th>What Devgentic Needs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>LLM / Chat</td>
+  <td>Basic LLM Chain, QA Chain</td>
+  <td>LLM node</td>
+  <td>LLM node</td>
+  <td>Bot node</td>
+  <td><span class="badge badge-yes">Have it</span></td>
+</tr>
+<tr>
+  <td>Agent</td>
+  <td>AI Agent (6 types)</td>
+  <td>Agent node (FC + ReAct)</td>
+  <td>Agent node</td>
+  <td>Agent node (4 architectures)</td>
+  <td><span class="badge badge-yes">Have it</span></td>
+</tr>
+<tr class="highlight-row">
+  <td>Condition / Router</td>
+  <td>IF, Switch</td>
+  <td>IF/ELIF/ELSE, Question Classifier</td>
+  <td>Condition, Condition Agent</td>
+  <td>-</td>
+  <td><span class="badge badge-need">NEED</span></td>
+</tr>
+<tr class="highlight-row">
+  <td>Loop / Iterator</td>
+  <td>Loop Over Items</td>
+  <td>Iteration, Loop</td>
+  <td>Loop node</td>
+  <td>-</td>
+  <td><span class="badge badge-need">NEED</span></td>
+</tr>
+<tr class="highlight-row">
+  <td>Code / Transform</td>
+  <td>Code (JS/Python)</td>
+  <td>Code (Python/JS), Template (Jinja2)</td>
+  <td>Custom Function</td>
+  <td>-</td>
+  <td><span class="badge badge-need">NEED</span></td>
+</tr>
+<tr class="highlight-row">
+  <td>Human Gate</td>
+  <td>Wait (webhook/form)</td>
+  <td>Human Input node</td>
+  <td>Human Input node</td>
+  <td>-</td>
+  <td><span class="badge badge-need">NEED</span></td>
+</tr>
+<tr class="highlight-row">
+  <td>Merge / Join</td>
+  <td>Merge (5 modes)</td>
+  <td>Variable Assigner</td>
+  <td>Implicit</td>
+  <td>ContextCompressor (limited)</td>
+  <td><span class="badge badge-need">UPGRADE</span></td>
+</tr>
+<tr class="highlight-row">
+  <td>Sub-Workflow</td>
+  <td>Execute Sub-workflow</td>
+  <td>Workflow-as-Tool</td>
+  <td>Execute Flow</td>
+  <td>-</td>
+  <td><span class="badge badge-need">NEED</span></td>
+</tr>
+<tr>
+  <td>HTTP / API</td>
+  <td>HTTP Request</td>
+  <td>HTTP Request</td>
+  <td>HTTP node</td>
+  <td>-</td>
+  <td><span class="badge badge-partial">Via agent tools</span></td>
+</tr>
+<tr>
+  <td>Knowledge / RAG</td>
+  <td>Vector Store QA</td>
+  <td>Knowledge Retrieval</td>
+  <td>Retriever</td>
+  <td>Via RAGIndexingService</td>
+  <td><span class="badge badge-partial">Exists but not a workflow node</span></td>
+</tr>
+<tr>
+  <td>Image Generation</td>
+  <td>Via integrations</td>
+  <td>Via tools</td>
+  <td>DALL-E, SD</td>
+  <td>ImageGen node (MLX/API)</td>
+  <td><span class="badge badge-yes">Have it</span></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>5. Execution Engine Comparison</h2>
+<!-- ============================================================ -->
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+  <th>Engine Feature</th>
+  <th class="col-n8n">n8n</th>
+  <th class="col-langgraph">LangGraph</th>
+  <th class="col-dify">Dify</th>
+  <th class="col-devgentic">Devgentic</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>Graph Type</td>
+  <td>DAG (no cycles)</td>
+  <td>Directed graph <strong>with cycles</strong></td>
+  <td>DAG + Loop/Iteration nodes</td>
+  <td>DAG (cycles blocked)</td>
+</tr>
+<tr>
+  <td>Execution Strategy</td>
+  <td>Stack-based, sequential</td>
+  <td>Superstep (parallel where possible)</td>
+  <td>Sequential + parallel branches</td>
+  <td>Sequential topological sort</td>
+</tr>
+<tr>
+  <td>Data Between Nodes</td>
+  <td>Items array (structured JSON + binary)</td>
+  <td>Typed state dict with reducers</td>
+  <td>Variables with UI selector</td>
+  <td>Truncated text string (6K cap)</td>
+</tr>
+<tr>
+  <td>State Persistence</td>
+  <td>DB serialization (Wait node)</td>
+  <td>Checkpointer (SQLite/Postgres)</td>
+  <td>Session state (Chatflow)</td>
+  <td>In-memory only</td>
+</tr>
+<tr>
+  <td>Error Recovery</td>
+  <td>Retry + error branches + error workflow</td>
+  <td>Checkpoint rollback + conditional retry</td>
+  <td>Continue-on-error + terminate</td>
+  <td>Skip failed + skip dependents</td>
+</tr>
+<tr>
+  <td>Streaming</td>
+  <td>SSE for AI nodes</td>
+  <td>AsyncGenerator</td>
+  <td>SSE</td>
+  <td>AsyncThrowingStream events</td>
+</tr>
+<tr>
+  <td>Timeout Handling</td>
+  <td>Per-workflow timeout</td>
+  <td>Custom (state-based)</td>
+  <td>Per-node timeout</td>
+  <td>ExecutionConstraints.maxDuration (120s)</td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>6. What Devgentic's Unique Advantages Are</h2>
+<!-- ============================================================ -->
+
+<div class="grid-2">
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon" style="background:rgba(63,185,80,0.12); color:var(--green);">&#x2713;</div>
+      <div class="card-title">Native macOS + On-Device AI</div>
+    </div>
+    <div class="card-body">No platform runs MLX models on Apple Silicon natively with a visual workflow builder. This is a unique moat — fully private, zero-cloud workflows using local models.</div>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon" style="background:rgba(63,185,80,0.12); color:var(--green);">&#x2713;</div>
+      <div class="card-title">4 Agent Architectures Per Node</div>
+    </div>
+    <div class="card-body">No other visual builder lets you pick ReAct vs Plan&amp;Execute vs Reflexion vs Supervisor per node. n8n has 6 agent types but no Reflexion. Dify has only 2 strategies.</div>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon" style="background:rgba(63,185,80,0.12); color:var(--green);">&#x2713;</div>
+      <div class="card-title">Dialect-Aware Local Model Routing</div>
+    </div>
+    <div class="card-body">CognitiveProfile + ModelDialect routing (nativeJSON, mistralXML, reactMarkdown, promptedFlatJSON) is unique. No other platform auto-detects and adapts to local model capabilities.</div>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon" style="background:rgba(63,185,80,0.12); color:var(--green);">&#x2713;</div>
+      <div class="card-title">Privacy-First Architecture</div>
+    </div>
+    <div class="card-body">Everything runs locally. No server dependency. No data leaves the machine unless the user chooses cloud providers. This is the polar opposite of n8n Cloud, Dify Cloud, etc.</div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2>7. Gap Analysis — What We Need to Build</h2>
+<!-- ============================================================ -->
+
+<p style="color:var(--text-muted); margin-bottom: 20px; font-size: 0.9rem;">Prioritized by impact on user expressiveness. Items marked <span class="badge badge-need">NEED</span> are missing entirely. Items marked <span class="badge badge-partial">UPGRADE</span> exist but are insufficient.</p>
+
+<!-- P0: Critical -->
+<h3>P0 — Critical (Unlocks fundamentally new workflow patterns)</h3>
+
+<div class="priority-item">
+  <div class="priority-rank p-critical">1</div>
+  <div class="priority-content">
+    <div class="priority-title">Condition / Router Node</div>
+    <div class="priority-desc">
+      An IF/ELSE node that evaluates upstream output and routes to one of N branches. Two variants: <strong>rule-based</strong> (string contains, regex match, value comparison) and <strong>LLM-based</strong> (classifier prompt picks a branch). This is the single highest-impact addition — every competitor has it. Without it, all paths always execute, making workflows wasteful and unable to express any decision logic.
+      <br><em>Reference: n8n IF/Switch, Dify IF/ELIF/ELSE, LangGraph conditional_edges, Flowise Condition Agent</em>
+    </div>
+  </div>
+</div>
+
+<div class="priority-item">
+  <div class="priority-rank p-critical">2</div>
+  <div class="priority-content">
+    <div class="priority-title">Loop / Iteration Node</div>
+    <div class="priority-desc">
+      Allow controlled cycles with a max-iteration cap and exit condition. Two forms: <strong>Retry loop</strong> (generator → evaluator → loop back or exit) and <strong>Collection iterator</strong> (process each item in an array). The cycle detection should allow backward edges <em>only through a Loop node</em> which enforces the iteration cap. This enables iterative refinement, the Review &amp; Critique pattern, and batch processing.
+      <br><em>Reference: LangGraph native cycles, Dify Iteration/Loop nodes, Flowise Loop node, n8n Loop Over Items</em>
+    </div>
+  </div>
+</div>
+
+<div class="priority-item">
+  <div class="priority-rank p-critical">3</div>
+  <div class="priority-content">
+    <div class="priority-title">Parallel Branch Execution</div>
+    <div class="priority-desc">
+      When independent branches exist in the DAG (no data dependencies between them), execute them concurrently via <code>TaskGroup</code>. The topological sort already identifies independent "levels" — nodes at the same level with no mutual edges can run in parallel. Fan-in merges wait for all branches. This is pure execution engine work — no UI changes needed.
+      <br><em>Reference: LangGraph superstep, Dify parallel branches (up to 10), n8n planned but not shipped</em>
+    </div>
+  </div>
+</div>
+
+<!-- P1: High -->
+<h3>P1 — High (Significantly expands what users can build)</h3>
+
+<div class="priority-item">
+  <div class="priority-rank p-high">4</div>
+  <div class="priority-content">
+    <div class="priority-title">Human-in-the-Loop Gate Node</div>
+    <div class="priority-desc">
+      A dedicated workflow node that pauses execution and presents intermediate results to the user for review. The user can approve (continue), reject (stop), or edit (modify the data before continuing). Uses <code>ExecutionSuspensionService</code> (already exists for per-tool HITL) but at the workflow orchestration level. Critical for high-stakes workflows.
+      <br><em>Reference: Dify Human Input node, Flowise Human Input node, LangGraph interrupt(), n8n Wait node</em>
+    </div>
+  </div>
+</div>
+
+<div class="priority-item">
+  <div class="priority-rank p-high">5</div>
+  <div class="priority-content">
+    <div class="priority-title">Code / Transform Node</div>
+    <div class="priority-desc">
+      A lightweight non-LLM node that executes a user-defined transformation: regex extraction, JSON path queries, string formatting, data reshaping. Runs instantly with zero token cost. Since this is a sandboxed macOS app, options include: embedded JavaScriptCore, a restricted Swift expression evaluator, or Lua. This prevents burning LLM tokens on deterministic operations.
+      <br><em>Reference: n8n Code node (JS/Python), Dify Code node (Python/JS), Dify Template (Jinja2), Flowise Custom Function</em>
+    </div>
+  </div>
+</div>
+
+<div class="priority-item">
+  <div class="priority-rank p-high">6</div>
+  <div class="priority-content">
+    <div class="priority-title">Structured Data Model (Replace Text Truncation)</div>
+    <div class="priority-desc">
+      Replace the current text-based context forwarding (2K/node, 6K total) with a structured envelope: <code>{ text: String, json: [String: Any]?, artifacts: [MediaArtifact], metadata: NodeExecutionMetadata }</code>. Downstream nodes should be able to reference specific upstream fields, not just receive a truncated text blob. This is foundational for multi-port and transform nodes.
+      <br><em>Reference: n8n items <code>{json, binary}</code>, LangGraph typed state with reducers, Dify variable selectors</em>
+    </div>
+  </div>
+</div>
+
+<!-- P2: Medium -->
+<h3>P2 — Medium (Polish and power-user features)</h3>
+
+<div class="priority-item">
+  <div class="priority-rank p-medium">7</div>
+  <div class="priority-content">
+    <div class="priority-title">Sub-Workflow / Nested Workflow Node</div>
+    <div class="priority-desc">
+      Allow workflow profiles to be added as nodes inside other workflows. The inner workflow executes as a black box — receives input, runs its DAG, returns terminal output. Requires recursion depth limit (e.g., max 3 levels). Enables modular, reusable workflow blocks.
+      <br><em>Reference: n8n Execute Sub-workflow, Dify Workflow-as-Tool, Flowise Execute Flow, LangGraph Subgraphs</em>
+    </div>
+  </div>
+</div>
+
+<div class="priority-item">
+  <div class="priority-rank p-medium">8</div>
+  <div class="priority-content">
+    <div class="priority-title">Error Handling Upgrade</div>
+    <div class="priority-desc">
+      Currently: failed nodes are skipped and dependents are skipped. Need: per-node retry count, error output branch (route to alternative path on failure), and optional continue-on-error flag. Error branch enables graceful degradation instead of cascade failure.
+      <br><em>Reference: n8n try/catch + retry + error workflow, LangGraph checkpoint rollback, Dify error handling modes</em>
+    </div>
+  </div>
+</div>
+
+<div class="priority-item">
+  <div class="priority-rank p-medium">9</div>
+  <div class="priority-content">
+    <div class="priority-title">Remove Bot → Agent Edge Restriction</div>
+    <div class="priority-desc">
+      The current block on Bot → Agent edges is unnecessarily restrictive. A Bot summarizing data that feeds into an Agent for action is a valid pattern. The restriction should be removed or replaced with a user-facing warning.
+    </div>
+  </div>
+</div>
+
+<div class="priority-item">
+  <div class="priority-rank p-medium">10</div>
+  <div class="priority-content">
+    <div class="priority-title">Execution History &amp; Replay</div>
+    <div class="priority-desc">
+      Persist per-run execution logs (node I/O, timing, status) to SwiftData. Allow users to inspect past runs, see what each node produced, and replay from a specific point. Essential for debugging complex workflows.
+      <br><em>Reference: n8n execution history with per-node I/O, LangGraph checkpoint timeline</em>
+    </div>
+  </div>
+</div>
+
+<!-- P3: Low -->
+<h3>P3 — Future (Nice-to-have, advanced patterns)</h3>
+
+<div class="priority-item">
+  <div class="priority-rank p-low">11</div>
+  <div class="priority-content">
+    <div class="priority-title">Multi-Port Nodes</div>
+    <div class="priority-desc">Multiple labeled output ports per node, each carrying a different data slice. Mainly useful after Condition/Router node is built (which implicitly has multiple outputs).</div>
+  </div>
+</div>
+
+<div class="priority-item">
+  <div class="priority-rank p-low">12</div>
+  <div class="priority-content">
+    <div class="priority-title">Swarm / Debate Pattern</div>
+    <div class="priority-desc">Peer-to-peer agent communication with round-based iteration. Very high complexity, niche use case. Could be implemented as a specialized executor type rather than a visual workflow pattern.</div>
+  </div>
+</div>
+
+<div class="priority-item">
+  <div class="priority-rank p-low">13</div>
+  <div class="priority-content">
+    <div class="priority-title">Trigger System</div>
+    <div class="priority-desc">Schedule-based, webhook-based, or file-watcher triggers to auto-start workflows. Lower priority for a desktop app but relevant for automation use cases.</div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- ============================================================ -->
+<h2>8. Architecture Decision: DAG vs Cyclic Graph</h2>
+<!-- ============================================================ -->
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+  <th>Approach</th>
+  <th>How Loops Work</th>
+  <th>Who Uses It</th>
+  <th>Complexity</th>
+  <th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td><strong>Option A: DAG + Loop Nodes</strong></td>
+  <td>Special Loop nodes contain an internal subgraph that repeats. The outer graph stays acyclic.</td>
+  <td>n8n, Dify, Flowise</td>
+  <td>Medium — loop is scoped, easier to reason about</td>
+  <td><span class="badge badge-yes">Recommended</span></td>
+</tr>
+<tr>
+  <td><strong>Option B: Full Cyclic Graph</strong></td>
+  <td>Any edge can loop back. Conditional edges determine when to exit. Max-iteration safety cap.</td>
+  <td>LangGraph</td>
+  <td>High — harder to visualize, risk of infinite loops</td>
+  <td><span class="badge badge-partial">Power user only</span></td>
+</tr>
+<tr>
+  <td><strong>Option C: Hybrid</strong></td>
+  <td>DAG by default + Loop nodes for scoped iteration + optional "advanced mode" for unrestricted cycles</td>
+  <td>Flowise AgentFlow V2</td>
+  <td>Medium-High — best of both, more UI work</td>
+  <td><span class="badge badge-partial">Long-term target</span></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<p style="color:var(--text-muted); font-size:0.9rem; margin-top:12px;">
+<strong>Recommendation:</strong> Start with <strong>Option A (DAG + Loop Nodes)</strong>. It's what Dify and Flowise use, it's visually intuitive (the loop is an explicit node, not an invisible backward edge), and it keeps the existing cycle detection intact for the outer graph. A Loop node contains a max-iteration cap and an exit condition — the subgraph inside it repeats until the condition is met or the cap is hit.
+</p>
+
+<hr class="divider">
+
+<!-- ============================================================ -->
+<h2>9. Summary: Devgentic's Position</h2>
+<!-- ============================================================ -->
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+  <th></th>
+  <th>Current State</th>
+  <th>After P0-P1</th>
+  <th>After P2-P3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td><strong>Patterns expressible</strong></td>
+  <td>Sequential chain, fan-in/fan-out (sequential)</td>
+  <td>+ Conditional, Parallel, Loops, HITL, Transforms</td>
+  <td>+ Sub-workflows, Error branches, Multi-port, Triggers</td>
+</tr>
+<tr>
+  <td><strong>Competitive parity with</strong></td>
+  <td>Basic pipeline tools</td>
+  <td>Dify, Flowise</td>
+  <td>n8n (for AI workflows), LangGraph (visual)</td>
+</tr>
+<tr>
+  <td><strong>Unique moat</strong></td>
+  <td colspan="3">Native macOS + MLX on-device + 4 agent architectures + dialect routing + full privacy = no competitor matches this combination</td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<p style="color:var(--text-muted); font-size: 0.85rem; margin-top: 24px; text-align: center;">
+  Devgentic Workflow Architecture Analysis &mdash; March 2026
+</p>
+
+</div>
+</body>
+</html>

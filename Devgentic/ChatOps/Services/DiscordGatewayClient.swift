@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  DiscordGatewayClient.swift
 //  Devgentic
@@ -89,7 +91,7 @@ actor DiscordGatewayClient {
     // MARK: - Connection Loop
 
     private func connectAndListen(continuation: AsyncStream<DiscordGatewayEvent>.Continuation) async {
-        while !Task.isCancelled {
+        connectLoop: while !Task.isCancelled {
             do {
                 try await connect()
                 try await receiveLoop(continuation: continuation)
@@ -97,10 +99,50 @@ actor DiscordGatewayClient {
                 break
             } catch {
                 isConnected = false
-                let delay = backoffSeconds
-                logger.error("Gateway error: \(error.localizedDescription). Reconnecting in \(delay)s...")
-                continuation.yield(.disconnected(error))
 
+                // ⚠️ THE THROWN ERROR IS NOT DIAGNOSTIC. A server-side close arrives here as a
+                // generic `NSPOSIXErrorDomain` 57 ("Socket is not connected") whether Discord
+                // rejected the bot token or the Wi-Fi dropped, which is why this loop used to
+                // retry a rejected token every backoff interval forever while the user was told
+                // nothing. The close CODE is the only thing that separates those cases, and it
+                // lives on the TASK rather than on the error.
+                //
+                // ⚠️ Reading it works even though `NSURLSessionWebSocketCloseCode` declares no
+                // case above 1015 — measured against a server closing with 4004, `rawValue` is
+                // 4004. See `DiscordGatewayClosePolicy` for the measurement note.
+                let closeCode = webSocket?.closeCode.rawValue ?? 0
+                let closeReason = webSocket?.closeReason
+                    .flatMap { String(data: $0, encoding: .utf8) }?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let reported = (closeReason?.isEmpty == false) ? " Discord said: \(closeReason!)." : ""
+
+                switch DiscordGatewayClosePolicy.disposition(forCloseCode: closeCode) {
+                case .fatal(let explanation):
+                    logger.error("[CHATOPS] Discord Gateway closed permanently with code \(closeCode).\(reported) \(explanation) CONSEQUENCE: the Discord bridge is STOPPING and will NOT retry, because reconnecting cannot fix this. Discord commands, HITL prompts and mirroring stay off until the cause is corrected and ChatOps is restarted.")
+                    continuation.yield(.disconnected(
+                        DiscordAPIError.gatewayClosedPermanently(code: closeCode, reason: explanation)
+                    ))
+                    break connectLoop
+
+                case .reconnectWithNewSession:
+                    // ⚠️ Clear the session BEFORE reconnecting. `handlePayload` sends a RESUME
+                    // whenever `sessionID` and `lastSequence` are set, so reconnecting without
+                    // clearing them replays the sequence Discord just rejected and is closed
+                    // again at once — a tight loop that reads as a transient network fault.
+                    logger.info("[CHATOPS] Discord Gateway closed with code \(closeCode) — the session is no longer valid.\(reported) CONSEQUENCE: the session id and sequence are discarded and the next connection re-identifies from scratch rather than resuming; queued events since the last sequence are lost.")
+                    sessionID = nil
+                    lastSequence = nil
+                    resumeGatewayURL = nil
+                    continuation.yield(.disconnected(error))
+
+                case .reconnect:
+                    let nextDelay = backoffSeconds
+                    let ceiling = maxBackoff
+                    logger.error("[CHATOPS] Discord Gateway error (close code \(closeCode)): \(error.localizedDescription).\(reported) Reconnecting in \(nextDelay)s. CONSEQUENCE: Discord is unreachable until the reconnect succeeds; the backoff grows toward \(ceiling)s.")
+                    continuation.yield(.disconnected(error))
+                }
+
+                let delay = backoffSeconds
                 increaseBackoff()
 
                 do {
@@ -150,8 +192,15 @@ actor DiscordGatewayClient {
     }
 
     private func handlePayload(data: Data, continuation: AsyncStream<DiscordGatewayEvent>.Continuation) async throws {
-        guard let payload = try? JSONDecoder().decode(DiscordGatewayPayload.self, from: data) else {
-            logger.warning("Failed to decode Gateway payload.")
+        // ⚠️ THE ENVELOPE CARRIES THE SEQUENCE NUMBER. Losing it is not just a lost event: `s` is
+        // what heartbeats and RESUME replay from, so a run of undecodable envelopes degrades the
+        // next resume into a full reconnect and re-delivers or skips events either side of the gap.
+        // The old line said only "Failed to decode Gateway payload" — no opcode, no consequence.
+        let payload: DiscordGatewayPayload
+        do {
+            payload = try JSONDecoder().decode(DiscordGatewayPayload.self, from: data)
+        } catch {
+            logger.error("[CHATOPS] Could not decode a Discord Gateway envelope (\(data.count) bytes): \(error.localizedDescription). CONSEQUENCE: the event inside is dropped AND its sequence number is never recorded, so a later RESUME replays from a stale point — the user may see a command silently ignored, or an old one acted on twice.")
             return
         }
 
@@ -167,7 +216,21 @@ actor DiscordGatewayClient {
 
         switch opcode {
         case .hello:
-            guard let d = payload.d, let hello = try? d.decode(DiscordHelloPayload.self) else { return }
+            // ⚠️ A DROPPED HELLO IS A DEAD CONNECTION, NOT A DROPPED MESSAGE. The heartbeat
+            // interval arrives only here, so returning silently means the heartbeat loop never
+            // starts and Discord closes the socket ~45s later as unresponsive — which surfaces as
+            // an unexplained reconnect cycle rather than as a decode problem.
+            guard let d = payload.d else {
+                logger.error("[CHATOPS] Discord HELLO arrived with no `d` payload. CONSEQUENCE: no heartbeat interval, so the heartbeat loop never starts and Discord closes this connection as unresponsive within about a minute; the bridge then reconnects and the user sees intermittent unavailability with no stated cause.")
+                return
+            }
+            let hello: DiscordHelloPayload
+            do {
+                hello = try d.decode(DiscordHelloPayload.self)
+            } catch {
+                logger.error("[CHATOPS] Could not decode Discord HELLO: \(error.localizedDescription). CONSEQUENCE: no heartbeat interval, so the heartbeat loop never starts and Discord closes this connection as unresponsive within about a minute; the bridge reconnects in a loop and Discord appears intermittently dead with nothing naming the cause.")
+                return
+            }
             heartbeatInterval = hello.heartbeat_interval
             startHeartbeatLoop()
 
@@ -219,7 +282,16 @@ actor DiscordGatewayClient {
 
         switch eventName {
         case "READY":
-            guard let ready = try? data.decode(DiscordReadyPayload.self) else { return }
+            // ⚠️ READY CARRIES THE APPLICATION ID, and nothing else does. Without it
+            // `editInteractionResponse` cannot address a deferred reply, so every slash command
+            // falls back to a channel post and leaves its "thinking…" placeholder unresolved.
+            let ready: DiscordReadyPayload
+            do {
+                ready = try data.decode(DiscordReadyPayload.self)
+            } catch {
+                logger.error("[CHATOPS] Could not decode Discord READY: \(error.localizedDescription). CONSEQUENCE: no session id, no resume URL and NO APPLICATION ID for this session — so slash commands cannot edit their deferred response and every one of them leaves a permanent \"thinking…\" placeholder, while resumes degrade to full reconnects.")
+                return
+            }
             sessionID = ready.session_id
             resumeGatewayURL = ready.resume_gateway_url
             applicationID = ready.application.id
@@ -231,11 +303,29 @@ actor DiscordGatewayClient {
             continuation.yield(.resumed)
 
         case "MESSAGE_CREATE":
-            guard let message = try? data.decode(DiscordMessage.self) else { return }
+            // ⚠️⚠️ THIS IS THE BOT GOING DEAF, SILENTLY. A MESSAGE_CREATE this build cannot model
+            // was dropped here with no log at all, so a Discord schema change — or one unexpected
+            // field — turned every typed command into "the bot ignored me", on both sides.
+            let message: DiscordMessage
+            do {
+                message = try data.decode(DiscordMessage.self)
+            } catch {
+                logger.error("[CHATOPS] Could not decode a Discord MESSAGE_CREATE: \(error.localizedDescription). CONSEQUENCE: the user's typed message is DROPPED before it ever reaches the command parser — they get no reply and no error, and the bot appears to be ignoring them. If this line repeats, Discord's payload shape has moved past what DiscordMessage models.")
+                return
+            }
             continuation.yield(.messageCreate(message))
 
         case "INTERACTION_CREATE":
-            guard let interaction = try? data.decode(DiscordInteraction.self) else { return }
+            // ⚠️⚠️ WORSE THAN A DROPPED MESSAGE: an unacked interaction shows the user Discord's red
+            // "This interaction failed" three seconds later, so they see a definite failure with
+            // nothing anywhere explaining it.
+            let interaction: DiscordInteraction
+            do {
+                interaction = try data.decode(DiscordInteraction.self)
+            } catch {
+                logger.error("[CHATOPS] Could not decode a Discord INTERACTION_CREATE: \(error.localizedDescription). CONSEQUENCE: the button tap or slash command is dropped before the bridge sees it, so nothing acknowledges it and Discord shows the user \"This interaction failed\" after three seconds. If this line repeats, the interaction payload has moved past what DiscordInteraction models.")
+                return
+            }
             continuation.yield(.interactionCreate(interaction))
 
         default:
@@ -261,7 +351,7 @@ actor DiscordGatewayClient {
                 let ackReceived = await self.heartbeatAckReceived
                 if !ackReceived {
                     // Zombie connection — no ACK for last heartbeat
-                    await self.logWarning("No heartbeat ACK received. Closing connection.")
+                    await self.logWarning("[CHATOPS] No Discord heartbeat ACK received; closing the connection. CONSEQUENCE: this socket is a zombie — Discord stopped responding but never closed it, so commands sent in this window were silently going nowhere. Closing forces the reconnect that restores them.")
                     await self.closeWebSocket()
                     return
                 }
@@ -271,7 +361,10 @@ actor DiscordGatewayClient {
                 do {
                     try await self.sendHeartbeat()
                 } catch {
-                    await self.logWarning("Failed to send heartbeat: \(error.localizedDescription)")
+                    // ⚠️ THIS `return` ENDS THE HEARTBEAT LOOP FOR GOOD. Without a heartbeat Discord
+                    // closes the session within about a minute, so a failed send is the start of an
+                    // outage, not a blip — and the old line named neither that nor the recovery.
+                    await self.logWarning("[CHATOPS] Failed to send a Discord heartbeat: \(error.localizedDescription). CONSEQUENCE: the heartbeat loop STOPS here, so Discord closes this session as unresponsive within about a minute and every command sent meanwhile is lost; recovery depends entirely on the reconnect that close triggers.")
                     return
                 }
 

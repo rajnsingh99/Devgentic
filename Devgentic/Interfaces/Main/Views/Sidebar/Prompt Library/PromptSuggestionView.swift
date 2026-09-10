@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  PromptSuggestionView.swift
 //  Devgentic
@@ -61,13 +63,7 @@ struct PromptSuggestionView: View {
                 }
             }
             .frame(maxHeight: maxListHeight)
-            // MARK: Liquid Glass
-            .glassEffect(.regular, in: .rect(cornerRadius: cornerRadiusValue))
-            // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
-            // .background(VisualEffectBlur(material: .popover).opacity(0.9))
-            // .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
-            // .overlay(RoundedRectangle(cornerRadius: cornerRadiusValue).stroke(theme.dividerColor, lineWidth: 1))
-            // .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
+            .appSurface(in: .rect(cornerRadius: cornerRadiusValue), elevation: .popover)
             .transition(.opacity.combined(with: .move(edge: .bottom)))
             .onAppear {
                 // When the view appears, if no item is selected, select the first one.
@@ -81,13 +77,7 @@ struct PromptSuggestionView: View {
                 .foregroundColor(theme.secondaryText)
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                // MARK: Liquid Glass
-                .glassEffect(.regular, in: .rect(cornerRadius: cornerRadiusValue))
-                // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
-                // .background(VisualEffectBlur(material: .popover).opacity(0.9))
-                // .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
-                // .overlay(RoundedRectangle(cornerRadius: cornerRadiusValue).stroke(theme.dividerColor, lineWidth: 1))
-                // .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
+                .appSurface(in: .rect(cornerRadius: cornerRadiusValue), elevation: .popover)
                 .transition(.opacity)
         }
     }

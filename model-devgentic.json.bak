@@ -9,10 +9,10 @@
       "name": "ParentDocumentEntity",
       "properties": [
         {
-          "flags": 1,
           "id": "1:3871524690125618176",
           "name": "id",
-          "type": 6
+          "type": 6,
+          "flags": 1
         },
         {
           "id": "2:4208963517832046592",
@@ -39,14 +39,14 @@
     },
     {
       "id": "3:1682473059827456000",
-      "lastPropertyId": "5:3692851740519263232",
+      "lastPropertyId": "6:2322328137919046912",
       "name": "ChildChunkEntity",
       "properties": [
         {
-          "flags": 1,
           "id": "1:8274615930285143040",
           "name": "id",
-          "type": 6
+          "type": 6,
+          "flags": 1
         },
         {
           "id": "2:9163027485921738752",
@@ -56,7 +56,9 @@
         {
           "id": "3:1047382956103847936",
           "name": "embedding",
-          "type": 23
+          "indexId": "2:243373707592068352",
+          "type": 28,
+          "flags": 8
         },
         {
           "id": "4:2538194607326951424",
@@ -64,19 +66,24 @@
           "type": 6
         },
         {
-          "flags": 520,
           "id": "5:3692851740519263232",
-          "indexId": "1:4817293650284719104",
           "name": "parentDocument",
-          "relationTarget": "ParentDocumentEntity",
-          "type": 11
+          "indexId": "1:4817293650284719104",
+          "type": 11,
+          "flags": 520,
+          "relationTarget": "ParentDocumentEntity"
+        },
+        {
+          "id": "6:2322328137919046912",
+          "name": "conversationID",
+          "type": 9
         }
       ],
       "relations": []
     }
   ],
   "lastEntityId": "3:1682473059827456000",
-  "lastIndexId": "1:4817293650284719104",
+  "lastIndexId": "2:243373707592068352",
   "lastRelationId": "0:0",
   "lastSequenceId": "0:0",
   "modelVersion": 5,

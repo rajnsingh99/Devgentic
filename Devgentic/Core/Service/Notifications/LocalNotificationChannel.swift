@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  LocalNotificationChannel.swift
 //  Devgentic
@@ -29,7 +31,21 @@ final class LocalNotificationChannel: NotificationChannel {
 
     let channelID = "local_notification"
     let displayName = "Local Notification"
-    var isEnabled: Bool = true
+    /// ⚠️ PERSISTED as of the settings wiring. It used to be a plain stored `var` on an instance
+    /// rebuilt at every launch, so turning macOS notifications off lasted until the next start and
+    /// the pane would then render the switch back ON. A toggle that silently forgets the user's
+    /// decision is worse than no toggle, which is why this had to change before the pane got one.
+    ///
+    /// ⚠️ `bool(forKey:)` alone returns false for an absent key, which would flip the default to
+    /// OFF for every existing install. The nil check is what keeps the shipped default of ON.
+    var isEnabled: Bool {
+        get {
+            let defaults = UserDefaults.standard
+            guard defaults.object(forKey: AppSettings.localNotificationsEnabledKey) != nil else { return true }
+            return defaults.bool(forKey: AppSettings.localNotificationsEnabledKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: AppSettings.localNotificationsEnabledKey) }
+    }
     let requiresConfiguration = false
 
     func send(_ payload: AppNotificationPayload) async throws {

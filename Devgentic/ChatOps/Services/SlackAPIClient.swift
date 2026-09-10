@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  SlackAPIClient.swift
 //  Devgentic
@@ -144,6 +146,30 @@ actor SlackAPIClient {
         }
 
         return chunks
+    }
+
+    // MARK: - Views
+
+    /// Opens a modal against a live `trigger_id`.
+    ///
+    /// ⚠️ `trigger_id` EXPIRES IN ABOUT THREE SECONDS and cannot be reused. It arrives only on
+    /// `block_actions` and `slash_commands` payloads — never on `events_api`, so a modal can never
+    /// be opened in response to typed text on Slack, only from a button or a slash command.
+    ///
+    /// ⚠️ A REJECTED VIEW COMES BACK AS HTTP 200. Slack answers `ok: false` with an `error` string
+    /// that names nothing useful ("invalid_arguments"), putting the real detail in
+    /// `response_metadata.messages` — which this app used to discard. Both are logged here, because
+    /// the user-visible symptom is a button that appears to do nothing at all.
+    func openView(triggerID: String, view: SlackModalView) async throws {
+        let payload = SlackViewsOpenPayload(trigger_id: triggerID, view: view)
+        let data = try await post(method: "views.open", payload: payload)
+        let response = try JSONDecoder().decode(SlackAPIResponse<EmptyResponse>.self, from: data)
+
+        guard response.ok else {
+            let detail = response.response_metadata?.messages?.joined(separator: "; ") ?? "no detail supplied"
+            logger.error("[CHATOPS] Slack refused views.open: \(response.error ?? "unknown") — \(detail). CONSEQUENCE: the modal never opens, so the user taps the answer button and nothing happens; the run stays parked and the only route left is typing in the channel.")
+            throw SlackAPIError.apiError(method: "views.open", error: response.error ?? "views.open failed")
+        }
     }
 
     // MARK: - Private Helpers

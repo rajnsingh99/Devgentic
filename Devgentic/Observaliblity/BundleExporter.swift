@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  BundleExporter.swift
 //  Devgentic
@@ -499,6 +501,12 @@ enum BundleExporter {
             AppSettings.ciFeatureResponseSynthesisRemoteKey,
             AppSettings.ciFeatureHistoryCompactionKey,
             AppSettings.notificationsEnabledKey,
+            // Whether macOS system delivery is on. Absent means ON. Exported because "I stopped
+            // getting notifications" is otherwise undebuggable from a bundle: the master switch,
+            // this per-channel switch and the OS permission are three independent gates and a
+            // report that names only the first cannot distinguish them.
+            AppSettings.localNotificationsEnabledKey,
+            AppSettings.chatOpsNotificationsEnabledKey,
             AppSettings.chatFontSizeKey,
             AppSettings.chatLineSpacingKey,
             AppSettings.speechPlaybackRateKey,

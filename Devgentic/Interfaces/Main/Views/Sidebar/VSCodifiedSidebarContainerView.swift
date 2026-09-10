@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  VSCodifiedSidebarContainerView.swift
 //  Devgentic
@@ -37,6 +39,7 @@ struct VSCodifiedSidebarContainerView: View {
 
     @Environment(MainApplicationViewModel.self) var viewModel
     @Environment(\.appTheme) private var theme
+    @Environment(\.surfaceStyle) private var surfaceStyle
 
     init(isSidebarVisible: Binding<Bool>, sidebarWidth: Binding<CGFloat>) {
         self._isSidebarVisible = isSidebarVisible
@@ -96,20 +99,33 @@ struct VSCodifiedSidebarContainerView: View {
             .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(theme.secondaryBackground)
-                    .shadow(color: theme.shadowColor.opacity(0.6), radius: 20, x: 0, y: 8)
+                    .shadow(
+                        color: surfaceStyle == .glassmorphic ? theme.shadowColor.opacity(0.6) : Color.clear,
+                        radius: surfaceStyle == .glassmorphic ? 20 : 0,
+                        x: 0,
+                        y: surfaceStyle == .glassmorphic ? 8 : 0
+                    )
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                theme.isDark ? Color.white.opacity(0.18) : theme.dividerColor,
-                                theme.dividerColor.opacity(0.6),
-                                theme.accentColor.opacity(0.25)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
+                        surfaceStyle == .glassmorphic
+                            ? LinearGradient(
+                                colors: [
+                                    theme.isDark ? Color.white.opacity(0.18) : theme.dividerColor,
+                                    theme.dividerColor.opacity(0.6),
+                                    theme.accentColor.opacity(0.25)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                            : LinearGradient(
+                                colors: [
+                                    theme.isDark ? Color.white.opacity(0.08) : theme.dividerColor.opacity(0.7)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
                         lineWidth: 1
                     )
             )

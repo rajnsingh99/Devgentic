@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  DGLogger.swift
 //  Devgentic
@@ -39,13 +41,13 @@ struct DGLogger: Sendable {
     /// THE subsystem the whole app logs under — the one place the string is decided.
     ///
     /// ⚠️ 29 `Logger(subsystem:)` sites used to hardcode `"com.devgentic"` while the app's real
-    /// bundle identifier is `com.dev.devgentic`, so every one of them logged under a subsystem
+    /// bundle identifier is `app.devgentic.macos`, so every one of them logged under a subsystem
     /// that does not exist: filtering Console or `log stream` by the app's actual identifier
     /// silently missed them, and three different fallback spellings were in circulation
     /// (`"com.devgentic"`, `"com.devgentic.app"`, and the real one). A logging standard that
     /// requires the app to be debuggable from logs alone cannot have the subsystem be a literal
     /// each site retypes.
-    static let subsystem: String = Bundle.main.bundleIdentifier ?? "com.dev.devgentic"
+    static let subsystem: String = Bundle.main.bundleIdentifier ?? "app.devgentic.macos"
 
     // MARK: - Identity (instance)
 

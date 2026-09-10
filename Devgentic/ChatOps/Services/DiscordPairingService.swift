@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  DiscordPairingService.swift
 //  Devgentic
@@ -98,6 +100,8 @@ final class DiscordPairingService {
 
         let stream = await gatewayClient.start()
         var applicationID: String?
+        /// Per-origin failed attempts for THIS window only — see `PairingAttemptLedger`.
+        var ledger = PairingAttemptLedger()
 
         for await event in stream {
             // Check timeout
@@ -114,8 +118,28 @@ final class DiscordPairingService {
                 // Ignore bot messages
                 guard message.author.bot != true else { continue }
 
-                let text = message.content.uppercased().trimmingCharacters(in: .whitespaces)
-                guard text == "PAIR \(pin)" else { continue }
+                let attempt = PairingAttemptPolicy.classify(message.content, expectedPIN: pin)
+                guard attempt != .unrelated else { continue }
+
+                // ⚠️ THE AUTHOR, NOT THE CHANNEL. Everyone in a Discord channel shares its id, so
+                // counting per channel would let one member's guesses lock out every other member —
+                // and the pairing user is one of those members.
+                let origin = message.author.id
+
+                if ledger.isBlocked(origin) {
+                    logger.info("[CHATOPS] Ignoring a pairing message from user \(origin) — it has already spent its \(PairingAttemptLedger.attemptsPerOrigin) attempts this window. CONSEQUENCE: nothing further from that origin can pair, including a correct PIN. The window stays OPEN for every other channel, deliberately: aborting it would let a stranger stop the user pairing with ten messages.")
+                    continue
+                }
+
+                if attempt == .wrongPIN {
+                    switch ledger.recordFailure(from: origin) {
+                    case .listening(let remaining):
+                        logger.error("[CHATOPS] Failed pairing attempt from user \(origin) (\(remaining) left before it is ignored; \(ledger.totalFailures) failures from \(ledger.distinctOrigins) origin(s) this window). CONSEQUENCE: pairing did NOT happen and the window stays open. One origin repeating is a typo; several origins guessing is not, and the PIN space is 900,000 against a 300-second window. The attempted digits are deliberately not recorded — see PairingAttemptPolicy.")
+                    case .blocked:
+                        logger.error("[CHATOPS] user \(origin) has now spent all \(PairingAttemptLedger.attemptsPerOrigin) pairing attempts and will be IGNORED for the rest of this window, including a correct PIN. CONSEQUENCE: if this was the user mistyping, they must restart pairing from Settings to get a fresh window; if it was someone guessing, that origin can no longer reach the PIN. The window itself stays open for other channels.")
+                    }
+                    continue
+                }
 
                 // PIN matched — pairing successful
                 let channelID = message.channel_id
@@ -131,14 +155,24 @@ final class DiscordPairingService {
 
                 // Send confirmation
                 let apiClient = DiscordAPIClient(botToken: botToken)
-                _ = try? await apiClient.sendMessage(
-                    channelID: channelID,
-                    content: "✅ Paired with Devgentic! Use /help to see available commands."
-                )
+                do {
+                    _ = try await apiClient.sendMessage(
+                        channelID: channelID,
+                        content: "✅ Paired with Devgentic! Use /help to see available commands."
+                    )
+                } catch {
+                    logger.error("[CHATOPS] Discord pairing succeeded for channel \(channelID) but the confirmation could not be posted: \(error.localizedDescription). CONSEQUENCE: the user sees no acknowledgement that pairing worked and will reasonably try again, even though the app is now paired.")
+                }
 
                 // Register slash commands if we have guild info
                 if let guildID, let appID = applicationID {
-                    try? await apiClient.registerSlashCommands(applicationID: appID, guildID: guildID)
+                    do {
+                        try await apiClient.registerSlashCommands(applicationID: appID, guildID: guildID)
+                    } catch {
+                        logger.error("[CHATOPS] Discord pairing succeeded for guild \(guildID) but slash-command registration failed: \(error.localizedDescription). CONSEQUENCE: the user is paired but Devgentic's commands do not appear in Discord's \"/\" menu; they remain reachable only by typing them as ordinary messages, until the next gateway READY retries.")
+                    }
+                } else {
+                    logger.error("[CHATOPS] Discord pairing completed with no guild id or no application id, so NO slash commands were registered. CONSEQUENCE: the \"/\" menu stays empty for this user and every command must be typed as an ordinary message.")
                 }
 
                 // Stop the pairing Gateway connection

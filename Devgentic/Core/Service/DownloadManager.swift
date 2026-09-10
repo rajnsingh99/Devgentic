@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  DownloadManager.swift
 //  Devgentic
@@ -377,9 +379,6 @@ final class DownloadManager {
                 }
                 if userIsViewing { return }
             }
-
-            let config = await NotificationConfiguration.shared
-            guard await config.isNotificationEnabled(for: nil) else { return }
 
             let payload = AppNotificationPayload(
                 title: succeeded ? "Model ready" : "Download failed",

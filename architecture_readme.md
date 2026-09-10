@@ -33,6 +33,7 @@
 | RAG / knowledge base / file context | not documented | — |
 | Persistence (SwiftData + ObjectBox) | not documented | — |
 | HITL / InteractionCenter | not documented | — |
+| ChatOps remote interface (Telegram/Discord/Slack) | partial — **invariants only** (2026-09-09): 27–33 plus 16–26, and §9. Every file was read in that session, but no dedicated section exists, so the wire formats, the bridge/transport/renderer split and the pairing flow are undocumented here | §7, §9 |
 | UI / theming / Code interface | not documented | — |
 | Vision & multimodal | not documented | — |
 
@@ -998,6 +999,15 @@ check (`BackendOrchestrationService`). Both **render the real episodic blob and 
 rather than estimating from a parallel copy of the render rules. Affordable because the ring
 recomputes on turn boundaries, not keystrokes.
 
+⚠️ Superseded in part on 2026-09-06: callers no longer SUPPLY history to the request path —
+`ActiveStreamManager` derives it (invariant 8). The gauge still calls the resolver directly, so the
+two continue to agree by sharing it. ⚠️ ONE caller still *calls* the resolver for its own
+purposes: `MessagingCoordinator.resolveBackendHistory`, reached only from `resumeRun`, where it
+locates the user MESSAGE a resume is replaying (not history to send). The regenerate path used to
+call it too and no longer does — that fetch's result was read by nothing, so only the actor hop it
+provided was kept. What changed is that the result no longer travels to the model. The description
+below remains accurate for what the resolver does.
+
 Both read history through **`BackendHistoryResolver`** (2026-07-30), which merges the stored
 conversation with the in-memory window and returns it **ascending** — the same source and the
 same order the request uses. Previously each gauge read `currentChatMessages`, the view's
@@ -1154,51 +1164,324 @@ Honest list. Each is a decision, not an oversight.
 
 Lines a reader is likely to "simplify" into a bug. Each names the failure it prevents.
 
-1. **The four `<effect>` markers never merge.** Each answers a different "what can I do about
+**Each entry now also carries how it is ENFORCED** (audited 2026-09-06, every row re-derived from
+source). The distinction that matters is not "is there a test" but *can the test fail when a
+CALLER breaks the rule*:
+
+| | Meaning |
+|---|---|
+| ✅ **drift-tested** | a test reads real production source or exercises the real call path, and fails on a violation |
+| 🛡 **guard-rail** | production code detects the violation at runtime and logs it at `.error` with the consequence |
+| ⚠️ **policy-only** | a test proves a helper behaves correctly IN ISOLATION but cannot fail when a caller violates the rule |
+| ❌ **unenforced** | nothing would catch it |
+| ❔ **not mechanically checkable** | the rule is real but no test could decide it — invariant 9 is the only one, because "was the CONSEQUENCE named" is a judgement about prose |
+
+⚠️ **Two badges on one row means both mechanisms are present**, not that the author was undecided:
+invariant 8 is `✅🛡` because a drift test reads the real source AND production asserts at runtime.
+(Both marks were in use before this legend existed and neither was defined here; added 2026-09-09
+after a count of the register disagreed with the stated tally purely because of them. The tally was
+right — see the note below it.)
+
+⚠️ **policy-only is the dangerous state, not the honest one.** Invariant 8 had a test that proved
+`pairTurns` misreports on a descending array — and it could not fail when `SchedulerCoordinator`
+actually shipped one, which is exactly what happened. A green policy-only test reads, to everyone
+who did not write it, as "this rule is pinned". Where a row below says ⚠️, treat the rule as
+unprotected and the coverage as an illusion.
+
+Current state: **25 enforced, 7 policy-only, 1 not mechanically checkable** — 33 rows, recounted
+from the badges on 2026-09-09 rather than carried forward, because this line has been wrong twice. (Invariant 12 was ❌ unenforced when this audit began — its test counted lines containing `"--"` and asserted `>=` a minimum, so two separators could be deleted and it still passed, and one match in each of two files was output-parsing rather than argv. Fixed the same day; the tally moved 7→8.) Entries 16–22 were added 2026-09-08 with the
+notification-delivery work; six are drift-tested and one (19) is honestly policy-only — see its row.
+Entries 23-26 followed on the same day with the ChatOps mirror's send-once,
+failed-run-reporting and resolution-attribution fixes and the Discord Gateway close-code fix.
+Entries 27-33 were added 2026-09-09 from a cold audit of the whole ChatOps subsystem; all seven are
+drift-tested, and each was verified by reverting its fix and watching the named test go red.
+
+1. ✅ **The four `<effect>` markers never merge.** Each answers a different "what can I do about
    it?". Collapsing any two re-creates the ambiguity `baseline="none"` exists to remove.
-2. **Only two turn renderers exist.** A third copy is how `<effect>`, sorted params and
+2. ✅ **Only two turn renderers exist.** A third copy is how `<effect>`, sorted params and
    compaction summaries were lost the first time.
-3. **The gauge measures the shipped blob, not an estimate of it.** A parallel estimator is a
+3. ⚠️ **The gauge measures the shipped blob, not an estimate of it.** A parallel estimator is a
    fourth copy of the render rules.
-4. **Logging must not alter the payload.** The gauge renders with `correlation: nil` (silent),
+4. ✅ **Logging must not alter the payload.** The gauge renders with `correlation: nil` (silent),
    the request with one (logs); the output must be byte-identical.
-5. **One chars↔tokens ratio, both directions.** Two ratios means one budget is wrong. Holds on
+5. ⚠️ **One chars↔tokens ratio, both directions.** Two ratios means one budget is wrong. Holds on
    the main request path; §5.1 lists the sites that still convert by hand.
-6. **Effects are derived once, at tool completion.** Deriving per prompt-build is O(n²) per
+6. ⚠️ **Effects are derived once, at tool completion.** Deriving per prompt-build is O(n²) per
    historical write, per request.
-7. **`resolve`'s two policies stay two policies.** The chip must refuse an append with no
+7. ✅ **`resolve`'s two policies stay two policies.** The chip must refuse an append with no
    baseline; memory must record it.
-8. **Ascending history only, from `BackendHistoryResolver`.** `pairTurns` walks forward, so a
-   descending array pairs every reply with the wrong question and halves the turn count —
-   invisibly, because a character sum is order-independent. Never re-add a `.reversed()` at a
-   call site; if history arrives descending, the resolver is the bug. Never substitute the
-   view's `currentChatMessages`: that is a pagination window, not the conversation.
-9. **Every silent drop is logged with its consequence.** An elision, a trim, a skipped
+8. ✅🛡 **Ascending history only — and no surface supplies it.** `pairTurns` walks forward. On a
+   descending array of n complete turns it: skips the newest agent reply entirely (it arrives with
+   no pending question), pairs every remaining reply with the question from the turn *after* it in
+   real time, and ends holding the conversation's OLDEST user message, which the orphan handler
+   emits as `wasCancelled` / "Agent never responded to this query".
+   ⚠️ **The turn COUNT is unchanged — n in, n out** (n−1 mispaired pairs from the loop, plus the
+   orphan). That is what makes it invisible: neither a character sum (order-independent) nor a
+   turn count reveals it. Only reading the pairs does.
+   ⚠️ This entry has now been wrong TWICE about its own failure mode. It first said "halves the
+   turn count"; the 2026-09-06 correction said "n in, n−1 out". Both were wrong, and both would
+   have sent a reader hunting a count that never changes. Derived from the source and corrected
+   again the same day. A wrong failure description here is worse than no entry — the arithmetic in
+   this register is exactly the thing a reader will not re-derive.
+   ✅ **Satisfied by construction since 2026-09-06.** `ActiveStreamManager.startMessageStream`
+   has **no `history` parameter**; it derives history via `deriveHistory` from the store and the
+   user's message. ⚠️ `activeStreams` is NOT a source — `deriveHistory` is `static` and cannot read
+   it. Live-run state reaches the derivation only as the `omitting` SET (built from
+   `liveRunQuestionIDs`), which REMOVES rows; in-flight assistant rows arrive from the store on
+   their own, because `flushInFlight` upserts them there. A surface cannot hand over a descending array, a
+   pagination window or a private transcript because it hands over none — the three shapes that
+   actually shipped (`SchedulerCoordinator`'s raw `fetchMessages`, QuickAccess's 20-row render
+   window, Jarvis's private transcript) are now unrepresentable rather than merely forbidden.
+   Do not re-introduce the parameter. If history ever arrives descending, the resolver is the bug
+   — never a `.reversed()` at a call site. The rule that the view's `currentChatMessages` is a
+   pagination window and not the conversation still binds anything that reads it directly.
+9. ❔ **Every silent drop is logged with its consequence.** An elision, a trim, a skipped
    snapshot, a rejected retrieval.
-10. **`GitCommandBuilder.hardening` goes on every action, ahead of the subcommand.** It is not
+10. ✅ **`GitCommandBuilder.hardening` goes on every action, ahead of the subcommand.** It is not
     redundant with the option denylist and cannot be folded into it: the RCE it closes is
     triggered by a call carrying **no arguments** (`status`), which argument filtering never
     sees. Ahead of the subcommand because `-c` is a git global and `args` is appended after it.
-11. **Model-supplied values never become a shell command string, and never become an
+11. ⚠️ **Model-supplied values never become a shell command string, and never become an
     AppleScript literal unescaped.** Two interpreters, two mitigations — argv for the first,
     escaping for the second. Neither substitutes for the other. §3.5.
-12. **A model-supplied value that leads an argv position gets a `--` before it.** Argv ends the
+12. ✅ **A model-supplied value that leads an argv position gets a `--` before it.** Argv ends the
     shell's involvement, not the callee's option parser; `grep -f` and `rg --pre` are the proof.
     Both branches of a tool (the ripgrep path and the grep fallback) need it, not just one.
-13. **A guard belongs to a capability, not to a tool name.** The interactive/REPL/sudo refusals
+13. ⚠️ **A guard belongs to a capability, not to a tool name.** The interactive/REPL/sudo refusals
     protected `execute_shell` and nothing else, so `batch_command` — the same `zsh -c` — walked
     past all of them. New shell-running or AppleScript-running tools call the shared guard and
     the shared escaper; they do not grow private copies.
-14. **`NativeToolCatalog` is the only place a native tool is declared.** `resolveNativeTool` is a
+14. ✅ **`NativeToolCatalog` is the only place a native tool is declared.** `resolveNativeTool` is a
     lookup and `LocalToolManager` is a projection; neither may grow its own list. A second list
     is what produced every tool bug in the 2026-07-31 audit, and the asymmetry hides it — a
     missing registration is silent because the tool still works. §3.7.
-15. **`ToolCapability.arbitraryCodeExecution` describes what a tool DOES; it decides nothing.**
+15. ⚠️ **`ToolCapability.arbitraryCodeExecution` describes what a tool DOES; it decides nothing.**
     Per-tool `requiresConfirmation` stays the sole gate, so a profile that set a tool to run
     automatically still does. Anything that starts *enforcing* off this set has changed the
     user's configured behaviour behind their back — which is the one thing it must not do.
     It is also never hand-edited on its own: `ToolCapabilityTests` checks it against the source
     in both directions, and it is meant to fail when the code and the set disagree.
+16. ✅ **Every notification passes through `NotificationDispatcher.dispatch()`, and the user's
+    master switch is enforced THERE — not at the call sites.** A dispatch call with no guard of its
+    own is correct, not an oversight; re-adding per-call-site guards duplicates the policy, and
+    three of the four that existed also paid a second `@MainActor` hop on a path whose whole job is
+    to run while the user is away. The rule was previously "every caller must remember to ask", and
+    a caller did not: `SchedulerService` fired every scheduled-task completion with notifications
+    switched off — the exact notification `ChatOpsNotificationChannel` forwards to Telegram, Discord
+    and Slack. ⚠️ **Gating `dispatch()` covers callers OF `dispatch`; it cannot cover a path that
+    never goes near it.** `push_local_notification` was such a path — an agent tool building its own
+    `UNMutableNotificationContent` and calling `center.add(request)` — so no user setting could
+    reach it. Nothing may deliver to `UNUserNotificationCenter` outside `LocalNotificationChannel`.
+17. ✅ **An absent notification key means ON.** `notificationsEnabled` and
+    `localNotificationsEnabled` are both declared with a default of `true`, so a fresh install has
+    no stored value and notifications work. `UserDefaults.bool(forKey:)` returns `false` for an
+    absent key, so reading either without an `object(forKey:) != nil` check inverts the shipped
+    default and switches notifications OFF for every install that never touched the setting — a
+    silent, app-wide regression delivered by an upgrade.
+18. ✅ **The master switch is checked BEFORE any per-conversation override.** The order of the two
+    statements in `NotificationGatePolicy.shouldDeliver` is the rule: an override may mute one
+    conversation while notifications are on, but must never resurrect one the user switched off
+    globally. Pinned on the real dispatch path, not only on the pure function — a pure test cannot
+    fail when `dispatch` reads the two in the wrong order.
+19. ⚠️ **A `NotificationChannel` never leaves the actor.** The protocol is `AnyObject`, is not
+    `Sendable`, and has a mutable `isEnabled`; handing one to a `@MainActor` view and binding a
+    `Toggle` to that property races `dispatch()`'s `channels.values.filter { $0.isEnabled }` on the
+    actor's executor. Under this project's `SWIFT_STRICT_CONCURRENCY = complete` with
+    `SWIFT_VERSION = 5.0` that is reported as a **warning**, so the race would ship silently.
+    `NotificationChannelInfo` is the `Sendable` projection the UI gets instead.
+    ⚠️ **Policy-only, and the gap is named:** `registeredChannels()` still exists and still returns
+    `[any NotificationChannel]`, and no test fails if a view calls it. The settings pane is pinned
+    to `channelSnapshots()`; nothing pins the next reader.
+20. ✅ **`NotificationConfiguration.isGloballyEnabled` is a computed property over
+    `NotificationGatePolicy`, deliberately NOT `@AppStorage`.** `AppStorage` is a `DynamicProperty`
+    and `DynamicProperty.update()` runs only for a `View`, so declared on a class it fails twice:
+    it caches (the pane reported notifications ON while the store — and therefore `dispatch()` —
+    said OFF), and, being `@ObservationIgnored`, it invalidates nothing, so any SwiftUI body reading
+    it renders once and then holds a stale value. `access` / `withMutation` are what a stored
+    property gets for free and a computed one must ask for; without them the property reads
+    correctly and still never re-renders a view. Both halves are reproduced in
+    `MasterSwitchObservabilityTests`, which were written to FAIL against the old declaration first.
+21. ✅ **`dispatch()` returns how many channels ACCEPTED the payload, and zero is an outcome rather
+    than an error.** A channel that throws is not counted, or the settings pane reports success for
+    a test that failed everywhere. Zero has two causes — suppressed by the switch, or every channel
+    off — and they are not interchangeable: the pane re-derives which one from the same policy,
+    because telling a user to check the channel switches when the master switch is what stopped
+    delivery is a wrong answer on the one screen whose purpose is diagnosing delivery.
+22. ✅ **No control in the notification settings pane is disabled by the master switch.** Reading
+    the value is fine — the Channels card shows a notice with it. Taking the control away is what
+    this forbids: it greyed out every channel switch whenever notifications were off, so no
+    combination of controls produced ChatOps mirroring without desktop banners, and a channel could
+    not be configured ahead of switching notifications on. Delivery is enforced in `dispatch()`;
+    this pane records intent and reports outcomes.
+23. ✅ **`RemoteMirrorService`'s send-once claim is taken BEFORE the send and released if the send
+    throws.** Both halves are load-bearing and they pull in opposite directions, so neither may be
+    "simplified" away. The claim must precede the `await` because `observeMessage` deliberately
+    re-arms `withObservationTracking` BEFORE awaiting `evaluateMessageState` — its own comment says
+    the dedup makes the extra pass harmless — so passes for one message really do overlap; on a
+    `@MainActor` class a check and an insert with no `await` between them are atomic, and that is
+    the only thing stopping two passes from posting the same text. The claim must be RELEASED on
+    failure because a permanent claim marks work done that was never done: a transport error left
+    the response marked mirrored with nothing delivered, and every later pass was then suppressed
+    by a claim for a send that never happened. The two sends in that method had opposite halves of
+    this — the response path claimed early and never released, the HITL path released but claimed
+    after its `await`, leaving a window where two overlapping passes post the same prompt twice and
+    the stale buttons answer an already-resolved operation. ⚠️ Emptiness is checked BEFORE the
+    claim for the same reason: `content` is an observed property, so claiming for a body that has
+    not arrived suppresses the one that does.
+24. ✅ **The mirror's content switch has NO `default:` arm, and a failed run never reports success.**
+    It used to end in `default: responseText = "Response complete."`, and `MessageContent.error`
+    fell into it — so a run that FAILED told the remote user it had completed, on the one surface
+    where the user cannot see the Mac's error card and has no other signal. `.mediaArtifact` fell in
+    too, promising a reply that did not exist. Every case is now named, so a `MessageContent` case
+    added later fails to COMPILE here rather than silently inheriting a success message; that is the
+    enforcement, and it is why no `default` may be reintroduced "to keep the switch short".
+    ⚠️ **Error text is sanitised on the way out, because this created a NEW EGRESS.** Before the fix
+    the details never left the process — only the fixed string did. Error details are the content
+    most likely to carry an absolute home path, an HTTP error body or an env dump, and they now go
+    to a third-party chat service, so they pass `TelemetrySanitizer.sanitize` (`.standard`).
+    ⚠️ **SUPERSEDED 2026-09-09 — normal responses are no longer unsanitised.** This row used to end
+    "normal responses are still sent UNSANITISED; that is the whole outbound surface and belongs to
+    the planned per-provider egress pass. Do not read this one call as coverage of it." That pass
+    landed: invariant 27 is the floor, and every text path on all three transports now passes it.
+    The distinction the old sentence drew still holds and is why there are two mechanisms — error
+    details take the HARSHER `.standard` treatment here (home paths, IPs and emails folded as well
+    as credentials) because the user never asked to transmit them, while the floor strips
+    credentials ONLY, so an answer about the user's own files is not damaged into uselessness.
+25. ✅ **Who answered a HITL prompt is CARRIED on the resolution, never assumed by whoever renders
+    it — and an absent source prints no attribution at all.** The mirror's observers fire on a
+    GLOBAL `NotificationCenter` notification, so they run for every resolution regardless of where
+    it happened; they used to render the literal `"(from Mac)"`, which told a user who had just
+    tapped Approve on Telegram that the Mac had answered, and with several bridges connected
+    reported a Telegram approval on Discord as the Mac's too. `HITLResolvedKey.source` carries a
+    `MessageSource.rawValue`, and `resolvedBy:` on the four `resume*` methods is **REQUIRED, never
+    defaulted** — that is the enforcement. A default would let a new call site silently inherit
+    someone else's attribution, which is the same class of bug as a defaulted `currentUserMessageID`
+    silently reverting a strip. Making it required surfaced TEN machine-driven resolutions inside
+    `ExecutionSuspensionService` alone (double-suspension cleanup, `Task.isCancelled`, `onCancel`
+    teardown, deadlines) that the hard-coded copy had been reporting to users as the Mac's doing.
+    ⚠️ **A cancel is not a denial.** `drainOperation` resolves a torn-down permission with
+    `approved: false`, so a stopped run rendered as "❌ Tool denied (from Mac)" — a decision nobody
+    took, credited to a surface nobody used. The `outcome` key already carried the truth and nothing
+    read it; every observer now checks it before phrasing a decision.
+26. ✅ **A Discord Gateway close CODE decides whether to reconnect — the thrown error cannot.**
+    `receive()` reports every server-side close as a generic `NSPOSIXErrorDomain` 57 ("Socket is not
+    connected"), identical whether Discord rejected the bot token or the Wi-Fi dropped, so the old
+    catch-all reconnect retried a rejected token every backoff interval forever while the user was
+    told nothing. The code lives on the TASK (`webSocket?.closeCode.rawValue`), not on the error.
+    ⚠️ **THAT IT SURVIVES AT ALL IS NON-OBVIOUS AND WAS MEASURED, NOT ASSUMED.**
+    `NSURLSessionWebSocketCloseCode` is a closed `NS_ENUM` whose largest case is 1015, so Discord's
+    4000-range codes look like they cannot cross into Swift. Against a server closing with 4004,
+    `closeCode.rawValue` reports 4004 and `closeReason` carries the server's text. Do not "simplify"
+    this back to inspecting the error.
+    ⚠️ **Classifying is only half of it — the fatal arm must actually STOP the loop.** A correct
+    classification that falls through to the reconnect is the original bug with extra steps, which
+    is why the wiring test slices the `.fatal` arm specifically and asserts `break connectLoop` is
+    inside it.
+    ⚠️ **4007/4009 clear the session BEFORE reconnecting.** `handlePayload` sends a RESUME whenever
+    `sessionID` and `lastSequence` are set, so reconnecting without clearing them replays the
+    sequence Discord just rejected and is closed again at once — a tight loop that reads as a flaky
+    network. And the default stays `.reconnect`: treating every close as fatal would turn a dropped
+    connection into a permanently dead bridge.
+27. ✅ **Nothing reaches a third-party chat service without the credential floor, and it is applied
+    to the VIEW rather than to the rendered text.** `RemoteEgressSanitizer.credentialsOnly` composes
+    exactly the credential passes — API keys, bearer tokens, URL credentials, JSON secret keys, env
+    assignments — and deliberately does NOT ask `TelemetrySanitizer` for a LEVEL, because
+    `.standard` would drag home-path, IP and email folding in with them. ⚠️ **The line is drawn at
+    INTENT, not at sensitivity.** A home path is something the user asked about; answering
+    `[USER_PATH]/main.swift` turns a correct answer into a broken-looking one and teaches them to
+    route around the redaction. An API key echoed out of a `.env` the agent happened to read is
+    something they never meant to transmit, to a third party that keeps it. The first stays; the
+    second never leaves. ⚠️ **Sanitising the VIEW is what closes two holes a text-level pass leaves
+    open:** Slack renders the body into BLOCKS as well as the fallback text, and every platform puts
+    conversation titles and profile names on BUTTON LABELS — and a conversation's title is auto-set
+    to the user's first prompt, so a prompt containing a key becomes a button label. ⚠️ **And it is
+    applied BEFORE chunking**, in the transport rather than the API client: a credential split
+    across two chunks matches no pattern in either half. ⚠️ Callback tokens are deliberately
+    untouched — they are ids and fixed verbs minted by this app, never user text, and rewriting one
+    breaks the round trip that makes the button work.
+28. ✅ **A remote view is fitted to the platform's own message limit before it is posted.** `render`
+    posts through the UNCHUNKED `sendMessage` / `postMessage` — chunking lives in
+    `sendChunkedMessage`, which only the mirror's agent-reply path uses — so an over-long view is
+    not truncated by the platform, it is REJECTED, and the user receives nothing at all for a
+    command that succeeded locally. ⚠️ **The three limits are different limits, not one with three
+    values:** Telegram 4096 (message text), Discord 2000 (message `content`, the tightest and the
+    one that bit first), Slack 3000 (a `section` block's text, NOT `chat.postMessage`'s 40 000 —
+    the notice renderer puts the same string in both, so the block's cap governs). ⚠️ Measured in
+    UTF-16, deliberately conservative: `String.count` counts graphemes, so an emoji-dense transcript
+    measures short here and is rejected there. ⚠️ Whole LINES are dropped and the count is stated in
+    the message, because cutting mid-sentence reads as corruption while a silently shortened
+    transcript reads as "that is all there is". ⚠️ The prompt arms need this most, not least:
+    `toolConfirmation` caps its params at 500, but `planReview`'s subtask list, `gate`'s prompt and
+    `clarification`'s question are all model-generated and unbounded — and a rejected HITL prompt
+    leaves the run parked with no buttons anywhere remote, which is strictly worse than a trimmed
+    one, because the buttons are what resolve it.
+29. ✅ **The callback grammar's 64-byte ceiling is ASSERTED, not merely documented.**
+    `CallbackToken`'s header had cited `CallbackTokenTests.testEveryTokenFitsTelegramsBudget` as "a
+    standing probe rather than a one-off calculation" — and no such file, test or caller existed;
+    `fits(budget:)`, `telegramPayloadBudget` and `RemoteCapabilities.callbackPayloadBudget` had zero
+    references anywhere. Telegram caps `callback_data` at 64 bytes and rejects the SEND, so a token
+    over budget is a message that never posts, and the grammar is shared so Telegram's limit binds
+    Discord (100) and Slack (255) too. ⚠️ The probe measures the byte count INDEPENDENTLY of
+    `fits()` and separately asserts the two agree — asserting only `token.fits()` proves the
+    predicate agrees with itself, and stays green when it is mutated to `return true`.
+30. ✅ **The channel allowlist is never handed the value it compares against.** Discord's
+    `handleInteraction` and Slack's read `interaction.channel_id ?? config.discordAuthorizedChannelID`
+    (and the Slack equivalent) into ONE variable feeding both the authorization check and the reply
+    address. As an address the fallback is harmless — posting into the user's own paired channel is
+    always safe. As evidence it was a BYPASS: `authorizeDiscord` compares its argument against
+    `discordAuthorizedChannelID`, so substituting that value made the guard compare the authorized
+    id with itself and pass unconditionally, and any payload arriving without a channel id was
+    authorized by construction. The two uses are now separate values — `originChannelID` is
+    evidence and may be nil, `replyChannelID` is an address and keeps its fallback. ⚠️ A Discord
+    MODAL SUBMISSION genuinely has no channel (a modal is not in one); that is the single named,
+    logged exemption, matching what Slack already documented for its view submissions — the
+    allowlist ran on the button tap that opened it, the answer is correlated by the operation id in
+    `custom_id`, and the tier gate still applies. Everything else with no channel id is refused.
+31. ✅ **No ChatOps failure path is silent, and the consequence is a REQUIRED parameter.** Every
+    user-facing send goes through `tell(_:_:whenLost:)`, every Discord interaction response through
+    `respond(to:type:data:whenLost:)`, and every resolved HITL prompt through
+    `editResolvedPrompt(...)`. `whenLost` has no default — the anti-drift rule already used for
+    `resolvedBy:` and `offset:` — so a new call site cannot be added without stating what the user
+    loses. ⚠️ **The callers are the messages that EXPLAIN a failure** — a tier denial, an unbound
+    conversation, a missing profile — so a swallowed send meant the one message whose job is to
+    explain why nothing happened was itself dropped in silence, and a tier-blocked command was
+    indistinguishable from a crashed bridge on both sides. ⚠️ **Three sites are deliberately silent
+    and say so**: both typing indicators (decoration that expires on its own, with no consequence to
+    name) and the pairing-attempt arm (owned by the pairing service, which answers on its own loop).
+    ⚠️ A bare `break` cannot name a consequence, so no routing switch ends in one; where an arm is a
+    FILTER that falls through to more handling rather than a drop, it returns a value instead —
+    `routeHITL` exists for exactly that reason, because a filter and a silent drop are otherwise
+    indistinguishable at a glance.
+32. ✅ **The pairing lockout counts per ORIGIN, never per window — and the obvious design is
+    strictly worse than no lockout at all.** Guessing a 6-digit PIN needs roughly 9,000 messages
+    inside the 300-second window to reach even a 1% chance, which platform rate limits make
+    impractical. A window-wide "abort after N failures" would let a stranger end the user's pairing
+    with TEN messages, repeatably and at no cost — and Telegram bots are discoverable by username,
+    so that is not a hypothetical stranger. It spends a real capability to prevent something that
+    was not going to happen. Counting per origin caps one account's guesses while the window stays
+    open for everyone else. ⚠️ **No global backstop, deliberately** — any window-wide cap
+    reintroduces that denial of service with a larger number in front of it. ⚠️ **The origin is the
+    SENDER, not the channel or chat**: everyone in a Discord channel or a Telegram group shares its
+    id, so counting per channel lets one member lock out every other, including the person pairing.
+    Authorization still binds the CHAT; only the lockout is per person. ⚠️ An unattributable message
+    is counted against NOBODY, because counting it globally is the same hole again. ⚠️ `isBlocked`
+    is checked BEFORE the PIN is acted on — a lockout that still honours a lucky correct guess from
+    a spent origin is not a lockout. ⚠️ The threshold is 10 because against a 900,000-value space 10
+    and 3 are the same answer; the only real difference between them is how a mistyping human is
+    treated, and locking the user out of their own window is a real cost paid to prevent nothing.
+33. ✅ **An oversized chooser is trimmed VISIBLY, and the extras survive the trim.** ⚠️ **This
+    REVERSES a judgement recorded in `RemoteChooserLayout.plan`,** whose comment says truncation is
+    unacceptable because "losing DECORATION is acceptable degradation, losing an ACTION is not".
+    That weighs truncation against showing everything, which the platform does not offer: Discord
+    accepts at most 5 ActionRows and rejects the message outright above them, so the real
+    alternative to dropping SOME actions is the message never arriving and the user losing ALL of
+    them along with the heading that would have explained why. `plan` keeps its totality — it is the
+    right primitive and the golden fixtures rest on it; the decision to show fewer lives in
+    `fit(optionCount:extraCount:capabilities:)`, where it is named, counted and reported in the
+    heading. ⚠️ **The extras are preserved and the options trimmed**, because `extraActions` holds
+    the paging controls that reach the very rows being dropped — trimming uniformly takes the route
+    away along with the destination. ⚠️ Telegram is not trimmed to Discord's limit; it allows 100
+    buttons, and one shared cap would quietly degrade the platform with the most headroom.
 
 ---
 
@@ -1227,6 +1510,25 @@ nothing — otherwise the log fills with elision warnings for prompts that were 
 
 | Date | Change |
 |---|---|
+| 2026-09-09 | **A cold audit of the whole ChatOps subsystem — ten findings, all closed.** Read every file changed across slices 1-5 plus the supporting seams. ⚠️ **Two of the ten were classes a reader would not find by inspection of the diff**, and both were more serious than anything in it. (a) `guard let x = try? decode(...) else { return }` in `DiscordGatewayClient` and `SlackSocketClient` dropped an inbound payload this build cannot model with NO log at all — so a Discord or Slack schema change makes the bot go DEAF in total silence, on both sides; for an interaction it is worse, because nothing acks it and the user sees Discord's red "This interaction failed" with nothing anywhere explaining why. (b) All four of `RemoteMirrorService`'s HITL resolution observers wrote `try? await session.transport.editMessage(...)` and deleted `hitlMessageIDs[operationID]` on the very NEXT line — and that edit is the only thing that clears the approve/deny/gate buttons on every transport, so a failed edit left LIVE buttons on an already-decided prompt with the id needed to repair it discarded in the same breath; the second tap then resolves nothing, silently, forever. Other findings: an unrecognised Discord slash name parses to `.unknown`, clears every tier, receives a deferred ack and is then dropped by a discarded return value, leaving a permanent "thinking…" placeholder; `/history n` exceeded every platform's message cap; the channel allowlist auto-passed for a payload with no channel id (pre-existing, present at HEAD); `/status` reported "None" and "Default" beside "unavailable" from one catch; `registerSlashCommands` logged success unconditionally one statement below a `try?`. ⚠️ **The audit's own scope estimate was wrong twice, in the same direction.** A single grep for `_ = try? await apiClient?` found 15 sites in three bridges and was reported as the finding; an exhaustive pass over the subsystem found 41 across eleven files, with 35 further candidates refuted. A hand-maintained list of 35 test classes was likewise missing `HITLPromptGoldenTests` and `ShippingLiteralGoldenTests` — the two suites most directly over the changed code — so several rounds of "all green" were narrower than they sounded. Enumerate by SYMBOL. 513 tests green across all 37 ChatOps suites. |
+| 2026-09-09 | **An outbound credential floor, and a message that fits the platform it is sent to.** `RemoteEgressSanitizer.credentialsOnly` now sits on every text path of all three transports — `sendTextMessage`, `sendChunkedMessage`, `editMessage`, and `render` — closing the surface invariant 24 had explicitly left open. It is applied to the VIEW, not the rendered text, because Slack renders the body into blocks as well as the fallback text and every platform puts conversation titles on BUTTON LABELS, and a title is auto-set to the user's first prompt; and it is applied BEFORE chunking, because a credential split across two chunks matches no pattern in either half. It strips credentials ONLY — the line is drawn at intent, not sensitivity, so a home path the user asked about survives while a key echoed out of a `.env` does not (invariant 27). ⚠️ **Separately, an over-long reply was not being truncated — it was being REJECTED.** `render` posts through the unchunked send, so `/history 20` (about 4,130 characters) cleared Telegram's 4096, Discord's 2000 from ten turns and Slack's 3000-character section-block cap, and the user received nothing for a command that had worked. The comment justifying the limit had done the arithmetic wrong AND considered only Telegram. `RemoteTextBudget` now fits every notice, chooser heading and prompt to the platform's own cap, dropping whole lines and stating how many went; measured in UTF-16 because these APIs do not count graphemes (invariant 28). The prompt arms mattered most: `planReview`, `gate` and `clarification` are model-generated and were unbounded, and a rejected HITL prompt parks the run with no buttons anywhere remote. ⚠️ `RemoteChooserLayout.exceedsCapacity` had tests and NO production caller; it now has one, and the reasoning in `plan` that argued against trimming is reversed and recorded — it compared truncation against showing everything, which the platform does not offer (invariant 33). Verified by nine mutations, each caught by the named test. |
+| 2026-09-09 | **41 silent failure paths in ChatOps, and a required parameter so the next one cannot be added.** Every user-facing send now goes through `tell(_:_:whenLost:)`, every Discord interaction response through `respond(to:type:data:whenLost:)`, and every resolved HITL prompt through `editResolvedPrompt(...)`; `whenLost` is non-defaulted, so a new call site must state what the user loses (invariant 31). The callers are the messages that EXPLAIN a failure — tier denials, unbound conversations, missing profiles — so a swallowed send dropped the one message whose whole job was to say why nothing happened, and the tier refusal itself was logged nowhere either. Inbound decode failures on both socket clients now name what was lost and what it costs (a dropped envelope also loses Slack's ack id and Discord's sequence number, so a run of them degrades the next RESUME into a replay gap). ⚠️ **Three sites are deliberately silent and now SAY SO** — both typing indicators and the pairing-attempt arm — because a comment is what stops the next reader "fixing" them. ⚠️ **A bare `break` cannot name a consequence**, so no routing switch ends in one; where an arm is a filter that falls through rather than a drop it returns a value instead (`routeHITL`), because the two shapes are otherwise indistinguishable at a glance. ⚠️ **The channel allowlist bypass was fixed by splitting one variable into two** — `originChannelID` is evidence and may be nil, `replyChannelID` is an address and keeps its fallback; a Discord modal submission is the single named, logged exemption (invariant 30). ⚠️ `CallbackTokenTests` was written: the file's header had been citing a budget probe that did not exist, and `fits(budget:)` had no callers at all (invariant 29). |
+| 2026-09-09 | **Failed pairing attempts became visible, and the lockout that followed is per-origin because the obvious one is worse than none.** All three pairing services dropped a wrong PIN on a bare `continue`, so nothing recorded that anyone had tried and there was no data from which to justify any threshold. `PairingAttemptPolicy` classifies an inbound message as `.matched`, `.wrongPIN` or `.unrelated`; only `.wrongPIN` logs. ⚠️ **The classifier's value is entirely in its false-positive rate** — a pairing window is five minutes of live chat, and a detector that fires on ordinary conversation buries the one event that matters in exactly the traffic it needs to stand out from, which is why the three bare `continue`s were defensible as written. The trailing space in the `"PAIR "` prefix is load-bearing: without it "PAIRING SCHEDULED FOR FRIDAY" is a failed attempt. The attempted digits are deliberately not recorded — useless for detection, and a mistyped attempt is one character from the real PIN. ⚠️ **The lockout then had to avoid making things worse.** Guessing needs roughly 9,000 messages in 300 seconds for a 1% chance; a window-wide "abort after N" lets a stranger end the user's pairing with TEN, repeatably, and Telegram bots are discoverable by username. Counting per SENDER caps one account while the window stays open for everyone else, with no global backstop, an unattributable message counted against nobody, and `isBlocked` checked before the PIN is acted on (invariant 32). ⚠️ Correcting an earlier claim of my own: the PIN's strength does NOT rest on obscurity — it rests on entropy, a short user-initiated window and platform rate limits, none of which open-sourcing weakens, and `Int.random(in:)` is cryptographically secure on Apple platforms. |
+| 2026-09-08 | **A rejected Discord bot token stopped retrying forever in silence.** `DiscordGatewayClient.connectAndListen` caught every error and reconnected with backoff without limit, so the two most common Discord setup failures — a wrong/revoked token (close 4004) and Message Content Intent left disabled in the Developer Portal (close 4014) — produced an infinite loop of identical failures and no way for the user to learn what was wrong; Discord simply never worked. Discord states the cause in the close code, and nothing read it. `DiscordGatewayClosePolicy` now classifies: 4004/4010/4011/4012/4013/4014 are FATAL (the loop stops, with a reason naming the actual fix — for 4014, the exact Developer Portal switch); 4007/4009 reconnect but DISCARD the session id, sequence and resume URL first, because `handlePayload` sends a RESUME whenever those are set and replaying the rejected sequence is closed again immediately; everything else, including code 0 (no close frame — a dropped network), stays retryable so a Wi-Fi blip cannot kill the bridge. ⚠️ **The platform behaviour this depends on was MEASURED, not assumed:** `receive()` surfaces every server-side close as a generic `NSPOSIXErrorDomain` 57 regardless of cause, and `NSURLSessionWebSocketCloseCode` is a closed `NS_ENUM` topping out at 1015 — so a reader would reasonably conclude Discord's 4000-range codes are lost. A probe against a local server closing with 4004 showed `closeCode.rawValue == 4004` and `closeReason == "Authentication failed"`; the fix would have been inert otherwise. `DiscordAPIError.gatewayClosedPermanently(code:reason:)` lets the bridge log a permanent failure distinctly from a blip, saying Discord is disabled until it is fixed. Invariant 26. Verified by four mutations: making 4004 retryable again (red), treating every close as fatal (red), removing `break connectLoop` from the fatal arm so it classifies correctly and reconnects anyway (red), and dropping the session reset (red). ⚠️ KNOWN GAP: the wiring is covered by a source scan, not a live-socket test — the client's Gateway URL is a private static and cannot be pointed at a local server without making it injectable. |
+| 2026-09-08 | **The remote HITL prompts stopped crediting every decision to the Mac.** `RemoteMirrorService`'s four resolution observers rendered a hard-coded `"(from Mac)"`, but they fire on a GLOBAL notification — so a user who tapped Approve on Telegram was told, on Telegram, that the Mac had answered, and with several bridges connected a Telegram approval was reported on Discord as the Mac's too. Attribution is now CARRIED: `HITLResolvedKey.source` holds a `MessageSource.rawValue`, and the four `ExecutionSuspensionService.resume*` methods take `resolvedBy:` as a **required, non-defaulted** parameter so every caller states who answered (invariant 25). That requirement is the point — a default would let a new call site inherit someone else's attribution — and it immediately surfaced TEN machine-driven resolutions inside `ExecutionSuspensionService` itself (double-suspension cleanup, `Task.isCancelled`, `onCancel` teardown, deadlines) plus a workflow gate DEADLINE in `WorkflowExecutor`, none of them a person, all of which the old copy had been reporting as the Mac's doing; each now passes `nil`, and an absent source prints no attribution rather than guessing. ⚠️ **Second lie in the same lines: a cancel is not a denial.** `drainOperation` resolves a torn-down permission with `approved: false`, so a stopped run rendered "❌ Tool denied (from Mac)" — a decision nobody took, credited to a surface nobody used. The `outcome` key already said "cancelled" and nothing read it; all four observers now check it first, and the gate observer stopped putting a ✅ on a cancellation. 11 production and ~20 test call sites updated. Tests drive the REAL mirror end-to-end — a real `InteractionCenter` item, a real prompt render, a real posted notification — and assert the edited remote text; verified by restoring the hard-coded string (red), dropping the cancel branch (red), and never reading the source (red). |
+| 2026-09-08 | **A failed run stopped telling the remote user it had succeeded.** `RemoteMirrorService`'s content switch ended in `default: responseText = "Response complete."`, and `MessageContent.error(title:details:category:suggestion:)` fell straight into it — so on Telegram/Discord/Slack, the one surface with no error card and no other signal, a failure was reported as a completed reply. `.mediaArtifact` fell in too, promising a reply to read when an image had been produced that no transport can carry. The `default` is gone: every case is named, so a `MessageContent` case added later fails to compile here instead of inheriting a success message (invariant 24). `.error` now renders the title, details and suggestion; `.mediaArtifact` says what exists and that it can only be seen on the Mac; `.unknown` says the reply cannot be displayed; `.checkpoint` sends nothing and logs, since a compaction checkpoint is not a reply (believed unreachable — observation starts at `didStartStream` and checkpoints are written outside any stream — and the log says so, so the note can be falsified). ⚠️ **This created a NEW EGRESS and it is sanitised accordingly:** before the change the error text never left the process, only the fixed string did. Error details are exactly the content that carries home paths, HTTP error bodies and env dumps, so they pass `TelemetrySanitizer.sanitize` (`.standard`: home paths, IPs, emails, API keys, bearer tokens, URL credentials, JSON secrets, env assignments) before reaching a third-party chat service. ⚠️ Normal responses remain UNSANITISED — that whole surface belongs to the planned per-provider egress pass, and this one call is not coverage of it. **[Superseded 2026-09-09: that pass landed — see the egress-floor entry and invariant 27. Normal responses now pass a credentials-only floor.]** ⚠️ The `parse_mode` trap was checked, not assumed: `TelegramTransport.sendChunkedMessage` passes `parseMode: nil`, so arbitrary error text cannot 400 the send and vanish. Tests drive the REAL service through the delegate and a real `ChatMessage`; verified by restoring the original `default` arm (red), stripping the sanitiser (red, with a live-shaped API key transmitted verbatim), and folding `.mediaArtifact` back into the success text (red). |
+| 2026-09-08 | **The ChatOps mirror stopped marking work done before doing it.** `RemoteMirrorService.evaluateMessageState` claimed the final-response send-once key BEFORE the send and never released it, so a transport failure left the message marked mirrored with nothing delivered — the agent's answer dropped, and every later observation pass suppressed by a claim for a send that never happened. The same method held the MIRROR-IMAGE bug in its HITL branch, whose comment explicitly chose to "mark mirrored only AFTER a successful send… self-heals on the next observation pass": that self-heals, but because `observeMessage` re-arms tracking BEFORE awaiting the mirror (by design — "the dedup makes the extra pass harmless"), a second overlapping pass could clear the `where` guard while the first was suspended inside `render` and post the SAME prompt twice, leaving two sets of live buttons for one operation where the stale set answers something already resolved. Both paths now claim atomically before the `await` — safe because the class is `@MainActor`, so a check and an insert with no suspension between them cannot interleave — and release the claim in `catch`. Emptiness is now checked BEFORE the claim too: `content` is one of the observed properties, so an empty final response used to claim the key and permanently suppress the body that arrived immediately after. Both suppression paths now log with their CONSEQUENCE, including the honest one — that if the stream has already ended, no further pass occurs and the answer is lost with only that line to say so. Invariant 23. `RemoteMirrorRetryTests` drives the REAL service through the delegate call and a real `ChatMessage`, not a copy of the claim logic; verified by reverting to the original file wholesale (two tests red) plus three targeted mutations, including the over-correction of dropping the claim entirely. |
+| 2026-09-08 | **The notification master switch became enforceable, and the settings pane became true.** The pane showed four HARDCODED channel rows — including "Telegram Bot — Coming soon" — while `ChatOpsNotificationChannel` was registered and delivering to all three platforms, and it never called the registry; it now renders `NotificationDispatcher.channelSnapshots()`, a `Sendable` projection added because `NotificationChannel` is `AnyObject`, non-`Sendable` and mutable, so binding a `Toggle` to a real channel would race `dispatch()`'s filter as a mere WARNING under Swift-5-mode `complete` concurrency (invariant 19). Three defects had to be fixed before a toggle could be honest: `LocalNotificationChannel.isEnabled` was a plain stored `var` on an instance rebuilt each launch, so the switch silently forgot (now UserDefaults-backed, defaulting ON via an `object(forKey:) != nil` check — invariant 17); `setEnabled` used an optional chain that no-opped for an unregistered id and then logged success, while registration races two detached `Task`s (now returns `Bool` and logs the drop with its consequence); and `channelSnapshots()` sorts deterministically because a dictionary's order is not an order. **The master switch was then moved INSIDE `dispatch()`** (invariant 16): it had been enforced only where a caller chose to ask, and `SchedulerService` did not — every scheduled-task completion fired with notifications off, which is exactly what ChatOps forwards to Telegram/Discord/Slack. All four call-site guards were removed as duplicated policy. Adversarial review then found the gate could not cover `push_local_notification`, an agent tool delivering straight to `UNUserNotificationCenter` — the one notification path no user setting could stop — now routed through the dispatcher. `dispatch` returns a delivered COUNT so the Test button stopped flashing "Test Sent!" unconditionally, and names which of the two causes of a zero count applies (invariant 21). ⚠️ **Root cause behind several of these:** `isGloballyEnabled` was `@ObservationIgnored @AppStorage` on a class — a shape that caches AND publishes nothing, because `DynamicProperty.update()` runs only for a `View`. The pane could report ON while the store said OFF. Replaced with a computed property over the shared policy plus manual `access`/`withMutation` (invariant 20); the two failing tests were written FIRST, against the old declaration. ⚠️ **Behaviour change:** with the master switch off, ChatOps mirroring of scheduled runs now stops too; there is no controls combination giving remote-only delivery, and whether the master switch SHOULD mean "all surfaces" is a product decision, not a settled one. Ten mutations verified red across the change; 112 tests green. |
+| 2026-09-07 | **The audit's third class — 27 stale or false comments — corrected.** A late fix falsifies the comments around it, and this change set falsified a lot of them: `deriveHistory`'s entire doc block was attached to `incompleteTurnIDs` (so the derivation had none) and claimed the method "holds both the message being sent and any in-flight streams" and that in-flight rows are "never in the store while running" — both false, and the second contradicted 22 lines below by its own note that `flushInFlight` upserts them within ~100 ms. The §7 register said history is derived from "the store, its own `activeStreams`, and the user's message"; `deriveHistory` is `static` and cannot read `activeStreams` — live-run state reaches it only as the `omitting` SET, which REMOVES rows. `ConversationSyncService`'s new comment contradicted itself, calling a rejected incoming-conversation stream a bug in one paragraph and the required behaviour in the next; the property is neither — it names the OUTGOING conversation through the debounce and the INCOMING one for the whole load body, and both spans are now written out. `HistoryOrderGuardRailTests`' header said the chokepoint "already receives `history`" (deleted in the same change) and that `SchedulerCoordinator` "has no test class of its own" (added in the same change). Three comments still routed the scheduler through the VM's `createUserMessage`. The scheduled-attribution rationale named ChatOps mirroring, analytics and the audit trail; `messageSource` is TRANSIENT and none of them read it — `RemoteMirrorService` has no reference to it at all, which also makes `ChatMessage`'s own long-standing doc for the field wrong. `MessagingCoordinator`'s regenerate guard and its `[RUN_CLAIM]` field log both said "after the history resolve" when only an actor hop remains. `fileProcessor`'s rationale warned of "two classification paths" for a `struct` with no stored properties. `AgentTimelineView` justified dropping an event because `destinationConversationID` "is private" — this change made it internal. ⚠️ Also fixed while in there: the `[STREAM_START]` line carried a `regenerate/resume` suffix that sits in the `else` arm of `if let existingMessage` and could never render; `recentConversations` swallowed a fetch throw with no log while the arm above it logged `.error`; and `SchedulerCoordinator`'s one remaining VM use was a bare optional chain that dropped the backend mapping in silence. 1131 tests green across 112 classes. ⚠️ FOLLOW-UP: `JarvisSessionController.transcript` — a `[ChatMessage]` holding every user AND agent message of a voice session, including streamed content and timeline events — is replaced by `spokenTurnCount: Int`. Its only real consumer was `history: transcript` on the send call; once history became derived, the array retained a conversation to produce an Int for two log lines. It was also appended TWICE per turn (user and agent, both in `execute(_:)`), so `transcript.count` reported roughly double the "turn(s)" those lines claimed — the new counter increments once, at the user's message, so the number those logs print has changed and older logs are not comparable. Guarded by a source scan, mutation-checked. |
+| 2026-09-07 | **Adversarial audit of this change set — 4 behavioural defects and 5 non-failing tests, all introduced by it, all fixed.** (1) The id-based duplicate-query strip kept a TEXT fallback chained to the id LOOKUP rather than to the id being ABSENT, so a supplied id that matched nothing fell through and `removeLast()` deleted a row that was not the current question — the exact deletion the id scan exists to prevent, reintroduced through its own fallback, while logging "no message id was supplied" and pre-empting the `.error` written for that state. The rule is now `BackendOrchestrationService.strippingCurrentQuery`, `nonisolated static` so it is testable without a backend. (2) `SchedulerCoordinator`'s run-registry guard had moved BELOW the durable persist, so a nil registry left the scheduled question in the store with nothing answering it (`pairTurns` then reports it as abandoned) — and it aborted EVERY profile type while its own log said "non-workflow profiles are unaffected", which is true: `WorkflowRunBootstrap.begin` returns nil for them without touching the registry. The check now runs before the write and only for workflow profiles. (3) The context gauge omitted the request path's whole-TURN set, subtracting the just-sent QUESTION as well as the live reply, so the ring FELL at the moment of send and jumped back at completion. The two consumers legitimately differ by one row — the request path drops the turn because a half-written turn poisons `pairTurns`; the gauge prices tokens and the question is a settled row the next request carries — so the gauge now asks the same object for `liveReplyIDs()`. (4) QuickAccess's gate-CANCEL arm reached `ExecutionSuspensionService` inline with no log, so a field log showed three of four Escape presses, while the funnel's doc claimed no decision kind could reintroduce the silent path. TESTS: `DuplicateQueryStripTests` tested a hand-COPY of the production branches — nothing in the repo reached the real strip, and because `currentUserMessageID` is defaulted, deleting the argument at its one call site still compiled and silently reverted every surface to the text compare with the suite green; it now calls production and scans the call site. A Jarvis test asserted `XCTAssertEqual(x, x)`. The scheduler's attribution-ordering test could not fail because `ChatMessage` is a class and the stub kept the live reference (it now snapshots at write time, as SwiftData does). `DerivedHistorySourceTests` pinned the pre-move design in the present tense. A QuickAccess attachment rationale sat on a test that passed no files. Every fix mutation-checked; 1131 tests green across 112 classes. |
+| 2026-09-07 | **The "pending destination" that led the selection was removed — one day old, and wrong in two separate ways.** (1) Folding it into `destinationConversationID` BROKE the Code Viewer in both directions: a live-write `completed` for the still-displayed conversation was dropped, leaving that tab marked "agent is writing this file" forever — the consequence its own guard logs — while a `began` for the incoming conversation was admitted into the outgoing viewer and stashed under the wrong key. The 250 ms window is NOT a bug for these consumers: during the debounce the rows and tabs on screen really do belong to the outgoing conversation, so viewer identity must trail the load, and `loadingConversationID ?? viewerOwningConversationID` is restored. (2) Splitting the leading answer into a separate `routingDestinationConversationID` fixed that breakage and left a property NO production code ever read — set on every switch, cleared on every load, for no reader, with green tests over it. The whole chain (`routingDestinationConversationID`, `pendingDestinationConversationID`, `setPendingDestination`, and its `ConversationSwitchCoordinator` call site) is deleted. The reasoning is preserved where it will be read — the property's own doc comment and `ConversationDestinationTests`' header — because the 250 ms window is visible from the code and invites exactly this fix again. A source-scan test now fails the build if either name returns to `ChatHistoryViewModel`. If a SEND path ever needs "where is the user going?", that is a different question: add it with its consumer, and do not route viewer state through it. |
+| 2026-09-06 | **This file was staged for deletion and is restored.** It held the only copy of the §7 invariants register — 15 entries, one of which was violated in shipped code (see the next row). A register with no other home is not a candidate for deletion while one of its rules is being broken. |
+| 2026-09-06 | **Invariant 8 corrected, then made structural.** ⚠️ The entry's stated failure mode was WRONG: it said a descending array "halves the turn count". It does not. `pairTurns` skips the newest agent reply, emits n−1 mispaired pairs, then emits the oldest user message as a `wasCancelled` orphan — **n turns in, n turns out**. The count does not move at all, which is why neither a character sum nor a turn count ever revealed it. (A first attempt at this correction said "n−1 out" and was also wrong; re-derived from `pairTurns` the same day.), and the register's whole purpose is to describe the failure accurately. **The violation was live**: `SchedulerCoordinator` handed `ChatPersistenceStore.fetchMessages` output (sorted `.reverse`) straight to `startMessageStream`, so every scheduled and every recurring run mispaired its entire history. Two further defects fell out of the same order bug — `BackendOrchestrationService`'s duplicate-query strip inspects `.last`, which on a descending array is the OLDEST row, so the current query was double-prompted; and on a RECURRING task (same prompt every firing) the text comparison matched that oldest identical row and `removeLast()` silently DELETED the conversation's first turn. |
+| 2026-09-06 | **The send path stopped accepting history and started deriving it.** `ActiveStreamManager.startMessageStream` no longer takes `history`, `conversationID` or `userQuery`; it takes `userMessage: ChatMessage` plus an optional `promptOverride`, and derives history through `deriveHistory` (store + its own `activeStreams` + the message). All seven call sites migrated. This is the move `LLM_Execution_Concurrency_Design.md:55-59` made for `streamingMessageID`: delete the storage, derive the value, and the wrong call becomes unrepresentable rather than guarded against. Three surfaces were building history wrongly and all three are now structurally unable to: QuickAccess shipped its render window (a HARD 20 rows — it never calls `loadMoreMessages`), Jarvis shipped a private transcript never hydrated from the store (so a turn typed into the same conversation was invisible to the next voice turn), and the Scheduler shipped the descending fetch above. Jarvis's decorated query — previously an UNDECLARED divergence between `userQuery` and the message in `history`, and the reason `BackendOrchestrationService`'s text-equality strip failed and every voice turn arrived as an orphan — is now `promptOverride`, declared. ⚠️ Behaviour change: `resumeRun` used to fall through to `userQuery: ""` when it could not identify the question; it now routes to `finalizeUnresumable` instead. |
+| 2026-09-06 | **A compaction checkpoint is persisted BEFORE it is spliced.** `MessagingCoordinator` wrapped `addMessage` in an unawaited `Task` and spliced immediately, with a comment saying the splice existed "so the NEXT turn's history resolution sees it in memory too" — which made `currentChatMessages` a DATA channel rather than a render window. For the width of that write the view's array was the only copy of the checkpoint: a resolution reading the store alone in that window got neither the compacted turns (already removed) nor the summary standing in for them. Silent context loss, no log line. The write is now awaited and the splice is render-only. Awaiting also tightens `HistoryCompactionService`'s duplicate-run guard, whose `defer` now cannot release until the row is durable. |
+| 2026-09-06 | **`MessageStreamStarting` added — the send path's chokepoint is now a seam.** `ActiveStreamManager` is `final`, so no test could observe what a surface handed over; that is why the invariant-8 violation shipped past review. `SchedulerCoordinator` depends on the protocol and no longer needs a `MainApplicationViewModel` ON ITS SEND PATH (its user-message factory became `MessagingCoordinator.makeUserMessage`, and its workflow bookkeeping takes the narrow `WorkflowRunRegistry`); the parameter became optional rather than disappearing, because `ensureConversation` still calls `viewModel?.updateBackendForCurrentConversation(...)` when it creates a conversation — constructing a view model runs `ChatOpsCoordinator.bootstrap()`, which opens REAL Telegram/Discord/Slack connections when the developer has them enabled, so a unit test must never do it. `sendScheduledMessage` is now driven end-to-end in tests with no backend, network or view model. |
+| 2026-09-06 | ⚠️ **SUPERSEDED by the 2026-09-07 row above — the half of this that led the selection was removed the next day; read both.** **`destinationConversationID` was made to lead the selection instead of trailing the load.** It answers "which conversation does an event arriving now belong to?" — and the claim here was that it gave the wrong answer for the longest part of a switch: `ConversationSwitchCoordinator` debounces 250 ms and then, on a profile change, awaits an MLX *and* an Ollama `unloadModel()` before calling `loadConversation`, and across that whole span `loadingConversationID` was nil while `loadedConversationID` still named the OUTGOING conversation. ⚠️ That window is not a defect for a VIEWER consumer, which is what both consumers are — see below. What DID survive from this change: `ConversationSyncService` routed live streams by `currentChatMessages.first?.conversationId` — identity inferred from POSITION, the weakest definition in the codebase — and now routes by `destinationConversationID`, which also fixes the pre-cleared viewer (welcome screen, interface switch, ⌘N) where the positional read returned nil and the stream was never injected or recorded. |
+| 2026-09-06 | **`[HISTORY]` order guard-rail added to `startMessageStream`**, beside the existing `[WF_RUN]` one and for the same stated reason: "a helper can be forgotten by the NEXT new call site and a loud log cannot." It LOGS and deliberately does not repair — invariant 8 forbids a call-site `.reversed()`, and a caller with a descending array is usually also reading the wrong SOURCE, which no sort fixes. Retained after the derivation landed as a SELF-check: callers can no longer get it wrong, so a trip now means `BackendHistoryResolver.merge` regressed. |
 | 2026-07-31 | **§3.5 added — tool arguments reaching a subprocess.** Adversarial audit of the 2026-07-30 shell→argv sweep. The five converted tools were argv-correct, but the sweep's own top prediction landed: argv does not close the invoked program's option parser. Three reachable code-execution paths fixed — `disk_usage largest_files` (a `zsh -c` string the sweep missed entirely), `apple_notes` list-folder (the one unescaped AppleScript interpolation in that tool), and `git_tool`'s config-write→trigger chain. Fixing the third also closed `git_tool`'s arbitrary file write (`--output`), whole-disk read (`--no-index`, `blame --contents`) and branch rename (`-a -M`). Invariants 10 and 11 added. |
 | 2026-07-31 | **Logging hardened across everything touched this session**, per the standing production-logging directive (tag + correlation ID + the CONSEQUENCE stated). `[TOOLRESOLVE]` — an unresolved profile tool was one `warning` with a bare name; it is now an `.error` naming the profile, the conversation and the effect ("the agent will run WITHOUT this capability"), plus a per-run summary line, and `resolveExecutableTools` gained a `profileID:` parameter purely to carry that correlation. `[TOOLCATALOG]` — the startup line now reports the full projection (58 library + 5 library-except-code, 9 code-only withheld) and errors if the registered count disagrees, since a bare count cannot distinguish a shrunken catalogue from a mis-filtered projection. Catalogue duplicate-name collapse now logs before its `assertionFailure`, because `assert` is compiled out of exactly the builds users run. `[GIT_DENY]` and `[KILLPROC]` — security refusals were visible only to the model; an operator asking "why did the agent say it couldn't?" had nothing. `[WF_HITL]` — loop-body HITL forwarding logs that the run is now WAITING, which is the only thing distinguishing that state from a hang. 193 tests pass. |
 | 2026-07-31 | **Audit follow-ups cleared.** (1) `extract_safari_reader_view` TRAPPED — a hard crash — on a negative `offset` or `limit`: both reach `String.index(_:offsetBy:)`, and the existing `startOffset < totalLen` guard passes happily for -1. Rejected rather than clamped, so a miscalculated offset is reported instead of silently paginating from the wrong place. (2) **Loop-body HITL events were swallowed.** The loop's `default: break` caught `.requestConfirmation` / `.requestGate` / `.requestClarification` alongside the orchestration events it meant to suppress. Each carries an `operationID` the inner run is already suspended on, so dropping it meant no banner, nobody to answer, and a workflow hung forever with no error or timeout — and Action-node confirmations, added the same day, widened the reachable surface. All three now forward, preserving the operationID and the inner node's id (the approval scope is keyed on it). (3) `ExplorerViewModel.openInTerminal` interpolated a filesystem path raw into `do script "cd \"…\""` — two nested interpreters, AppleScript and the shell, from a path on disk: a crafted filename in any cloned repo sufficed. Now POSIX-single-quoted then AppleScript-escaped. (4) `finder_tags` search interpolated `search_tag` into an `mdfind` QUERY — a fourth interpreter — where a `'` ends the literal and widens the search. (5) `ToolRegistryDriftTests` read `Local/Utils/` while git tracks `Local/utils/`: on a case-sensitive checkout it `XCTSkip`ped, silently disabling the only guard against a reintroduced registration list. Both source scans now assert they read the intended file. 193 tests pass. |

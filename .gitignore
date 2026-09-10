@@ -36,8 +36,17 @@ Packages/
 # ── Claude Code / agent working state ───────────────────────────────────────────
 # Worktrees are checkouts of this same repo; committing the gitlink makes the parent repo depend on
 # a directory that only exists on one machine (and is what left an orphaned session record here).
-.claude/worktrees/
-.claude/settings.local.json
+#
+# ⚠️ The `**/` prefix is LOAD-BEARING, not decoration. These rules were once written as
+# `.claude/worktrees/` and `.claude/settings.local.json`; a pattern containing a slash is
+# anchored to this file's directory, so both matched ONLY the repo root. Claude Code creates
+# `.claude/` relative to the session's working directory, so a session started deeper in the
+# tree wrote `Devgentic/Interfaces/Main/Views/Tooling/Local/.claude/settings.local.json` —
+# which no rule matched, and it was committed in `a3b831d` carrying absolute home paths and a
+# personal document's filename. Match at ANY depth, or this recurs the next time someone runs
+# an agent from a subdirectory.
+**/.claude/worktrees/
+**/.claude/settings.local.json
 
 # ── macOS ───────────────────────────────────────────────────────────────────────
 .DS_Store
@@ -49,6 +58,16 @@ Icon?
 # ── Local scratch ───────────────────────────────────────────────────────────────
 # ⚠️ NOT `logs/` or `*.log`: the repo-root `logs/` directory holds captured investigation
 # transcripts that are deliberately tracked and cited from `observability_baseline.md`.
+#
+# ⚠️ These four are the EXCEPTION to that, named individually rather than by widening the rule.
+# They are real captured sessions that name personal employment documents by filename, so they
+# must not be published — but `logs/` stays tracked, so nothing else here would catch them and a
+# later `git add -A` would pull them straight back in. Excluded 2026-09-05; they remain on disk.
+logs/MistralXMLParser_not_found_log.txt
+logs/ask_tool_permission_access_log.txt
+logs/report_1_log.txt
+logs/response_synthesizer_edge1_log.txt
+
 *.tmp
 
 # ── Harnesses' own build output ─────────────────────────────────────────────────

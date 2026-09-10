@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  DiscordChatOpsBridgeTests.swift
 //  DevgenticTests
@@ -194,5 +196,104 @@ final class DiscordChatOpsBridgeTests: XCTestCase {
 
         let interaction = try JSONDecoder().decode(DiscordInteraction.self, from: json)
         XCTAssertEqual(interaction.channel_id, "9876543210987654321")
+    }
+
+    // MARK: - The orphaned deferred ack
+
+    /// ⚠️⚠️ A COMMAND NOBODY OWNS USED TO LEAVE A PERMANENT "THINKING…". `routeInteractionCommand`
+    /// ran only AFTER the interaction had been acked with a deferred response, and Discord shows
+    /// that placeholder until something edits it. The method discarded `routeThroughService`'s
+    /// return with `_ =`, so an unowned command fell out of it having acked and posted nothing —
+    /// and the spinner stayed in the channel forever, with no log line naming what happened.
+    ///
+    /// ⚠️ REACHABLE, NOT THEORETICAL — which is what the three assertions below stand for. An
+    /// unregistered or renamed slash name parses to `.unknown`, `.unknown` is permitted at every
+    /// tier, so it clears both gates, receives the deferred ack, and lands there. A guild command
+    /// left behind by a rename is enough to produce it.
+    ///
+    /// ⚠️ A SOURCE ASSERTION, DELIBERATELY, AND ITS LIMIT IS STATED. The bridge holds a concrete
+    /// `DiscordAPIClient` with no seam to inject a fake through, so this proves the WIRING is
+    /// present, not that the edit reaches Discord. It is the same technique
+    /// `RemoteEgressSanitizerTests` uses for the transport floor, and it is bounded to the one
+    /// method so it cannot answer for code it was not asked about.
+    func testAnUnownedInteractionCommandResolvesItsDeferredPlaceholder() throws {
+        let source = try Self.readBridgeSource()
+        let start = try XCTUnwrap(source.range(of: "private func routeInteractionCommand("),
+                                  "routeInteractionCommand was renamed — this test no longer guards anything")
+        let rest = source[start.upperBound...]
+        let end = rest.range(of: "\n    private func ")?.lowerBound ?? rest.endIndex
+        let body = String(rest[..<end])
+
+        XCTAssertFalse(body.contains("_ = await routeThroughService"),
+                       "discarding the return is the defect: an unowned command acks and posts nothing")
+        XCTAssertTrue(body.contains("await render("),
+                      "the deferred placeholder must be resolved, or it stays in the channel forever")
+        XCTAssertTrue(body.contains("logger.error"),
+                      "a dropped command with no log is how this went unnoticed")
+    }
+
+    /// The premise the test above rests on: `.unknown` really does clear the tier gate, so it
+    /// really does reach the ack. If this ever changes the reachability comment must change too.
+    func testAnUnknownCommandClearsTheTierGateAndSoReachesTheAck() async {
+        let gate = ChatOpsSecurityGate()
+        for tier in [ChatOpsSecurityTier.readOnly, .standard, .full] {
+            let allowed = await gate.canExecute(.unknown, tier: tier)
+            XCTAssertTrue(allowed,
+                          "\(tier) refusing .unknown would change how the orphaned-ack path is reached")
+        }
+    }
+
+    private static func readBridgeSource() throws -> String {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let url = repoRoot.appendingPathComponent("Devgentic/ChatOps/Services/DiscordChatOpsBridge.swift")
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw XCTSkip("DiscordChatOpsBridge.swift not reachable — running outside a checkout")
+        }
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    // MARK: - The channel allowlist and its missing-evidence case
+
+    /// ⚠️⚠️ THE MECHANISM, SO THE ASSERTIONS BELOW ARE READABLE. `authorizeDiscord` decides by
+    /// comparing its argument against `discordAuthorizedChannelID` — so passing that very value in
+    /// makes the guard compare the authorized id with itself and pass unconditionally. That is what
+    /// `interaction.channel_id ?? config.discordAuthorizedChannelID` did for every interaction whose
+    /// payload carried no channel: the allowlist was satisfied by construction.
+    ///
+    /// ⚠️ THERE IS DELIBERATELY NO TEST DRIVING THE REAL GATE HERE. It reads the shared
+    /// `ChatOpsConfigManager`, so proving the tautology at runtime means either depending on the
+    /// developer's own Discord pairing (a test that SKIPS on most machines, which is a green tick
+    /// over nothing) or writing to it (which moves their real pairing, and leaves it moved if the
+    /// test crashes). The property is arithmetic — `x == x` — and the assertions below guard the
+    /// thing that can actually regress: whether the fallback is allowed to reach the gate.
+    ///
+    /// ⚠️⚠️ THE FIX: THE FALLBACK MUST NOT REACH THE GATE. A missing `channel_id` is the ABSENCE of
+    /// evidence, and the old expression turned it into proof. The reply ADDRESS may still fall back
+    /// — posting into the user's own paired channel is always safe — so the two uses are separated
+    /// and only the address keeps a default.
+    ///
+    /// Mutation that must turn this red: pass `replyChannelID` to `authorizeDiscord`, or restore
+    /// the single `let channelID = interaction.channel_id ?? config.discordAuthorizedChannelID`.
+    func testTheChannelAllowlistIsNeverGivenTheFallbackValue() throws {
+        let body = try Self.methodBody("private func handleInteraction(")
+
+        XCTAssertTrue(body.contains("authorizeDiscord(channelID: originChannelID"),
+                      "the allowlist must be given the payload's own channel, never a default")
+        XCTAssertFalse(body.contains("authorizeDiscord(channelID: replyChannelID"),
+                       "feeding the reply address to the gate reintroduces the bypass")
+        XCTAssertTrue(body.contains("let originChannelID = interaction.channel_id\n"),
+                      "the evidence value must have no fallback at all")
+        XCTAssertTrue(body.contains("modalSubmit"),
+                      "the one legitimate no-channel case must be named, not swept in with the rest")
+    }
+
+    private static func methodBody(_ signature: String) throws -> String {
+        let source = try readBridgeSource()
+        let start = try XCTUnwrap(source.range(of: signature), "\(signature) was renamed")
+        let rest = source[start.upperBound...]
+        let end = rest.range(of: "\n    // MARK:")?.lowerBound ?? rest.endIndex
+        return String(rest[..<end])
     }
 }

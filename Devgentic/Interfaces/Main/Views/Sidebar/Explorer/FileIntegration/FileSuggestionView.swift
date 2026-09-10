@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  FileSuggestionView.swift
 //  Devgentic
@@ -82,13 +84,7 @@ struct FileSuggestionView: View {
             }
         }
         .frame(maxHeight: maxListHeight)
-        // MARK: Liquid Glass
-        .glassEffect(.regular, in: .rect(cornerRadius: cornerRadiusValue))
-        // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
-        // .background(VisualEffectBlur(material: .sidebar).opacity(0.9))
-        // .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
-        // .overlay(RoundedRectangle(cornerRadius: cornerRadiusValue).stroke(theme.dividerColor, lineWidth: 1))
-        // .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
+        .appSurface(in: .rect(cornerRadius: cornerRadiusValue), elevation: .popover)
         .transition(.opacity.combined(with: .move(edge: .bottom)))
         .onAppear {
             logger.debug("FileSuggestionView appeared with \(files.count) files for query '\(suggestionQuery)'.")
@@ -104,13 +100,7 @@ struct FileSuggestionView: View {
             .foregroundColor(theme.secondaryText)
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            // MARK: Liquid Glass
-            .glassEffect(.regular, in: .rect(cornerRadius: cornerRadiusValue))
-            // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
-            // .background(VisualEffectBlur(material: .sidebar).opacity(0.9))
-            // .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
-            // .overlay(RoundedRectangle(cornerRadius: cornerRadiusValue).stroke(theme.dividerColor, lineWidth: 1))
-            // .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
+            .appSurface(in: .rect(cornerRadius: cornerRadiusValue), elevation: .popover)
             .transition(.opacity)
     }
 

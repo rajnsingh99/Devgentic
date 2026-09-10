@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  ChatOpsCoordinator.swift
 //  Devgentic
@@ -43,6 +45,13 @@ final class ChatOpsCoordinator {
     private(set) var discordBridge: DiscordChatOpsBridge?
     private(set) var slackBridge: SlackChatOpsBridge?
 
+    /// [Slice 3] Announces app notifications to whichever providers are connected.
+    ///
+    /// ⚠️ Registered ONCE and never unregistered: it resolves its targets on every send, so a
+    /// disconnected provider simply stops being one. Unregistering on disconnect would also need
+    /// re-registering on reconnect, and getting that wrong means silent notification loss.
+    private var notificationChannel: ChatOpsNotificationChannel?
+
     /// Always-on sync service that injects newly-started streams from
     /// `ActiveStreamManager.activeStreams` into the currently displayed
     /// chat. Kept here because its lifecycle coincides with ChatOps bootstrap.
@@ -71,6 +80,23 @@ final class ChatOpsCoordinator {
                 chatHistoryViewModel: chatHistoryViewModel,
                 activeStreamManager: activeStreamManager
             )
+        }
+
+        if notificationChannel == nil {
+            let channel = ChatOpsNotificationChannel(announcers: { [weak self] in
+                // ⚠️ Resolved per send, not captured: bridges come and go as the user connects and
+                // disconnects providers, so a captured list would address a stopped bridge.
+                guard let self else { return [] }
+                // Listed explicitly rather than built as a heterogeneous array — the three bridges
+                // share no base type, which is the point: they are independent conformers.
+                var announcers: [any RemoteAnnouncing] = []
+                if let telegram = self.telegramBridge { announcers.append(telegram) }
+                if let discord = self.discordBridge { announcers.append(discord) }
+                if let slack = self.slackBridge { announcers.append(slack) }
+                return announcers
+            })
+            notificationChannel = channel
+            Task { await NotificationDispatcher.shared.register(channel) }
         }
 
         let config = ChatOpsConfigManager.shared

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  ResumeExecutorIntegrationTests.swift
 //  DevgenticTests
@@ -63,10 +65,10 @@ final class ResumeExecutorIntegrationTests: XCTestCase {
             switch ev {
             case .requestConfirmation(_, _, let opID, _, _):
                 try await Task.sleep(for: .milliseconds(50))
-                await ExecutionSuspensionService.shared.resume(for: opID, approved: true)
+                await ExecutionSuspensionService.shared.resume(for: opID, approved: true, resolvedBy: .localUI)
             case .requestClarification(_, let opID, _, _, _, _):
                 try await Task.sleep(for: .milliseconds(50))
-                await ExecutionSuspensionService.shared.resumeClarification(for: opID, userInput: "yes, proceed")
+                await ExecutionSuspensionService.shared.resumeClarification(for: opID, userInput: "yes, proceed", resolvedBy: .localUI)
             default:
                 break
             }

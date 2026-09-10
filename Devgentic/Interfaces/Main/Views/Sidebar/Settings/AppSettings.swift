@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  AppSettings.swift
 //  Devgentic
@@ -113,6 +115,12 @@ struct AppSettings {
     static let chatOpsSecurityTierKey = "chatOpsSecurityTier"
     static let chatOpsEnabledKey = "chatOpsEnabled"
     static let chatOpsActiveConversationIDKey = "chatOpsActiveConversationID"
+    /// [Slice 3] Whether completed runs and other app notifications are announced to the paired
+    /// ChatOps channels. Defaults to OFF — see `ChatOpsNotificationChannel`.
+    static let chatOpsNotificationsEnabledKey = "chatOpsNotificationsEnabled"
+    /// Whether macOS system notifications are delivered. Absent means ON — see
+    /// `LocalNotificationChannel.isEnabled`.
+    static let localNotificationsEnabledKey = "localNotificationsEnabled"
 
     // ChatOps — Discord
     static let chatOpsDiscordBotTokenKey = "chatOpsDiscordBotToken"

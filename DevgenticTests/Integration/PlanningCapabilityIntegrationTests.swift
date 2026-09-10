@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  PlanningCapabilityIntegrationTests.swift
 //  DevgenticTests
@@ -404,7 +406,7 @@ final class PlanningCapabilityIntegrationTests: XCTestCase {
             if case .requestClarification(_, let opID, _, _, _, _) = event {
                 count += 1
                 try await Task.sleep(for: .milliseconds(50))
-                await ExecutionSuspensionService.shared.resumeClarification(for: opID, userInput: answer)
+                await ExecutionSuspensionService.shared.resumeClarification(for: opID, userInput: answer, resolvedBy: .localUI)
             }
         }
         return (events, count)

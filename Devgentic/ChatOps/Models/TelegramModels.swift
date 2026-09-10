@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  TelegramModels.swift
 //  Devgentic
@@ -31,6 +33,36 @@ struct TelegramUpdate: Codable {
     }
 }
 
+// MARK: - Force Reply
+
+/// Telegram's answer to "there is no modal".
+///
+/// ⚠️ TELEGRAM HAS NO MODAL AT PLATFORM LEVEL and `ForceReply` is its ceiling. It opens no dialog:
+/// it makes the user's client pre-focus the reply box AIMED AT this specific message, so the answer
+/// comes back carrying `reply_to_message`. That correlation is the entire point — it lets an answer
+/// name the operation it answers instead of being inferred from a provider-wide cursor, which is
+/// how a second parked clarification became unanswerable and how `/cancel` got swallowed.
+struct ForceReply: Codable {
+
+    let force_reply: Bool
+
+    /// Greyed placeholder inside the reply box. Telegram caps it at 64 characters.
+    let input_field_placeholder: String?
+
+    /// ⚠️ FALSE, AND THAT IS NOT AN OVERSIGHT. Telegram's `selective` targets only users @mentioned
+    /// in the message text, or — if the bot's message is itself a reply — the original sender. A
+    /// mirrored clarification prompt is neither, so `selective: true` would force the reply box for
+    /// NOBODY and the affordance would silently do nothing. ChatOps is paired to one chat and one
+    /// human by design, so a non-selective force reply targets exactly the right person anyway.
+    let selective: Bool
+
+    init(placeholder: String? = nil) {
+        self.force_reply = true
+        self.input_field_placeholder = placeholder.map { String($0.prefix(64)) }
+        self.selective = false
+    }
+}
+
 // MARK: - Message
 
 struct TelegramMessage: Codable {
@@ -39,6 +71,24 @@ struct TelegramMessage: Codable {
     let chat: TelegramChat
     let date: Int
     let text: String?
+
+    /// The message this one replies to, when the user used Telegram's reply affordance.
+    ///
+    /// ⚠️ FLATTENED TO A SEPARATE TYPE, NOT `TelegramMessage?`. Swift rejects the obvious spelling
+    /// outright — "value type 'TelegramMessage' cannot have a stored property that recursively
+    /// contains it" — so anyone reaching for the one-line fix will hit a compiler error and may
+    /// conclude the data is unavailable. It is not: Telegram has been sending this all along and
+    /// `Codable` was silently discarding it, because unknown keys are ignored.
+    ///
+    /// Only `message_id` is carried, because only `message_id` has a reader: it is the key that
+    /// turns "some text arrived" into "this answers operation X".
+    let reply_to_message: TelegramReplyReference?
+}
+
+/// The subset of a replied-to message that correlation needs. See `TelegramMessage.reply_to_message`
+/// for why this is not just another `TelegramMessage`.
+struct TelegramReplyReference: Codable {
+    let message_id: Int
 }
 
 // MARK: - Chat
@@ -124,6 +174,9 @@ struct SendMessagePayload: Encodable {
     enum ReplyMarkup: Encodable {
         case inline(InlineKeyboardMarkup)
         case reply(ReplyKeyboardMarkup)
+        /// Pre-focuses the user's reply box at this message so the answer carries
+        /// `reply_to_message` — see `ForceReply`.
+        case forceReply(ForceReply)
 
         func encode(to encoder: Encoder) throws {
             var container = encoder.singleValueContainer()
@@ -131,6 +184,8 @@ struct SendMessagePayload: Encodable {
             case .inline(let markup):
                 try container.encode(markup)
             case .reply(let markup):
+                try container.encode(markup)
+            case .forceReply(let markup):
                 try container.encode(markup)
             }
         }

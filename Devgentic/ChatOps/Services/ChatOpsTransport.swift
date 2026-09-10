@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  ChatOpsTransport.swift
 //  Devgentic
@@ -10,7 +12,13 @@ import Foundation
 // MARK: - HITL Type
 
 /// Describes the type of Human-In-The-Loop interaction to present on a remote transport.
-enum HITLType: Sendable {
+///
+/// ⚠️ `Codable` and `Equatable` are carried for `RemoteView.prompt`, which requires them so the
+/// compiler can refuse any view that reaches for a secret-bearing type — `BackendProfileSnapshot`
+/// is deliberately non-`Codable` for exactly that reason. Synthesis must be declared on the type
+/// itself, not bolted on in an extension from another file. No behaviour change: nothing encodes
+/// or compares a `HITLType` today.
+enum HITLType: Sendable, Equatable, Codable {
     case toolConfirmation(toolName: String, params: String)
     case clarification(question: String)
     case planReview(subtaskDescriptions: [String])
@@ -39,17 +47,34 @@ protocol ChatOpsTransport: AnyObject, Sendable {
     /// Send a long text message, splitting into platform-appropriate chunks.
     func sendChunkedMessage(chatID: String, text: String) async throws
 
-    /// Send an HITL prompt (approval buttons or clarification question).
-    /// - Returns: The platform-specific message ID for later editing.
-    func sendHITLPrompt(
-        chatID: String,
-        operationID: UUID,
-        type: HITLType
-    ) async throws -> String
-
     /// Edit an existing message in-place (e.g., to update HITL status after resolution).
     func editMessage(chatID: String, messageID: String, newText: String) async throws
 
     /// Show a typing/processing indicator.
     func sendTypingIndicator(chatID: String) async throws
+
+    // MARK: - Remote view rendering (C3)
+
+    /// What this platform can render. Facts about the platform, not preferences — see
+    /// `RemoteCapabilities`.
+    nonisolated var capabilities: RemoteCapabilities { get }
+
+    /// Posts a view whose content was decided elsewhere.
+    ///
+    /// ⚠️ THE DECISION ARRIVES ALREADY MADE, AND THAT IS THE WHOLE REFACTOR. Today twelve
+    /// `private func … -> Void` handlers each run a SwiftData query, build a platform widget AND
+    /// send — written three times over, which is why `/conversations` has two different Discord
+    /// renderings. A command returns a `RemoteView`; this is the only thing that posts one.
+    ///
+    /// A `.silent` view posts nothing and logs why. Every other case — including `.prompt`, whose
+    /// dedicated send method this replaced at C8.5 — goes out through here.
+    /// - Returns: the platform message id of what was posted, so a prompt can be edited in place
+    ///   when it resolves — or nil when nothing was posted (a `.silent` view).
+    ///
+    /// ⚠️ THE RETURN VALUE IS LOAD-BEARING, and it was the last thing keeping the old
+    /// prompt-sending method alive. `RemoteMirrorService` stores this id in `hitlMessageIDs` and
+    /// uses it at four sites to strike through a resolved prompt and clear its buttons — a
+    /// `Void`-returning render could not replace a method whose entire contract was that id.
+    @discardableResult
+    func render(_ view: RemoteView, to destination: RemoteDestination) async throws -> String?
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  InteractionCenter.swift
 //  Devgentic
@@ -123,9 +125,6 @@ final class InteractionCenter {
             // the user is reading in the panel would still fire a "still waiting" notification.
             let userIsViewing = await MainActor.run { NSApp.isActive || (AppDelegate.shared?.isQuickAccessPanelKey ?? false) }
             guard !userIsViewing else { return }
-
-            let config = await NotificationConfiguration.shared
-            guard await config.isNotificationEnabled(for: item.origin.conversationID) else { return }
 
             let minutes = max(1, Int(Date().timeIntervalSince(item.timestamp) / 60))
             // [L4] Do NOT put origin.title in the body — a conversation's title is often the raw

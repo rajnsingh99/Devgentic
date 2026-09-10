@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  DynamicIslandBar.swift
 //  Devgentic
@@ -171,14 +173,19 @@ struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
 private struct IslandBackdropModifier: ViewModifier {
     let reduceTransparency: Bool
     let theme: any Theme
+    @Environment(\.surfaceStyle) private var surfaceStyle
 
     func body(content: Content) -> some View {
-        if reduceTransparency {
+        if reduceTransparency || surfaceStyle == .solid {
             content
                 .background(
                     Capsule()
                         .fill(theme.secondaryBackground)
-                        .shadow(color: theme.primaryText.opacity(0.08), radius: 12, x: 0, y: 4)
+                        .shadow(color: theme.primaryText.opacity(0.08), radius: 8, x: 0, y: 2)
+                )
+                .overlay(
+                    Capsule()
+                        .stroke(theme.isDark ? Color.white.opacity(0.08) : theme.dividerColor.opacity(0.7), lineWidth: 1)
                 )
         } else {
             content.glassEffect(.regular, in: .capsule)

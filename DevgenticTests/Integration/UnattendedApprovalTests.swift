@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  UnattendedApprovalTests.swift
 //  DevgenticTests
@@ -212,7 +214,7 @@ final class UnattendedApprovalTests: XCTestCase {
                         // immediately races that registration. `collectWithGateChoice` (the gate
                         // twin) sleeps for exactly this reason; same fix here.
                         try? await Task.sleep(for: .milliseconds(50))
-                        await ExecutionSuspensionService.shared.resume(for: operationID, approved: true)
+                        await ExecutionSuspensionService.shared.resume(for: operationID, approved: true, resolvedBy: .localUI)
                     }
                 }
                 return collectedEvents

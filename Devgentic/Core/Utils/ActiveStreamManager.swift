@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Raj Singh
 //
 //  ActiveStreamManager.swift
 //  Devgentic
@@ -1699,9 +1701,6 @@ final class ActiveStreamManager {
             // so a completion the user watches in the panel would otherwise double-notify).
             let userIsViewing = await MainActor.run { NSApp.isActive || (AppDelegate.shared?.isQuickAccessPanelKey ?? false) }
             guard !userIsViewing else { return }
-
-            let config = await NotificationConfiguration.shared
-            guard await config.isNotificationEnabled(for: notifConversationID) else { return }
 
             let payload = AppNotificationPayload(
                 title: hasError ? "Query Failed" : "Query Completed",
