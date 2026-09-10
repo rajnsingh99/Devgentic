@@ -1,0 +1,27 @@
+,,
+,,
+Report Name:,Quarterly Revenue Summary,
+Account:,Northwind Analytics Ltd,
+Period:,Q1 2026,
+,,
+Revenue by category,,
+Category,Amount (USD),Share
+Subscriptions,48200,62.1%
+Professional services,18450,23.8%
+Training,6900,8.9%
+Support contracts,4050,5.2%
+Total,77600,100.0%
+,,
+Revenue by region,,
+Region,Q4 2025,Q1 2026
+North America,31200,36800
+Europe,19850,24100
+Asia Pacific,12400,16700
+,,
+Headcount,,
+Team,Employees,Contractors
+Engineering,24,6
+Sales,11,2
+Support,8,3
+,,
+Synthetic sample data for document-extraction tests. Figures are invented and describe no real entity.
