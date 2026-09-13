@@ -34,6 +34,13 @@ enum RemoteEgressSanitizer {
     /// deliberately rather than by asking for a level — the level would drag the path/IP/email
     /// folding in with them. If `TelemetrySanitizer` grows a new credential pass, it belongs here
     /// too; that is a judgement a level cannot make for us.
+    /// ⚠️ WIDENED 2026-09-11 WITHOUT ADDING A PASS HERE, and that is worth stating because this
+    /// function's header says a NEW `TelemetrySanitizer` pass "belongs here too". Three gaps were
+    /// closed inside the passes already listed: `sanitizeURLCredentials` accepts any URI scheme
+    /// rather than `(https?|ftp|ssh|wss?)` — every database URI used to walk straight through — and
+    /// `sanitizeAPIKey` gained bare-JWT and PEM-private-key patterns. The composition below is
+    /// unchanged; the floor simply catches more. A pass added as a NEW function still has to be
+    /// added to this list by hand, which is what the header is warning about.
     static func credentialsOnly(_ text: String) -> String {
         var out = text
         out = TelemetrySanitizer.sanitizeAPIKey(out)

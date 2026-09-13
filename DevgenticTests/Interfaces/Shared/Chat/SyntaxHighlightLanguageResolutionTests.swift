@@ -125,7 +125,7 @@ final class SyntaxHighlightLanguageResolutionTests: XCTestCase {
     }
 
     /// A highlight whose task was cancelled before it reached the actor must not run:
-    /// `AsyncHighlightedCodeView` supersedes the previous flush's task on every flush, and
+    /// `CodeBlockView` supersedes the previous flush's task on every flush, and
     /// before the fix each superseded call still ran to completion, serialised ahead of
     /// the one the user will actually see.
     func test_preCancelledTask_skipsTheHighlight() async throws {

@@ -87,6 +87,7 @@ struct MLXDisplayModel: Identifiable, Hashable {
     let likes: Int
     let description: String?
     var createdAt: Date?         // Filesystem creation date for installed models
+
     
     // UI Helpers
     var displayName: String {

@@ -801,13 +801,37 @@ struct HITLOrigin: Sendable, Equatable, Codable {
     /// in the right profile. nil when unknown.
     let profileID: UUID?
 
+    /// The id of the agent MESSAGE whose run raised this request — i.e. which RUN is asking.
+    ///
+    /// ⚠️⚠️ WHY A RUN ID AND NOT JUST `conversationID`, WHICH IS ALREADY HERE. `conversationID`
+    /// answers "where does the banner belong"; it cannot answer "who is asking", and those differ
+    /// whenever two root runs share a conversation. `RemoteMirrorService` gates which RUNS it
+    /// mirrors (invariant 46: a run is mirrored only when the source that started it matches the
+    /// remote session), but `evaluateMessageState` then pulled pending items from
+    /// `InteractionCenter.items(for: conversationID)` — CONVERSATION-keyed — so a tool confirmation
+    /// raised by a LOCALLY-started run could have its tool name and parameters posted to a
+    /// third-party chat, simply because a remote run happened to be observed in the same
+    /// conversation. The run gate was correct and the item lookup went around it.
+    ///
+    /// ⚠️ IT IS THE AGENT MESSAGE ID BECAUSE THAT IS WHAT THE MIRROR ALREADY HOLDS.
+    /// `ActiveStreamManager` mints `TraceContext(profile:messageID: agentMessage.id)` for the run,
+    /// and the mirror observes that same `agentMessage` — so the two sides join with no new
+    /// identifier invented and no new plumbing to keep in step.
+    ///
+    /// ⚠️ NIL MEANS "RAISED OUTSIDE A RUN", NOT "UNKNOWN RUN" — and the mirror treats it as
+    /// not-attributable rather than as a mismatch, so such an item is still posted. Excluding nil
+    /// would silently stop mirroring MCP elicitation, whose source→conversation association is made
+    /// in `resolveMCPTool` where no run identity is in scope. See §6 of `architecture_readme.md`.
+    let runMessageID: UUID?
+
     init(
         interface: Interface,
         conversationID: UUID,
         nodeID: UUID? = nil,
         nodeName: String? = nil,
         title: String,
-        profileID: UUID? = nil
+        profileID: UUID? = nil,
+        runMessageID: UUID? = nil
     ) {
         self.interface = interface
         self.conversationID = conversationID
@@ -815,6 +839,7 @@ struct HITLOrigin: Sendable, Equatable, Codable {
         self.nodeName = nodeName
         self.title = title
         self.profileID = profileID
+        self.runMessageID = runMessageID
     }
 }
 

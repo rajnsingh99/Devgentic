@@ -191,6 +191,8 @@ struct ImageGenConfigDetailView: View {
             // See AgentConfigDetailView for the rationale — `onCancel` swaps
             // the leading chevron for an xmark and routes it to the modal host.
             DynamicIslandBar(
+                title: editBuffer.draft.displayName,
+                icon: "photo",
                 onBack: handleBackTap,
                 leadingSymbol: onCancel != nil ? "xmark" : "chevron.left"
             ) {

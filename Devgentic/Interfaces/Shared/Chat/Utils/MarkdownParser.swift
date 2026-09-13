@@ -15,23 +15,56 @@ import os
 private let logger = DGLogger(category: "MarkdownParser")
 
 /// Step 3: Stream-Resilient Preprocessor
+/// [mc-14] A line's leading backtick RUN when that line is a fence marker, with whether it
+/// carries an info string — nil when the line is not a fence at all.
+///
+/// THE reason this is not `hasPrefix("```")`: CommonMark closes a fenced block only on a run at
+/// least as long as the one that opened it, so a ```` ```` ```` block containing an ordinary
+/// ```` ``` ```` fence stays open — the shape a model emits constantly when it shows you
+/// markdown. A boolean toggle reads that inner fence as a close, and both stages that used one
+/// then disagreed with cmark about where the block ends.
+///
+/// `hasInfo` exists because only a BARE run can close: ```` ```swift ```` opens, it never
+/// closes. Both callers need that distinction or a nested language fence still toggles.
+struct MarkdownFenceMarker {
+    let run: Int
+    let hasInfo: Bool
+}
+
+func markdownFenceMarker(inTrimmedLine trimmed: String) -> MarkdownFenceMarker? {
+    var run = 0
+    var index = trimmed.startIndex
+    while index < trimmed.endIndex, trimmed[index] == "`" {
+        run += 1
+        index = trimmed.index(after: index)
+    }
+    guard run >= 3 else { return nil }
+    return MarkdownFenceMarker(run: run, hasInfo: index < trimmed.endIndex)
+}
+
 /// Automatically closes unmatched code blocks to ensure AST parsers (and our UI)
 /// render them correctly while streaming, instead of falling back to raw paragraph text.
+///
+/// [mc-14] Run-length aware, and it closes with a run of the OPENING length — a hard-coded
+/// ```` ``` ```` cannot close a ```` ```` ```` block, so the old version appended a closer that
+/// left the block open and the whole remainder of the answer rendered as code.
 func preprocessStreamResilientMarkdown(_ text: String) -> String {
-    var unclosedCodeBlock = false
-    let lines = text.components(separatedBy: .newlines)
+    var openFenceRun: Int? = nil
 
-    for line in lines {
+    for line in text.components(separatedBy: .newlines) {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
-        // A standard code block marker. We ignore inline backticks by checking the prefix.
-        if trimmed.hasPrefix("```") {
-            unclosedCodeBlock.toggle()
+        guard let marker = markdownFenceMarker(inTrimmedLine: trimmed) else { continue }
+        if let open = openFenceRun {
+            // Only an equal-or-longer BARE run closes.
+            if marker.run >= open, !marker.hasInfo { openFenceRun = nil }
+        } else {
+            openFenceRun = marker.run
         }
     }
 
     // If we reach the end of the stream and a code block is still open, artificially close it.
-    if unclosedCodeBlock {
-        return text + "\n```\n"
+    if let open = openFenceRun {
+        return text + "\n" + String(repeating: "`", count: open) + "\n"
     }
     return text
 }
@@ -97,8 +130,33 @@ func rewritingHTMLLineBreaks(_ text: String) -> String {
 }
 
 private func rewritingBreaksInProse(_ text: String) -> String {
+    // ⚠️ [CR16] A RUN of breaks collapses to ONE hard break, and any newline the source already
+    // had after the run is consumed with it.
+    //
+    // Each `<br>` used to be rewritten to `"  \n"` independently, which is correct for a lone
+    // tag and wrong the moment a second newline lands beside it: `"  \n  \n"` and `"  \n\n"` are
+    // both PARAGRAPH breaks, and `AttributedString(markdown:)` renders a paragraph boundary as
+    // NOTHING — no space, no newline. So the words on either side fused. Measured on this
+    // machine: `a<br><br>b` rendered "ab", and — the commoner shape, which the finding did not
+    // mention — `line1<br>\nline2` rendered "line1line2", because a single tag at end of line
+    // already supplies the newline that makes the pair a paragraph.
+    //
+    // This is the same content-corruption class as the path-list fusion two functions below: a
+    // transform that rewrites a payload by shape and silently joins text the author separated.
+    //
+    // ⚠️ The trailing group is `(?:[ \t]*\n)?` — horizontal whitespace is consumed ONLY as part of
+    // a newline, never on its own. Written first as `[ \t]*\n?`, it ate the space in
+    // `"<br> tail"` and rendered "span\ntail" instead of "span\n tail": a fix for content loss
+    // that lost content. `HTMLLineBreakRewriteTests` caught it.
+    //
+    // ⚠️ RESIDUE, stated rather than hidden: an author's own BLANK LINE (`a<br>\n\nb`) is still a
+    // paragraph break and still renders as nothing. That is the renderer's documented limit, not
+    // this rewrite's doing, and it is not something a `<br>` rule can fix. A run is collapsed to
+    // ONE break rather than N because a blank line is not representable here at all; injecting a
+    // non-breaking space to fake one would put a character into the user's text that they would
+    // copy out, which is the very class of harm this comment opens with.
     text.replacingOccurrences(
-        of: "<br[ \t]*/?>",
+        of: "<br[ \t]*/?>(?:[ \t]*\n?[ \t]*<br[ \t]*/?>)*(?:[ \t]*\n)?",
         with: "  \n",
         options: [.regularExpression, .caseInsensitive]
     )
@@ -108,10 +166,29 @@ func preprocessMarkdownText(_ text: String) -> String {
     var processed = rewritingHTMLLineBreaks(text)
 
     // If the text looks like a list of paths but isn't properly formatted as a markdown list,
-    // we can try to force double newlines to ensure readability in the UI.
+    // force real line breaks so each path stays on its own line.
+    //
+    // ⚠️ The separator is a markdown HARD break ("  \n") and MUST NOT go back to "\n\n".
+    // This runs on ONE paragraph's `format()` output, and the result is handed to
+    // `AttributedString(markdown:)` in `ContentBlockView.createStyledString` — which
+    // concatenates block elements with NO character between them (it records the boundary
+    // only in block-level `presentationIntent`, which that renderer never reads; the same
+    // blindness ContentBlockView.swift:51-60 documents). Measured on this machine:
+    //   "/a/b\n/c/d\n/e/f\n/g/h"       -> "/a/b /c/d /e/f /g/h"   (soft break = one space)
+    //   "/a/b\n\n/c/d\n\n/e/f\n\n/g/h" -> "/a/b/c/d/e/f/g/h"      (paragraph = NOTHING)
+    //   "a  \nb"                       -> "a\nb"                  (the one form that survives)
+    // So "\n\n" replaced a space with nothing and FUSED the paths into one unbroken string —
+    // a user copying a path out of it got one that does not exist. That is this repo's
+    // content-corruption class: a transform that shape-matches a payload and silently
+    // rewrites it.
+    //
+    // The trigger is deliberately left as-is. It is crude and does fire on prose with dates,
+    // fractions or URLs — but with a hard break a false positive merely honours the newlines
+    // the model actually wrote, which is faithful to the source rather than corrupting it.
+    // That was not true of the old separator, where a false positive fused mid-sentence words.
     let lines = processed.components(separatedBy: .newlines)
     if lines.count > 3 && lines.filter({ $0.contains("/") }).count > lines.count / 2 {
-        processed = lines.joined(separator: "\n\n")
+        processed = lines.joined(separator: "  \n")
     }
 
     return processed
@@ -135,13 +212,20 @@ func parseMarkdown(_ markdown: String) -> [ContentBlock] {
     let document = Document(parsing: safeMarkdown, options: [.disableSmartOpts])
 
     // 3. Map top-level AST nodes to ContentBlocks
-    var pendingFileName: String? = nil
+    var pendingFileName: PendingFileNameClaim? = nil
     var blocks = buildContentBlocks(from: document, idOffset: 0, pendingFileName: &pendingFileName)
 
     // If the AST produced zero blocks but the input was non-empty, the parser silently
     // dropped everything (e.g., deeply malformed markdown). Fall back to rendering the
     // raw text as a paragraph so the user sees *something* instead of a blank bubble.
-    if blocks.isEmpty && !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+    // ⚠️ Zero blocks is not always a failure. A node that is NOTHING BUT a file marker is
+    // CONSUMED on purpose — that sentinel must never reach the user — so a document consisting
+    // only of markers legitimately produces no blocks, and this fallback used to resurrect the
+    // raw sentinel as prose. (Surfaced 2026-09-12 while testing mc-15; the fallback predates it
+    // and defeated the marker-only case on its own.) Stripping the marker lines first tells the
+    // two apart: if nothing is left, the emptiness was deliberate.
+    let withoutMarkers = BlockBuilder.strippingFileMarkerLines(from: markdown)
+    if blocks.isEmpty, !withoutMarkers.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         let preview = markdown.prefix(120).replacingOccurrences(of: "\n", with: "\\n")
         logger.warning("Markdown AST produced zero blocks for non-empty input (\(markdown.count) chars). Preview: \"\(preview)\". Falling back to raw paragraph.")
         blocks.append(ContentBlock(id: "block-0", type: .paragraph(markdown)))
@@ -166,7 +250,7 @@ func parseMarkdown(_ markdown: String) -> [ContentBlock] {
 fileprivate func buildContentBlocks(
     from document: Document,
     idOffset: Int,
-    pendingFileName: inout String?
+    pendingFileName: inout PendingFileNameClaim?
 ) -> [ContentBlock] {
     var builder = BlockBuilder(
         makeID: { index in "block-\(idOffset + index)" },
@@ -190,9 +274,26 @@ fileprivate func buildContentBlocks(
 /// order (the marker stays authoritative; see the CodeBlock branch): marker > info string
 /// > leading comment > preceding prose.
 ///
-/// Failure is graceful by construction: a missed signal falls back to today's
-/// language-only labels, and a false positive costs a cosmetic title — `fileName` never
-/// participates in snippet identity (`denotesSameBlock`) or tab dedup.
+/// A missed signal is graceful: it falls back to today's language-only labels.
+///
+/// ⚠️ [mc-6] A FALSE POSITIVE IS NOT COSMETIC, and this comment used to say it was. The
+/// narrow part is true — `fileName` is not part of `denotesSameBlock`, so a wrong name cannot
+/// fuse two different fences into one tab. But `openMessageInCodeViewer` feeds the inferred name
+/// to a store-backed second pass (`resolvePendingSourceLinks`) that searches every
+/// attachment-bearing message in the conversation for an exact name match, and a hit stamps
+/// `sourceFileID` — which is what enables ⌘S / Apply Changes, and `performApplyChanges` then
+/// writes the tab's buffer to that file's URL on disk. So a wrong name that happens to equal an
+/// attached file's name links an unrelated fence to a REAL FILE and puts overwriting it one
+/// keystroke away.
+///
+/// ⚠️ A claim is also UNBOUNDED in reach: nothing clears it but a fence or an explicit "End of
+/// file" marker, so an inferred claim carries across any number of intervening blocks and can
+/// name a later, unrelated fence. Verified 2026-09-13, NOT yet fixed — closing it needs the
+/// threaded claim to carry its PROVENANCE so only inferred claims are dropped on the next
+/// sibling (a marker claim is multi-block by design and must survive). Do not "fix" it by
+/// clearing indiscriminately: that strips the filename, and therefore the source-file link, from
+/// every fence inside an injected file. See the register row for the full plan and the two tests
+/// that pin the marker behaviour a naive fix would break.
 enum CodeFileNameInference {
 
     /// Longest prose allowed to claim a filename — a short lead-in like "Here is the
@@ -345,9 +446,20 @@ enum CodeFileNameInference {
         }
 
         // The info string IS the filename (```DijkstraSolver.java) — models do this too.
-        // The language token is left as-is (same lookup miss → plain-text grammar as today).
+        // [mc-5] The language is then DERIVED from the extension, exactly as a tab opened from a
+        // FILE already does. It used to be left as the whole filename, under a comment claiming
+        // a "lookup miss → plain-text grammar"; there is no such miss. `SyntaxHighlightService.
+        // resolvedLanguage` renders plain ONLY for ""/code/text/plaintext and hands every other
+        // token to hljs, whose undefined result Highlightr turns into `highlightAuto` across every
+        // bundled grammar — on EVERY streaming flush of the block. And both badges print the raw
+        // token, so the header read "dijkstrasolver.java" beside a file chip reading
+        // "DijkstraSolver.java" — the filename twice, one of them labelled as the language.
+        // An UNKNOWN extension yields that bare extension (`languageHint`'s best-effort contract),
+        // which reaches hljs like any other unknown token — the residue CF-2 accepted, now
+        // confined to extensions no grammar exists for instead of hitting every bare filename.
         if fileName == nil, language.contains("."), let name = filenameToken(language) {
             fileName = name
+            language = CodeSnippet.languageHint(forFileName: name) ?? ""
         }
 
         return (language, fileName)
@@ -400,7 +512,22 @@ enum CodeFileNameInference {
     /// is a section named after a file, not a sentence that happens to end in one — there is
     /// no surrounding prose for the token to be a stray word of. A heading that merely ends
     /// in a filename-shaped word ("## Setting up Node.js") must still carry markup emphasis,
-    /// exactly like prose.
+    /// exactly like prose — its spaces defeat the anchored whole-string match below.
+    ///
+    /// ⚠️ [mc-16] The sentence above used to stop at "exactly like prose", which reads as a
+    /// guarantee it does not make. A ONE-WORD heading that is wholly filename-shaped claims with
+    /// NO markup gate: `## Node.js` names the next fence "Node.js", and so do `## ASP.NET` and
+    /// `## Package.json`. That is an ACCEPTED FALSE POSITIVE, not an oversight — the trade is
+    /// stated at `plausibleFilenameToken`, and it is the same trade: there is no shape that
+    /// separates `Node.js` from a real `app.min.js`. Pinned deliberately in
+    /// `FileNameInferenceTests.testAOneWordFrameworkHeadingClaimsAndThatIsAccepted`.
+    ///
+    /// ⚠️ Do NOT "fix" this by gating on `CodeSnippet.languageHint(forFileName:) != nil`: that
+    /// helper returns nil only for an EMPTY extension, which `filenameToken` already excludes,
+    /// so the gate rejects nothing and a test written against it is green against a no-op.
+    /// The only rule that would actually refuse `## Node.js` is corroborating the claim against
+    /// the fence's own language at the CONSUMPTION site, which needs the claim to carry its
+    /// provenance — see [mc-6].
     ///
     /// The whole-heading escape hatch deliberately does NOT take `labelledFilenameToken`'s
     /// label fallback: a heading carries no markup signal of its own, so "## Note: Node.js"
@@ -448,6 +575,34 @@ enum CodeFileNameInference {
 /// `makeID` produces each block's identity from its sibling index, so top-level blocks
 /// stay `"block-N"` (the streaming parser's settled-region stitching and its tests
 /// depend on that) while nested blocks get `"<parent>.N"`.
+/// [mc-6] A pending filename claim and WHERE it came from.
+///
+/// The origin is what makes bounding the claim possible at all. An injected
+/// `--- Start of file: X ---` marker spans an entire file body by design — that is why the "End
+/// of file" branch exists as its terminator — so a marker claim MUST survive intervening blocks.
+/// An INFERRED claim (prose, heading) has no such span, and before this it inherited the
+/// marker's unbounded reach: nothing but a fence or an End marker cleared it, so a claim made in
+/// one paragraph could name a fence arbitrarily far below it.
+///
+/// ⚠️ A VALUE type, deliberately. `StreamingMarkdownParser` keeps an active-region COPY of this
+/// (`transientFileName`) precisely so a claim made in text that has not settled yet cannot leak
+/// into the permanent `prefixBlocks` state. A class here would alias that copy and make every
+/// active-region claim permanent — the same family as the permanent-cut bugs this file's
+/// streaming half already carries scar tissue for.
+struct PendingFileNameClaim: Equatable {
+    enum Origin: Equatable {
+        /// An injected `--- Start of file: X ---` sentinel. Spans multiple blocks BY DESIGN.
+        case marker
+        /// A heading that is, or ends in, a filename.
+        case heading
+        /// A short paragraph ending in a marked-up filename token.
+        case prose
+    }
+
+    let name: String
+    let origin: Origin
+}
+
 private struct BlockBuilder {
     let makeID: (Int) -> String
     var blocks: [ContentBlock] = []
@@ -455,9 +610,9 @@ private struct BlockBuilder {
     /// regions) so the next code block can consume it. Set by the explicit
     /// `--- Start of file: X ---` marker AND by `CodeFileNameInference`'s prose/heading
     /// signal; the nearest claim wins and every fence clears it.
-    var pendingFileName: String?
+    var pendingFileName: PendingFileNameClaim?
 
-    init(makeID: @escaping (Int) -> String, pendingFileName: String?) {
+    init(makeID: @escaping (Int) -> String, pendingFileName: PendingFileNameClaim?) {
         self.makeID = makeID
         self.pendingFileName = pendingFileName
     }
@@ -476,9 +631,31 @@ private struct BlockBuilder {
     ///   during parsing, which silently broke the original `---`-only regex — and it
     ///   still arrives via user text typed while the composer had smart dashes enabled.
     ///   Dropping that branch would orphan those messages' filename badges.
+    /// ⚠️ [mc-15] Applies the marker's CLAIM and reports whether one was found — it no longer
+    /// decides that the whole node disappears. It used to return a bare Bool and both call sites
+    /// `return`ed on true, so ANY paragraph merely CONTAINING a marker was discarded whole, with
+    /// nothing logged.
+    ///
+    /// That is not an edge case: the injected marker is followed by the file's content with NO
+    /// blank line between them, so cmark parses marker-and-content as ONE paragraph — the common
+    /// shape, not the rare one. The first lines of an attached file were being dropped from the
+    /// transcript, and the End branch is looser still (a bare `contains`), so prose that merely
+    /// MENTIONS "--- End of file:" vanished too.
+    ///
+    /// The claim must still be applied even when text survives, or the following fence loses its
+    /// filename badge — which is a worse outcome than losing the prose, and the reason this
+    /// returns a claim rather than just a remainder.
     private mutating func consumedFileMarker(_ text: String) -> Bool {
+        // ⚠️ Do NOT "normalise" the text before matching — in particular, do not strip
+        // backslashes. I added exactly that during mc-15 to compensate for the `\-\-\-` escape
+        // the comment at the paragraph call site describes, and BOTH were wrong: a probe of the
+        // pinned swift-markdown shows `Paragraph.format()` emits `--- Start of file: X ---`
+        // unescaped, so there was nothing to compensate for. The strip was not harmless either —
+        // `match.1` below is captured out of the matched string and becomes `pendingFileName`,
+        // i.e. the filename the rest of the app links by, so a legitimately-named
+        // `back\slash.txt` was captured as `backslash.txt` and its badge stopped resolving.
         if let match = text.firstMatch(of: /(?:---|—)\s*Start of file:\s*(.*?)\s*(?:---|—)/) {
-            pendingFileName = String(match.1)
+            pendingFileName = PendingFileNameClaim(name: String(match.1), origin: .marker)
             return true
         }
         if text.contains("--- End of file:") || text.contains("— End of file:") {
@@ -488,32 +665,122 @@ private struct BlockBuilder {
         return false
     }
 
+    /// The marker LINES removed, markup intact.
+    ///
+    /// Operates on the FORMATTED text so surviving prose keeps its bold/links/code — detection
+    /// stays on `plainText` above, which is the only form the regex reliably matches (the
+    /// formatter escapes a leading `---` to `\-\-\-`). Backslashes are stripped per line before
+    /// testing, so an escaped marker line is recognised too.
+    static func strippingFileMarkerLines(from formatted: String) -> String {
+        let kept = formatted.split(separator: "\n", omittingEmptySubsequences: false).filter { line in
+            let bare = line.replacingOccurrences(of: "\\", with: "")
+                .trimmingCharacters(in: .whitespaces)
+            // ⚠️ A marker LINE is one that BEGINS with the sentinel. The injected markers are
+            // always emitted on their own line, so a prefix test strips every real one — while
+            // prose that merely MENTIONS "--- End of file:" mid-sentence keeps its whole line.
+            // That distinction matters because `consumedFileMarker`'s End branch is a loose
+            // `contains` and fires on such prose; without it, "I looked for the --- End of file:
+            // marker" was deleted as though it were a sentinel.
+            let opensWithDashes = bare.hasPrefix("---") || bare.hasPrefix("—")
+            let isStart = opensWithDashes && bare.contains("Start of file:")
+            let isEnd = opensWithDashes && bare.contains("End of file:")
+            return !(isStart || isEnd)
+        }
+        return kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     mutating func append(children: [Markup]) {
         for child in children {
-            append(node: child)
+            let claimed = append(node: child)
+
+            // ⚠️ [mc-6] An INFERRED claim reaches only as far as its own neighbourhood.
+            //
+            // Nothing but a fence or an explicit "End of file" marker used to clear a claim, so a
+            // prose claim carried across any number of intervening blocks and named a later,
+            // unrelated fence. That is not merely a wrong badge: `openMessageInCodeViewer` feeds
+            // the inferred name to a store-backed lookup that stamps `sourceFileID` on an exact
+            // name match, which is what enables Apply Changes — and that writes the tab's buffer
+            // to the matched file on disk.
+            //
+            // Measured in SIBLING NODES, not in parse regions: a claim and its fence routinely
+            // land in different streaming flushes, and a region boundary is not a node. A
+            // stateless per-node rule keeps that working, where "stale on entry to a builder"
+            // would break it.
+            //
+            // ⚠️ `.marker` is exempt, and that exemption is the whole reason this carries an
+            // origin. An injected `--- Start of file: X ---` wraps a WHOLE file body, so its
+            // claim must outlive every block in between; the End branch is its terminator.
+            // Clearing markers here would strip the filename — and therefore the source-file
+            // link, and therefore diff and apply — from every fence inside an injected file.
+            //
+            // ⚠️ `.heading` is also exempt, for now. A heading claim is naturally section-scoped
+            // and its ordinary shape is "### Main.swift" → an explanatory paragraph → the fence;
+            // dropping it on the first non-claiming sibling would silently unbadge that. Bounding
+            // it properly means clearing on the next Heading or ThematicBreak, which is only
+            // worth doing once a heading claim is harder to arm than it is today (see mc-16).
+            if !claimed, let claim = pendingFileName, claim.origin == .prose {
+                pendingFileName = nil
+                logger.debug("[FILENAME] Prose claim '\(claim.name)' dropped — the next block made no claim of its own and was not a fence, so the claim does not reach past it.")
+            }
         }
     }
 
-    private mutating func append(node child: Markup) {
+    private mutating func append(node child: Markup) -> Bool {
+        // [mc-6] Whether THIS node made a claim. Reported so `append(children:)` can bound an
+        // INFERRED claim to its own neighbourhood without a freshness heuristic — comparing the
+        // claim value before and after cannot do it, because a repeated identical claim (a
+        // heading and then a sentence naming the same file) would read as "unchanged" and the
+        // real setter would be judged stale.
+        var didClaim = false
         if let paragraph = child as? Paragraph {
-            // Standalone images are often wrapped inside a single Paragraph node
-            if paragraph.childCount == 1,
-               let image = paragraph.child(at: 0) as? Markdown.Image {
-                append(.image(url: image.source ?? "", altText: image.plainText))
-                return
-            }
-            // Marker detection uses plainText, NOT format(): the formatter escapes a
-            // leading "---" (to `\-\-\-`, since re-parsing it would read as a thematic
-            // break), which silently defeated the regex ever since the AST migration.
+            // [mc-3] A paragraph carrying ANY image is split at its images: the text runs between
+            // them become `.paragraph`s and each image its own `.image` block, in document order.
+            // Only a paragraph that was NOTHING BUT one image used to reach `.image`; every other
+            // shape fell to the text branch below, where `AttributedString(markdown:)` keeps an
+            // image's alt TEXT as characters and nothing draws a picture. So
+            //
+            //     Here is the chart:
+            //     ![chart](/tmp/x.png)
+            //
+            // — prose, ONE newline, image: the common model shape, which cmark folds into a single
+            // [Text, SoftBreak, Image] paragraph — rendered as "Here is the chart: chart" with no
+            // image, no failure card and no log line; only a blank line before the image saved
+            // it. The whole `localImagePath` / `LocalMarkdownImageView` path was reachable from
+            // the single-child branch alone.
+            //
+            // Marker detection is fed plainText here because it is the cheapest form available
+            // on this branch — NOT because `format()` would defeat the regex. This comment used
+            // to claim the formatter escapes a leading `---` to `\-\-\-`; a probe of the pinned
+            // swift-markdown shows it does not, and acting on that claim corrupted filenames
+            // containing a backslash. The unknown-node fallback matches on `format()` directly.
             let plain = paragraph.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if consumedFileMarker(plain) { return }
+            // [mc-15] The claim is applied either way; only a node that is NOTHING BUT the
+            // marker disappears. A merged marker+content paragraph renders its content.
+            // ⚠️ Applied BEFORE the image split: a marker paragraph CAN carry an image (a quoted
+            // or persisted `.md` attachment opening with a logo), and splitting first would print
+            // the sentinel as prose and lose the filename claim for the fence that follows.
+            let hadMarker = consumedFileMarker(plain)
+            didClaim = didClaim || hadMarker
+            if paragraph.children.contains(where: { Self.imageChild($0) != nil }) {
+                appendSplittingImages(in: paragraph, stripMarkers: hadMarker)
+                return didClaim
+            }
+            if hadMarker {
+                let remainder = Self.strippingFileMarkerLines(
+                    from: paragraph.format().trimmingCharacters(in: .whitespacesAndNewlines))
+                if remainder.isEmpty { return didClaim }
+                logger.debug("[FILENAME] File marker stripped from a paragraph that also carried \(remainder.count) chars of content — the content is kept.")
+                append(.paragraph(preprocessMarkdownText(remainder)))
+                return didClaim
+            }
             // Prose filename claim ("`DijkstraSolver.java`" above a fence). Unlike the
             // marker the paragraph stays VISIBLE — it's the model's own prose, not an
             // injected sentinel to hide. The AST node itself is passed, not `plain`: the
             // claim requires the author's own markup (inline code or bold) on the trailing
             // token, and plainText erases bold entirely.
             if let inferred = CodeFileNameInference.fromTrailingProse(in: paragraph) {
-                pendingFileName = inferred
+                pendingFileName = PendingFileNameClaim(name: inferred, origin: .prose)
+                didClaim = true
                 logger.debug("[FILENAME] Prose claim '\(inferred)' pending for next code block.")
             }
             let text = paragraph.format().trimmingCharacters(in: .whitespacesAndNewlines)
@@ -525,7 +792,7 @@ private struct BlockBuilder {
             // marker must stay on top — it's what source-file linking resolves by name,
             // and letting a weaker signal rename a linked block would break that lookup.
             let (language, infoFileName) = CodeFileNameInference.languageAndFileName(fromInfoString: codeBlock.language ?? "")
-            let fileName = pendingFileName
+            let fileName = pendingFileName?.name
                 ?? infoFileName
                 ?? CodeFileNameInference.fromLeadingComment(in: codeBlock.code)
             append(.code(language: language, content: codeBlock.code, fileName: fileName))
@@ -535,19 +802,43 @@ private struct BlockBuilder {
             // A heading that IS a filename ("### DijkstraSolver.java") claims; one that
             // merely ends in a filename-shaped word needs the same markup emphasis prose does.
             if let inferred = CodeFileNameInference.fromHeading(heading) {
-                pendingFileName = inferred
+                pendingFileName = PendingFileNameClaim(name: inferred, origin: .heading)
+                didClaim = true
                 logger.debug("[FILENAME] Heading claim '\(inferred)' pending for next code block.")
             }
-            append(.heading(level: heading.level, text: heading.plainText))
+            // ⚠️ [mc-8] `.format()` of the CHILDREN, not `plainText`. `plainText` is
+            // swift-markdown's markup-STRIPPING accessor — `## A **bold** word` arrived here as
+            // "A bold word", so bold, italic, inline code and links inside a heading rendered as
+            // flat text while the identical markup one line lower, in a paragraph, rendered
+            // correctly. The paragraph branch has always used `format()`; this is the same
+            // treatment the table cells above already get, `rewritingHTMLLineBreaks` included.
+            //
+            // Children rather than the node, so no ATX `#` prefix is produced and nothing has to
+            // know how many of them this level would emit.
+            // ⚠️ [CR17] The heading's TEXT is re-parsed as markdown by the renderer, and cmark
+            // had already eaten the `##`, so text that begins with another block marker is read
+            // as that block and its marker disappears: `## 1. Setup` rendered "Setup",
+            // `## - Prerequisites` rendered "Prerequisites", `## > Note` rendered "Note".
+            // Numbering a section is ordinary, so this silently dropped the number from headings
+            // models write constantly.
+            //
+            // Same helper, same reason as a text run that follows an inline image ([mc-3]): the
+            // marker was inline content in the source and must not be promoted to structure when
+            // the fragment is parsed on its own. It escapes only a LEADING marker followed by
+            // whitespace, so `## 1.5 release` and `## #hashtag` are untouched.
+            let headingText = Self.escapingLeadingBlockSyntax(
+                rewritingHTMLLineBreaks(heading.children.map { $0.format() }.joined())
+                    .trimmingCharacters(in: .whitespacesAndNewlines))
+            append(.heading(level: heading.level, text: headingText))
         }
         else if child is ThematicBreak {
             append(.horizontalRule)
         }
         else if let list = child as? UnorderedList {
-            append(listItems: Array(list.listItems), ordered: false, start: 1)
+            didClaim = append(listItems: Array(list.listItems), ordered: false, start: 1) || didClaim
         }
         else if let list = child as? OrderedList {
-            append(listItems: Array(list.listItems), ordered: true, start: Int(list.startIndex))
+            didClaim = append(listItems: Array(list.listItems), ordered: true, start: Int(list.startIndex)) || didClaim
         }
         else if let quote = child as? BlockQuote {
             // Previously fell through to the `else` fallback below, which stringified
@@ -556,6 +847,10 @@ private struct BlockBuilder {
             let id = makeID(blocks.count)
             var nested = BlockBuilder(makeID: { "\(id).\($0)" }, pendingFileName: pendingFileName)
             nested.append(children: Array(quote.children))
+            // [mc-6] A claim made INSIDE this container was set by a node the outer loop never
+            // sees, so the container itself must report it — otherwise the next sibling would
+            // judge it stale and drop it before a following top-level fence could consume it.
+            didClaim = didClaim || (nested.pendingFileName != nil && nested.pendingFileName != pendingFileName)
             pendingFileName = nested.pendingFileName
             blocks.append(ContentBlock(id: id, type: .blockquote(blocks: nested.blocks)))
         }
@@ -585,9 +880,95 @@ private struct BlockBuilder {
         else {
             // Fallback for HTML blocks or other unknown types
             let text = child.format().trimmingCharacters(in: .whitespacesAndNewlines)
-            if consumedFileMarker(text) { return }
+            // [mc-15] Same rule as the paragraph branch: apply the claim, keep any content that
+            // is not the marker itself. This branch already works on `format()` output, so the
+            // strip is over the same string it renders.
+            if consumedFileMarker(text) {
+                let remainder = Self.strippingFileMarkerLines(from: text)
+                if remainder.isEmpty { return didClaim }
+                append(.paragraph(preprocessMarkdownText(remainder)))
+                return didClaim
+            }
             append(.paragraph(preprocessMarkdownText(text)))
         }
+        return didClaim
+    }
+
+    /// [mc-3] The image an inline node IS, if any: a `Markdown.Image` itself, or a `Link` /
+    /// `Emphasis` / `Strong` whose ONLY child is one — the `[![alt](src)](href)` "click to
+    /// enlarge" / badge idiom and the `*![Figure 1](src)*` caption idiom. Both used to collapse
+    /// to their alt text exactly like a bare inline image did. A wrapper with anything else in
+    /// it is prose and stays prose.
+    static func imageChild(_ inline: Markup) -> Markdown.Image? {
+        if let image = inline as? Markdown.Image { return image }
+        guard inline is Markdown.Link || inline is Markdown.Emphasis || inline is Markdown.Strong,
+              inline.childCount == 1 else { return nil }
+        return inline.child(at: 0) as? Markdown.Image
+    }
+
+    /// [mc-3] Emits a paragraph that contains images as alternating `.paragraph` / `.image`
+    /// blocks.
+    ///
+    /// A text run is the inline nodes between two images, formatted as ONE synthetic
+    /// `Paragraph` — never node by node. `Markup.format()` builds a fresh formatter per call and
+    /// a `SoftBreak` only QUEUES its newline for the next print in the same formatter, so a
+    /// per-node join emitted "" for every soft break and "  " for every hard break: two lines of
+    /// prose before an image fused into one word ("png.Here"). The synthetic paragraph prints
+    /// `\n` / `"  \n"` between the texts exactly as the whole-paragraph branch does. A run that
+    /// trims to nothing — the `SoftBreak` between two images on consecutive lines — emits no
+    /// block. The prose-filename claim is not evaluated on the runs (a claim taken from half a
+    /// paragraph would be a new false positive); the file-MARKER claim was already applied by
+    /// the caller, which passes `stripMarkers` so the sentinel lines never render.
+    private mutating func appendSplittingImages(in paragraph: Paragraph, stripMarkers: Bool) {
+        var run: [Markup] = []
+        var images = 0
+        var textRuns = 0
+        for inline in paragraph.children {
+            if let image = Self.imageChild(inline) {
+                if appendTextRun(run, stripMarkers: stripMarkers) { textRuns += 1 }
+                run.removeAll()
+                if let link = inline as? Markdown.Link {
+                    logger.debug("[RENDER] Linked image rendered as its image; the link target (\(link.destination ?? "none")) is not carried — the block has nowhere to put it.")
+                }
+                append(.image(url: image.source ?? "", altText: image.plainText))
+                images += 1
+            } else {
+                run.append(inline)
+            }
+        }
+        if appendTextRun(run, stripMarkers: stripMarkers) { textRuns += 1 }
+        if textRuns > 0 || images > 1 {
+            logger.debug("[RENDER] Paragraph split at \(images) inline image(s) into \(textRuns) text run(s) — each image renders as its own block instead of collapsing to its alt text.")
+        }
+    }
+
+    /// Appends one text run of a split paragraph; false when the run had no visible text.
+    @discardableResult
+    private mutating func appendTextRun(_ run: [Markup], stripMarkers: Bool) -> Bool {
+        var text = Paragraph(run.compactMap { $0 as? InlineMarkup }).format()
+        if stripMarkers { text = Self.strippingFileMarkerLines(from: text) }
+        text = Self.escapingLeadingBlockSyntax(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard !text.isEmpty else { return false }
+        append(.paragraph(preprocessMarkdownText(text)))
+        return true
+    }
+
+    /// A run that FOLLOWS an image was inline content in the source (" - caption", " 1. Open
+    /// Settings"), protected from block interpretation by the image before it. Trimmed and
+    /// handed to `AttributedString(markdown:)` on its own it would become a list item or
+    /// heading whose marker that renderer silently eats. The marker is escaped so the characters
+    /// the author wrote stay on screen; the formatter never escapes text itself.
+    static func escapingLeadingBlockSyntax(_ text: String) -> String {
+        if let match = text.firstMatch(of: /^(\d{1,9})([.)])(?=\s|$)/) {
+            return String(match.1) + "\\" + String(match.2) + text[match.range.upperBound...]
+        }
+        if let first = text.first, "-+*#>".contains(first) {
+            let rest = text.dropFirst()
+            if rest.isEmpty || rest.first?.isWhitespace == true || first == "#" && rest.first == "#" {
+                return "\\" + text
+            }
+        }
+        return text
     }
 
     /// Emits one `.listItem` per item, carrying EVERYTHING the item contains as child
@@ -598,11 +979,16 @@ private struct BlockBuilder {
     /// emitted the own content first, flattening nested items to siblings. That
     /// reordered the output: a fence written *after* the sub-bullets rendered *above*
     /// them. Preserving the AST's child order is the whole point.
-    private mutating func append(listItems: [ListItem], ordered: Bool, start: Int) {
+    /// - Returns: whether any item made a filename claim ([mc-6] — the list is one sibling to the
+    ///   outer loop, so a claim made inside it has to be reported or the next sibling drops it).
+    @discardableResult
+    private mutating func append(listItems: [ListItem], ordered: Bool, start: Int) -> Bool {
+        var didClaim = false
         for (offset, item) in listItems.enumerated() {
             let id = makeID(blocks.count)
             var nested = BlockBuilder(makeID: { "\(id).\($0)" }, pendingFileName: pendingFileName)
             nested.append(children: Array(item.children))
+            didClaim = didClaim || (nested.pendingFileName != nil && nested.pendingFileName != pendingFileName)
             pendingFileName = nested.pendingFileName
 
             let checkbox: ContentBlock.Checkbox? = item.checkbox.map { $0 == .checked ? .checked : .unchecked }
@@ -614,6 +1000,7 @@ private struct BlockBuilder {
                 type: .listItem(prefix: prefix, blocks: nested.blocks, checkbox: checkbox)
             ))
         }
+        return didClaim
     }
 }
 
@@ -649,9 +1036,14 @@ final class StreamingMarkdownParser {
     /// Cached `consumedPrefix.count` — `String.count` is O(n), and we need it per flush.
     private var consumedPrefixCharCount: Int = 0
     private var prefixBlocks: [ContentBlock] = []
+    /// [mc-14] Tail size at the last "no settle boundary" warning, so a long answer logs on
+    /// growth rather than on every flush.
+    private var lastUnboundedTailWarning = 0
+    /// Tail size past which never finding a boundary is worth saying out loud.
+    private static let unboundedTailWarningChars = 8_000
     /// File-marker state carried across settled regions (marker paragraph and its
     /// code block may arrive in different flushes).
-    private var pendingFileName: String? = nil
+    private var pendingFileName: PendingFileNameClaim? = nil
 
     /// Parses the full accumulated text, reusing blocks for already-settled regions.
     /// Safe for arbitrary input: if `fullText` is not an append to what was consumed
@@ -666,7 +1058,17 @@ final class StreamingMarkdownParser {
         // Advance the settled boundary to the last blank line (outside a code fence)
         // in the unconsumed tail. Everything before it can never re-parse differently
         // under our flattened block model, so parse it once and lock it in.
-        if let cut = Self.lastSafeBoundary(in: fullText[tailStart...]) {
+        let tail = fullText[tailStart...]
+        // [mc-14] A tail that never yields a boundary is re-parsed WHOLE on every flush — the
+        // O(n²) behaviour this parser exists to avoid. It is silent by construction (the render
+        // stays correct), so it is logged once past a threshold rather than left to be
+        // discovered by a user watching a long answer get slower.
+        if Self.lastSafeBoundary(in: tail) == nil, tail.count > Self.unboundedTailWarningChars,
+           tail.count - lastUnboundedTailWarning > Self.unboundedTailWarningChars {
+            lastUnboundedTailWarning = tail.count
+            logger.warning("[RENDER] Streaming parser found no settle boundary in a \(tail.count)-char tail — every flush re-parses all of it. CONSEQUENCE: render is correct but cost grows with the answer; usually an unterminated fence or a tail with no blank line outside one.")
+        }
+        if let cut = Self.lastSafeBoundary(in: tail) {
             let settled = String(fullText[tailStart..<cut])
             if !settled.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 // Fences inside a settled region are balanced by construction (the
@@ -712,26 +1114,53 @@ final class StreamingMarkdownParser {
         consumedPrefixCharCount = 0
         prefixBlocks = []
         pendingFileName = nil
+        lastUnboundedTailWarning = 0
     }
 
     /// Index just past the last completed blank line that sits outside any ``` fence,
-    /// or nil if the tail contains no safe boundary yet. Uses the same fence heuristic
-    /// as `preprocessStreamResilientMarkdown` (trimmed `hasPrefix("```")` toggles) so
-    /// the two stages can't disagree about what's inside a fence.
+    /// or nil if the tail contains no safe boundary yet.
+    ///
+    /// Shares ONE fence rule with `preprocessStreamResilientMarkdown` —
+    /// `markdownFenceMarker(inTrimmedLine:)` — because everything before the cut this returns is
+    /// parsed WITHOUT the preprocessor and then locked into `prefixBlocks` forever. A cut that
+    /// lands inside a fence is not a rendering glitch that heals on the next flush; it is
+    /// permanent until the message settles.
+    ///
+    /// ⚠️ [mc-14] Two things this used to get wrong, both of which made that permanent cut real:
+    ///
+    /// 1. A boolean toggle on `hasPrefix("```")`. Given ```` ````markdown ```` followed by an
+    ///    inner ```` ```swift ```` — the shape a model emits whenever it shows you markdown —
+    ///    the inner fence toggled the flag back off, a blank line inside the outer block was
+    ///    accepted as a boundary, and the settled region ended mid-fence. cmark then swallowed
+    ///    the settled text as one unterminated code block and the rest of the code rendered as
+    ///    prose. Run length and the bare-run requirement are what cmark itself uses.
+    ///
+    /// 2. `firstIndex(of: "\n")`. Swift's `"\r\n"` is ONE Character, so this found NOTHING in
+    ///    an all-CRLF tail: the whole tail read as a single line, no boundary was ever returned,
+    ///    and the streaming parser silently degraded to the full re-parse per flush it exists to
+    ///    avoid — while `preprocessStreamResilientMarkdown` split the same text into 9 lines with
+    ///    `components(separatedBy: .newlines)`. The doc here claimed the two stages "can't
+    ///    disagree about what's inside a fence"; they disagreed about what a LINE is.
+    ///    `\.isNewline` matches the CRLF cluster and every separator that `CharacterSet.newlines`
+    ///    splits on, so the two now agree on both questions.
     static func lastSafeBoundary(in tail: Substring) -> Substring.Index? {
-        var inFence = false
+        var openFenceRun: Int? = nil
         var lastCut: Substring.Index? = nil
         var lineStart = tail.startIndex
 
         while lineStart < tail.endIndex {
-            let newlineIndex = tail[lineStart...].firstIndex(of: "\n")
+            let newlineIndex = tail[lineStart...].firstIndex(where: \.isNewline)
             let lineContentEnd = newlineIndex ?? tail.endIndex
             let nextLineStart = newlineIndex.map { tail.index(after: $0) } ?? tail.endIndex
 
             let trimmed = tail[lineStart..<lineContentEnd].trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("```") {
-                inFence.toggle()
-            } else if trimmed.isEmpty, !inFence, newlineIndex != nil {
+            if let marker = markdownFenceMarker(inTrimmedLine: trimmed) {
+                if let open = openFenceRun {
+                    if marker.run >= open, !marker.hasInfo { openFenceRun = nil }
+                } else {
+                    openFenceRun = marker.run
+                }
+            } else if trimmed.isEmpty, openFenceRun == nil, newlineIndex != nil {
                 // A COMPLETED blank line (has its newline) outside any fence.
                 lastCut = nextLineStart
             }

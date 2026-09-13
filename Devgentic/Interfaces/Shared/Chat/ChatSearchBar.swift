@@ -16,9 +16,11 @@ struct ChatSearchBar: View {
     @State private var isPrevHovered: Bool = false
     @State private var isNextHovered: Bool = false
     @Environment(\.appTheme) private var theme
-    // [CF-37] For `unreachableMatchCount` — an ancestor already provides this (ChatHistoryView),
-    // so no call site needs to change.
-    @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
+    // [vm-3] Deliberately NO `ChatHistoryViewModel` here. The bar used to pull it from the
+    // environment for `unreachableMatchCount(in:)`, which walks the computed `searchCorpus` —
+    // and reading that from `body` made every keystroke rebuild the corpus and made the bar an
+    // observer of every resident message's text. The count now arrives on `searchViewModel`,
+    // written by `ChatHistoryViewModel.runSearch` alongside the matches it describes.
 
     var body: some View {
         HStack(spacing: 10) {
@@ -40,11 +42,9 @@ struct ChatSearchBar: View {
 
             // Match Count Badge
             if !searchViewModel.searchQuery.isEmpty {
-                // Computed ONCE per body pass and handed to both strings: it walks the search
-                // corpus, and reading it from each of the two computed properties doubled that
-                // walk on every keystroke.
-                let unreachable = unreachableCount
-                Text(matchCountLabel(unreachable: unreachable))
+                // Both strings come from the view model, built from its STORED unreachable
+                // count ([vm-3]) — nothing here walks the corpus.
+                Text(searchViewModel.matchCountLabel)
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundColor(searchViewModel.totalMatchCount > 0 ? theme.accentColor : theme.errorColor)
                     .padding(.horizontal, 7)
@@ -56,7 +56,7 @@ struct ChatSearchBar: View {
                         Capsule().stroke(searchViewModel.totalMatchCount > 0 ? theme.accentColor.opacity(0.3) : theme.errorColor.opacity(0.3), lineWidth: 0.5)
                     )
                     .fixedSize()
-                    .accessibilityLabel(matchCountAccessibilityLabel(unreachable: unreachable))
+                    .accessibilityLabel(searchViewModel.matchCountAccessibilityLabel)
                     .task(id: searchViewModel.totalMatchCount) {
                         try? await Task.sleep(for: .milliseconds(600))
                         guard !Task.isCancelled else { return }
@@ -157,29 +157,12 @@ struct ChatSearchBar: View {
         }
     }
 
-    /// [CF-37] `unreachableMatchCount` was written to keep this honest and had zero callers —
-    /// so "N of M" counted matches Next/Previous could never actually land on, with nothing
-    /// distinguishing them from a reachable one until the user pressed toward one and hit the
-    /// silent "Older than the loaded history" case CF-35 added below.
-    private var unreachableCount: Int {
-        chatHistoryViewModel.unreachableMatchCount(in: searchViewModel.matches)
-    }
-
-    private func matchCountLabel(unreachable: Int) -> String {
-        if searchViewModel.totalMatchCount == 0 {
-            return String(localized: "No results")
-        }
-        let position = String(localized: "\(searchViewModel.currentMatchIndex + 1) of \(searchViewModel.totalMatchCount)")
-        guard unreachable > 0 else { return position }
-        return String(localized: "\(position) · \(unreachable) older not shown")
-    }
-
-    private func matchCountAccessibilityLabel(unreachable: Int) -> String {
-        if searchViewModel.totalMatchCount == 0 { return String(localized: "No results") }
-        let position = String(localized: "Match \(searchViewModel.currentMatchIndex + 1) of \(searchViewModel.totalMatchCount)")
-        guard unreachable > 0 else { return position }
-        return String(localized: "\(position), \(unreachable) older matches not loaded and cannot be reached")
-    }
+    // [CF-37] The unreachable count keeps "N of M" honest — without it the badge counted
+    // matches Next/Previous could never land on, with nothing distinguishing them from a
+    // reachable one until the user pressed toward one and hit the silent "Older than the
+    // loaded history" case CF-35 added below. [vm-3] Both badge strings now live on
+    // `ChatSearchViewModel` (`matchCountLabel`, `matchCountAccessibilityLabel`), built from the
+    // stored count, so they are unit-tested there.
 
     /// Announced while typing, so it reports the COUNT rather than the position — which
     /// match you're on is meaningless until you start navigating.

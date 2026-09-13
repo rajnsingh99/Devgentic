@@ -25,7 +25,7 @@ struct ToolLibraryContainerView: View {
     @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
-    @State private var searchText = ""
+    @State private var isSearchExpanded = false
     @State private var isSelectionMode = false
     @State private var selectedToolIDs: Set<String> = []
 
@@ -53,15 +53,17 @@ struct ToolLibraryContainerView: View {
         if profileID == nil || profileService.profiles.contains(where: { $0.id == profileID! }) {
             VStack(spacing: 0) {
                 DynamicIslandBar {
-                    IslandSearchField(
+                    IslandExpandableSearchHeader(
+                        title: "Tool Library",
+                        icon: "wrench.and.screwdriver",
                         text: Binding(get: { ToolLibraryNavigationState.shared.searchText },
                                      set: { ToolLibraryNavigationState.shared.searchText = $0 }),
                         // One search field for the whole library; what it searches depends on
                         // where you are, so the placeholder has to say which.
                         placeholder: ToolLibraryNavigationState.shared.selectedSidebar == .marketplace
-                            ? "Search the MCP registry..."
-                            : "Search tools...",
-                        autoFocus: true,
+                            ? "Search the MCP registry"
+                            : "Search tools",
+                        isExpanded: $isSearchExpanded,
                         accessibilityIdentifier: "tool.library.search"
                     )
                 } trailing: {
@@ -93,6 +95,9 @@ struct ToolLibraryContainerView: View {
                     ToolLibraryNavigationState.shared.selectedSidebar = .mcp(pending)
                     logger.info("[TOOLLIB] Opened preselected on MCP source \(pending) from the Tools sidebar.")
                 }
+                if !ToolLibraryNavigationState.shared.searchText.isEmpty {
+                    isSearchExpanded = true
+                }
                 logger.info("""
                     [TOOLLIB] Opened \(routeProfileID != nil ? "pinned to a route profile" : "unpinned"); \
                     configuring '\(currentProfile?.displayName ?? "no profile")' — tool enablement \
@@ -112,50 +117,30 @@ struct ToolLibraryContainerView: View {
 
     private var actionIcons: some View {
         HStack(spacing: 6) {
+            IslandSearchToggleButton(isExpanded: $isSearchExpanded)
+
             // Selection mode and Select All write tool enablement into a profile. With none
             // targeted they would be controls with nowhere to write, so they are hidden
             // rather than shown disabled — the profile selector below is the way back.
             if canConfigureTools {
-            IslandIconButton(
-                symbol: isSelectionMode ? "checklist.checked" : "checklist",
-                isActive: isSelectionMode,
-                help: isSelectionMode ? "Exit selection mode" : "Bulk select tools",
-                accessibilityLabel: isSelectionMode ? "Exit bulk selection mode" : "Enter bulk selection mode"
-            ) {
-                isSelectionMode.toggle()
-                if !isSelectionMode { selectedToolIDs.removeAll() }
-            }
+                IslandIconButton(
+                    symbol: isSelectionMode ? "checklist.checked" : "checklist",
+                    isActive: isSelectionMode,
+                    help: isSelectionMode ? "Exit selection mode" : "Bulk select tools",
+                    accessibilityLabel: isSelectionMode ? "Exit bulk selection mode" : "Enter bulk selection mode"
+                ) {
+                    isSelectionMode.toggle()
+                    if !isSelectionMode { selectedToolIDs.removeAll() }
+                }
 
-            IslandIconButton(
-                symbol: allToolsSelected ? "checkmark.circle.fill" : "checkmark.circle",
-                isActive: allToolsSelected,
-                help: allToolsSelected ? "Deselect all tools" : "Select all tools",
-                accessibilityLabel: allToolsSelected ? "Deselect all tools" : "Select all tools"
-            ) {
-                toggleSelectAll()
-            }
-            }
-
-            IslandIconButton(
-                symbol: "plus.circle",
-                help: "Add MCP Server",
-                accessibilityLabel: "Add MCP Server"
-            ) {
-                router.navigate(to: .addMCPServer)
-            }
-
-            // "Done" uses `checkmark.seal.fill` to disambiguate from the
-            // neighboring `checkmark` / `checkmark.circle` affordances. Promoted
-            // to .prominent so the primary CTA reads distinctly from the
-            // ghost-style toggles to its left.
-            IslandIconButton(
-                symbol: "checkmark.seal.fill",
-                style: .prominent,
-                help: "Done (⌘↩)",
-                accessibilityLabel: "Done, return to previous view",
-                keyboardShortcut: .defaultAction
-            ) {
-                router.goBack()
+                IslandIconButton(
+                    symbol: allToolsSelected ? "checkmark.circle.fill" : "checkmark.circle",
+                    isActive: allToolsSelected,
+                    help: allToolsSelected ? "Deselect all tools" : "Select all tools",
+                    accessibilityLabel: allToolsSelected ? "Deselect all tools" : "Select all tools"
+                ) {
+                    toggleSelectAll()
+                }
             }
         }
     }
@@ -200,32 +185,32 @@ struct ToolLibraryContainerView: View {
                 }
             }
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 Image(systemName: canConfigureTools ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark")
-                    .font(.system(size: 11))
+                    .font(.caption2)
                     .foregroundColor(canConfigureTools ? theme.accentColor : theme.secondaryText)
                 Text(currentProfile?.displayName ?? "No profile selected")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.caption)
                     .foregroundColor(canConfigureTools ? theme.primaryText : theme.secondaryText)
                     .lineLimit(1)
                 if !pinned {
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundColor(theme.tertiaryText)
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(canConfigureTools ? theme.accentColor : theme.secondaryText)
                 }
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 9)
             .padding(.vertical, 5)
             .background(
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(canConfigureTools ? theme.accentColor.opacity(0.10) : theme.surfaceOverlay)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(canConfigureTools ? theme.accentColor.opacity(0.12) : theme.surfaceOverlay)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 7)
-                    .stroke(canConfigureTools ? theme.accentColor.opacity(0.28) : theme.secondaryText.opacity(0.18), lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(canConfigureTools ? theme.accentColor.opacity(0.4) : theme.surfaceOverlayStrong, lineWidth: 0.5)
             )
         }
-        .menuStyle(.borderlessButton)
+        .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
         .disabled(pinned)
@@ -459,9 +444,10 @@ struct ToolLibraryContainerView: View {
     }
 
     private func matchesSearch(_ tool: ToolDefinition) -> Bool {
-        searchText.isEmpty ||
-        tool.name.localizedCaseInsensitiveContains(searchText) ||
-        tool.description.localizedCaseInsensitiveContains(searchText)
+        let query = ToolLibraryNavigationState.shared.searchText
+        return query.isEmpty ||
+            tool.name.localizedCaseInsensitiveContains(query) ||
+            tool.description.localizedCaseInsensitiveContains(query)
     }
 
     // MARK: - Bindings

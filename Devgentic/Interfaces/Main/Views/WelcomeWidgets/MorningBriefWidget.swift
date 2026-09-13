@@ -17,6 +17,10 @@ struct MorningBriefWidget: WelcomeWidget {
     let priority = 10
 
     func isVisible() -> Bool {
+        let isICEnabled = UserDefaults.standard.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
+        let isBriefEnabled = UserDefaults.standard.bool(forKey: AppSettings.ciFeatureMorningBriefKey)
+        guard isICEnabled && isBriefEnabled else { return false }
+
         let service = MorningBriefService.shared
         return service.isGenerating || !(service.currentBrief?.isEmpty ?? true)
     }

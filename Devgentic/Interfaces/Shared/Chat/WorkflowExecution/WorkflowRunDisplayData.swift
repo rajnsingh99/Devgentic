@@ -249,17 +249,43 @@ struct WorkflowRunDisplayData {
 
             // Compute "input": upstream nodes' detail joined; falls back to
             // user input for source nodes (no upstream edges).
-            let upstreamIDs = layout.edges.filter { $0.targetNodeID == nodeID }.map(\.sourceNodeID)
-            let upstreamResults = upstreamIDs.compactMap { resultByNodeID[$0] }
+            // [workflow/vm-2] One contribution per upstream NODE, in first-seen edge order —
+            // the engine's own rule (`WorkflowState.upstreamResultEnvelopes`). An upstream wired
+            // into two ports of this node passed the port filter on both edges and was joined
+            // into the preview twice. Mirrored verbatim in `WorkflowRunRecord`'s factory, which
+            // is the frozen half of this same pair.
+            var seenUpstreamIDs = Set<UUID>()
+            let upstreamIDs = layout.edges
+                .filter { $0.targetNodeID == nodeID }
+                .map(\.sourceNodeID)
+                .filter { seenUpstreamIDs.insert($0).inserted }
+            let allUpstreamResults = upstreamIDs.compactMap { resultByNodeID[$0] }
+            // [workflow/vm-1] ONE filtered list drives BOTH the text and the label — they are a
+            // pair, and filtering one while falling back on the other would name a node that
+            // contributed nothing (or omit the one that did). See `contributesInput` for what
+            // this mirrors and, just as importantly, what it cannot.
+            //
+            // ⚠️ The fallback is deliberate: when the filter empties a NON-empty list, show the
+            // unfiltered join. A node in a wholly dead subtree still has to explain itself —
+            // "Not run — the workflow branched a different way" is the right preview when that is
+            // genuinely all there is, and only wrong when it is mixed in beside real input.
+            let contributing = allUpstreamResults.filter { WorkflowExecutionState.contributesInput($0.status) }
+            let upstreamResults = contributing.isEmpty ? allUpstreamResults : contributing
+            _ = upstreamResults
             let derivedInput: String? = {
                 if !upstreamResults.isEmpty {
                     // [CF-31] `upstreamInputContribution`, NOT `\.detail`. A user-skipped upstream's
                     // detail is the skip SENTENCE, while the engine forwarded that node's own INPUT
                     // down this edge — so the node currently RUNNING previewed the one string it
                     // certainly did not receive. Every other status still resolves to `detail`.
+                    // [workflow/vm-3] BOUNDED — this runs once per node per body pass of a live
+                    // run, and its only reader shows 200 characters. Unbounded it concatenated
+                    // every upstream's entire model output into a fresh String each pass, and
+                    // the string is identical every time: a settled upstream's `detail` never
+                    // changes. The frozen twin in `WorkflowRunRecord` stays unbounded.
                     let combined = upstreamResults
                         .map {
-                            WorkflowExecutionState.upstreamInputContribution(
+                            WorkflowExecutionState.boundedUpstreamInputContribution(
                                 of: $0, resultsByNodeID: resultByNodeID,
                                 edges: layout.edges, userInput: state.userInput)
                         }

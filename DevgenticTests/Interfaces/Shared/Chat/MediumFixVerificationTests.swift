@@ -155,11 +155,24 @@ final class DiffUtilityOptimizationTests: XCTestCase {
     /// The load-bearing real-world case: a file that ends in a newline (empty final line)
     /// vs a trailing-trimmed snippet. `CodeDiffView` / the HITL write-approval preview hit
     /// this on virtually every source file. Core is `[""]` vs `[]` → `m == 0` trap.
+    ///
+    /// ⚠️ EXPECTATION UPDATED 2026-09-12 (cv-4). This used to assert ONE deletion for the phantom
+    /// trailing empty line. `changeCounts` has always trimmed a single trailing newline before
+    /// counting — deliberately, per its own doc — so the ROWS and the COUNTS disagreed about this
+    /// exact input: the chip said "no change" while the preview showed a deletion. The trim now
+    /// lives in `lineLevelDiff`, so both surfaces agree.
+    ///
+    /// The trade-off, stated plainly: a change that ONLY adds or removes the file's final line
+    /// terminator is now reported as no line-level change on BOTH surfaces. It was previously
+    /// visible on one of the two, inconsistently. The alternative unification — counting it —
+    /// makes every newline-terminated CREATE report one line more than the file has, which is the
+    /// defect cv-4 was filed for. The crash-safety this test is NAMED for is unaffected.
     func testTrailingNewlineDeltaDoesNotCrash() {
         let diff = DiffUtility.generateDiff(original: "a\nb\n", modified: "a\nb")
-        // Only the phantom trailing empty line differs — one deletion, no additions.
-        XCTAssertEqual(diff.filter { $0.type == .deleted }.count, 1)
-        XCTAssertTrue(diff.allSatisfy { $0.type != .added })
+        XCTAssertTrue(diff.allSatisfy { $0.type == .unchanged },
+                      "a terminator-only delta is no line-level change on either surface")
+        XCTAssertEqual(DiffUtility.changeCounts(original: "a\nb\n", modified: "a\nb").deleted, 0,
+                       "…and the counts agree, which is the invariant that was broken")
     }
 
     /// Verify large file fallback doesn't crash.

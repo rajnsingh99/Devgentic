@@ -22,61 +22,14 @@ final class ChatMessageRAGTests: XCTestCase {
         )
     }
 
-    // MARK: - tokenCountEstimate
 
-    func testTokenCountEstimate_PlainText_ShortString() {
-        // "Hello world" = 11 chars → max(1, 11/4) = max(1, 2) = 2
-        let msg = makeMessage(content: .plainText("Hello world"))
-        XCTAssertEqual(msg.tokenCountEstimate, 2)
-    }
 
-    func testTokenCountEstimate_PlainText_MinimumIsOne() {
-        // "Hi" = 2 chars → max(1, 2/4) = max(1, 0) = 1
-        let msg = makeMessage(content: .plainText("Hi"))
-        XCTAssertEqual(msg.tokenCountEstimate, 1)
-    }
 
-    func testTokenCountEstimate_PlainText_LongString() {
-        // 1000 chars → 1000/4 = 250
-        let longText = String(repeating: "a", count: 1000)
-        let msg = makeMessage(content: .plainText(longText))
-        XCTAssertEqual(msg.tokenCountEstimate, 250)
-    }
 
-    func testTokenCountEstimate_MarkdownText() {
-        let text = "# Title\n\nSome **bold** and *italic* text here."
-        let msg = makeMessage(content: .markdownText(text))
-        XCTAssertEqual(msg.tokenCountEstimate, max(1, text.count / 4))
-    }
 
-    /// Code is denser than prose — braces, operators and short identifiers each cost a
-    /// token — so it is estimated at ~3 chars/token, not the ~4 used for English. This test
-    /// asserted the old uniform /4 and had been red since the split landed. The same ~3
-    /// figure is reached independently by `SemanticChunker` for WordPiece.
-    func testTokenCountEstimate_CodeBlock() {
-        let code = "let x = 1\nlet y = 2"
-        let msg = makeMessage(content: .codeBlock(language: "swift", code: code))
-        XCTAssertEqual(msg.tokenCountEstimate, max(1, code.count / 3))
-        XCTAssertGreaterThan(msg.tokenCountEstimate, code.count / 4,
-                             "code must be priced denser than prose, not the same")
-    }
 
-    func testTokenCountEstimate_Error() {
-        let msg = makeMessage(content: .error(title: "Err", details: "Something failed"))
-        // textContent returns "Err: Something failed" = 21 chars → 21/4 = 5
-        XCTAssertEqual(msg.tokenCountEstimate, 5)
-    }
 
-    func testTokenCountEstimate_Image_ReturnsZero() {
-        let msg = makeMessage(content: .mediaArtifact(MediaArtifact(kind: .image, reference: .ephemeralData(Data()), mimeType: "image/png")))
-        XCTAssertEqual(msg.tokenCountEstimate, 0)
-    }
 
-    func testTokenCountEstimate_EmptyString() {
-        // "" = 0 chars → max(1, 0/4) = 1
-        let msg = makeMessage(content: .plainText(""))
-        XCTAssertEqual(msg.tokenCountEstimate, 1)
-    }
 
     // MARK: - MessageContent.textContent
 

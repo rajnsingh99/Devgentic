@@ -55,7 +55,7 @@ struct FileContextStrategyPicker: View {
                     // which keeps the key extractable AND localizes the substitutions.
                     Text("Custom override. Default for \(Text(profileType.localizedTitle)) is \(Text(defaultStrategy.localizedTitle)).")
                 }
-                .font(theme.fontCaption)
+                .font(theme.fontCaption2)
                 .foregroundColor(theme.secondaryText)
             }
         }
@@ -82,7 +82,7 @@ private struct FileContextStrategyCard: View {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text(strategy.localizedTitle)
-                            .font(theme.fontSubheadline.weight(.medium))
+                            .font(theme.fontFootnote.weight(.semibold))
                             .foregroundColor(theme.primaryText)
 
                         if isDefault {
@@ -97,8 +97,9 @@ private struct FileContextStrategyCard: View {
                     }
 
                     Text(strategy.localizedDescription)
-                        .font(theme.fontCaption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                         .lineLimit(2)
                 }
 

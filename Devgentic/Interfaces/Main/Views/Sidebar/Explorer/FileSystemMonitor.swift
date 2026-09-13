@@ -48,6 +48,14 @@ class FileSystemMonitor {
     }
 
     func start(path: String, excludedPaths: [String] = []) {
+        // ⚠️⚠️ THIS IS REACHED WITHOUT ANYONE ASKING FOR IT. `ExplorerViewModel` is a STORED PROPERTY
+        // on `MainApplicationViewModel`, so it is constructed before the view model's init body runs
+        // — resolving the developer's security-scoped bookmark, recursively indexing that folder, and
+        // opening a live `FSEventStream` on it for the life of the process. It is then published as
+        // an MCP workspace root. None of that is anything a test asked for, and the folder is the
+        // developer's real last-opened project.
+        guard TestHost.permits("open an FSEventStream on the developer's real folder", logger: logger) else { return }
+
         stop()
 
         self.monitoringURL = URL(fileURLWithPath: path)

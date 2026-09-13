@@ -74,10 +74,12 @@ struct ProviderConfigSection: View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("LLM Provider")
-                    .fontWeight(.medium)
+                    .font(theme.fontFootnote.weight(.semibold))
+                    .foregroundColor(theme.primaryText)
                 Text("The underlying model powering this profile.")
-                    .font(.caption)
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2.5)
             }
 
             Spacer(minLength: 16)
@@ -129,7 +131,8 @@ struct ProviderConfigSection: View {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Model Selection")
-                        .fontWeight(.medium)
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                 }
                 Spacer(minLength: 16)
                 OllamaModelPickerView(
@@ -174,7 +177,8 @@ struct ProviderConfigSection: View {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Model Selection")
-                        .fontWeight(.medium)
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                 }
                 Spacer(minLength: 16)
                 MLXModelPickerView(
@@ -237,14 +241,16 @@ struct ProviderConfigSection: View {
 
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Model Selection").fontWeight(.medium)
+                    Text("Model Selection")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                 }
 
                 Spacer(minLength: 16)
 
                 if currentApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text("Enter a valid API Key to select a model.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
                 } else {
                     modelPicker(apiKey: currentApiKey)
@@ -263,9 +269,50 @@ struct ProviderConfigSection: View {
         VStack(alignment: .leading, spacing: 12) {
             endpointField
 
+            // ⚠️ Known endpoints, offered because the capability already worked and could not be
+            // found. HuggingFace Inference Providers speak the OpenAI wire format, so this
+            // provider has always driven them — including native tool calls — but the field is a
+            // bare URL box hinting at localhost, so nobody would guess it.
+            HStack(spacing: 8) {
+                Text("Presets")
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.secondaryText)
+                ForEach(CompatibleEndpointPreset.all) { preset in
+                    let isActive = CompatibleEndpointPreset.matching(providerConfig.baseURL)?.id == preset.id
+                    Button(preset.name) { providerConfig.baseURL = preset.url }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .tint(isActive ? theme.accentColor : nil)
+                        .help("Use \(preset.name) at \(preset.url)")
+                        .accessibilityLabel("Use the \(preset.name) endpoint")
+                }
+                Spacer()
+            }
+
             Divider()
 
             apiKeyField(labelSuffix: " (Optional)")
+
+            // ⚠️ An explicit button, never a silent auto-fill. This COPIES a Keychain secret out
+            // of the HuggingFace download store into the per-profile key store — a second item
+            // that will not track the first when the user rotates the token. Making the copy the
+            // user's deliberate act is what makes the later divergence explicable.
+            if let preset = CompatibleEndpointPreset.matching(providerConfig.baseURL),
+               preset.usesHuggingFaceToken,
+               HuggingFaceTokenStore.shared.hasToken,
+               (providerConfig.apiKey ?? "").isEmpty {
+                HStack(spacing: 8) {
+                    Button("Use saved HuggingFace token") {
+                        providerConfig.apiKey = HuggingFaceTokenStore.shared.token
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    Text("Copies the token from Settings › General into this profile.")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.secondaryText)
+                    Spacer()
+                }
+            }
 
             Divider()
 
@@ -273,17 +320,20 @@ struct ProviderConfigSection: View {
 
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Model Selection").fontWeight(.medium)
+                    Text("Model Selection")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Load the endpoint's models, or type the id.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
 
                 Spacer(minLength: 16)
 
                 if currentBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text("Enter the API Endpoint above first.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
                 } else {
                     OpenAICompatibleModelPickerView(
@@ -305,7 +355,9 @@ struct ProviderConfigSection: View {
     private func apiKeyField(labelSuffix: String = "") -> some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("API Key\(labelSuffix)").fontWeight(.medium)
+                Text("API Key\(labelSuffix)")
+                    .font(theme.fontFootnote.weight(.semibold))
+                    .foregroundColor(theme.primaryText)
             }
 
             Spacer(minLength: 16)
@@ -440,7 +492,7 @@ struct ProviderConfigSection: View {
             // local providers work, and the classifier exempts loopback for exactly that reason.
             if let transportWarning {
                 Label(transportWarning, systemImage: "lock.open.trianglebadge.exclamationmark")
-                    .font(theme.fontCaption)
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.warningColor)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(8)
@@ -456,10 +508,12 @@ struct ProviderConfigSection: View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("API Endpoint")
-                    .fontWeight(.medium)
+                    .font(theme.fontFootnote.weight(.semibold))
+                    .foregroundColor(theme.primaryText)
                 Text("Optional override for custom gateways.")
-                    .font(.caption)
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2.5)
             }
 
             Spacer(minLength: 16)
@@ -467,6 +521,7 @@ struct ProviderConfigSection: View {
             HStack {
                 if isEditingBaseURL || (providerConfig.baseURL != nil && !providerConfig.baseURL!.isEmpty) {
                     TextField(Self.defaultBaseURL(for: providerConfig.apiProvider), text: baseURLBinding)
+                        .font(theme.fontFootnote)
                         .textFieldStyle(.roundedBorder)
                         .disableAutocorrection(true)
 
@@ -483,6 +538,7 @@ struct ProviderConfigSection: View {
                     .accessibilityLabel("Reset to default")
                 } else {
                     Text(Self.defaultBaseURL(for: providerConfig.apiProvider))
+                        .font(theme.fontFootnote)
                         .foregroundColor(theme.secondaryText)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 5)

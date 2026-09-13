@@ -4,13 +4,25 @@
 //  NotificationSettingsView.swift
 //  Devgentic
 //
-//  Settings panel for configuring the notification system.
+//  The notification settings, as a section of the General pane.
+//
+//  ⚠️ THE FILE NAME IS DELIBERATELY UNCHANGED. Three drift tests in
+//  DevgenticTests/Core/Notifications/NotificationChannelRegistryTests.swift read this file by its
+//  literal path (:198, :436, :459) and assert that specific source substrings are present. Their
+//  helper (:520-522) throws `XCTSkip` when the path does not resolve — so renaming or deleting this
+//  file does not turn the suite red, it turns those three tests into silent skips and drops their
+//  coverage invisibly. Keeping the path is what keeps them honest.
 //
 
 import SwiftUI
 import UserNotifications
 
-struct NotificationSettingsView: View {
+/// The notifications settings, rendered inside `GeneralSettingsView`.
+///
+/// ⚠️ THIS IS A SECTION, NOT A PANE. It used to be its own `SettingsCategory` row in the sidebar;
+/// it now renders at the top of General. It therefore owns NO `ScrollView` and NO outer padding —
+/// the host supplies both, and adding them back here nests a scroll view inside a scroll view.
+struct NotificationSettingsSection: View {
 
     @Bindable private var config = NotificationConfiguration.shared
     @Environment(\.appTheme) private var theme
@@ -26,194 +38,163 @@ struct NotificationSettingsView: View {
     @State private var channelErrorMessage: String? = nil
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: 24) {
 
-                // Permission Status Banner
-                if permissionStatus == .denied {
-                    HStack(spacing: 12) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.orange)
-                            .accessibilityHidden(true)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Notifications Disabled in System Settings")
-                                .font(theme.fontSubheadline.weight(.semibold))
-                                .foregroundColor(theme.primaryText)
-                            Text("Devgentic doesn't have permission to send notifications. Enable them to use this feature.")
-                                .font(.system(.caption))
-                                .foregroundColor(theme.secondaryText)
-                        }
-                        Spacer()
-                        Button("Open Settings") {
-                            openSystemNotificationSettings()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
+            // Permission Status Banner
+            if permissionStatus == .denied {
+                HStack(spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Notifications Disabled in System Settings")
+                            .font(theme.fontSubheadline.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
+                        Text("Devgentic doesn't have permission to send notifications. Enable them to use this feature.")
+                            .font(theme.fontCaption2)
+                            .foregroundColor(theme.secondaryText)
                     }
-                    .padding(12)
-                    .background(theme.warningColor.opacity(0.12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(theme.warningColor.opacity(0.3), lineWidth: 1)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    Spacer()
+                    TactileButton(
+                        title: "Open Settings",
+                        icon: "gearshape",
+                        variant: .primary,
+                        size: .compact
+                    ) {
+                        openSystemNotificationSettings()
+                    }
+                }
+                .padding(12)
+                .background(theme.warningColor.opacity(0.12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(theme.warningColor.opacity(0.3), lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+
+            // Consolidated Notifications Card
+            SettingsCard(title: "Notifications", icon: "bell.fill", theme: theme) {
+                // Master Toggle
+                SettingsRow(
+                    title: "Enable Notifications",
+                    description: "Receive alerts when queries complete while the app is in the background.",
+                    theme: theme
+                ) {
+                    Toggle("", isOn: $config.isGloballyEnabled)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .tint(theme.accentColor)
                 }
 
-                // Master Toggle
-                SettingsCard(title: "Notifications", icon: "bell.fill", theme: theme) {
-                    SettingsRow(
-                        title: "Enable Notifications",
-                        description: "Receive alerts when queries complete while the app is in the background.",
-                        theme: theme
-                    ) {
-                        Toggle("", isOn: $config.isGloballyEnabled)
+                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+
+                // Channels List
+                if !config.isGloballyEnabled {
+                    HStack(spacing: 8) {
+                        Image(systemName: "info.circle.fill")
+                            .font(theme.fontCaption2)
+                            .foregroundColor(theme.secondaryText.opacity(0.7))
+                            .accessibilityHidden(true)
+                        Text("Notifications are switched off above, so nothing is delivered on any channel. These switches still record your choice.")
+                            .font(theme.fontCaption2)
+                            .foregroundColor(theme.secondaryText)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+                }
+
+                if channels.isEmpty {
+                    HStack(spacing: 12) {
+                        Image(systemName: "hourglass")
+                            .font(theme.fontCallout)
+                            .foregroundColor(theme.secondaryText.opacity(0.6))
+                            .frame(width: 24, alignment: .center)
+                            .accessibilityHidden(true)
+                        Text("No delivery channels are registered yet.")
+                            .font(theme.fontCaption2)
+                            .foregroundColor(theme.secondaryText)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
+                } else {
+                    ForEach(Array(channels.enumerated()), id: \.element.id) { index, info in
+                        if index > 0 {
+                            Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+                        }
+                        ChannelRow(
+                            name: info.displayName,
+                            description: description(for: info),
+                            icon: icon(for: info),
+                            isEnabled: info.isEnabled,
+                            showsUnavailableWarning: isUnavailable(info),
+                            theme: theme
+                        ) {
+                            Toggle("", isOn: Binding(
+                                get: { info.isEnabled },
+                                set: { setChannel(info, enabled: $0) }
+                            ))
                             .toggleStyle(.switch)
                             .labelsHidden()
                             .tint(theme.accentColor)
+                            .accessibilityLabel(Text(verbatim: info.displayName))
+                        }
                     }
                 }
 
-                // Channels
-                //
-                // ⚠️ THIS CARD USED TO BE FOUR HARDCODED ROWS — "Local Notification" plus Slack,
-                // Discord and Telegram marked "Coming soon" — and it never asked the dispatcher
-                // anything. Both halves of that were wrong by the time it was read: the ChatOps
-                // channel (Telegram, Discord AND Slack) is registered and delivering, so the pane
-                // advertised as unbuilt something that already worked, and offered no way to turn
-                // it on or off. The rows now come from the registry, so a channel registered later
-                // appears here without this file changing.
-                SettingsCard(title: "Channels", icon: "square.grid.2x2.fill", theme: theme) {
-                    // ⚠️ A NOTICE, NOT A DISABLED STATE. These switches used to grey out when the
-                    // master switch was off, which said the same thing but also took the controls
-                    // away. This re-renders correctly only because `isGloballyEnabled` is now an
-                    // observed property — as an `@ObservationIgnored @AppStorage` it would have
-                    // rendered once and then gone stale, which is why the old code could not have
-                    // used a conditional here.
-                    if !config.isGloballyEnabled {
-                        HStack(spacing: 8) {
-                            Image(systemName: "info.circle.fill")
-                                .font(.system(size: 12))
-                                .foregroundColor(theme.secondaryText.opacity(0.7))
-                                .accessibilityHidden(true)
-                            Text("Notifications are switched off above, so nothing is delivered on any channel. These switches still record your choice.")
-                                .font(.system(size: 11))
-                                .foregroundColor(theme.secondaryText)
-                            Spacer()
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.top, 12)
+                if let channelErrorMessage {
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+                    HStack(spacing: 6) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.red)
+                            .font(theme.fontCaption2)
+                            .accessibilityHidden(true)
+                        Text(verbatim: channelErrorMessage)
+                            .font(theme.fontCaption2)
+                            .foregroundColor(.red)
                     }
-
-                    if channels.isEmpty {
-                        HStack(spacing: 12) {
-                            Image(systemName: "hourglass")
-                                .font(.system(size: 14))
-                                .foregroundColor(theme.secondaryText.opacity(0.6))
-                                .frame(width: 24, alignment: .center)
-                                .accessibilityHidden(true)
-                            Text("No delivery channels are registered yet.")
-                                .font(.system(size: 12))
-                                .foregroundColor(theme.secondaryText)
-                            Spacer()
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 14)
-                    } else {
-                        ForEach(Array(channels.enumerated()), id: \.element.id) { index, info in
-                            if index > 0 {
-                                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
-                            }
-                            ChannelRow(
-                                name: info.displayName,
-                                description: description(for: info),
-                                icon: icon(for: info),
-                                isEnabled: info.isEnabled,
-                                showsUnavailableWarning: isUnavailable(info),
-                                theme: theme
-                            ) {
-                                Toggle("", isOn: Binding(
-                                    get: { info.isEnabled },
-                                    set: { setChannel(info, enabled: $0) }
-                                ))
-                                .toggleStyle(.switch)
-                                .labelsHidden()
-                                .tint(theme.accentColor)
-                                // ⚠️ NOT `.disabled(!config.isGloballyEnabled)`, which is what this
-                                // was. It trapped the user: switching the master off greyed out
-                                // every channel switch, so no combination of controls gave ChatOps
-                                // mirroring without desktop banners, and a channel could not be
-                                // pre-configured before switching notifications on. Delivery is
-                                // enforced in `dispatch()`; this pane records intent, and recording
-                                // intent while the master switch is off is fine — the notice at the
-                                // top of this card says so plainly instead of greying things out.
-                                .accessibilityLabel(Text(verbatim: info.displayName))
-                            }
-                        }
-                    }
-
-                    if let channelErrorMessage {
-                        Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
-                        HStack(spacing: 6) {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.red)
-                                .font(.system(.caption))
-                                .accessibilityHidden(true)
-                            Text(verbatim: channelErrorMessage)
-                                .font(.system(.caption))
-                                .foregroundColor(.red)
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
                 }
+
+                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                 // Test Notification
-                SettingsCard(title: "Test Alert", icon: "hammer.fill", theme: theme) {
-                    SettingsRow(
-                        title: "Send Test Notification",
-                        description: "Send a mock local alert to verify Devgentic has correctly configured system permissions.",
-                        theme: theme
+                SettingsRow(
+                    title: "Send Test Notification",
+                    description: "Send a mock local alert to verify Devgentic has correctly configured system permissions.",
+                    theme: theme
+                ) {
+                    TactileButton(
+                        title: testSent ? "Test Sent!" : "Test",
+                        icon: testSent ? "checkmark.circle.fill" : "bell.and.waves.left.and.right",
+                        variant: testSent ? .primary : .secondary,
+                        size: .compact,
+                        isDisabled: permissionStatus == .denied
                     ) {
-                        Button {
-                            sendTestNotification()
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: testSent ? "checkmark.circle.fill" : "bell.and.waves.left.and.right")
-                                    .foregroundColor(testSent ? .green : theme.accentColor)
-                                Text(testSent ? "Test Sent!" : "Test")
-                                    .font(.system(size: 11, weight: .semibold))
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        // ⚠️ DELIBERATELY NOT `.disabled(!config.isGloballyEnabled ...)`. A
-                        // diagnostic control that refuses to run cannot diagnose: greying this out
-                        // when notifications are off tells the user nothing they did not already
-                        // know, while running it and naming the real cause tells them exactly which
-                        // of the three gates — master switch, channel switch, OS permission — is
-                        // stopping delivery. (This modifier was ALSO reading a value SwiftUI never
-                        // refreshed; that defect is fixed at its source now, but the reasoning above
-                        // is why the modifier stays gone.)
-                        .disabled(permissionStatus == .denied)
-                    }
-
-                    if let errorMsg = testErrorMessage {
-                        Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
-                        HStack(spacing: 6) {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.red)
-                                .font(.system(.caption))
-                                .accessibilityHidden(true)
-                            Text(errorMsg)
-                                .font(.system(.caption))
-                                .foregroundColor(.red)
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
+                        sendTestNotification()
                     }
                 }
+
+                if let errorMsg = testErrorMessage {
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+                    HStack(spacing: 6) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.red)
+                            .font(theme.fontCaption2)
+                            .accessibilityHidden(true)
+                        Text(errorMsg)
+                            .font(theme.fontCaption2)
+                            .foregroundColor(.red)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                }
             }
-            .padding(24)
         }
         .task {
             await refreshPermissionStatus()
@@ -376,10 +357,10 @@ private struct ChannelRow<Control: View>: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(verbatim: name)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(theme.fontFootnote.weight(.semibold))
                     .foregroundColor(theme.primaryText)
                 Text(description)
-                    .font(.system(size: 11))
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText.opacity(0.8))
             }
 

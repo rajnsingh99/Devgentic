@@ -211,6 +211,11 @@ final class SchedulerService {
     // MARK: - Scheduling (Timers)
 
     func rescheduleAll() {
+        // ⚠️⚠️ GUARDED HERE RATHER THAN AT THE CALL SITE, because the call site is the app's launch
+        // and the test host RUNS THE APP'S LAUNCH. An armed timer outlives the test that provoked
+        // it: a suite taking minutes gives a cron task its next occurrence and fires it mid-run.
+        guard TestHost.permits("arm scheduled-task timers", logger: logger) else { return }
+
         // Cancel all existing timers
         for id in timers.keys {
             cancelTimer(for: id)
@@ -287,6 +292,16 @@ final class SchedulerService {
     /// switch away and back. The bootstrap now calls this itself after loading, and an early call
     /// records that it must be replayed rather than being lost.
     func evaluateAndFireDueTasks() {
+        // ⚠️⚠️ THE MOST EXPENSIVE UNGUARDED LINE IN THE LAUNCH PATH. This fires overdue tasks, and
+        // firing one is a REAL agent turn against the user's REAL API key — money, on every
+        // `test-without-building` run. It is reached twice: `DevgenticApp` at launch, and again on
+        // `didBecomeActive`, which a test host also triggers.
+        //
+        // ⚠️ AND IT COMPOUNDS, which is what makes it more than a one-off. `/tmp/devgentic-testhost.store`
+        // PERSISTS BETWEEN RUNS, so a task any test writes is still there next time, overdue, and
+        // fires then — a test that scheduled something once keeps spending money afterwards.
+        guard TestHost.permits("fire due scheduled tasks (each one is a real agent turn against the user's real API key)", logger: logger) else { return }
+
         guard hasLoadedTasks else {
             pendingEvaluationAfterLoad = true
             logger.warning(

@@ -22,10 +22,12 @@ struct ExecutionLimitsSection: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Max Iterations")
-                        .font(theme.fontBody.weight(.medium))
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Maximum reasoning cycles before forced termination")
-                        .font(theme.fontCaption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
 
                 Spacer(minLength: 16)
@@ -45,10 +47,12 @@ struct ExecutionLimitsSection: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Execution Timeout")
-                        .font(theme.fontBody.weight(.medium))
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Maximum wall-clock time for a single execution")
-                        .font(theme.fontCaption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
 
                 Spacer(minLength: 16)
@@ -73,7 +77,7 @@ struct ExecutionLimitsSection: View {
                 } else {
                     HStack(spacing: 8) {
                         Text("No limit")
-                            .font(theme.fontCallout)
+                            .font(theme.fontFootnote)
                             .foregroundColor(theme.secondaryText)
 
                         GlassActionButton(title: "Set", icon: "clock") {
@@ -122,10 +126,12 @@ struct ErrorRecoverySection: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("On Parse Failure")
-                        .font(theme.fontBody.weight(.medium))
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Retries when the model returns unparseable output")
-                        .font(theme.fontCaption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
 
                 Spacer(minLength: 16)
@@ -150,10 +156,12 @@ struct ErrorRecoverySection: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Tool Failure Tolerance")
-                        .font(theme.fontBody.weight(.medium))
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Gives up after this many tool failures in a row")
-                        .font(theme.fontCaption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
 
                 Spacer(minLength: 16)
@@ -175,10 +183,12 @@ struct ErrorRecoverySection: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("On Tool Failure")
-                        .font(theme.fontBody.weight(.medium))
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("When a tool execution fails repeatedly")
-                        .font(theme.fontCaption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
 
                 Spacer(minLength: 16)
@@ -204,8 +214,8 @@ struct ErrorRecoverySection: View {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text("Fallback Message")
-                            .font(theme.fontCaption.weight(.medium))
-                            .foregroundColor(theme.secondaryText)
+                            .font(theme.fontFootnote.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
                         Spacer()
                         if effectiveRecovery.fallbackMessage != nil {
                             GlassActionButton(title: "Reset to Default", icon: "arrow.counterclockwise", isAccent: false) {
@@ -239,7 +249,7 @@ struct ErrorRecoverySection: View {
                     )
 
                     Text("This message is injected into the agent's working memory when tools fail repeatedly. The failure reason is automatically prepended.")
-                        .font(theme.fontCaption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.tertiaryText)
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
@@ -249,10 +259,12 @@ struct ErrorRecoverySection: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("On Budget Exhausted")
-                        .font(theme.fontBody.weight(.medium))
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("When max iterations are reached without completion")
-                        .font(theme.fontCaption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
 
                 Spacer(minLength: 16)
@@ -312,10 +324,12 @@ struct LoopSafetySection: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Repetition Tolerance")
-                        .font(theme.fontBody.weight(.medium))
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Stops the run when a tool returns the same result this many times — the model is warned one call early")
-                        .font(theme.fontCaption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
 
                 Spacer(minLength: 16)
@@ -340,10 +354,12 @@ struct LoopSafetySection: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Denial Limit")
-                        .font(theme.fontBody.weight(.medium))
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Stops the run after this many denials in a row — repeats of a declined request are auto-denied")
-                        .font(theme.fontCaption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
 
                 Spacer(minLength: 16)

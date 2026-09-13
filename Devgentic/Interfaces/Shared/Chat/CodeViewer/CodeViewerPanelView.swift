@@ -985,10 +985,13 @@ struct CodeViewerPanelView: View {
             // SIZE-CAPPED like the live-tab pre-read (`handleAgentWriteBegan`). This is the only
             // engine that reads whatever destination the USER chose, which is why it was fixed
             // first — it is the one that can be pointed at an arbitrarily large file.
-            // ⚠️ NOT the last engine doing both inline: `ChatHistoryViewModel.saveTabToItsPath`
-            // (the ⌘S path for a path-linked tab) still reads and writes synchronously on the
-            // main actor with NO cap, so a large agent-written file opened from a timeline row
-            // still beachballs on save. Filed, not fixed here.
+            // ⚠️ Half of this note is now out of date and half is still true.
+            // `ChatHistoryViewModel.saveTabToItsPath` (the ⌘S path for a path-linked tab) NO
+            // LONGER reads or writes on the main actor — its drift read runs in a
+            // `Task.detached` and its write goes through `atomicallyWrite`. What it still lacks
+            // is this engine's SIZE CAP: that read is an uncapped `String(contentsOf:)`, so a
+            // very large agent-written file opened from a timeline row still allocates whole
+            // into memory on save. Off-main, so no beachball — a memory spike, not a freeze.
             // `savePanel.begin`'s completion is @MainActor (this method already touched
             // `chatHistoryViewModel` here synchronously before this fix), so the `Task`
             // below inherits that and only the two `await`ed legs leave it.

@@ -199,6 +199,54 @@ class OllamaService {
     var modelToPull: String = "" // For UI binding
     var isPullingModel: Bool = false
     var pullStatusMessage: String = ""
+
+    /// The pull narration that only changes at a LIFECYCLE boundary — start, success, cancel,
+    /// failure — never per progress line.
+    ///
+    /// ⚠️ EXISTS SO AN OBSERVER CAN TRACK IT SAFELY. `pullStatusMessage` is rewritten once per
+    /// NDJSON line for the whole of a multi-GB pull, and Observation's `withMutation` fires on
+    /// every assignment regardless of equality — so a view model that tracks it runs its full
+    /// re-filter and re-sort per progress line. That is the exact regression `pullProgress` is
+    /// excluded from the store observer to avoid; this property is the version that is safe to
+    /// mirror. Live progress belongs to `DownloadManager`, which the cards read directly.
+    var pullTerminalState: PullTerminalState?
+
+    /// How the most recent pull ended, carried as a VALUE rather than as prose.
+    ///
+    /// ⚠️ THE OUTCOME AND ITS SENTENCE TRAVEL TOGETHER ON PURPOSE. The first version of this was a
+    /// bare `String`, and the banner picked its icon from `isPullingModel` — a PHASE, not an
+    /// OUTCOME — so "Download cancelled." and "Failed to pull X." both rendered under a green
+    /// success tick the moment the pull stopped being in flight. A free-text status cannot answer
+    /// "did this succeed?", and any second property holding the answer can drift from the text it
+    /// describes. One value, one answer.
+    enum PullTerminalState: Equatable {
+        case started(model: String)
+        case succeeded(model: String)
+        case cancelled
+        case failed(model: String)
+
+        var message: String {
+            switch self {
+            case .started(let model):   return "Starting pull for \(model)…"
+            case .succeeded(let model): return "Successfully pulled \(model)."
+            case .cancelled:            return "Download cancelled."
+            case .failed(let model):    return "Failed to pull \(model)."
+            }
+        }
+
+        /// True once the pull has stopped — the banner uses this, never `isPullingModel`.
+        var isTerminal: Bool {
+            if case .started = self { return false }
+            return true
+        }
+
+        /// ⚠️ `.cancelled` is NOT a success. It is not an error either — the user asked for it —
+        /// so it gets neither a green tick nor a red triangle.
+        var isSuccess: Bool {
+            if case .succeeded = self { return true }
+            return false
+        }
+    }
     var modelPullError: String? = nil
     var pullProgress: Double = 0.0
     var pullStage: String = "" // e.g., "downloading", "verifying"
@@ -284,7 +332,29 @@ class OllamaService {
         guard serverStatus == .connected, !isPullingModel, !isRemovingModel else {
             return
         }
+        await performLocalModelRefresh()
+    }
 
+    /// The refresh itself, WITHOUT the "is anything else in flight?" guard.
+    ///
+    /// ⚠️ EXISTS BECAUSE `pullModel` MUST REFRESH FROM INSIDE ITS OWN WINDOW. `loadLocalModels`'s
+    /// guard is there to stop a view appearance racing a pull or a delete — but a pull's own
+    /// completion is the one caller that has to refresh while `isPullingModel` is still true, and
+    /// it was calling the GUARDED entry point, which returned immediately having fetched nothing.
+    ///
+    /// Two things depended on that refresh actually happening:
+    ///   · the model the user just pulled never appeared in the store grid — the observer fired on
+    ///     the `isPullingModel` transition and re-filtered a STALE `localModels`, so it took a
+    ///     manual Refresh or a navigate-away-and-back to show up;
+    ///   · `DownloadManager` classifies the terminal state by reading
+    ///     `OllamaService.shared.localModels` on that same transition, under a comment asserting
+    ///     the list is fresh by then. It was not, so `isInstalledNow` was always false and the
+    ///     classification fell through to the `progress >= 0.99` heuristic.
+    ///
+    /// ⚠️ Do NOT "simplify" the call in `pullModel` back to `loadLocalModels()`, and do not clear
+    /// `isPullingModel` early to get past the guard instead: the bridge would then observe the
+    /// pull finishing BEFORE the list was refreshed, which is the same race from the other side.
+    private func performLocalModelRefresh() async {
         isLoadingModels = true
         modelLoadingError = nil
         
@@ -339,8 +409,32 @@ class OllamaService {
         }
         self.ollamaBaseURL = baseURL
 
+        // ⚠️ THIS SINGLE MISSING ASSIGNMENT WAS THE WHOLE DEFECT. `DownloadManager.bindOllama`
+        // tracks both this and `isPullingModel`, and opens a record only on
+        // `isPulling && !modelName.isEmpty`; with no assignment site anywhere in the repo that
+        // predicate was permanently false, so an Ollama pull produced no DownloadRecord, no
+        // sidebar row, no progress bar, no ETA and no Cancel button. Trimmed, because the trimmed
+        // form is what the record's `modelIdentifier` must match in `activeRecordMatches`.
+        //
+        // ⚠️ THE INVARIANT IS "BEFORE THE NEXT SUSPENSION POINT", NOT "BEFORE `isPullingModel`".
+        // `ObservationStream`'s onChange schedules `Task { @MainActor … }`, which cannot run until
+        // this synchronous block yields — so the bridge's first observation sees the block's FINAL
+        // state and never an intermediate one. Swapping these two lines is observationally
+        // identical. What is load-bearing is only that `modelToPull` is non-empty by the time this
+        // function next awaits.
+        // (An earlier version of this comment claimed the relative order mattered. It does not;
+        // do not reintroduce a test that pins it, or a `defer`-based cleanup — which would be
+        // strictly better, since it also covers a future early return — fails the build.)
+        modelToPull = trimmedModelName
+        // ⚠️ These two ARE order-sensitive, unlike the pair above, and for a real reason: the
+        // observer task scheduled by this block runs at the NEXT suspension point and reads them.
+        // Counters left from the PREVIOUS pull would be baked into the new record's size, giving a
+        // wrong percentage and ETA. Nothing else clears them on this path.
+        pullTotalBytes = nil
+        pullCompletedBytes = nil
         isPullingModel = true
         pullStatusMessage = "Starting pull for \(trimmedModelName)..."
+        pullTerminalState = .started(model: trimmedModelName)
         modelPullError = nil
         pullProgress = 0.0
         pullStage = "Starting..."
@@ -368,9 +462,14 @@ class OllamaService {
         do {
             try await pullTask?.value
             pullStatusMessage = "Successfully pulled \(trimmedModelName)."
-            await loadLocalModels()
+            pullTerminalState = .succeeded(model: trimmedModelName)
+            // ⚠️ The UNGUARDED refresh, and it must stay that way — see
+            // `performLocalModelRefresh`. `isPullingModel` is still true here, which is precisely
+            // what `loadLocalModels`'s own guard rejects, so that call fetched nothing.
+            await performLocalModelRefresh()
         } catch is CancellationError {
             pullStatusMessage = "Download cancelled."
+            pullTerminalState = .cancelled
             modelPullError = nil
         } catch {
             let rawErrorMessage = error.localizedDescription
@@ -381,9 +480,20 @@ class OllamaService {
                 self.modelPullError = "Pull failed: \(ErrorHandling.generateUserFriendlyMessage(for: error, backendType: .ollama))"
             }
             pullStatusMessage = "Failed to pull \(trimmedModelName)."
+            pullTerminalState = .failed(model: trimmedModelName)
         }
         
         isPullingModel = false
+        // ⚠️ MUST BE CLEARED IN THIS SAME SYNCHRONOUS BLOCK, so the bridge's next observation sees
+        // a finished pull rather than one whose name has outlived it — `DownloadCoordinator` builds
+        // its "already pulling" refusal message from `modelToPull`.
+        //
+        // The ORDER relative to `isPullingModel = false` does not matter: no suspension point
+        // separates them, so the observer task cannot run in between and can never see an
+        // intermediate pair. (This comment previously claimed clearing first would close the record
+        // as CANCELLED — it would not, and the sentence that followed already said why. The real
+        // rule is "same block", not "after".)
+        modelToPull = ""
         pullTask = nil
     }
 
@@ -512,6 +622,7 @@ class OllamaService {
     
     func clearPullActionStatus() {
         pullStatusMessage = ""
+        pullTerminalState = nil
         modelPullError = nil
         pullProgress = 0.0
         pullStage = ""

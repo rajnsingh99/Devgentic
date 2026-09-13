@@ -67,10 +67,16 @@ final class JarvisAmbientRunWatcher: ActiveStreamMirrorDelegate {
 
     // MARK: - ActiveStreamMirrorDelegate
 
-    func activeStreamManager(_ manager: ActiveStreamManager, didStartStream message: ChatMessage, for conversationID: UUID) {
-        // ⚠️ Only a timestamp can be recorded here. `messageSource` is ALWAYS `.localUI` at this
+    func activeStreamManager(_ manager: ActiveStreamManager, didStartStream message: ChatMessage,
+                             startedBy: MessageSource, for conversationID: UUID) {
+        // ⚠️ Only a timestamp is recorded here. `message.messageSource` is ALWAYS `.localUI` at this
         // point — every caller assigns it after `startMessageStream` returns — so classification
         // has to wait for the end event.
+        //
+        // ⚠️ `startedBy` NOW CARRIES THE ANSWER, and this watcher deliberately ignores it: its
+        // classification reads the AGENT message at `didEndStream` (see `announce`), and switching
+        // to the start value would change which runs Jarvis speaks. The parameter exists for
+        // `RemoteMirrorService`, which must decide at START whether a run may leave the machine.
         guard JarvisConfigManager.shared.ambientAnnouncements else { return }
         if startedAt.count >= Self.maxTrackedRuns, let oldest = startedAt.min(by: { $0.value < $1.value })?.key {
             startedAt.removeValue(forKey: oldest)

@@ -37,12 +37,18 @@ final class TimelineGroupingTests: XCTestCase {
         }
     }
 
+    /// ⚠️ UPDATED 2026-09-12 (tc-11). This used to pass NO `finalContentText` and still assert the
+    /// thought was dropped — pass 1 ran unconditionally. It is now gated on there actually being
+    /// an answer below to duplicate, which is the premise the pass's own comment states, so the
+    /// test supplies one. Its twin below covers the case that used to lose the narrative.
     func testTrailingThoughtDeduplicatedWhenNotStreaming() {
         let events: [TimelineEvent] = [
             .toolExecution(ToolExecutionData(id: UUID(), name: "read_file", params: "{}", output: "content", isSuccess: true, isExecuting: false)),
             .thought(id: UUID(), text: "Final summary")
         ]
-        let nodes = AgentTimelineView.buildGroupedNodes(from: events, isStreaming: false)
+        let nodes = AgentTimelineView.buildGroupedNodes(
+            from: events, isStreaming: false, finalContentText: "Here is the answer."
+        )
         // The trailing thought should be removed, leaving the lone tool as a plain
         // `.action` row (a collapsible `.actionGroup` requires 2+ tools by design).
         XCTAssertEqual(nodes.count, 1)
@@ -55,6 +61,33 @@ final class TimelineGroupingTests: XCTestCase {
         } else {
             XCTFail("Expected a single .action node (single tools don't form groups)")
         }
+    }
+
+    /// ⚠️ THE tc-11 REGRESSION GUARD. With no answer below, the trailing narrative is the ONLY
+    /// record of what the agent did — a cancelled or skipped run renders exactly this shape.
+    /// Mutation that must kill this: drop `hasFinalAnswerBelow` from pass 1's condition.
+    func testTrailingThoughtSurvivesWhenThereIsNoFinalAnswerBelow() {
+        let events: [TimelineEvent] = [
+            .toolExecution(ToolExecutionData(id: UUID(), name: "read_file", params: "{}", output: "content", isSuccess: true, isExecuting: false)),
+            .thought(id: UUID(), text: "Checking the config before giving up")
+        ]
+        let nodes = AgentTimelineView.buildGroupedNodes(from: events, isStreaming: false)
+        XCTAssertEqual(nodes.count, 2,
+                       "nothing duplicates the thought, so deleting it destroys the only 'why' the user has")
+    }
+
+    /// A synthetic stopped-run placeholder is not an answer either — it is the marker for a run
+    /// that produced nothing, which is precisely when the narrative matters most.
+    func testTrailingThoughtSurvivesWhenTheAnswerIsOnlyAStoppedPlaceholder() {
+        let events: [TimelineEvent] = [
+            .toolExecution(ToolExecutionData(id: UUID(), name: "read_file", params: "{}", output: "content", isSuccess: true, isExecuting: false)),
+            .thought(id: UUID(), text: "Checking the config before giving up")
+        ]
+        let nodes = AgentTimelineView.buildGroupedNodes(
+            from: events, isStreaming: false,
+            finalContentText: ChatMessage.stoppedRunPlaceholder
+        )
+        XCTAssertEqual(nodes.count, 2)
     }
 
     func testTrailingThoughtKeptWhenStreaming() {

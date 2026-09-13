@@ -55,7 +55,11 @@ struct PromptDetailContainerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            DynamicIslandBar(onBack: handleBackTap) {
+            DynamicIslandBar(
+                title: editVM.title.isEmpty ? "Prompt" : editVM.title,
+                icon: "text.quote",
+                onBack: handleBackTap
+            ) {
                 actionButtons
             }
 

@@ -139,6 +139,10 @@ final class JarvisStreamingSpeaker: NSObject, AVSpeechSynthesizerDelegate {
         // ⚠️ Two synthesizers must never hold CoreAudio at once: the chat Read-Aloud island owns
         // a long-lived one, and its teardown racing our engine is the documented dead-mic bug.
         SpeechService.shared.stop()
+        // [sa-8] …and the converse. `stop()` takes the floor FROM Read Aloud; this is how Read
+        // Aloud takes it back. Without it, pressing Read Aloud silenced the synthesizer but left
+        // THIS driver ingesting the answer and queueing utterances, so the two interleaved.
+        SpeechService.shared.registerExternalNarration(owner: self) { [weak self] in self?.cancel() }
         observedMessageID = message.id
         logger.info("[JARVIS_TTS]\(self.correlationTag) Narrating message \(message.id.uuidString.prefix(8)) — mode \(JarvisConfigManager.shared.spokenResponses.rawValue).")
         observe(message)
@@ -215,6 +219,10 @@ final class JarvisStreamingSpeaker: NSObject, AVSpeechSynthesizerDelegate {
     func cancel() {
         guard !cancelled else { return }
         cancelled = true
+        // [sa-8] Release the floor claim. Left set, a stale closure would make the NEXT Read
+        // Aloud cancel a speaker that had already finished — harmless here, but the clearing
+        // rule is what keeps the hand-off honest in both directions.
+        SpeechService.shared.releaseExternalNarrationCanceller(ifOwnedBy: self)
         observedMessageID = nil
         onDrained = nil
         drainWatchdog?.cancel()
@@ -237,6 +245,7 @@ final class JarvisStreamingSpeaker: NSObject, AVSpeechSynthesizerDelegate {
 
     /// Drops the synthesizer so its audio unit is deallocated before the microphone opens.
     func releaseAudio() {
+        SpeechService.shared.releaseExternalNarrationCanceller(ifOwnedBy: self)
         synthesizer?.delegate = nil
         synthesizer = nil
         // ⚠️ Only the SYNTHESIZER is released here, never the engine: the engine is panel-scoped

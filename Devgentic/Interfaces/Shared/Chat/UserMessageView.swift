@@ -83,27 +83,26 @@ struct UserMessageView: View {
                     // ~100 times per 200pt of drag, per visible long message. `onAppear` ran it
                     // once, so making the trigger correct also made it far more frequent; this
                     // keeps the correctness and pays for one measurement per settled width.
-                    if lastMeasuredWidth == 0 {
-                        measureTask?.cancel()
-                        measureTask = nil
-                        determineTruncation(availableWidth: width)
-                    } else {
-                        measureTask?.cancel()
-                        measureTask = Task { @MainActor in
-                            try? await Task.sleep(for: .milliseconds(120))
-                            guard !Task.isCancelled else { return }
-                            determineTruncation(availableWidth: width)
-                        }
-                    }
+                    scheduleMeasure(width: width, immediate: lastMeasuredWidth == 0)
                 }
                 .onChange(of: themeManager.chatFontSize) { _, _ in
-                    // Same width, different glyph metrics: clear the cached width so the
-                    // ±2pt guard in `determineTruncation` cannot short-circuit the re-measure,
-                    // and so the branch above treats this as a first measurement (immediate).
-                    measureTask?.cancel()
-                    measureTask = nil
-                    lastMeasuredWidth = 0
-                    determineTruncation(availableWidth: geometry.size.width)
+                    // ⚠️ [bm-6] DEBOUNCED, and it no longer zeroes the width sentinel.
+                    //
+                    // The only writer of `chatFontSize` is the settings slider, which emits one
+                    // change per step — so a 12→22 drag fired ~10 SYNCHRONOUS measurement bursts,
+                    // two NSHostingViews over the full message text each, for every long message
+                    // in the transcript. All of it invisible: the settings pane is a layer ABOVE
+                    // the chat, which is held at opacity 0 while it is open (still laid out, so
+                    // the work still happens; just nothing to see).
+                    //
+                    // ⚠️ Zeroing `lastMeasuredWidth` here was the subtler half. That sentinel
+                    // means "never measured, measure inline" to the width handler above, so
+                    // between a font change and its re-measure ANY width callback took the
+                    // immediate branch too — one slider step could cost four hosting-view
+                    // layouts per row, not two. The font size is part of the cache KEY now
+                    // (`lastMeasuredFontSize`), which makes a font change a genuine cache MISS
+                    // with nothing to zero.
+                    scheduleMeasure(width: geometry.size.width, immediate: false)
                 }
                 .onDisappear {
                     // A row scrolled out of the LazyVStack must not keep a pending measurement
@@ -132,15 +131,57 @@ struct UserMessageView: View {
     }
     
     /// Cached width for which truncation was last computed — avoids re-creating
-    /// expensive NSHostingViews on every GeometryReader callback. Reset to 0 by the
-    /// font-size `onChange` in `truncationProbe`, which is the one caller that needs a
-    /// re-measure at an UNCHANGED width.
+    /// expensive NSHostingViews on every GeometryReader callback.
+    ///
+    /// ⚠️ [bm-6] 0 still means "never measured": the first geometry callback can arrive before
+    /// layout resolves, and `determineTruncation(availableWidth: 0)` is then short-circuited by
+    /// the ±2pt guard below, leaving this at 0 so the first REAL width is still measured
+    /// immediately. Do not replace that with an optional — it would make the degenerate callback
+    /// a genuine measurement at `.frame(width: 0)`, which sets a bogus truncation flag AND makes
+    /// the first real width take the debounced path.
     @State private var lastMeasuredWidth: CGFloat = 0
 
+    /// [bm-6] The font size the cached width was measured AT. Same width with different glyph
+    /// metrics is a different answer, so it belongs in the key rather than being papered over by
+    /// zeroing the width at the call site.
+    @State private var lastMeasuredFontSize: CGFloat = 0
+
+    /// [bm-6] The one scheduler both triggers use. `immediate` is true only for a first
+    /// measurement, where a 120 ms delay would pop the chevron in late on every scroll-back.
+    private func scheduleMeasure(width: CGFloat, immediate: Bool) {
+        measureTask?.cancel()
+        measureTask = nil
+        guard !immediate else {
+            determineTruncation(availableWidth: width)
+            return
+        }
+        measureTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled else { return }
+            determineTruncation(availableWidth: width)
+        }
+    }
+
+    /// [bm-6] Whether the cached truncation answer is still valid. Pure and `nonisolated` so the
+    /// cache KEY is testable: the rest of this path is `@State` behind a private method, and the
+    /// defect was entirely in what the key did — and did not — include.
+    ///
+    /// ±2pt on the width, because a window drag emits a callback roughly every point and the
+    /// answer cannot change that fast. EXACT on the font size: one step of the settings slider
+    /// changes every glyph metric, so a tolerance there would silently serve a stale answer.
+    nonisolated static func shouldRemeasure(availableWidth: CGFloat, lastMeasuredWidth: CGFloat,
+                                            fontSize: CGFloat, lastMeasuredFontSize: CGFloat) -> Bool {
+        abs(availableWidth - lastMeasuredWidth) > 2 || fontSize != lastMeasuredFontSize
+    }
+
     private func determineTruncation(availableWidth: CGFloat) {
-        // Skip re-computation if the width hasn't changed meaningfully (±2pt tolerance).
-        guard abs(availableWidth - lastMeasuredWidth) > 2 else { return }
+        // Skip re-computation if neither the width nor the glyph metrics moved meaningfully.
+        guard Self.shouldRemeasure(availableWidth: availableWidth,
+                                   lastMeasuredWidth: lastMeasuredWidth,
+                                   fontSize: themeManager.chatFontSize,
+                                   lastMeasuredFontSize: lastMeasuredFontSize) else { return }
         lastMeasuredWidth = availableWidth
+        lastMeasuredFontSize = themeManager.chatFontSize
 
         // Heuristic fast-path: a message that cannot reach `lineLimitCollapsed` lines is
         // never truncatable, so skip the expensive hosting views. "Cannot reach" has to be

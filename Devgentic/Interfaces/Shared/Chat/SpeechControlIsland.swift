@@ -51,7 +51,7 @@ struct SpeechControlIsland: View {
                 ForEach(SpeechService.speedPresets, id: \.self) { rate in
                     Button(action: { speechService.setRate(rate) }) {
                         HStack {
-                            Text(formatRate(rate))
+                            Text(Self.formatRate(rate))
                             if speechService.currentRate == rate {
                                 Image(systemName: "checkmark")
                             }
@@ -59,7 +59,7 @@ struct SpeechControlIsland: View {
                     }
                 }
             } label: {
-                Text(formatRate(speechService.currentRate))
+                Text(Self.formatRate(speechService.currentRate))
                     .font(.system(size: 11, weight: .semibold, design: .monospaced)) // Fixed size: monospaced
                     .foregroundColor(speechService.currentRate != 1.0 ? theme.accentColor : theme.primaryText)
                     .padding(.horizontal, 6)
@@ -67,7 +67,7 @@ struct SpeechControlIsland: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .accessibilityLabel("Speech speed: \(formatRate(speechService.currentRate))")
+            .accessibilityLabel("Speech speed: \(Self.formatRate(speechService.currentRate))")
 
             islandDivider
 
@@ -167,11 +167,21 @@ struct SpeechControlIsland: View {
         .buttonStyle(IslandButtonStyle())
     }
 
-    private func formatRate(_ rate: Float) -> String {
-        if rate == Float(Int(rate)) {
-            return "\(Int(rate))x"
-        }
-        return String(format: "%.1fx", rate).replacingOccurrences(of: ".0x", with: "x")
+    /// ⚠️ [sa-6] TWO decimals, trailing zeros trimmed — not `%.1f`.
+    ///
+    /// `SpeechService.speedPresets` is `[0.5, 0.75, 1.0, 1.25, 1.5, 2.0]`, and one decimal
+    /// rendered the two QUARTER steps as "0.8x" and "1.2x": the menu offered a speed, and the
+    /// badge then reported a different one, for a value the user picked from a fixed list. All
+    /// three call sites — the menu item, the badge and the VoiceOver label — go through here, so
+    /// the wrong number appeared in all of them at once.
+    ///
+    /// `nonisolated static` so it is testable without a view; it is a pure formatter and its
+    /// three callers are the only consumers. Integers keep their old rendering ("1x", "2x").
+    nonisolated static func formatRate(_ rate: Float) -> String {
+        var text = String(format: "%.2f", rate)
+        while text.contains("."), text.hasSuffix("0") { text.removeLast() }
+        if text.hasSuffix(".") { text.removeLast() }
+        return text + "x"
     }
 }
 

@@ -258,7 +258,7 @@ struct MLXSettingsView: View {
                 .font(.system(size: 10, weight: .semibold))
                 .accessibilityHidden(true)
             Text("Current value \(current) exceeds this model's \(what) cap of \(cap). Your setting is kept — lower it if this model cannot handle it.")
-                .font(.caption2)
+                .font(theme.fontCaption2)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .foregroundColor(theme.warningColor)
@@ -271,10 +271,13 @@ struct MLXSettingsView: View {
             // Temperature
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Temperature").fontWeight(.medium)
+                    Text("Temperature")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Sharpens or flattens the next-token distribution. 0.0 = pick the single most likely token (fully deterministic, best for structured tool calls). 0.5–0.7 = natural conversation. 1.0+ = creative/varied but less reliable. Above 1.5 is rarely useful.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
@@ -284,7 +287,8 @@ struct MLXSettingsView: View {
                         .accessibilityValue(String(format: "%.2f", config.temperature))
                         .frame(width: 150)
                     Text("\(config.temperature, specifier: "%.2f")")
-                        .monospacedDigit()
+                        .font(theme.fontFootnote.monospacedDigit())
+                        .foregroundColor(theme.secondaryText)
                         .frame(width: 40, alignment: .trailing)
                 }
             }
@@ -294,10 +298,13 @@ struct MLXSettingsView: View {
             // Top P
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Top P").fontWeight(.medium)
+                    Text("Top P")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("After temperature, restricts sampling to the smallest set of tokens whose combined probability reaches this value (nucleus sampling). 1.0 = no filter. 0.9–0.95 = standard for chat. 0.7–0.85 = tighter; pairs with higher temperature to keep output coherent. Lower temperature usually beats lower Top P for structured output.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
@@ -307,7 +314,8 @@ struct MLXSettingsView: View {
                         .accessibilityValue(String(format: "%.2f", config.topP))
                         .frame(width: 150)
                     Text("\(config.topP, specifier: "%.2f")")
-                        .monospacedDigit()
+                        .font(theme.fontFootnote.monospacedDigit())
+                        .foregroundColor(theme.secondaryText)
                         .frame(width: 40, alignment: .trailing)
                 }
             }
@@ -317,10 +325,13 @@ struct MLXSettingsView: View {
             // Repetition Penalty
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Repetition Penalty").fontWeight(.medium)
+                    Text("Repetition Penalty")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Multiplier applied to the probability of recently-emitted tokens. 1.0 = off. 1.05–1.15 = mild (suits frontier models). 1.20–1.30 = strong, useful when small/Q4 models lock into identical tool-call patterns. Above 1.5 can make output incoherent.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
@@ -330,7 +341,8 @@ struct MLXSettingsView: View {
                         .accessibilityValue(String(format: "%.2f", config.repetitionPenalty))
                         .frame(width: 150)
                     Text("\(config.repetitionPenalty, specifier: "%.2f")")
-                        .monospacedDigit()
+                        .font(theme.fontFootnote.monospacedDigit())
+                        .foregroundColor(theme.secondaryText)
                         .frame(width: 40, alignment: .trailing)
                 }
             }
@@ -340,13 +352,16 @@ struct MLXSettingsView: View {
             // Repetition Context Size — TextField + Stepper combo with model-derived cap
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Repetition Context Size").fontWeight(.medium)
+                    Text("Repetition Context Size")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("How far back (in tokens) the repetition penalty looks. Larger windows catch longer-range loops at a small decode-speed cost. Chat models rarely need more than 64; small/Q4 local models prone to JSON-template loops benefit from values ≥200 because a single tool-call envelope is ~60 tokens.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                         .fixedSize(horizontal: false, vertical: true)
                     Text("Range: 10–\(repCtxCap)\(modelContextSuffix)")
-                        .font(.caption2).foregroundColor(theme.secondaryText.opacity(0.7))
+                        .font(theme.fontCaption2).foregroundColor(theme.secondaryText.opacity(0.7))
 
                     if config.repetitionContextSize > repCtxCap {
                         overCapWarning(
@@ -381,13 +396,16 @@ struct MLXSettingsView: View {
             // Max Tokens — TextField + Stepper combo with model-derived cap
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Max Tokens").fontWeight(.medium)
+                    Text("Max Tokens")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Cap on the length of a single model response. Higher values consume more of the context window — leave room for the prompt itself. A typical tool call needs 100–500 tokens; a multi-paragraph chat reply 500–2000; a long synthesis 2000+.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                         .fixedSize(horizontal: false, vertical: true)
                     Text("Range: 256–\(maxTokensCap)\(modelContextSuffix)")
-                        .font(.caption2).foregroundColor(theme.secondaryText.opacity(0.7))
+                        .font(theme.fontCaption2).foregroundColor(theme.secondaryText.opacity(0.7))
 
                     if config.maxTokens > maxTokensCap {
                         overCapWarning(

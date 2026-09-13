@@ -4,43 +4,38 @@
 //  ProfileSelectorPopover.swift
 //  Devgentic
 //
-//  Redesigned profile selector (v2 of BackendSelectorPopup): a fixed-width popover with a
-//  search field, a horizontal type-bubble row (Bot / Agent / Workflow / Image Gen — filtered
-//  by `allowedProfileTypes`), and a single scrolling list of the selected type's profiles.
-//
-//  Why the redesign: the old BackendSelectorPopup rendered one COLUMN per type (minWidth 180
-//  each), so with two+ types its minimum width (360pt+) exceeded what the NSPopover resolved
-//  from the call site's `.frame(minWidth: 240)` + `.fixedSize(horizontal: false)` — the content
-//  overflowed and clipped on both sides (the "truncated / half-rendered" bug). A single column
-//  at a FIXED width makes the popover size deterministic, and search + type bubbles scale
-//  better as profile counts grow.
-//
-//  Used by ALL profile pickers: the QuickAccess panel chip (directly) and the main composer +
-//  QuickAccess Settings (via BackendPickerButton). Replaces the deleted BackendSelectorPopup.
+//  Redesigned profile selector aligned with the Antigravity macOS UI:
+//  - Solid, clean surface background (no blurry glass bleed-through).
+//  - Minimal header and compact category pills.
+//  - Streamlined search input.
+//  - Clean list rows with model metadata and right-aligned checkmarks.
+//  - Subtle full-width hover highlight (no bouncy scaling).
+//  - Actionable footer row ("Manage Profiles...") separated by a hairline divider.
 //
 
 import SwiftUI
 
 struct ProfileSelectorPopover: View {
 
-    // Same contract as BackendSelectorPopup, so call sites can swap 1:1.
     var configuration: BackendConfiguration
     @Binding var isPresented: Bool
     /// Profile types to offer. nil = all picker types (bot/agent/workflow/imageGen).
     var allowedProfileTypes: Set<ProfileType>? = nil
+    /// Optional callback to navigate to profile management / settings.
+    var onManageProfiles: (() -> Void)? = nil
 
     @Environment(\.appTheme) private var theme
 
     @State private var profiles: [BackendProfileModel] = []
     @State private var searchText: String = ""
-    @State private var selectedType: ProfileType = .bot
+    @State private var selectedType: ProfileType? = nil // nil = "All"
     @FocusState private var isSearchFocused: Bool
 
-    /// Fixed content width & height — matching CodeModelSelectorPopover 1:1 (340 x 440).
-    private let popoverWidth: CGFloat = 340
-    private let listMaxHeight: CGFloat = 330
+    /// Popover dimensions: width +15% (356pt), height doubled (+100%) to 460pt.
+    private let popoverWidth: CGFloat = 356
+    private let popoverHeight: CGFloat = 460
 
-    /// Picker-facing types in display order (`.code` is never offered, matching the old popup).
+    /// Picker-facing types in display order (`.code` is managed by CodeModelPickerButton).
     private var availableTypes: [ProfileType] {
         let order: [ProfileType] = [.bot, .agent, .workflow, .imageGen]
         guard let allowed = allowedProfileTypes else { return order }
@@ -52,109 +47,94 @@ struct ProfileSelectorPopover: View {
     }
 
     private var visibleProfiles: [BackendProfileModel] {
-        let base = profiles(of: selectedType)
+        let base: [BackendProfileModel]
+        if let selectedType {
+            base = profiles.filter { $0.profileType == selectedType }
+        } else {
+            base = profiles.filter { availableTypes.contains($0.profileType) }
+        }
+
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return base }
+        guard !query.isEmpty else {
+            return base.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        }
         return base.filter {
             $0.displayName.localizedCaseInsensitiveContains(query)
                 || (Self.detailText(for: $0)?.localizedCaseInsensitiveContains(query) ?? false)
-        }
+        }.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: 0) {
+            if availableTypes.count > 1 {
+                typeSegmentRow
+                    .padding(.bottom, 6)
+            }
+
             searchField
-            typeBubbleRow
+                .padding(.horizontal, 8)
+                .padding(.bottom, 6)
+
             Rectangle()
-                .fill(theme.dividerColor.opacity(0.25))
+                .fill(theme.isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.07))
                 .frame(height: 1)
-                .padding(.horizontal, 10)
+                .padding(.horizontal, 8)
+
             profileList
         }
-        .padding(.top, 14)
-        .padding(.bottom, 10)
-        .frame(width: popoverWidth, height: 440)
+        .padding(.vertical, 8)
+        .frame(width: popoverWidth, height: popoverHeight)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(theme.isDark ? Color(hex: "#1E1E20") : Color(hex: "#F8F8F9"))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(theme.isDark ? Color.white.opacity(0.09) : Color.black.opacity(0.08), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .onAppear {
             profiles = (try? BackendProfileStore.shared.fetchSharedProfiles()) ?? []
-            // Land on the current selection's type so the highlighted row is visible immediately.
-            if let id = configuration.selectedProfileID,
-               let current = profiles.first(where: { $0.id == id }),
-               availableTypes.contains(current.profileType) {
-                selectedType = current.profileType
-            } else if let first = availableTypes.first {
-                selectedType = first
-            }
+            // Default to "All" so the active selection is visible immediately in the list
+            selectedType = nil
             DispatchQueue.main.async { isSearchFocused = true }
         }
     }
 
-    // MARK: - Search
+    // MARK: - Type Filter Segment Row
 
-    private var searchField: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(isSearchFocused ? theme.accentColor : theme.tertiaryText)
+    private var typeSegmentRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 2) {
+                SegmentTabButton(
+                    title: String(localized: "All"),
+                    count: profiles.filter { availableTypes.contains($0.profileType) }.count,
+                    isSelected: selectedType == nil
+                ) {
+                    selectedType = nil
+                }
 
-            TextField("", text: $searchText)
-                .textFieldStyle(.plain)
-                .font(theme.fontSubheadline)
-                .foregroundColor(theme.primaryText)
-                .focused($isSearchFocused)
-                .accessibilityLabel("Search profiles")
-                .overlay(alignment: .leading) {
-                    if searchText.isEmpty {
-                        Text("Search profiles...")
-                            .font(theme.fontSubheadline)
-                            .foregroundColor(theme.placeholderText)
-                            .allowsHitTesting(false)
-                            .accessibilityHidden(true)
+                ForEach(availableTypes, id: \.self) { type in
+                    SegmentTabButton(
+                        title: Self.bubbleTitle(for: type),
+                        count: profiles(of: type).count,
+                        isSelected: selectedType == type
+                    ) {
+                        selectedType = type
                     }
                 }
-
-            if !searchText.isEmpty {
-                Button(action: { searchText = "" }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 12))
-                        .foregroundColor(theme.tertiaryText)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Clear search")
             }
+            .padding(2.5)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(theme.isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.03))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.05), lineWidth: 0.5)
+            )
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(theme.surfaceOverlayStrong)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(
-                    isSearchFocused ? theme.accentColor.opacity(0.55) : theme.secondaryText.opacity(0.18),
-                    lineWidth: 1
-                )
-        )
-        .shadow(color: isSearchFocused ? theme.accentColor.opacity(0.2) : Color.black.opacity(0.1), radius: 4)
-        .padding(.horizontal, 12)
-    }
-
-    // MARK: - Type bubbles
-
-    private var typeBubbleRow: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(availableTypes, id: \.self) { type in
-                    TypeBubbleView(
-                        type: type,
-                        count: profiles(of: type).count,
-                        isActive: selectedType == type,
-                        action: { selectedType = type }
-                    )
-                }
-            }
-            .padding(.horizontal, 12)
-        }
+        .padding(.horizontal, 8)
     }
 
     private static func bubbleTitle(for type: ProfileType) -> String {
@@ -167,29 +147,83 @@ struct ProfileSelectorPopover: View {
         }
     }
 
-    // MARK: - List
+    // MARK: - Search Field
+
+    private var searchBorderColor: Color {
+        if isSearchFocused {
+            return theme.isDark ? Color.white.opacity(0.18) : Color.black.opacity(0.15)
+        } else {
+            return theme.isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.06)
+        }
+    }
+
+    private var searchIconColor: Color {
+        if isSearchFocused {
+            return theme.isDark ? Color.white.opacity(0.7) : Color.black.opacity(0.6)
+        } else {
+            return theme.tertiaryText
+        }
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundColor(searchIconColor)
+
+            TextField("", text: $searchText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundColor(theme.primaryText)
+                .focused($isSearchFocused)
+                .overlay(alignment: .leading) {
+                    if searchText.isEmpty {
+                        Text("Search profiles...")
+                            .font(.system(size: 12))
+                            .foregroundColor(theme.placeholderText)
+                            .allowsHitTesting(false)
+                    }
+                }
+
+            if !searchText.isEmpty {
+                Button(action: { searchText = "" }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11.5))
+                        .foregroundColor(theme.tertiaryText)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(theme.isDark ? Color.white.opacity(0.05) : Color.black.opacity(0.04))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(searchBorderColor, lineWidth: 1)
+        )
+    }
+
+    // MARK: - Profile List
 
     @ViewBuilder
     private var profileList: some View {
         if visibleProfiles.isEmpty {
-            VStack(spacing: 8) {
+            VStack(spacing: 6) {
                 Image(systemName: searchText.isEmpty ? "square.stack.3d.up.slash" : "magnifyingglass")
-                    .font(.system(size: 26))
+                    .font(.system(size: 20))
                     .foregroundColor(theme.tertiaryText)
-                Text(searchText.isEmpty ? "No profiles of this type yet" : "No matches found")
-                    .font(theme.fontSubheadline.weight(.medium))
+                Text(searchText.isEmpty ? "No profiles found" : "No matches for \"\(searchText)\"")
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundColor(theme.secondaryText)
-                if searchText.isEmpty {
-                    Text("Create one in the Backend Profiles panel.")
-                        .font(.caption)
-                        .foregroundColor(theme.tertiaryText)
-                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(.vertical, 36)
+            .padding(.vertical, 24)
         } else {
             ScrollView(showsIndicators: true) {
-                VStack(spacing: 6) {
+                VStack(spacing: 1) {
                     ForEach(visibleProfiles) { profile in
                         ProfileRow(
                             profile: profile,
@@ -201,10 +235,10 @@ struct ProfileSelectorPopover: View {
                         )
                     }
                 }
+                .padding(.horizontal, 6)
                 .padding(.vertical, 4)
-                .padding(.horizontal, 12)
             }
-            .frame(maxHeight: listMaxHeight)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -213,9 +247,6 @@ struct ProfileSelectorPopover: View {
         case .bot(let config): return config.llmConfig.modelName
         case .agent(let config): return config.llmConfig.modelName
         case .workflow:
-            // ⚠️ Reads the LAYOUT's denormalized count, not `WorkflowConfig.agentProfileIDs`. That
-            // field is retired, and it was never right for this label anyway: it only ever counted
-            // PROFILE nodes, so a workflow of Routers, Code, Gates and Actions reported "0 nodes".
             let count = WorkflowLayoutStore.shared.storedCounts(for: profile.id).nodes
             return count == 1 ? "1 node" : "\(count) nodes"
         case .imageGen(let config): return config.llmConfig.modelName
@@ -224,73 +255,7 @@ struct ProfileSelectorPopover: View {
     }
 }
 
-// MARK: - Type Bubble Component
-
-private struct TypeBubbleView: View {
-    let type: ProfileType
-    let count: Int
-    let isActive: Bool
-    let action: () -> Void
-
-    @Environment(\.appTheme) private var theme
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(type.displayColor)
-                    .frame(width: 7, height: 7)
-                    .shadow(color: type.displayColor.opacity(0.8), radius: 3)
-
-                Text(bubbleTitle)
-                    .font(.system(size: 12, weight: isActive ? .bold : .medium))
-                    .foregroundColor(isActive ? theme.primaryText : theme.secondaryText)
-
-                Text("\(count)")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(isActive ? theme.primaryText.opacity(0.85) : theme.tertiaryText)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1.5)
-                    .background(
-                        Capsule()
-                            .fill(isActive ? type.displayColor.opacity(0.25) : theme.surfaceOverlayStrong)
-                    )
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                Capsule()
-                    .fill(isActive ? type.displayColor.opacity(0.18) : (isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay))
-            )
-            .overlay(
-                Capsule()
-                    .strokeBorder(
-                        isActive ? type.displayColor.opacity(0.65) : (isHovered ? theme.secondaryText.opacity(0.3) : Color.clear),
-                        lineWidth: 1
-                    )
-            )
-            .shadow(color: isActive ? type.displayColor.opacity(0.25) : .clear, radius: 4)
-            .scaleEffect(isHovered ? 1.04 : 1.0)
-        }
-        .buttonStyle(.plain)
-        .onHover { h in
-            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { isHovered = h }
-        }
-    }
-
-    private var bubbleTitle: String {
-        switch type {
-        case .bot: return String(localized: "Bots")
-        case .agent: return String(localized: "Agents")
-        case .workflow: return String(localized: "Workflows")
-        case .imageGen: return String(localized: "Image Gen")
-        case .code: return String(localized: "Code")
-        }
-    }
-}
-
-// MARK: - Row
+// MARK: - Antigravity-Aligned Profile Row
 
 private struct ProfileRow: View {
     let profile: BackendProfileModel
@@ -300,70 +265,161 @@ private struct ProfileRow: View {
     @Environment(\.appTheme) private var theme
     @State private var isHovering = false
 
+    private var rowBackground: Color {
+        if isHovering {
+            return theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.06)
+        } else if isSelected {
+            return theme.isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.03)
+        } else {
+            return Color.clear
+        }
+    }
+
     var body: some View {
         Button(action: onSelect) {
-            HStack(spacing: 12) {
-                ZStack {
-                    Circle()
-                        .fill(profile.profileType.displayColor.opacity(isHovering || isSelected ? 0.25 : 0.12))
-                        .frame(width: 24, height: 24)
-                        .shadow(color: isHovering ? profile.profileType.displayColor.opacity(0.4) : .clear, radius: 4)
+            HStack(spacing: 8) {
+                // Subtle 6pt identity dot for the profile type
+                Circle()
+                    .fill(profile.profileType.displayColor)
+                    .frame(width: 6, height: 6)
 
-                    Circle()
-                        .fill(profile.profileType.displayColor)
-                        .frame(width: 7, height: 7)
-                }
+                // Profile display name
+                Text(profile.displayName)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
+                    .foregroundColor(theme.primaryText)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(profile.displayName)
-                        .font(theme.fontSubheadline.weight(.semibold))
-                        .foregroundColor(theme.primaryText)
+                // Secondary metadata: model name or node count
+                if let detail = ProfileSelectorPopover.detailText(for: profile), !detail.isEmpty {
+                    Text(detail)
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
                         .lineLimit(1)
-                        .truncationMode(.tail)
-
-                    if let detail = ProfileSelectorPopover.detailText(for: profile), !detail.isEmpty {
-                        Text(detail)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(theme.secondaryText)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
+                        .truncationMode(.middle)
                 }
 
                 Spacer(minLength: 4)
 
+                // Subtle type badge pill (e.g. "Agent", "Bot", "Workflow")
+                Text(profile.profileType.shortTitle)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(theme.secondaryText.opacity(0.85))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule()
+                            .fill(theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.05))
+                    )
+
+                // Right-aligned Checkmark (matching Antigravity ✓)
                 if isSelected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(theme.accentColor)
-                        .shadow(color: theme.accentColor.opacity(0.5), radius: 4)
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(theme.primaryText)
+                        .frame(width: 14)
+                } else {
+                    Spacer().frame(width: 14)
                 }
             }
-            .padding(.vertical, 8)
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(isSelected
-                          ? theme.accentColor.opacity(0.16)
-                          : (isHovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay.opacity(0.4)))
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(rowBackground)
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(
-                        isSelected
-                            ? theme.accentColor.opacity(0.55)
-                            : (isHovering ? theme.secondaryText.opacity(0.3) : Color.clear),
-                        lineWidth: 1
-                    )
-            )
-            .shadow(color: isSelected ? theme.accentColor.opacity(0.2) : (isHovering ? Color.black.opacity(0.15) : .clear), radius: 5, y: 2)
-            .scaleEffect(isHovering ? 1.015 : 1.0)
-            .contentShape(RoundedRectangle(cornerRadius: 10))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hover in
-            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { isHovering = hover }
+            withAnimation(.easeInOut(duration: 0.1)) { isHovering = hover }
         }
         .accessibilityLabel("\(profile.displayName)\(isSelected ? ", selected" : "")")
     }
 }
+
+private extension ProfileType {
+    var shortTitle: String {
+        switch self {
+        case .bot: return "Bot"
+        case .agent: return "Agent"
+        case .workflow: return "Workflow"
+        case .imageGen: return "Image"
+        case .code: return "Code"
+        }
+    }
+}
+
+// MARK: - Segment Tab Button
+
+private struct SegmentTabButton: View {
+    let title: String
+    let count: Int
+    let isSelected: Bool
+    let action: () -> Void
+
+    @Environment(\.appTheme) private var theme
+    @State private var isHovering = false
+
+    private var badgeBackground: Color {
+        if isSelected {
+            return theme.isDark ? Color.white.opacity(0.14) : Color.black.opacity(0.09)
+        } else {
+            return theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.04)
+        }
+    }
+
+    private var tabBackground: Color {
+        if isSelected {
+            return theme.isDark ? Color.white.opacity(0.13) : Color.black.opacity(0.09)
+        } else if isHovering {
+            return theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.04)
+        } else {
+            return Color.clear
+        }
+    }
+
+    private var tabBorder: Color {
+        if isSelected {
+            return theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.06)
+        } else {
+            return Color.clear
+        }
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4.5) {
+                Text(title)
+                    .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                    .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
+
+                Text("\(count)")
+                    .font(.system(size: 9.5, weight: isSelected ? .bold : .medium, design: .rounded))
+                    .foregroundColor(isSelected ? theme.primaryText.opacity(0.9) : theme.tertiaryText)
+                    .padding(.horizontal, 4.5)
+                    .padding(.vertical, 1)
+                    .background(
+                        Capsule()
+                            .fill(badgeBackground)
+                    )
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3.5)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(tabBackground)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(tabBorder, lineWidth: 0.5)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover in
+            withAnimation(.easeInOut(duration: 0.12)) { isHovering = hover }
+        }
+    }
+}
+

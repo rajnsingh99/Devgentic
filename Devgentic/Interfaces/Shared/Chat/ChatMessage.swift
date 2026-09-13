@@ -1238,66 +1238,43 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     // MARK: - RAG Indexing State
     // No longer polled; index occurs on stream completion.
 
-    /// Estimated token count for the message content.
-    /// Avoids expensive tokenizer calls for UI display and cost estimation.
-    ///
-    /// Heuristics by content type:
-    /// - Prose / markdown: ~4 characters per token (standard BPE for English)
-    /// - Code: ~3 characters per token (shorter identifiers, more symbols)
-    /// - Mixed (markdown with code blocks): weighted blend
-    var tokenCountEstimate: Int {
-        switch content {
-        case .codeBlock(_, let code):
-            // Pure code: ~3 chars per token (operators, braces, short identifiers)
-            return max(1, code.count / 3)
-        case .markdownText(let text):
-            // If >30% of content is inside ``` blocks, use code ratio for that portion
-            let codeCharCount = Self.estimateCodeBlockCharCount(in: text)
-            let proseCharCount = max(0, text.count - codeCharCount)
-            let codeTokens = codeCharCount / 3
-            let proseTokens = proseCharCount / 4
-            return max(1, codeTokens + proseTokens)
-        case .plainText(let text):
-            return max(1, text.count / 4)
-        case .unknown:
-            // Contributes nothing to the budget: this build cannot read the content, so it never
-            // reaches a prompt. Deliberately not a guess at the payload's size — an over-estimate
-            // would silently shrink the real budget.
-            return 0
-        case .error(let title, let details, _, _):
-            // Measures the string that actually ships. Every other case here estimates
-            // exactly what `textContent` returns; this one summed the raw fields and missed
-            // both the ": " separator and the "Error" default title the rendered form
-            // carries — the only case where the estimator and the shipped text disagreed.
-            return max(1, "\(title ?? "Error"): \(details)".count / 4)
-        case .mediaArtifact:
-            return 0
-        case .checkpoint(let summary):
-            return max(1, summary.count / 4)
-        }
-    }
-
-    /// Fast estimate of how many characters live inside ``` code fences.
-    private static func estimateCodeBlockCharCount(in text: String) -> Int {
-        var count = 0
-        var inBlock = false
-        var blockStart = text.startIndex
-        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            if line.hasPrefix("```") {
-                if inBlock {
-                    count += text.distance(from: blockStart, to: line.endIndex)
-                    inBlock = false
-                } else {
-                    blockStart = line.startIndex
-                    inBlock = true
-                }
-            }
-        }
-        return count
-    }
+    // [mm-11] `tokenCountEstimate` and `estimateCodeBlockCharCount` were DELETED here on
+    // 2026-09-12. They had ZERO production readers under a doc comment claiming they existed
+    // "for UI display and cost estimation" — and the app estimates tokens in six independent
+    // inline `count / 4` sites instead, so this was redundant rather than reserved. It carried
+    // sixteen dedicated test methods across three classes, all of which went with it: tests for
+    // unreachable code cost maintenance and buy nothing.
+    //
+    // ⚠️ One fact is worth keeping out of it, because it is about the RENDERED form and not about
+    // the estimator: `.error` content ships as `"\(title ?? "Error"): \(details)"` — so anything
+    // measuring or matching an error message must account for the `": "` separator AND the
+    // "Error" default title, not just sum the raw fields. That was the one case where the deleted
+    // estimator and the shipped text had disagreed.
+    //
+    // ⚠️ It also had a latent bug never worth fixing: an UNTERMINATED ``` fence left `inBlock`
+    // true at EOF and its characters uncounted, so a streaming message undercounted. If a token
+    // estimator is ever wanted here, close that case in the same change.
 
     // MARK: - Performance Caching
     @ObservationIgnored var cachedMarkdownBlocks: [ContentBlock]? = nil
+
+    /// The exact text `cachedMarkdownBlocks` was parsed from — the cache's KEY.
+    ///
+    /// ⚠️ Without this the cache was keyed on nothing: `getOrCreateMarkdownBlocks(from:)`
+    /// returned whatever it held whenever it was non-nil, ignoring its own `text` argument, so
+    /// correctness depended entirely on every writer of the displayed text ALSO calling
+    /// `invalidateMarkdownCache()`. The response-variant picker
+    /// (`ChatBubbleView`, `selectedVariantIndex`) did not — and since `displayedContent`
+    /// resolves through `variants[selectedVariantIndex]`, switching versions re-rendered the
+    /// PREVIOUS variant's prose under an animation that made the switch look successful.
+    /// Keying on the text makes a stale render unrepresentable rather than a thing every new
+    /// call site has to remember.
+    @ObservationIgnored private var cachedMarkdownSource: String? = nil
+
+    /// Test seam: the text `cachedMarkdownBlocks` was parsed from. Not read by app code — the
+    /// cache's correctness is precisely "the blocks match this key", and a test that cannot see
+    /// the key can only observe positional block ids, which are identical across a re-parse.
+    var cachedMarkdownSourceForTesting: String? { cachedMarkdownSource }
 
     /// Incremental parser used ONLY while this message is streaming — settled
     /// regions parse once, and each flush re-parses just the trailing block
@@ -1350,13 +1327,21 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         }
     }
     
+    /// Parsed blocks for `text`, memoised per message.
+    ///
+    /// ⚠️ The cache HIT requires `cachedMarkdownSource == text`, not merely a non-nil cache.
+    /// See `cachedMarkdownSource` for what returning a differently-sourced cache did. The
+    /// external `invalidateMarkdownCache()` calls remain correct and are still what forces the
+    /// per-flush re-parse during streaming; the key is a backstop for every writer that does
+    /// not call it — the variant picker being the one that did not.
     func getOrCreateMarkdownBlocks(from text: String) -> [ContentBlock] {
         if isStreaming {
-            if let cached = cachedMarkdownBlocks { return cached }
+            if let cached = cachedMarkdownBlocks, cachedMarkdownSource == text { return cached }
             let parser = streamingMarkdownParser ?? StreamingMarkdownParser()
             streamingMarkdownParser = parser
             let blocks = parser.parse(text)
             self.cachedMarkdownBlocks = blocks
+            self.cachedMarkdownSource = text
             return blocks
         }
 
@@ -1366,23 +1351,42 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         if streamingMarkdownParser != nil {
             streamingMarkdownParser = nil
             cachedMarkdownBlocks = nil
+            cachedMarkdownSource = nil
         }
 
-        if let cached = cachedMarkdownBlocks { return cached }
+        if let cached = cachedMarkdownBlocks, cachedMarkdownSource == text { return cached }
         let blocks = parseMarkdown(text)
         self.cachedMarkdownBlocks = blocks
+        self.cachedMarkdownSource = text
         return blocks
     }
-    
+
     func invalidateMarkdownCache() {
         self.cachedMarkdownBlocks = nil
+        self.cachedMarkdownSource = nil
     }
 
     /// Returns parsed ContentBlocks for the RAG indexing pipeline.
+    ///
+    /// ⚠️ PURE — it must not touch `cachedMarkdownBlocks`/`cachedMarkdownSource`/
+    /// `streamingMarkdownParser`. Its only caller is `RAGIndexingService.indexSingleMessage`,
+    /// which both call sites launch DETACHED (`ActiveStreamManager`, `ChatPersistenceStore`)
+    /// against the very `ChatMessage` instance the view model holds. `ChatMessage` is
+    /// `@unchecked Sendable` and not `@MainActor`, and those fields are plain stored
+    /// properties, so routing this through `getOrCreateMarkdownBlocks` put an unsynchronised
+    /// background WRITER on a slot the main actor writes from the render path, the per-chunk
+    /// invalidate and `trimMarkdownCachesOutsideWindow`. Two unordered reference writes to one
+    /// `[ContentBlock]?` is an ARC double-release, and the indexer's 500 ms delay also let it
+    /// populate the cache from `content` — which during a regeneration still holds the PREVIOUS
+    /// variant — so a retry could render the old answer for a frame.
+    ///
+    /// `parseMarkdown` is a free function and writes no cache on any `ChatMessage`; this is the
+    /// same choice `ChatPersistenceStore.fetchSearchDocuments` and `ChatSearchDecomposition`
+    /// already make, and for the same reason. Do not "optimise" this back onto the cache.
     func getBlocksForIndexing() -> [ContentBlock] {
         switch content {
         case .plainText(let text), .markdownText(let text):
-            return getOrCreateMarkdownBlocks(from: text)
+            return parseMarkdown(text)
         case .codeBlock(let language, let code):
             return [ContentBlock(id: "block-0", type: .code(language: language ?? "text", content: code, fileName: nil))]
         case .error, .mediaArtifact:
@@ -1392,7 +1396,7 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
             // retrieval corpus and surface it as if it were something the user wrote.
             return []
         case .checkpoint(let summary):
-            return getOrCreateMarkdownBlocks(from: summary)
+            return parseMarkdown(summary)
         }
     }
 
@@ -1468,6 +1472,7 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         // Transient properties always initialize to defaults
         self.agentState = .idle
         self.cachedMarkdownBlocks = nil
+        self.cachedMarkdownSource = nil
     }
 
     func encode(to encoder: Encoder) throws {

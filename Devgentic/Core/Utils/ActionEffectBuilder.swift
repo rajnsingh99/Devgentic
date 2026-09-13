@@ -53,7 +53,16 @@ extension ActionEffect {
             )
         }
 
-        let counts = DiffUtility.changeCounts(original: before, modified: after)
+        // [cv-5] ONE line-level pass feeds both the counts and the diff text. This used to run
+        // `DiffUtility.changeCounts` (a full line-level LCS) and then `generateDiff` inside
+        // `changedLines` — a SECOND full pass over the same pair PLUS the character-level
+        // `refineIntraLine`, whose `segments` nothing in this file reads. Every caller is on the
+        // main actor (`ActiveStreamManager.completeToolTimelineEvent`, `CapabilityCardRouter.
+        // completeTool`), so a ~5,000-line rewrite paid two direction tables and up to 300
+        // char-level tables as one non-interruptible main-thread block per file write, while the
+        // transcript stopped scrolling and Stop did not respond.
+        let rows = DiffUtility.lineLevelDiff(original: before, modified: after)
+        let counts = DiffUtility.changeCounts(rows: rows)
         guard counts.added > 0 || counts.deleted > 0 else {
             // A byte-identical rewrite is not a change. Recording it would teach the agent
             // it had edited something when it hadn't.
@@ -61,7 +70,7 @@ extension ActionEffect {
             return nil
         }
 
-        let (diff, truncated) = changedLines(before: before, after: after)
+        let (diff, truncated) = changedLines(rows: rows)
         if truncated {
             effectLogger.info("[EFFECT] '\(data.name)' → \(action.fileName): diff exceeded \(ActionEffect.diffCharacterLimit) chars and was truncated for memory — the model is told so via truncated=\"true\"; the full change is still on the timeline row.")
         }
@@ -79,8 +88,11 @@ extension ActionEffect {
     /// Context matters for reverting: `- foo()` alone doesn't say WHERE, so the agent
     /// couldn't put it back. Two lines either side is enough to locate a hunk without
     /// carrying the file.
-    private static func changedLines(before: String, after: String) -> (text: String, truncated: Bool) {
-        let rows = DiffUtility.generateDiff(original: before, modified: after)
+    ///
+    /// Takes the rows `from` already computed rather than the two strings: reads only `type`
+    /// and `line`, so it needs neither its own LCS pass nor `generateDiff`'s intra-line
+    /// refinement ([cv-5]).
+    private static func changedLines(rows: [DiffResult]) -> (text: String, truncated: Bool) {
         let contextRadius = 2
 
         // Indices worth emitting: every change, plus a small window around each.

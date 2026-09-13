@@ -18,10 +18,31 @@ import os
 ///
 /// **Architecture**: The main app is the source of truth. This service is
 /// a lightweight observer — it never drives execution, only mirrors output.
+/// Which pending interactions belong to the run being mirrored.
+///
+/// ⚠️⚠️ A NAMED FUNCTION RATHER THAN A `filter` CLOSURE INLINE, for one concrete reason: a test that
+/// retypes the predicate passes over a mirror that never applies it. Mutation-checking the first
+/// draft of this fix proved it — reverting the mirror to the conversation-wide list left every
+/// behavioural test green, because they were exercising a copy. Production and the tests now call
+/// the same function, so a change to the rule is a change both sides see.
+enum RemoteInteractionScope {
+
+    /// - Parameter runMessageID: the agent message of the run currently being mirrored.
+    ///
+    /// ⚠️ NIL `origin.runMessageID` PASSES, DELIBERATELY — it means "raised outside any run", which
+    /// today is MCP elicitation alone (its source→conversation association is made in
+    /// `resolveMCPTool`, where no run identity is in scope). Treating nil as a mismatch would stop
+    /// mirroring those prompts even for a run the remote user started themselves, turning a leak fix
+    /// into a hang. Recorded as the remaining residual in §6 of `architecture_readme.md`.
+    static func belongingToRun(_ runMessageID: UUID, in items: [PendingHITL]) -> [PendingHITL] {
+        items.filter { $0.origin.runMessageID == runMessageID || $0.origin.runMessageID == nil }
+    }
+}
+
 @MainActor
 final class RemoteMirrorService: ActiveStreamMirrorDelegate {
 
-    private let logger = Logger(subsystem: DGLogger.subsystem, category: "RemoteMirrorService")
+    private let logger = DGLogger(category: "RemoteMirrorService")
 
     // MARK: - State
 
@@ -36,6 +57,15 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
 
     /// Messages currently being observed via withObservationTracking.
     private var observedMessageIDs: Set<UUID> = []
+
+    /// Conversations with a mirrored run IN FLIGHT. Written only when the consent gate admits a run.
+    ///
+    /// ⚠️ SEPARATE FROM `remoteSessions` BECAUSE THEY ANSWER DIFFERENT QUESTIONS. The session map is
+    /// an ADDRESS BOOK — it holds the chat id and provider, and the four HITL resolution observers
+    /// and `editResolvedPrompt` still need it after the run ends, which is why releasing it at
+    /// `didEndStream` would strand live buttons on already-resolved prompts. This set is the
+    /// "is something being mirrored right now" predicate, and it is the one that has to be per-run.
+    private var mirroringConversations: Set<UUID> = []
 
     /// Reference to ActiveStreamManager (set as delegate).
     private weak var activeStreamManager: ActiveStreamManager?
@@ -63,9 +93,43 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
 
     // MARK: - ActiveStreamMirrorDelegate
 
-    func activeStreamManager(_ manager: ActiveStreamManager, didStartStream message: ChatMessage, for conversationID: UUID) {
-        guard remoteSessions[conversationID] != nil else { return }
+    /// ⚠️⚠️ THE CONSENT GATE, AND IT IS PER RUN — NOT PER CONVERSATION. It used to read
+    /// `guard remoteSessions[conversationID] != nil`, which asks "has this conversation EVER been
+    /// driven from chat". Since `unregisterSession` had no callers and only stopping the bridge
+    /// cleared the map, the answer stayed yes forever: a conversation touched once from Slack then
+    /// mirrored every later run in it — including ones typed at the Mac and ones fired by the
+    /// scheduler — in full, to the third-party channel, with no switch anywhere to turn it off. The
+    /// sibling path to the same channel (`ChatOpsNotificationChannel`) is default-OFF with a written
+    /// rationale about exactly this; this path had no such treatment.
+    ///
+    /// ⚠️ `startedBy` DECIDES, and it fails CLOSED. `.localUI` means "not attributed" rather than
+    /// "typed by hand" — a surface that forgets to stamp lands there — so a non-matching source
+    /// refuses to mirror rather than assuming permission. The cost is named in `admissionRefused`.
+    ///
+    /// ⚠️ This also closes cross-provider leakage for free: with three bridges connected, a
+    /// Telegram-started run is no longer mirrored to Discord and Slack as well.
+    ///
+    /// ⚠️ `observedMessageIDs` is ALREADY the per-run set, so admitting fewer runs here needs no
+    /// new state — this one line is the whole gate. `observeMessage` and `evaluateMessageState` are
+    /// reachable from nowhere else.
+    func activeStreamManager(_ manager: ActiveStreamManager, didStartStream message: ChatMessage,
+                             startedBy: MessageSource, for conversationID: UUID) {
+        guard let session = remoteSessions[conversationID] else { return }
+        guard startedBy == session.source else {
+            admissionRefused(startedBy: startedBy, session: session, conversationID: conversationID)
+            return
+        }
         guard !observedMessageIDs.contains(message.id) else { return }
+        // ⚠️ Recorded so `isMirroring` can answer about THIS RUN. See that property.
+        mirroringConversations.insert(conversationID)
+
+        // ⚠️⚠️ [MIR-4] MOVED HERE FROM `observeMessage`, WHICH IS RE-ENTRANT. That function re-arms
+        // its observation on every flush — roughly 5-20 times a SECOND at the adaptive interval — so
+        // an `.info` line there emitted one entry per re-arm and buried the mirror's real drop lines
+        // under its own noise, in the ring buffer a diagnostic bundle exports. This site runs ONCE
+        // per admitted run, and `session` is in scope here, so the line also gains the provider
+        // correlation it never had.
+        logger.info("[Mirror] Mirroring the run in conversation \(conversationID.uuidString.prefix(8)) to \(session.source.rawValue). CONSEQUENCE: its answer, HITL prompts and failures all reach that chat; a conversation absent from this line produced no remote output at all.")
         observeMessage(message)
     }
 
@@ -73,6 +137,17 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
         observedMessageIDs.remove(message.id)
         // [HITL/P5] Drop the final-response send-once key so the dedup Set doesn't grow unbounded.
         mirroredOperations.remove(message.id)
+        // ⚠️ The RUN is over, so this conversation is no longer being mirrored — but the SESSION
+        // stays (see `remoteSessions`). Only the notification double-post predicate is released here.
+        mirroringConversations.remove(message.conversationId)
+    }
+
+    /// Says out loud that a run in a session-bearing conversation was NOT mirrored.
+    ///
+    /// ⚠️ A REFUSAL IS A DECISION THE REMOTE USER CANNOT SEE. Without this line the only evidence is
+    /// an answer that never arrives, which is indistinguishable from a dead bridge.
+    private func admissionRefused(startedBy: MessageSource, session: RemoteSessionInfo, conversationID: UUID) {
+        logger.info("[Mirror] A run in conversation \(conversationID.uuidString.prefix(8)) was started by '\(startedBy.rawValue)' but this session belongs to '\(session.source.rawValue)', so it was NOT mirrored. CONSEQUENCE: its answer stays on the Mac and does not reach the remote chat — which is the point; before this gate existed, every later run in a conversation once driven from chat was posted to the third-party channel, whoever started it. A run you DID start remotely appearing here means its source was not stamped before startMessageStream.")
     }
 
     // MARK: - Session Registration
@@ -83,15 +158,27 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
         logger.info("[Mirror] Registered remote session for conversation \(conversationID) via \(info.source.rawValue).")
     }
 
-    /// Unregister a remote session. Called on disconnect or explicit cleanup.
-    /// Whether a conversation is bound to this provider's channel.
+    /// Whether a run in this conversation is being mirrored RIGHT NOW.
     ///
     /// ⚠️ [Slice 3] The double-post guard: `ChatOpsNotificationChannel` stays quiet for a
     /// conversation the mirror is already streaming, so a run started from chat is reported once
     /// rather than twice.
+    ///
+    /// ⚠️⚠️ THIS HAD TO CHANGE IN THE SAME COMMIT AS THE CONSENT GATE, and the reason is a silent
+    /// failure rather than a tidy-up. It used to read `remoteSessions[conversationID] != nil` —
+    /// sticky and conversation-keyed. Once the gate above stopped mirroring locally-started runs,
+    /// that predicate would still have answered YES for them, so the notification channel would
+    /// have suppressed itself for a run nothing was mirroring: no mirror AND no notice, and the
+    /// remote user told nothing at all. It is the ONLY suppression in
+    /// `ChatOpsNotificationChannel.send`, so getting it wrong loses the message outright.
     func isMirroring(_ conversationID: UUID) -> Bool {
-        remoteSessions[conversationID] != nil
+        mirroringConversations.contains(conversationID)
     }
+
+    /// Unregister a remote session. Called when its conversation is deleted, and on explicit cleanup.
+    ///
+    /// ⚠️ Had ZERO callers until 2026-09-11 — the map only ever grew, and `teardown()` on bridge
+    /// stop was the only thing that cleared it.
 
     func unregisterSession(conversationID: UUID) {
         remoteSessions.removeValue(forKey: conversationID)
@@ -102,10 +189,33 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
     /// multicast and drops all sessions, so a stopped transport no longer mirrors Mac-UI activity back
     /// out (the bridge then nils its strong ref, letting the service deallocate). Without this, a stopped
     /// transport with a lingering session kept pushing responses to the remote chat.
+    /// ⚠️⚠️ [MIR-5/OBS-6] SESSION-KEYED RELEASE FOR OPERATION-KEYED STATE WAS THE BUG. This cleared
+    /// `remoteSessions` and `mirroringConversations` and left `hitlMessageIDs`, `mirroredOperations`
+    /// and `observedMessageIDs` populated — so every posted HITL prompt was abandoned with its
+    /// message id still recorded, and the observers that later try to rewrite those prompts found a
+    /// session that no longer exists and bailed on a bare `return`. The buttons stay live on a
+    /// decision nobody can now make, forever, and the log line said only "sessions cleared".
+    ///
+    /// ⚠️ THE COUNTS ARE THE POINT. "Torn down" is unfalsifiable; "abandoned 2 posted prompts across
+    /// 1 session" is a fact a field debugger can act on, and it is the number that tells them whether
+    /// a user is staring at live buttons that will never resolve.
     func teardown() {
+        let abandonedPrompts = hitlMessageIDs.count
+        let sessions = remoteSessions.count
+        let observed = observedMessageIDs.count
+
         activeStreamManager?.removeMirrorDelegate(self)
         remoteSessions.removeAll()
-        logger.info("[Mirror] Torn down — detached from stream manager, sessions cleared.")
+        mirroringConversations.removeAll()
+        hitlMessageIDs.removeAll()
+        mirroredOperations.removeAll()
+        observedMessageIDs.removeAll()
+
+        if abandonedPrompts > 0 {
+            logger.warning("[Mirror] Torn down while \(abandonedPrompts) posted HITL prompt(s) were still live across \(sessions) session(s). CONSEQUENCE: those prompts keep their approve/deny buttons in the remote chat and NOTHING will ever rewrite them — the run they belong to is unreachable from that chat now. A user tapping one gets silence. This fires when ChatOps is switched off mid-run.")
+        } else {
+            logger.info("[Mirror] Torn down — \(sessions) session(s) and \(observed) observed run(s) released, no live prompts abandoned.")
+        }
     }
 
     // MARK: - HITL Response Routing (Transport → Agent)
@@ -125,6 +235,26 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
     /// second thing to keep in lockstep with the four sites that already clear this one.
     func operationID(forRemoteMessageID messageID: String) -> UUID? {
         hitlMessageIDs.first { $0.value == messageID }?.key
+    }
+
+    /// What kind of prompt a parked operation is, for a caller that must route a TYPED REPLY rather
+    /// than a button tap.
+    ///
+    /// ⚠️⚠️ WHY A REPLY NEEDS THIS AND A TAP DOES NOT. A button carries its own verb — `hitl:approve:`
+    /// is an approval whatever it is attached to — so `handleApproval` can dispatch on the kind it
+    /// finds and be sure of the user's INTENT. A reply carries only text, and the only thing that
+    /// says what the user meant is what they replied TO. Before this existed, Telegram's
+    /// reply-correlation branch called `handleClarification` for every correlated reply, so replying
+    /// to a mirrored tool-confirmation, plan-review or gate prompt resolved the wrong continuation:
+    /// the clarification resume found nothing to resume, the tool stayed parked forever, and the
+    /// operation's entry in `hitlMessageIDs` was consumed — so the prompt kept live buttons for a
+    /// decision no surface could still make.
+    ///
+    /// ⚠️ Returns nil when the operation has ALREADY been resolved, which is a distinct answer from
+    /// "wrong kind" and callers must say so: the user replied to a prompt that a race, the Mac UI,
+    /// or another provider answered first, and telling them "use the buttons" would be a lie.
+    func pendingInteraction(forOperation operationID: UUID) -> PendingInteraction? {
+        activeStreamManager?.interactionCenter?.item(withID: operationID)?.kind
     }
 
     /// The provider to record as having answered a prompt this service is resolving.
@@ -222,7 +352,7 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
         }
         observe()
 
-        logger.info("[Mirror] Started observing message \(messageID) for conversation \(conversationID).")
+
     }
 
     /// Evaluates current message state and mirrors events to the remote transport.
@@ -233,7 +363,27 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
         // truth). A workflow run can have several nodes awaiting at once, so mirror every
         // un-mirrored item — this also makes WORKFLOW HITL remotely actionable for the first time
         // (the legacy per-message container never carried workflow requests).
-        let pendingHITLs = activeStreamManager?.interactionCenter?.items(for: conversationID) ?? []
+        //
+        // ⚠️⚠️ FILTERED TO *THIS RUN*, NOT JUST THIS CONVERSATION. `items(for:)` is conversation-keyed,
+        // and invariant 46 gates which RUNS are mirrored — so pulling every pending item for the
+        // conversation walked straight around that gate: while a remote run was observed, a tool
+        // confirmation raised by a LOCALLY-started run in the same conversation had its tool name and
+        // parameters posted to the third-party channel. `message` is the run being mirrored and
+        // `origin.runMessageID` is the run that raised the item, so comparing them is the gate.
+        //
+        // ⚠️ A NIL `runMessageID` IS POSTED, DELIBERATELY. Nil means "raised outside any run" — today
+        // only MCP elicitation, whose source→conversation association is made in `resolveMCPTool`
+        // where no run identity is in scope. Treating nil as a mismatch would silently stop mirroring
+        // those prompts even for a run the remote user started themselves, turning a leak fix into a
+        // hang. Recorded as the remaining residual in §6 of `architecture_readme.md`.
+        let allPending = activeStreamManager?.interactionCenter?.items(for: conversationID) ?? []
+        let pendingHITLs = RemoteInteractionScope.belongingToRun(message.id, in: allPending)
+
+        let withheld = allPending.count - pendingHITLs.count
+        if withheld > 0 {
+            logger.warning("[Mirror] Withheld \(withheld) pending interaction(s) in conversation \(conversationID.uuidString.prefix(8)) from \(session.source.rawValue): they were raised by a different run than the one being mirrored (\(message.id.uuidString.prefix(8))). CONSEQUENCE: those prompts are answerable on the Mac banner only, which is correct — before this filter another run's tool name and parameters were posted to the remote channel purely because the two runs shared a conversation.")
+        }
+
         for pending in pendingHITLs where !mirroredOperations.contains(pending.id) {
             let hitlType: HITLType
             switch pending.kind {
@@ -286,7 +436,31 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
                     to: .channel(RemoteChannel(provider: provider, channelID: session.chatID))
                 )
                 if let msgID {
-                    hitlMessageIDs[pending.id] = msgID
+                    // ⚠️⚠️ THE RENDER WINDOW. `render` is a real network round-trip (100–800 ms),
+                    // and the InteractionCenter item exists from before it starts — so the Mac
+                    // banner is already answerable while this is suspended. A resolution landing
+                    // inside the window reached all four observers BEFORE this line ran, every one
+                    // of them read `hitlMessageIDs[operationID]` as nil, and every one returned
+                    // without a word. This line then stored the id for an operation that was
+                    // already dead: a fresh ✅/❌ prompt sat in the chat for a resolved decision,
+                    // nothing ever struck it through (`editMessage` is the only thing that clears
+                    // buttons), tapping it did nothing at all, and the stale entry kept
+                    // `operationID(forRemoteMessageID:)` routing REPLIES to a suspension that no
+                    // longer existed.
+                    //
+                    // ⚠️ Re-checking AFTER the await rather than reserving before it: the
+                    // observers key off this map, and a placeholder would make them act on a
+                    // message id that does not exist yet.
+                    if activeStreamManager?.interactionCenter?.item(withID: pending.id) == nil {
+                        logger.error("[Mirror] Operation \(pending.id) resolved while its prompt was being posted to \(session.source.rawValue). CONSEQUENCE: the prompt is rewritten as resolved immediately and its correlation id is NOT stored — without this it would have kept live buttons for a decision already made, and later replies to it would have been routed to a suspension that no longer exists.")
+                        await editResolvedPrompt(session,
+                                                 messageID: msgID,
+                                                 to: "✅ Already answered on another surface.",
+                                                 operationID: pending.id,
+                                                 kind: "HITL")
+                    } else {
+                        hitlMessageIDs[pending.id] = msgID
+                    }
                 } else {
                     logger.error("[Mirror] The transport posted the HITL prompt for operation \(pending.id) but returned no message id. CONSEQUENCE: the prompt cannot be edited when it resolves, so its buttons stay live and the remote user can tap a decision that has already been made.")
                 }
@@ -459,6 +633,62 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
         }
     }
 
+    /// What a resolution notification means for THIS mirror.
+    ///
+    /// ⚠️⚠️ [OBS-6] TWO OPPOSITE SITUATIONS SHARED ONE BARE `return`, AND ONE OF THEM IS A DEFECT.
+    /// All four observers opened with a single combined guard — `let messageID =
+    /// hitlMessageIDs[operationID], let convID, let session = remoteSessions[convID]` — so
+    /// "this resolution is not ours" (the overwhelmingly common case: a Mac-only run, nothing posted
+    /// remotely) and "it IS ours but we have lost the session" produced identical silence. The second
+    /// leaves approve/deny buttons live in the remote chat on a decision already made, forever, with
+    /// nothing written anywhere.
+    ///
+    /// ⚠️ THE ORDER IS PRESERVED EXACTLY: `hitlMessageIDs` FIRST, so `.notOurs` stays narrow. Checking
+    /// the session first would classify every Mac-only resolution as stranded and flood the log with
+    /// the non-event this distinction exists to keep out.
+    ///
+    /// ⚠️ `.notOurs` IS DELIBERATELY SILENT — the `PairingAttemptPolicy.unrelated` precedent. A line
+    /// per Mac-only resolution buries the one that matters.
+    private enum PromptResolution {
+        case rewritable(messageID: String, session: RemoteSessionInfo)
+        case notOurs
+        case stranded(messageID: String, reason: String)
+    }
+
+    private func promptResolution(operationID: UUID?, conversationID: UUID?) -> PromptResolution {
+        guard let operationID, let messageID = hitlMessageIDs[operationID] else { return .notOurs }
+        guard let conversationID else {
+            return .stranded(messageID: messageID, reason: "the notification carried no conversation id")
+        }
+        guard let session = remoteSessions[conversationID] else {
+            return .stranded(messageID: messageID, reason: "no remote session remains for conversation \(conversationID.uuidString.prefix(8)) — ChatOps was switched off, or the bridge was stopped, while this prompt was live")
+        }
+        return .rewritable(messageID: messageID, session: session)
+    }
+
+    /// Says out loud that a posted prompt can no longer be rewritten.
+    /// The message id and session a resolved prompt can be rewritten through, or nil.
+    ///
+    /// ⚠️ REPORTS `.stranded` ITSELF, so the four observers keep a one-line guard and cannot each
+    /// forget the log. Returning nil for both outcomes is deliberate: the CALLER's behaviour is
+    /// identical either way (stop), and only the LOGGING differs — which is exactly what OBS-6 was.
+    private func rewritableTarget(operationID: UUID?,
+                                  conversationID: UUID?) -> (messageID: String, session: RemoteSessionInfo)? {
+        switch promptResolution(operationID: operationID, conversationID: conversationID) {
+        case .rewritable(let messageID, let session):
+            return (messageID, session)
+        case .notOurs:
+            return nil
+        case .stranded(let messageID, let reason):
+            reportStranded(operationID, messageID: messageID, reason: reason)
+            return nil
+        }
+    }
+
+    private func reportStranded(_ operationID: UUID?, messageID: String, reason: String) {
+        logger.warning("[Mirror] A resolved HITL prompt (op \(operationID?.uuidString.prefix(8) ?? "?"), remote message \(messageID)) cannot be rewritten: \(reason). CONSEQUENCE: its approve/deny buttons stay LIVE in the remote chat on a decision that has already been made — a tap does nothing and answers nobody. Before this line the case was indistinguishable from the ordinary 'not ours' bail and left no trace at all.")
+    }
+
     /// Reads the two facts every observer needs out of a resolution notification.
     private static func resolution(from notification: Notification) -> (outcome: String?, source: MessageSource?) {
         let outcome = notification.userInfo?[HITLResolvedKey.outcome] as? String
@@ -483,9 +713,9 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
                 guard let self,
                       let operationID,
                       let approved,
-                      let messageID = self.hitlMessageIDs[operationID],
-                      let convID = conversationID,
-                      let session = self.remoteSessions[convID] else { return }
+                      let target = self.rewritableTarget(operationID: operationID, conversationID: conversationID)
+                else { return }
+                let (messageID, session) = target
 
                 // ⚠️ A CANCEL IS NOT A DENIAL. `drainOperation` resolves a torn-down permission with
                 // `approved: false`, so a stopped run or a deadline used to render as
@@ -518,9 +748,9 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
             Task { @MainActor [weak self] in
                 guard let self,
                       let operationID,
-                      let messageID = self.hitlMessageIDs[operationID],
-                      let convID = conversationID,
-                      let session = self.remoteSessions[convID] else { return }
+                      let target = self.rewritableTarget(operationID: operationID, conversationID: conversationID)
+                else { return }
+                let (messageID, session) = target
 
                 let statusText: String
                 switch resolution.outcome {
@@ -552,9 +782,9 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
             Task { @MainActor [weak self] in
                 guard let self,
                       let operationID,
-                      let messageID = self.hitlMessageIDs[operationID],
-                      let convID = conversationID,
-                      let session = self.remoteSessions[convID] else { return }
+                      let target = self.rewritableTarget(operationID: operationID, conversationID: conversationID)
+                else { return }
+                let (messageID, session) = target
 
                 let statusText: String
                 switch resolution.outcome {
@@ -589,9 +819,9 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
             Task { @MainActor [weak self] in
                 guard let self,
                       let operationID,
-                      let messageID = self.hitlMessageIDs[operationID],
-                      let convID = conversationID,
-                      let session = self.remoteSessions[convID] else { return }
+                      let target = self.rewritableTarget(operationID: operationID, conversationID: conversationID)
+                else { return }
+                let (messageID, session) = target
 
                 // ⚠️ A cancelled gate is not a decision, so it does not get a ✅ or an attribution.
                 let statusText: String

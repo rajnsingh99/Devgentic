@@ -96,6 +96,17 @@ SCRUB_MANIFEST.md
 *_Prompt*.md
 *_Plan*.md
 
+# ⚠️ AND THE WHOLE FOLDER. `Planout/` is where development documents live from 2026-09-13 on —
+# readiness registers, audit findings, design notes, release checklists, agent plan artifacts.
+# Ignoring it by DIRECTORY rather than by filename shape is the point: the shape rules above are
+# `*_Plan*.md`, so `p3_batch_plan.json` (lowercase, .json) walked straight past them into a
+# `git add -A` — the fourth time an internal register has been swept into a commit that way.
+# These documents enumerate open defects by name and cite commit hashes; D10 (2026-09-10) decided
+# they do not ship. `architecture_readme.md` moved in here too and was untracked in the same
+# change — it is the living invariant register, and its authoritative copy has always been the
+# one on disk.
+Planout/
+
 # ── SQLite sidecars beside the SwiftData store fixtures ──────────────────────────
 # Opening a .store in WAL mode creates -wal and -shm beside it, so any test run that
 # reads the fixtures leaves six untracked files. They are per-run state, never fixture

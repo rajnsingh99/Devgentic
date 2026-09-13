@@ -519,7 +519,7 @@ final class JarvisSessionController {
         }
         logger.info("[JARVIS_SESSION]\(self.tag) Profile switch — discarding \(self.spokenTurnCount) turn(s) and starting a new conversation. CONSEQUENCE: the new profile starts with empty history and any autonomous grant on the old conversation is revoked.")
         if let convID = jarvisConversationID {
-            Task { await SessionToolApprovals.shared.setAutonomous(false, conversationID: convID) }
+            Task { await SessionToolApprovals.shared.setAutonomous(false, conversationID: convID, origin: .jarvis) }
         }
         announcedInteractionID = nil
         spokenTurnCount = 0
@@ -589,7 +589,7 @@ final class JarvisSessionController {
                 // ⚠️ Revoke the blanket grant with the panel. It is in-memory so it cannot survive
                 // relaunch — but it WOULD survive the orb closing, and a mode the user can no
                 // longer see must not still be approving tools.
-                await SessionToolApprovals.shared.setAutonomous(false, conversationID: convID)
+                await SessionToolApprovals.shared.setAutonomous(false, conversationID: convID, origin: .jarvis)
             }
         }
         logger.info("[JARVIS_SESSION]\(self.tag) Panel torn down — voice loop stopped, run cancelled, autonomous grant revoked.")
@@ -1044,7 +1044,7 @@ final class JarvisSessionController {
         guard !dismissed, let convID = jarvisConversationID else { return }
         let autonomous = JarvisConfigManager.shared.toolApprovals == .autonomous
         logger.notice("[JARVIS_HITL]\(self.tag) Tool approvals changed to \(JarvisConfigManager.shared.toolApprovals.rawValue) mid-session — applying to the run in flight. CONSEQUENCE: \(autonomous ? "remaining tool calls in this conversation are auto-approved" : "the blanket grant is revoked NOW; the next tool call asks").")
-        Task { await SessionToolApprovals.shared.setAutonomous(autonomous, conversationID: convID) }
+        Task { await SessionToolApprovals.shared.setAutonomous(autonomous, conversationID: convID, origin: .jarvis) }
     }
 
     /// Re-entry point from the voiceUnavailable stage.
@@ -2071,7 +2071,7 @@ final class JarvisSessionController {
         // this feature must not have.
         let approvals = JarvisConfigManager.shared.toolApprovals
         logger.info("[JARVIS_RUN]\(self.tag) Dispatching \(Self.wordCount(command)) word(s) to \"\(config.profile.displayName)\" (approvals: \(approvals.rawValue), conv \(convID.uuidString.prefix(8))).")
-        Task { await SessionToolApprovals.shared.setAutonomous(approvals.isAutonomous, conversationID: convID) }
+        Task { await SessionToolApprovals.shared.setAutonomous(approvals.isAutonomous, conversationID: convID, origin: .jarvis) }
         observeInteractions()
         // Bind the profile so restart-resume, ChatOps, and the sidebar all resolve it.
         persistence.updateBackendForConversation(
@@ -2370,7 +2370,7 @@ final class JarvisSessionController {
             if let convID = jarvisConversationID {
                 Task {
                     await ExecutionSuspensionService.shared.cancel(for: convID)
-                    await SessionToolApprovals.shared.setAutonomous(false, conversationID: convID)
+                    await SessionToolApprovals.shared.setAutonomous(false, conversationID: convID, origin: .jarvis)
                 }
             }
             announcedInteractionID = nil

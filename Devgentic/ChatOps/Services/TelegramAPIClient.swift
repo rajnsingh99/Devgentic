@@ -17,7 +17,7 @@ actor TelegramAPIClient {
     private let botToken: String
     private let session: URLSession
     private let baseURL: String
-    private let logger = Logger(subsystem: DGLogger.subsystem, category: "TelegramAPI")
+    private let logger = DGLogger(category: "TelegramAPI")
 
     init(botToken: String) {
         self.botToken = botToken
@@ -82,8 +82,11 @@ actor TelegramAPIClient {
         text: String,
         parseMode: String? = "Markdown"
     ) async throws {
-        let chunks = TelegramAPIClient.chunkText(text, maxLength: 4000) // Leave margin for markdown
-        for chunk in chunks {
+        // ⚠️ 4000 rather than Telegram's 4096: Markdown escaping adds a backslash per metacharacter
+        // AFTER this budget is applied, so the margin absorbs it. Measured in UTF-16 by
+        // `RemoteTextBudget.chunk` — see its header for the unit bug this replaced.
+        let chunks = TelegramAPIClient.chunkText(text, maxLength: 4000)
+        try await RemoteChunkedSend.send(chunks) { chunk in
             try await sendMessage(chatID: chatID, text: chunk, parseMode: parseMode)
         }
     }
@@ -179,9 +182,14 @@ actor TelegramAPIClient {
         let (data, httpResponse) = try await session.data(for: request)
 
         if let http = httpResponse as? HTTPURLResponse, http.statusCode == 429 {
-            // Rate limited by Telegram — extract retry_after if available
-            logger.warning("Telegram rate limited (429). Backing off.")
-            throw TelegramAPIError.rateLimited
+            // ⚠️ THE COMMENT HERE USED TO PROMISE THIS AND THE CODE DID NOT DO IT: it read "extract
+            // retry_after if available" above a valueless `throw .rateLimited`, so the one number
+            // Telegram sends to make a retry work was discarded at the moment it arrived. Telegram
+            // puts it in `parameters.retry_after`, not in a header.
+            let retryAfter = (try? JSONDecoder().decode(TelegramErrorEnvelope.self, from: data))?
+                .parameters?.retry_after
+            logger.warning("Telegram rate limited (429); retry_after=\(retryAfter.map(String.init) ?? "absent").")
+            throw TelegramAPIError.rateLimited(retryAfter: retryAfter.map(TimeInterval.init))
         }
 
         let decoded = try JSONDecoder().decode(TelegramResponse<R>.self, from: data)
@@ -197,40 +205,14 @@ actor TelegramAPIClient {
 
     // MARK: - Text Chunking
 
-    /// Splits long text into chunks that respect Telegram's message size limit.
-    /// Tries to split on paragraph boundaries first, then falls back to hard splits.
+    /// Splits text to this platform's message budget.
+    ///
+    /// ⚠️ A FORWARDER, NOT AN IMPLEMENTATION. The real one is `RemoteTextBudget.chunk`, shared by all
+    /// three clients — see its header for the UTF-16 unit bug that three separate copies of this
+    /// function each carried. It stays as a named entry point so this client's own tests exercise
+    /// the same call production takes, rather than the shared helper in isolation.
     static func chunkText(_ text: String, maxLength: Int = 4000) -> [String] {
-        guard text.count > maxLength else { return [text] }
-
-        var chunks: [String] = []
-        var remaining = text
-
-        while !remaining.isEmpty {
-            if remaining.count <= maxLength {
-                chunks.append(remaining)
-                break
-            }
-
-            // Try to find a good break point (double newline = paragraph boundary)
-            let searchRange = remaining.prefix(maxLength)
-            if let paragraphBreak = searchRange.range(of: "\n\n", options: .backwards) {
-                let chunk = String(remaining[remaining.startIndex..<paragraphBreak.upperBound])
-                chunks.append(chunk)
-                remaining = String(remaining[paragraphBreak.upperBound...])
-            } else if let lineBreak = searchRange.range(of: "\n", options: .backwards) {
-                // Fall back to single newline
-                let chunk = String(remaining[remaining.startIndex..<lineBreak.upperBound])
-                chunks.append(chunk)
-                remaining = String(remaining[lineBreak.upperBound...])
-            } else {
-                // Hard split at maxLength
-                let idx = remaining.index(remaining.startIndex, offsetBy: maxLength)
-                chunks.append(String(remaining[remaining.startIndex..<idx]))
-                remaining = String(remaining[idx...])
-            }
-        }
-
-        return chunks
+        RemoteTextBudget.chunk(text, limit: maxLength)
     }
 }
 
@@ -238,17 +220,41 @@ actor TelegramAPIClient {
 
 enum TelegramAPIError: LocalizedError {
     case apiError(code: Int, description: String)
-    case rateLimited
+    case rateLimited(retryAfter: TimeInterval?)
     case invalidToken
 
     var errorDescription: String? {
         switch self {
         case .apiError(let code, let desc):
             return "Telegram API error (\(code)): \(desc)"
-        case .rateLimited:
+        case .rateLimited(let retryAfter):
+            if let retryAfter {
+                return "Telegram rate limited — retry after \(Int(retryAfter))s"
+            }
             return "Telegram rate limited — try again later"
         case .invalidToken:
             return "Invalid bot token"
         }
     }
+
+
+}
+
+
+// MARK: - Rate-limit reporting
+
+extension TelegramAPIError: RemoteRateLimitedError {
+    /// ⚠️ Telegram reports the wait in `parameters.retry_after` (seconds), not in a header. A 429
+    /// with no number still answers with a value — `nil` here means "not a rate limit at all", and
+    /// `RemoteChunkedSend` relies on that distinction to decide whether a retry can help.
+    var retryAfterSeconds: TimeInterval? {
+        guard case .rateLimited(let retryAfter) = self else { return nil }
+        return retryAfter ?? 1
+    }
+}
+
+/// The error shape Telegram returns alongside a 429.
+private struct TelegramErrorEnvelope: Decodable {
+    struct Parameters: Decodable { let retry_after: Int? }
+    let parameters: Parameters?
 }

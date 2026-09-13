@@ -98,6 +98,24 @@ enum WorkflowRunAttendance {
     /// ambiguity arbitration (WF-EX5) deliberately keys on `isAttended` alone, because an
     /// arbitration park has no deadline that can end it even when a remote human exists.
     static var canReachAHuman: Bool { isAttended || hasRemoteResponder }
+
+    /// WHICH SURFACE started this run.
+    ///
+    /// ⚠️⚠️ EXISTS SO A STANDING GRANT CANNOT CROSS A SURFACE BOUNDARY. `SessionToolApprovals`'
+    /// autonomous grant was keyed on the conversation alone, and Jarvis publishes its conversation
+    /// to ChatOps on purpose ("Bind the profile so restart-resume, ChatOps, and the sidebar all
+    /// resolve it") — so a message from a paired phone inherited an "approve everything" grant the
+    /// user had made by voice, and ran `execute_shell` with no prompt on ANY surface: the banner is
+    /// skipped, so no `PendingHITL` exists and the mirror has nothing to post either.
+    ///
+    /// ⚠️ BOUND IN `ActiveStreamManager.startMessageStream`, around the run's own task, rather than
+    /// at each caller. Every surface already stamps `userMessage.messageSource` before that call and
+    /// the manager already reads it; binding there means a new surface cannot forget to, and the
+    /// default below is the safe answer rather than a lie.
+    ///
+    /// ⚠️ `.localUI` is "not attributed", not "definitely typed by hand". Anything deciding whether
+    /// to skip a human must treat it as the least-privileged origin.
+    @TaskLocal static var origin: MessageSource = .localUI
 }
 
 actor WorkflowExecutor: Executor {

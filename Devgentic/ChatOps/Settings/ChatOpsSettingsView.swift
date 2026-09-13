@@ -77,6 +77,72 @@ extension ChatOpsSecurityTier {
     }
 }
 
+// MARK: - Secret Input Field
+
+/// Reusable credential input field with leading icon, monospace font, show/hide eye toggle, and clear button.
+private struct SecretInputField: View {
+    let placeholder: LocalizedStringKey
+    @Binding var text: String
+    var isConnected: Bool = false
+    @State private var isRevealed: Bool = false
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "key.fill")
+                .font(.system(size: 11))
+                .foregroundColor(theme.secondaryText.opacity(0.7))
+                .accessibilityHidden(true)
+
+            if isRevealed {
+                TextField(placeholder, text: $text)
+                    .textFieldStyle(.plain)
+                    .font(theme.fontCodeCaption)
+                    .foregroundColor(theme.primaryText)
+                    .disabled(isConnected)
+            } else {
+                SecureField(placeholder, text: $text)
+                    .textFieldStyle(.plain)
+                    .font(theme.fontCodeCaption)
+                    .foregroundColor(theme.primaryText)
+                    .disabled(isConnected)
+            }
+
+            if !text.isEmpty && !isConnected {
+                Button {
+                    isRevealed.toggle()
+                } label: {
+                    Image(systemName: isRevealed ? "eye.slash" : "eye")
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText.opacity(0.8))
+                }
+                .buttonStyle(.plain)
+                .help(isRevealed ? "Hide token" : "Show token")
+
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText.opacity(0.6))
+                }
+                .buttonStyle(.plain)
+                .help("Clear token")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(theme.secondaryBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(theme.dividerColor.opacity(0.4), lineWidth: 1)
+        )
+    }
+}
+
 // MARK: - Settings View
 
 struct ChatOpsSettingsView: View {
@@ -85,9 +151,12 @@ struct ChatOpsSettingsView: View {
     @Environment(\.appTheme) private var theme
 
     @State private var config = ChatOpsConfigManager.shared
-    @State private var pairingService = ChatOpsPairingService()
-    @State private var discordPairingService = DiscordPairingService()
-    @State private var slackPairingService = SlackPairingService()
+    // ⚠️ NOT `@State`. These own an in-flight pairing window that must survive this view being
+    // torn down — see `ChatOpsPairingService.shared`. Nothing here observes them; the PIN and the
+    // status both come from `ChatOpsConfigManager`, which is what the card actually renders.
+    private let pairingService = ChatOpsPairingService.shared
+    private let discordPairingService = DiscordPairingService.shared
+    private let slackPairingService = SlackPairingService.shared
 
     @State private var selectedPlatform: ChatOpsPlatform = .telegram
     // Telegram state
@@ -109,7 +178,7 @@ struct ChatOpsSettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 32) {
+            VStack(spacing: 24) {
                 platformSelector
                 platformContent
             }
@@ -188,10 +257,10 @@ struct ChatOpsSettingsView: View {
     // MARK: - Telegram Settings
 
     private var telegramSettings: some View {
-        VStack(spacing: 32) {
+        VStack(spacing: 24) {
             botConfigCard
             pairingCard
-            securityCard
+            securityCard(for: .telegram)
             connectionCard
         }
     }
@@ -210,9 +279,9 @@ struct ChatOpsSettingsView: View {
                         HStack(spacing: 4) {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundColor(.green)
-                                .font(.system(.caption))
+                                .font(theme.fontCaption2)
                             Text("@\(username)")
-                                .font(.system(size: 12, weight: .medium, design: .monospaced)) // Fixed size: monospaced design
+                                .font(theme.fontCodeCaption.weight(.medium))
                                 .foregroundColor(theme.primaryText)
                         }
                     }
@@ -220,49 +289,42 @@ struct ChatOpsSettingsView: View {
 
                 Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
-                // Token input row (custom layout since it's a multi-element input)
+                // Token input row
                 HStack(spacing: 8) {
-                    SecureField("Bot Token", text: $tokenInput)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 13, design: .monospaced)) // Fixed size: monospaced design
-                        .padding(10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(theme.secondaryBackground)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(theme.dividerColor, lineWidth: 1)
-                        )
-                        .disabled(config.connectionState.isConnected)
+                    SecretInputField(
+                        placeholder: "Enter Telegram Bot Token",
+                        text: $tokenInput,
+                        isConnected: config.connectionState.isConnected
+                    )
 
-                    Button(action: validateToken) {
-                        if isValidating {
-                            ProgressView()
-                                .controlSize(.small)
-                                .frame(width: 60)
-                        } else {
-                            Text("Validate")
-                                .frame(width: 60)
-                        }
+                    TactileButton(
+                        title: "Validate",
+                        icon: "checkmark.shield.fill",
+                        variant: .primary,
+                        size: .compact,
+                        isLoading: isValidating,
+                        isDisabled: tokenInput.isEmpty || isValidating || config.connectionState.isConnected
+                    ) {
+                        validateToken()
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(theme.accentColor)
-                    .controlSize(.small)
-                    .disabled(tokenInput.isEmpty || isValidating || config.connectionState.isConnected)
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
 
                 if let error = validationError {
-                    HStack(spacing: 4) {
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+                    HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(.caption2))
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.warningColor)
+                            .accessibilityHidden(true)
                         Text(error)
-                            .font(.system(.caption))
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.warningColor)
+                        Spacer()
                     }
                     .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
+                    .padding(.vertical, 10)
                 }
             }
         }
@@ -280,35 +342,40 @@ struct ChatOpsSettingsView: View {
                         description: "Validate your bot token first, then initiate pairing. A 6-digit PIN will appear — send it to your bot on Telegram to link.",
                         theme: theme
                     ) {
-                        Button("Start Pairing") {
+                        TactileButton(
+                            title: "Start Pairing",
+                            icon: "link",
+                            variant: .primary,
+                            size: .compact,
+                            isDisabled: config.botToken == nil || config.botToken?.isEmpty == true
+                        ) {
                             guard let token = config.botToken, !token.isEmpty else { return }
                             pairingService.startPairing(botToken: token)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(theme.accentColor)
-                        .controlSize(.small)
-                        .disabled(config.botToken == nil || config.botToken?.isEmpty == true)
                     }
 
                 case .validating:
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("Validating token...")
-                            .font(.system(.caption))
+                        Text("Validating token…")
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
+                        Spacer()
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
 
                 case .awaitingPairing(let pin):
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Send this message to your bot on Telegram:")
-                            .font(.system(.caption))
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
 
                         HStack(spacing: 10) {
                             Text("PAIR \(pin)")
-                                .font(.system(size: 20, weight: .bold, design: .monospaced)) // Fixed size: monospaced design
+                                .font(theme.fontTitle3.weight(.bold).monospaced())
                                 .foregroundColor(theme.accentColor)
-                                .padding(.horizontal, 16)
+                                .padding(.horizontal, 14)
                                 .padding(.vertical, 8)
                                 .background(
                                     RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -319,30 +386,34 @@ struct ChatOpsSettingsView: View {
                                         .stroke(theme.accentColor.opacity(0.2), lineWidth: 0.5)
                                 )
 
-                            Button {
+                            TactileIconButton(
+                                icon: "doc.on.doc",
+                                tooltip: "Copy PIN to clipboard"
+                            ) {
                                 NSPasteboard.general.clearContents()
                                 NSPasteboard.general.setString("PAIR \(pin)", forType: .string)
-                            } label: {
-                                Image(systemName: "doc.on.doc")
-                                    .font(.system(.caption))
                             }
-                            .buttonStyle(.borderless)
-                            .help("Copy to clipboard")
                         }
 
                         HStack(spacing: 12) {
-                            Text("Waiting for pairing... (expires in 5 minutes)")
-                                .font(.system(.caption))
+                            Text("Waiting for pairing (expires in 5 minutes)")
+                                .font(theme.fontCaption2)
                                 .foregroundColor(theme.secondaryText)
 
-                            Button("Cancel") {
+                            Spacer()
+
+                            TactileButton(
+                                title: "Cancel",
+                                variant: .subtle,
+                                size: .compact
+                            ) {
                                 pairingService.cancelPairing()
                                 config.connectionState = .disconnected
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
 
                 case .connected(let chatID):
                     SettingsRow(
@@ -353,20 +424,35 @@ struct ChatOpsSettingsView: View {
                         HStack(spacing: 4) {
                             Circle().fill(.green).frame(width: 7, height: 7)
                             Text("Active")
-                                .font(.system(.caption, weight: .medium))
+                                .font(theme.fontCaption2.weight(.medium))
                                 .foregroundColor(.green)
                         }
                     }
 
                 case .error(let message):
-                    HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(theme.warningColor)
-                            .font(.system(.caption))
-                        Text(message)
-                            .font(.system(.caption))
-                            .foregroundColor(theme.warningColor)
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(theme.warningColor)
+                                .font(theme.fontCaption2)
+                                .accessibilityHidden(true)
+                            Text(message)
+                                .font(theme.fontCaption2)
+                                .foregroundColor(theme.warningColor)
+                        }
+                        TactileButton(
+                            title: config.connectionState.needsRepairing ? "Re-pair" : "Start Pairing",
+                            icon: "arrow.triangle.2.circlepath",
+                            variant: .primary,
+                            size: .compact,
+                            isDisabled: config.botToken == nil || config.botToken?.isEmpty == true
+                        ) {
+                            guard let token = config.botToken, !token.isEmpty else { return }
+                            pairingService.startPairing(botToken: token)
+                        }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
                 }
             }
         }
@@ -374,16 +460,16 @@ struct ChatOpsSettingsView: View {
 
     // MARK: - Security Card
 
-    private var securityCard: some View {
+    private func securityCard(for provider: RemoteChannel.Provider) -> some View {
         SettingsCard(title: "Security", icon: "lock.shield.fill", theme: theme) {
             SettingsRow(
                 title: "Security Tier",
-                description: LocalizedStringKey(config.securityTier.description),
+                description: LocalizedStringKey(config.securityTier(for: provider).description),
                 theme: theme
             ) {
                 Picker("", selection: Binding(
-                    get: { config.securityTier },
-                    set: { config.securityTier = $0 }
+                    get: { config.securityTier(for: provider) },
+                    set: { config.setSecurityTier($0, for: provider) }
                 )) {
                     ForEach(ChatOpsSecurityTier.allCases) { tier in
                         Text(tier.localizedTitle).tag(tier)
@@ -391,6 +477,27 @@ struct ChatOpsSettingsView: View {
                 }
                 .labelsHidden()
                 .fixedSize()
+            }
+
+            if config.securityTier(for: provider) == .full {
+                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+
+                SettingsRow(
+                    title: "Tool Approvals",
+                    description: LocalizedStringKey(config.toolApprovals(for: provider).description),
+                    theme: theme
+                ) {
+                    Picker("", selection: Binding(
+                        get: { config.toolApprovals(for: provider) },
+                        set: { config.setToolApprovals($0, for: provider) }
+                    )) {
+                        ForEach(ChatOpsToolApprovals.allCases) { approvals in
+                            Text(approvals.localizedTitle).tag(approvals)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
             }
         }
     }
@@ -433,8 +540,8 @@ struct ChatOpsSettingsView: View {
                         Circle()
                             .fill(statusColor)
                             .frame(width: 7, height: 7)
-                        Text(config.connectionState.statusText)
-                            .font(.system(.caption, weight: .medium))
+                        Text(config.connectionState.statusText(listenerEnabled: config.isEnabled))
+                            .font(theme.fontCaption2.weight(.medium))
                             .foregroundColor(theme.primaryText)
                     }
                 }
@@ -444,13 +551,20 @@ struct ChatOpsSettingsView: View {
 
                     HStack {
                         Spacer()
-                        DisconnectButton {
+                        TactileButton(
+                            title: "Disconnect",
+                            icon: "xmark.circle",
+                            variant: .destructive,
+                            size: .compact
+                        ) {
                             Task {
                                 viewModel.chatOpsBridge?.stop()
                                 await pairingService.disconnect()
                             }
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
                 }
             }
         }
@@ -490,10 +604,10 @@ struct ChatOpsSettingsView: View {
     // MARK: - Discord Settings
 
     private var discordSettings: some View {
-        VStack(spacing: 32) {
+        VStack(spacing: 24) {
             discordBotConfigCard
             discordPairingCard
-            securityCard // Shared with Telegram
+            securityCard(for: .discord)
             discordConnectionCard
         }
     }
@@ -512,9 +626,9 @@ struct ChatOpsSettingsView: View {
                         HStack(spacing: 4) {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundColor(.green)
-                                .font(.system(.caption))
+                                .font(theme.fontCaption2)
                             Text(username)
-                                .font(.system(size: 12, weight: .medium, design: .monospaced)) // Fixed size: monospaced design
+                                .font(theme.fontCodeCaption.weight(.medium))
                                 .foregroundColor(theme.primaryText)
                         }
                     }
@@ -523,60 +637,57 @@ struct ChatOpsSettingsView: View {
                 Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                 HStack(spacing: 8) {
-                    SecureField("Bot Token", text: $discordTokenInput)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 13, design: .monospaced)) // Fixed size: monospaced design
-                        .padding(10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(theme.secondaryBackground)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(theme.dividerColor, lineWidth: 1)
-                        )
-                        .disabled(config.discordConnectionState.isConnected)
+                    SecretInputField(
+                        placeholder: "Enter Discord Bot Token",
+                        text: $discordTokenInput,
+                        isConnected: config.discordConnectionState.isConnected
+                    )
 
-                    Button(action: validateDiscordToken) {
-                        if isDiscordValidating {
-                            ProgressView()
-                                .controlSize(.small)
-                                .frame(width: 60)
-                        } else {
-                            Text("Validate")
-                                .frame(width: 60)
-                        }
+                    TactileButton(
+                        title: "Validate",
+                        icon: "checkmark.shield.fill",
+                        variant: .primary,
+                        size: .compact,
+                        isLoading: isDiscordValidating,
+                        isDisabled: discordTokenInput.isEmpty || isDiscordValidating || config.discordConnectionState.isConnected
+                    ) {
+                        validateDiscordToken()
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(theme.accentColor)
-                    .controlSize(.small)
-                    .disabled(discordTokenInput.isEmpty || isDiscordValidating || config.discordConnectionState.isConnected)
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
 
                 if let error = discordValidationError {
-                    HStack(spacing: 4) {
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+                    HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(.caption2))
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.warningColor)
+                            .accessibilityHidden(true)
                         Text(error)
-                            .font(.system(.caption))
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.warningColor)
+                        Spacer()
                     }
                     .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
+                    .padding(.vertical, 10)
                 }
 
                 Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                 // Intent reminder
-                HStack(spacing: 6) {
-                    Image(systemName: "info.circle")
-                        .font(.system(.caption2))
-                        .foregroundColor(theme.secondaryText)
+                HStack(spacing: 8) {
+                    Image(systemName: "info.circle.fill")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.accentColor)
+                        .accessibilityHidden(true)
                     Text("Enable the MESSAGE CONTENT privileged intent in your bot's settings on the Discord Developer Portal.")
-                        .font(.system(.caption))
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                    Spacer()
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
             }
         }
     }
@@ -593,35 +704,40 @@ struct ChatOpsSettingsView: View {
                         description: "Validate your bot token first, add the bot to your server, then initiate pairing. A 6-digit PIN will appear — type PAIR <pin> in your chosen Discord channel.",
                         theme: theme
                     ) {
-                        Button("Start Pairing") {
+                        TactileButton(
+                            title: "Start Pairing",
+                            icon: "link",
+                            variant: .primary,
+                            size: .compact,
+                            isDisabled: config.discordBotToken == nil || config.discordBotToken?.isEmpty == true
+                        ) {
                             guard let token = config.discordBotToken, !token.isEmpty else { return }
                             discordPairingService.startPairing(botToken: token)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(theme.accentColor)
-                        .controlSize(.small)
-                        .disabled(config.discordBotToken == nil || config.discordBotToken?.isEmpty == true)
                     }
 
                 case .validating:
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("Validating token...")
-                            .font(.system(.caption))
+                        Text("Validating token…")
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
+                        Spacer()
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
 
                 case .awaitingPairing(let pin):
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Type this in any channel where your bot is present:")
-                            .font(.system(.caption))
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
 
                         HStack(spacing: 10) {
                             Text("PAIR \(pin)")
-                                .font(.system(size: 20, weight: .bold, design: .monospaced)) // Fixed size: monospaced design
+                                .font(theme.fontTitle3.weight(.bold).monospaced())
                                 .foregroundColor(ChatOpsPlatform.discord.color)
-                                .padding(.horizontal, 16)
+                                .padding(.horizontal, 14)
                                 .padding(.vertical, 8)
                                 .background(
                                     RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -632,30 +748,34 @@ struct ChatOpsSettingsView: View {
                                         .stroke(ChatOpsPlatform.discord.color.opacity(0.2), lineWidth: 0.5)
                                 )
 
-                            Button {
+                            TactileIconButton(
+                                icon: "doc.on.doc",
+                                tooltip: "Copy PIN to clipboard"
+                            ) {
                                 NSPasteboard.general.clearContents()
                                 NSPasteboard.general.setString("PAIR \(pin)", forType: .string)
-                            } label: {
-                                Image(systemName: "doc.on.doc")
-                                    .font(.system(.caption))
                             }
-                            .buttonStyle(.borderless)
-                            .help("Copy to clipboard")
                         }
 
                         HStack(spacing: 12) {
-                            Text("Waiting for pairing... (expires in 5 minutes)")
-                                .font(.system(.caption))
+                            Text("Waiting for pairing (expires in 5 minutes)")
+                                .font(theme.fontCaption2)
                                 .foregroundColor(theme.secondaryText)
 
-                            Button("Cancel") {
+                            Spacer()
+
+                            TactileButton(
+                                title: "Cancel",
+                                variant: .subtle,
+                                size: .compact
+                            ) {
                                 discordPairingService.cancelPairing()
                                 config.discordConnectionState = .disconnected
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
 
                 case .connected:
                     SettingsRow(
@@ -666,20 +786,35 @@ struct ChatOpsSettingsView: View {
                         HStack(spacing: 4) {
                             Circle().fill(.green).frame(width: 7, height: 7)
                             Text("Active")
-                                .font(.system(.caption, weight: .medium))
+                                .font(theme.fontCaption2.weight(.medium))
                                 .foregroundColor(.green)
                         }
                     }
 
                 case .error(let message):
-                    HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(theme.warningColor)
-                            .font(.system(.caption))
-                        Text(message)
-                            .font(.system(.caption))
-                            .foregroundColor(theme.warningColor)
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(theme.warningColor)
+                                .font(theme.fontCaption2)
+                                .accessibilityHidden(true)
+                            Text(message)
+                                .font(theme.fontCaption2)
+                                .foregroundColor(theme.warningColor)
+                        }
+                        TactileButton(
+                            title: config.discordConnectionState.needsRepairing ? "Re-pair" : "Start Pairing",
+                            icon: "arrow.triangle.2.circlepath",
+                            variant: .primary,
+                            size: .compact,
+                            isDisabled: config.discordBotToken == nil || config.discordBotToken?.isEmpty == true
+                        ) {
+                            guard let token = config.discordBotToken, !token.isEmpty else { return }
+                            discordPairingService.startPairing(botToken: token)
+                        }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
                 }
             }
         }
@@ -723,8 +858,8 @@ struct ChatOpsSettingsView: View {
                         Circle()
                             .fill(discordStatusColor)
                             .frame(width: 7, height: 7)
-                        Text(config.discordConnectionState.statusText)
-                            .font(.system(.caption, weight: .medium))
+                        Text(config.discordConnectionState.statusText(listenerEnabled: config.isDiscordEnabled))
+                            .font(theme.fontCaption2.weight(.medium))
                             .foregroundColor(theme.primaryText)
                     }
                 }
@@ -734,13 +869,20 @@ struct ChatOpsSettingsView: View {
 
                     HStack {
                         Spacer()
-                        DisconnectButton {
+                        TactileButton(
+                            title: "Disconnect",
+                            icon: "xmark.circle",
+                            variant: .destructive,
+                            size: .compact
+                        ) {
                             Task {
                                 viewModel.discordChatOpsBridge?.stop()
                                 await discordPairingService.disconnect()
                             }
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
                 }
             }
         }
@@ -778,11 +920,11 @@ struct ChatOpsSettingsView: View {
     // MARK: - Slack Settings
 
     private var slackSettings: some View {
-        VStack(spacing: 32) {
+        VStack(spacing: 24) {
             slackBotConfigCard
             slackAppTokenCard
             slackPairingCard
-            securityCard
+            securityCard(for: .slack)
             slackConnectionCard
         }
     }
@@ -801,9 +943,9 @@ struct ChatOpsSettingsView: View {
                         HStack(spacing: 4) {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundColor(.green)
-                                .font(.system(.caption))
+                                .font(theme.fontCaption2)
                             Text(username)
-                                .font(.system(size: 12, weight: .medium, design: .monospaced)) // Fixed size: monospaced design
+                                .font(theme.fontCodeCaption.weight(.medium))
                                 .foregroundColor(theme.primaryText)
                         }
                     }
@@ -812,20 +954,14 @@ struct ChatOpsSettingsView: View {
                 Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                 HStack(spacing: 8) {
-                    SecureField("xoxb-...", text: $slackBotTokenInput)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 13, design: .monospaced)) // Fixed size: monospaced design
-                        .padding(10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(theme.secondaryBackground)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(theme.dividerColor, lineWidth: 1)
-                        )
-                        .disabled(config.slackConnectionState.isConnected)
+                    SecretInputField(
+                        placeholder: "xoxb-token",
+                        text: $slackBotTokenInput,
+                        isConnected: config.slackConnectionState.isConnected
+                    )
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
             }
         }
     }
@@ -846,47 +982,40 @@ struct ChatOpsSettingsView: View {
                 Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                 HStack(spacing: 8) {
-                    SecureField("xapp-...", text: $slackAppTokenInput)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 13, design: .monospaced)) // Fixed size: monospaced design
-                        .padding(10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(theme.secondaryBackground)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(theme.dividerColor, lineWidth: 1)
-                        )
-                        .disabled(config.slackConnectionState.isConnected)
+                    SecretInputField(
+                        placeholder: "xapp-token",
+                        text: $slackAppTokenInput,
+                        isConnected: config.slackConnectionState.isConnected
+                    )
 
-                    Button(action: validateSlackTokens) {
-                        if isSlackValidating {
-                            ProgressView()
-                                .controlSize(.small)
-                                .frame(width: 60)
-                        } else {
-                            Text("Validate")
-                                .frame(width: 60)
-                        }
+                    TactileButton(
+                        title: "Validate",
+                        icon: "checkmark.shield.fill",
+                        variant: .primary,
+                        size: .compact,
+                        isLoading: isSlackValidating,
+                        isDisabled: slackBotTokenInput.isEmpty || slackAppTokenInput.isEmpty || isSlackValidating || config.slackConnectionState.isConnected
+                    ) {
+                        validateSlackTokens()
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(theme.accentColor)
-                    .controlSize(.small)
-                    .disabled(slackBotTokenInput.isEmpty || slackAppTokenInput.isEmpty || isSlackValidating || config.slackConnectionState.isConnected)
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
 
                 if let error = slackValidationError {
-                    HStack(spacing: 4) {
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+                    HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(.caption2))
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.warningColor)
+                            .accessibilityHidden(true)
                         Text(error)
-                            .font(.system(.caption))
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.warningColor)
+                        Spacer()
                     }
                     .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
+                    .padding(.vertical, 10)
                 }
             }
         }
@@ -904,36 +1033,41 @@ struct ChatOpsSettingsView: View {
                         description: "Validate both tokens first, then initiate pairing. A 6-digit PIN will appear — type PAIR <pin> in your chosen Slack channel.",
                         theme: theme
                     ) {
-                        Button("Start Pairing") {
+                        TactileButton(
+                            title: "Start Pairing",
+                            icon: "link",
+                            variant: .primary,
+                            size: .compact,
+                            isDisabled: config.slackBotToken == nil || config.slackAppToken == nil
+                        ) {
                             guard let botToken = config.slackBotToken, !botToken.isEmpty,
                                   let appToken = config.slackAppToken, !appToken.isEmpty else { return }
                             slackPairingService.startPairing(botToken: botToken, appToken: appToken)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(theme.accentColor)
-                        .controlSize(.small)
-                        .disabled(config.slackBotToken == nil || config.slackAppToken == nil)
                     }
 
                 case .validating:
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("Validating tokens...")
-                            .font(.system(.caption))
+                        Text("Validating tokens…")
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
+                        Spacer()
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
 
                 case .awaitingPairing(let pin):
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Type this in any Slack channel where your bot is present:")
-                            .font(.system(.caption))
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
 
                         HStack(spacing: 10) {
                             Text("PAIR \(pin)")
-                                .font(.system(size: 20, weight: .bold, design: .monospaced)) // Fixed size: monospaced design
+                                .font(theme.fontTitle3.weight(.bold).monospaced())
                                 .foregroundColor(ChatOpsPlatform.slack.color)
-                                .padding(.horizontal, 16)
+                                .padding(.horizontal, 14)
                                 .padding(.vertical, 8)
                                 .background(
                                     RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -944,30 +1078,34 @@ struct ChatOpsSettingsView: View {
                                         .stroke(ChatOpsPlatform.slack.color.opacity(0.2), lineWidth: 0.5)
                                 )
 
-                            Button {
+                            TactileIconButton(
+                                icon: "doc.on.doc",
+                                tooltip: "Copy PIN to clipboard"
+                            ) {
                                 NSPasteboard.general.clearContents()
                                 NSPasteboard.general.setString("PAIR \(pin)", forType: .string)
-                            } label: {
-                                Image(systemName: "doc.on.doc")
-                                    .font(.system(.caption))
                             }
-                            .buttonStyle(.borderless)
-                            .help("Copy to clipboard")
                         }
 
                         HStack(spacing: 12) {
-                            Text("Waiting for pairing... (expires in 5 minutes)")
-                                .font(.system(.caption))
+                            Text("Waiting for pairing (expires in 5 minutes)")
+                                .font(theme.fontCaption2)
                                 .foregroundColor(theme.secondaryText)
 
-                            Button("Cancel") {
+                            Spacer()
+
+                            TactileButton(
+                                title: "Cancel",
+                                variant: .subtle,
+                                size: .compact
+                            ) {
                                 slackPairingService.cancelPairing()
                                 config.slackConnectionState = .disconnected
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
 
                 case .connected:
                     SettingsRow(
@@ -978,20 +1116,36 @@ struct ChatOpsSettingsView: View {
                         HStack(spacing: 4) {
                             Circle().fill(.green).frame(width: 7, height: 7)
                             Text("Active")
-                                .font(.system(.caption, weight: .medium))
+                                .font(theme.fontCaption2.weight(.medium))
                                 .foregroundColor(.green)
                         }
                     }
 
                 case .error(let message):
-                    HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(theme.warningColor)
-                            .font(.system(.caption))
-                        Text(message)
-                            .font(.system(.caption))
-                            .foregroundColor(theme.warningColor)
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(theme.warningColor)
+                                .font(theme.fontCaption2)
+                                .accessibilityHidden(true)
+                            Text(message)
+                                .font(theme.fontCaption2)
+                                .foregroundColor(theme.warningColor)
+                        }
+                        TactileButton(
+                            title: config.slackConnectionState.needsRepairing ? "Re-pair" : "Start Pairing",
+                            icon: "arrow.triangle.2.circlepath",
+                            variant: .primary,
+                            size: .compact,
+                            isDisabled: config.slackBotToken == nil || config.slackAppToken == nil
+                        ) {
+                            guard let botToken = config.slackBotToken, !botToken.isEmpty,
+                                  let appToken = config.slackAppToken, !appToken.isEmpty else { return }
+                            slackPairingService.startPairing(botToken: botToken, appToken: appToken)
+                        }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
                 }
             }
         }
@@ -1035,8 +1189,8 @@ struct ChatOpsSettingsView: View {
                         Circle()
                             .fill(slackStatusColor)
                             .frame(width: 7, height: 7)
-                        Text(config.slackConnectionState.statusText)
-                            .font(.system(.caption, weight: .medium))
+                        Text(config.slackConnectionState.statusText(listenerEnabled: config.isSlackEnabled))
+                            .font(theme.fontCaption2.weight(.medium))
                             .foregroundColor(theme.primaryText)
                     }
                 }
@@ -1046,13 +1200,20 @@ struct ChatOpsSettingsView: View {
 
                     HStack {
                         Spacer()
-                        DisconnectButton {
+                        TactileButton(
+                            title: "Disconnect",
+                            icon: "xmark.circle",
+                            variant: .destructive,
+                            size: .compact
+                        ) {
                             Task {
                                 viewModel.slackChatOpsBridge?.stop()
                                 await slackPairingService.disconnect()
                             }
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
                 }
             }
         }
@@ -1149,40 +1310,5 @@ private struct PlatformTab: View {
         }
         .animation(.easeInOut(duration: 0.15), value: isSelected)
         .animation(.easeInOut(duration: 0.1), value: isHovering)
-    }
-}
-
-// MARK: - Disconnect Button (with hover effect)
-
-private struct DisconnectButton: View {
-    let action: () -> Void
-    @State private var isHovering = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: "xmark.circle")
-                    .font(.system(.caption, weight: .medium))
-                Text("Disconnect")
-                    .font(.system(.caption, weight: .medium))
-            }
-            .foregroundColor(isHovering ? .red : .red.opacity(0.65))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(isHovering ? Color.red.opacity(0.1) : Color.clear)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(isHovering ? Color.red.opacity(0.25) : Color.clear, lineWidth: 0.5)
-            )
-        }
-        .buttonStyle(.plain)
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.15)) { isHovering = hovering }
-            if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-        }
     }
 }

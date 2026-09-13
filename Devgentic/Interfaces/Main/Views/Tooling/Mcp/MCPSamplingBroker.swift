@@ -35,6 +35,17 @@ struct MCPSamplingContext: Sendable {
     let conversationID: UUID
     let providerConfig: ProviderConfig
     let profileID: UUID?
+
+    /// The agent message of the run that registered this context — "which run will a later
+    /// out-of-band sampling request belong to".
+    ///
+    /// ⚠️ RECORDED AT REGISTRATION BECAUSE THE REQUEST ITSELF CARRIES NOTHING. A server's
+    /// `sampling/createMessage` arrives on the client connection with no conversation and no run
+    /// attached, which is the same reason `conversationID` is recorded here. Without it the approval
+    /// — which names the server and previews the prompt — is un-attributable, and
+    /// `RemoteMirrorService` cannot tell whether it belongs to the run it is mirroring.
+    let runMessageID: UUID?
+
     let registeredAt: Date
 }
 
@@ -124,7 +135,8 @@ final class MCPSamplingBroker {
                 nodeID: nil,
                 nodeName: serverLabel,
                 title: "MCP server wants to use \(modelName)",
-                profileID: context.profileID
+                profileID: context.profileID,
+                runMessageID: context.runMessageID
             ),
             kind: .toolConfirmation(confirmation)
         ))

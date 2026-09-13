@@ -138,6 +138,44 @@ struct ThemeSettingsView: View {
                     .fill(theme.dividerColor.opacity(0.25))
                     .frame(height: 1)
 
+                // MARK: - Button Accent Section
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "paintpalette.fill")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(theme.accentColor)
+
+                            Text("BUTTON PRESENTATION")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .tracking(1.8)
+                                .foregroundColor(theme.secondaryText)
+                        }
+
+                        Text("Choose whether primary call-to-actions adopt your active accent color or a stark monochrome pro palette.")
+                            .font(theme.fontSubheadline)
+                            .foregroundColor(theme.secondaryText)
+                    }
+
+                    HStack(spacing: 16) {
+                        ForEach(ButtonAccentStyle.allCases) { style in
+                            ButtonAccentStyleCard(
+                                style: style,
+                                isSelected: themeManager.buttonAccentStyle == style,
+                                theme: theme
+                            ) {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                                    themeManager.applyButtonAccentStyle(style)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.25))
+                    .frame(height: 1)
+
                 // MARK: - Chat Font Section
                 VStack(alignment: .leading, spacing: 16) {
                     VStack(alignment: .leading, spacing: 4) {
@@ -508,6 +546,10 @@ struct AccentColorCircle: View {
                         Circle()
                             .fill(baseAccentColor)
                             .frame(width: 32, height: 32)
+                            .overlay(
+                                Circle()
+                                    .strokeBorder(appTheme.dividerColor.opacity(0.5), lineWidth: 0.75)
+                            )
                         
                         Image(systemName: "arrow.triangle.2.circlepath")
                             .font(.system(size: 13, weight: .bold))
@@ -516,6 +558,10 @@ struct AccentColorCircle: View {
                         Circle()
                             .fill(accent.color ?? baseAccentColor)
                             .frame(width: 32, height: 32)
+                            .overlay(
+                                Circle()
+                                    .strokeBorder(appTheme.dividerColor.opacity(0.6), lineWidth: 0.75)
+                            )
                             .shadow(color: (accent.color ?? baseAccentColor).opacity(isHovered ? 0.6 : 0.2), radius: isHovered ? 6 : 3)
                     }
 
@@ -890,6 +936,113 @@ private struct SurfaceStyleCard: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
+    }
+}
+
+// MARK: - Button Accent Style Card
+
+private struct ButtonAccentStyleCard: View {
+    let style: ButtonAccentStyle
+    let isSelected: Bool
+    let theme: any Theme
+    let onSelect: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: style.icon)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
+                        .frame(width: 24, height: 24)
+                        .background(
+                            Circle()
+                                .fill(isSelected ? theme.accentColor.opacity(0.15) : theme.surfaceOverlay)
+                        )
+
+                    Text(style.displayName)
+                        .font(theme.fontFootnote.weight(isSelected ? .bold : .semibold))
+                        .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
+
+                    Spacer()
+
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(theme.accentColor)
+                    }
+                }
+
+                Text(style.subtitle)
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.secondaryText)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                // Mini preview button to demonstrate the effect
+                HStack {
+                    Spacer()
+                    HStack(spacing: 5) {
+                        Image(systemName: "checkmark.shield")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("Action")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundColor(previewForeground)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4.5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(previewBackground)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(previewBorder, lineWidth: 1)
+                    )
+                }
+                .padding(.top, 4)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isSelected ? theme.accentColor.opacity(0.08) : (isHovering ? theme.surfaceOverlay : theme.secondaryBackground))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(
+                        isSelected
+                            ? theme.accentColor.opacity(0.5)
+                            : (isHovering ? theme.secondaryText.opacity(0.25) : theme.dividerColor.opacity(0.5)),
+                        lineWidth: isSelected ? 1.5 : 1
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+    }
+
+    private var previewForeground: Color {
+        switch style {
+        case .accent: return .white
+        case .themeContrast: return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+        }
+    }
+
+    private var previewBackground: Color {
+        switch style {
+        case .accent: return theme.accentColor
+        case .themeContrast: return theme.isDark ? .white : Color(red: 0.12, green: 0.12, blue: 0.14)
+        }
+    }
+
+    private var previewBorder: Color {
+        switch style {
+        case .accent: return Color.white.opacity(0.25)
+        case .themeContrast: return theme.isDark ? .white : Color(red: 0.12, green: 0.12, blue: 0.14)
+        }
     }
 }
 

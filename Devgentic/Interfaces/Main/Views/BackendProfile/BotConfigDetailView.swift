@@ -196,6 +196,8 @@ struct BotConfigDetailView: View {
             // See AgentConfigDetailView for the rationale — `onCancel` swaps
             // the leading chevron for an xmark and routes it to the modal host.
             DynamicIslandBar(
+                title: editBuffer.draft.displayName,
+                icon: "bubble.left.and.bubble.right.fill",
                 onBack: handleBackTap,
                 leadingSymbol: onCancel != nil ? "xmark" : "chevron.left"
             ) {
@@ -332,9 +334,8 @@ struct BotConfigDetailView: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("System Instructions")
-                        .font(theme.fontSubheadline)
-                        .fontWeight(.medium)
-                        .foregroundColor(theme.secondaryText)
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
 
                     Spacer()
 
@@ -402,7 +403,7 @@ struct BotConfigDetailView: View {
                             .font(.system(size: 11, weight: .semibold))
                             .accessibilityHidden(true)
                         Text(message)
-                            .font(theme.fontCaption)
+                            .font(theme.fontCaption2)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .foregroundColor(theme.errorColor)
@@ -561,32 +562,33 @@ struct BotConfigDetailView: View {
                     HStack(alignment: .center) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Reference Documents")
-                                .font(theme.fontBody.weight(.semibold))
+                                .font(theme.fontSubheadline.weight(.semibold))
                             Text("Add external documents the bot can use as context")
-                            .font(theme.fontCaption)
-                            .foregroundColor(theme.secondaryText)
-                    }
+                                .font(theme.fontCaption2)
+                                .foregroundColor(theme.secondaryText)
+                                .lineSpacing(2.5)
+                        }
 
-                    Spacer(minLength: 16)
+                        Spacer(minLength: 16)
 
-                    GlassActionButton(title: "Add File", icon: "plus") {
-                        showingKnowledgeImporter = true
-                    }
-                    .fileImporter(
-                        isPresented: $showingKnowledgeImporter,
-                        allowedContentTypes: [.item],
-                        allowsMultipleSelection: true
-                    ) { result in
-                        knowledgeImportError = KnowledgeSourceImport.apply(
-                            result, to: knowledgeSourcesBinding, profileKind: "bot")
-                    }
+                        GlassActionButton(title: "Add File", icon: "plus") {
+                            showingKnowledgeImporter = true
+                        }
+                        .fileImporter(
+                            isPresented: $showingKnowledgeImporter,
+                            allowedContentTypes: [.item],
+                            allowsMultipleSelection: true
+                        ) { result in
+                            knowledgeImportError = KnowledgeSourceImport.apply(
+                                result, to: knowledgeSourcesBinding, profileKind: "bot")
+                        }
                     }
 
                     // The reason "Add File" appeared to do nothing (register A60). Cleared as soon as the
                     // next import succeeds or is cancelled, so it never lingers past the attempt it describes.
                     if let knowledgeImportError {
                         Label(knowledgeImportError, systemImage: "exclamationmark.triangle")
-                            .font(theme.fontCaption)
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.warningColor)
                             .fixedSize(horizontal: false, vertical: true)
                             .padding(8)
@@ -595,17 +597,17 @@ struct BotConfigDetailView: View {
                     }
 
                     if !knowledgeSourcesBinding.wrappedValue.isEmpty {
-                    VStack(spacing: 8) {
-                        ForEach(knowledgeSourcesBinding.wrappedValue) { source in
-                            KnowledgeSourceRow(source: source, theme: theme) {
-                                knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
+                        VStack(spacing: 8) {
+                            ForEach(knowledgeSourcesBinding.wrappedValue) { source in
+                                KnowledgeSourceRow(source: source, theme: theme) {
+                                    knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
+                                }
                             }
                         }
-                    }
-                    .padding(.leading, 12)
-                } else {
-                    Text("No reference documents added.")
-                            .font(theme.fontCaption)
+                        .padding(.leading, 12)
+                    } else {
+                        Text("No reference documents added.")
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
                             .italic()
                             .padding(.leading, 12)

@@ -237,10 +237,28 @@ struct PlanProgressCard: View {
         stepExpandOverrides[step.id] ?? (step.status == .running)
     }
 
+    /// [tc-6] The summary the DISCLOSURE will actually show, or nil when it would show none.
+    ///
+    /// ONE predicate, read by both the chevron (`hasDetail`) and the disclosure body, because
+    /// they used to disagree: `hasDetail` counted any non-empty summary, while the disclosure
+    /// rendered one only for `.completed`. A `.cancelled` subtask therefore grew a chevron that
+    /// expanded to nothing, and its intermediate answer — the thing a cancelled step has to
+    /// show — was reachable from nowhere; a `.failed` step's reason past two lines was likewise
+    /// readable only in the clamped collapsed row.
+    ///
+    /// Dropping the `.completed` requirement is the fix, not tightening `hasDetail`: tightening
+    /// would have closed the empty chevron and kept the loss. The `"Completed ("` guard stays —
+    /// that prefix is the capability's own synthetic "Completed (N tool calls)" string, which is
+    /// already said by the meta label and is not worth a disclosure of its own.
+    nonisolated static func disclosedSummary(_ step: PlanStepData) -> String? {
+        guard let summary = step.summary, !summary.isEmpty, !summary.hasPrefix("Completed (") else { return nil }
+        return summary
+    }
+
     @ViewBuilder
     private func stepRow(_ step: PlanStepData, index: Int) -> some View {
         let expanded = isStepExpanded(step)
-        let hasDetail = !step.events.isEmpty || (step.summary?.isEmpty == false)
+        let hasDetail = !step.events.isEmpty || Self.disclosedSummary(step) != nil
 
         VStack(alignment: .leading, spacing: 0) {
             Button {
@@ -311,9 +329,12 @@ struct PlanProgressCard: View {
                         )
                     }
                     // The subtask's own closing summary (its intermediate answer) —
-                    // shown after the events, muted, only where it adds signal.
-                    if step.status == .completed, let summary = step.summary,
-                       !summary.isEmpty, !summary.hasPrefix("Completed (") {
+                    // shown after the events, muted, only where it adds signal. [tc-6] Same
+                    // predicate the chevron used to decide there was something in here, so the
+                    // two can no longer disagree. For `.failed`/`.warning` this repeats the
+                    // reason the collapsed row clamps to two lines — deliberately: the clamped
+                    // copy is a glance, this one is the whole text.
+                    if let summary = Self.disclosedSummary(step) {
                         Text(summary)
                             .font(.system(size: 11))
                             .foregroundColor(theme.secondaryText.opacity(0.85))

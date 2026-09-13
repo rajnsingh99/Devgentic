@@ -64,7 +64,7 @@ final class TraceStore: Sendable {
             let url = URL(fileURLWithPath: override)
             return (url.deletingLastPathComponent(), url.path)
         }
-        if NSClassFromString("XCTestCase") != nil {
+        if TestHost.isRunning {
             let dir = FileManager.default.temporaryDirectory
                 .appendingPathComponent("devgentic-tracestore-testhost", isDirectory: true)
             // One path per PROCESS, not per call: TraceStore.shared and any directly-constructed
@@ -101,7 +101,7 @@ final class TraceStore: Sendable {
 
         logger.info("TraceStore initialized at: \(dbPath)")
         #if DEBUG
-        if NSClassFromString("XCTestCase") != nil,
+        if TestHost.isRunning,
            ProcessInfo.processInfo.environment[Self.storePathOverrideEnvKey] == nil {
             // CONSEQUENCE of the redirect: this process records real telemetry into a throwaway
             // file, and the launch sweep prunes THAT file — the developer's traces.sqlite is

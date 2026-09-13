@@ -44,6 +44,17 @@ final class MCPConnectionCoordinator {
     /// Connects every enabled server. Safe to call more than once — later calls join the
     /// in-flight sweep rather than starting a second one.
     func connectEnabledServersAtLaunch() async {
+        // ⚠️⚠️ THIS SPAWNS CHILD PROCESSES — `npx` and friends — THAT INHERIT THE HOST'S ENTIRE
+        // ENVIRONMENT, and resolves their credentials from the developer's REAL login Keychain. In a
+        // test host that means arbitrary third-party server code executing with the developer's
+        // full environment, during a run nobody is watching, in a process about to be killed (so the
+        // children can outlive their parent's teardown).
+        //
+        // ⚠️ The user-driven paths — Add-server "Test Connection", an explicit reconnect — are
+        // deliberately NOT guarded: someone is sitting there, and a test cannot reach them. Only the
+        // automatic LAUNCH sweep is refused, because only it runs without anyone asking.
+        guard TestHost.permits("connect enabled MCP servers at launch (this spawns child processes inheriting the full environment and reads the real login Keychain)", logger: logger) else { return }
+
         if let existing = launchConnectTask {
             await existing.value
             return

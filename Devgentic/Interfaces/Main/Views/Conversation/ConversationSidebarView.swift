@@ -131,9 +131,6 @@ struct ConversationSidebarRow: View {
                 }
                 renamingConversationID = nil
             },
-            onPin: {
-                viewModel.togglePinStatus(for: conversation.id)
-            },
             onDelete: {
                 triggerDelete()
             },

@@ -218,12 +218,25 @@ struct ModelFitAdvisor {
     // MARK: - Estimation Engine
 
     /// Estimate runtime RAM from metadata (returns bytes). Used internally and for dual-model checks.
-    static func estimateRuntimeRAM(metadata: ModelMetadata?, diskSizeString: String? = nil) -> UInt64 {
+    /// ⚠️ The priority order MIRRORS `assess`: formula → raw bytes → formatted string → tier.
+    /// Keep them in step — `verdict` below is only interchangeable with `assess(…).verdict`
+    /// while they agree, and the agreement test exists to catch the day they stop.
+    static func estimateRuntimeRAM(
+        metadata: ModelMetadata?,
+        diskSizeString: String? = nil,
+        diskSizeBytes: Int64? = nil
+    ) -> UInt64 {
         let paramBillions = parseParameterCount(metadata?.parameterCount)
         let quantBits = parseQuantizationBits(metadata?.quantization)
 
         if let params = paramBillions {
             return calculateRuntimeRAM(paramBillions: params, quantBits: quantBits, contextWindow: metadata?.contextWindow)
+        }
+
+        // Raw bytes BEFORE the formatted string: round-tripping a `ByteCountFormatter` string
+        // back through `parseDiskSize` is lossy in comma-decimal locales.
+        if let diskSizeBytes, diskSizeBytes > 0 {
+            return safeUInt64(Double(diskSizeBytes) * 1.2)
         }
 
         if let diskSize = diskSizeString, let diskBytes = parseDiskSize(diskSize) {
@@ -480,6 +493,29 @@ struct ModelFitAdvisor {
     }
 
     // MARK: - Verdict Logic
+
+    /// The verdict alone, with NO diagnostic logging.
+    ///
+    /// ⚠️ Exists because `assess` emits a `logger.info` per model. That is right for a card that
+    /// renders once and wrong for a list filter: `applyFilterAndSort` runs on every service
+    /// observer tick — roughly one per size lookup that lands, ~30 per page — so assessing a
+    /// page there would emit hundreds of lines per store load.
+    ///
+    /// Takes the same three inputs as `assess` so the two cannot diverge on input shape.
+    static func verdict(
+        metadata: ModelMetadata?,
+        diskSizeString: String? = nil,
+        diskSizeBytes: Int64? = nil
+    ) -> ModelFitVerdict {
+        let estimated = estimateRuntimeRAM(
+            metadata: metadata,
+            diskSizeString: diskSizeString,
+            diskSizeBytes: diskSizeBytes
+        )
+        guard estimated > 0 else { return .unknown }
+        let budget = SystemHardwareProfiler.shared.profile.effectiveBudget
+        return verdictFromRatio(Double(estimated) / Double(budget))
+    }
 
     private static func verdictFromRatio(_ ratio: Double) -> ModelFitVerdict {
         switch ratio {

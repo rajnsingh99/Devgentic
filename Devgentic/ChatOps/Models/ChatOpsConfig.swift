@@ -8,6 +8,8 @@
 //
 
 import Foundation
+import Security
+import SwiftUI
 
 // MARK: - Security Tier
 
@@ -29,6 +31,50 @@ enum ChatOpsSecurityTier: String, Codable, CaseIterable, Identifiable {
         case .full:      return "Full access including tool approval"
         }
     }
+}
+
+// MARK: - Tool Approvals
+
+/// Whether a remote-started run stops for tool approval.
+///
+/// ⚠️⚠️ THE MOST PRIVILEGED SETTING IN CHATOPS, AND ITS SAFETY IS ITS SHAPE — the same argument
+/// `JarvisToolApprovals` rests on, which this deliberately mirrors. `.autonomous` means a message
+/// from a phone runs `execute_shell` with no prompt on ANY surface: the banner is skipped, so no
+/// `PendingHITL` exists and the mirror has nothing to post either. What keeps that defensible:
+///
+///   • `.ask` is the DEFAULT, and it already works — the mirror posts tappable Approve/Deny.
+///   • Chosen from the Mac's Settings pane and NOWHERE ELSE. ⚠️ There is deliberately no remote
+///     verb for it: a command that grants its own sender unattended shell is not a setting, it is
+///     a privilege escalation. `ChatOpsCommand` must never gain one.
+///   • Revealed only at the `.full` tier, and `isAutonomous(for:)` re-checks that — so dropping the
+///     tier revokes it even though the stored value stays put.
+///   • Per platform, so a private Telegram DM and a shared Slack channel can differ.
+///   • Single-user: only the account that completed pairing can reach it (invariant 38).
+///   • The GRANT it produces is in-memory and re-applied every turn, so a relaunch fails safe to
+///     Ask — and the user can still answer the mirrored buttons.
+enum ChatOpsToolApprovals: String, Codable, CaseIterable, Identifiable {
+    /// Mirror the request and wait for a tap. The default.
+    case ask
+    /// Approve everything for a run this platform started, so a long run never stops.
+    case autonomous
+
+    var id: String { rawValue }
+
+    var localizedTitle: LocalizedStringKey {
+        switch self {
+        case .ask:        return "Ask me"
+        case .autonomous: return "Autonomous"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .ask:        return "Mirror each tool request and wait for Approve or Deny"
+        case .autonomous: return "Run tools without asking — including shell commands"
+        }
+    }
+
+    var isAutonomous: Bool { self == .autonomous }
 }
 
 // MARK: - Connection State
@@ -55,18 +101,76 @@ enum ChatOpsConnectionState: Equatable {
         case .error(let msg):          return "Error: \(msg)"
         }
     }
+
+    /// Whether this state means "paired, but every remote command will be refused".
+    ///
+    /// ⚠️ Distinct from `.error` in general: a terminal token failure is also `.error`, and that one
+    /// is not fixed by re-pairing. Callers that want to offer re-pairing check this.
+    var needsRepairing: Bool {
+        if case .error(let message) = self { return message == ChatOpsPairingRestore.needsRepairingMessage }
+        return false
+    }
+
+    /// The status a user should read, given whether the listener is switched on.
+    ///
+    /// ⚠️⚠️ `.connected` MEANS "A PAIRING EXISTS", NOT "MESSAGES ARE ARRIVING" — and once the
+    /// restore stopped conflating the two (see `ChatOpsConfigManager.init`), a paired provider whose
+    /// listener the user had switched off started reading "Connected". That is a smaller lie than
+    /// the one it replaced, which greyed out the only control that could switch it back on, but it
+    /// is still a lie: nothing is being received. The caller knows `isEnabled`; the vocabulary lives
+    /// here, so it is composed here rather than at three call sites that could drift.
+    func statusText(listenerEnabled: Bool) -> String {
+        guard case .connected = self, !listenerEnabled else { return statusText }
+        return "Paired — listener off"
+    }
 }
 
 // MARK: - ChatOps Configuration
 
+/// What a provider's connection state should be at launch, given what is actually on disk.
+///
+/// ⚠️⚠️ WHY THIS IS A FUNCTION AND NOT THREE INLINE `if`s. The restore used to read
+/// `if let chatID = authorizedChatID, botToken != nil { connectionState = .connected(chatID:) }` —
+/// credentials plus an ADDRESS — and said nothing about whether anyone is authorized to USE it.
+/// Per-sender authorization (invariant 38) then made `authorizedUserID` load-bearing: it is written
+/// only by a pairing service and nothing backfills it, so a pairing made before that build restores
+/// with `authorizedUserID == nil` and `senderIsAuthorized` refuses EVERY inbound message. The UI,
+/// reading `.connected`, painted a green dot over a bridge that could not answer anything, and the
+/// remote user got silence. A green light over a dead path is worse than a red one.
+///
+/// ⚠️ THE REGISTER CALLED THIS AN "ACCEPTED COST" BECAUSE "THE LOG LINE SAYS SO EXPLICITLY". That was
+/// wrong, and this function is the correction: a log line is not an affordance. The user is not
+/// reading Console; they are looking at a green dot and wondering why their phone is ignored.
+enum ChatOpsPairingRestore {
+
+    /// ⚠️ MATCHED EXACTLY by `ChatOpsConnectionState.needsRepairing`, which is how the Settings pane
+    /// tells this apart from a terminal token failure (also `.error`, but NOT fixed by re-pairing).
+    /// One literal, one place.
+    static let needsRepairingMessage =
+        "This pairing predates per-sender authorization and records no account, so every remote command is refused. Start pairing again to fix it."
+
+    /// - Parameter authorizedUserID: the account recorded at pairing. ⚠️ NIL IS THE UPGRADE CASE,
+    ///   not a corrupt install — it is what every pairing made before invariant 38 looks like.
+    static func state(credentialsPresent: Bool,
+                      addressPresent: Bool,
+                      authorizedUserID: String?,
+                      chatID: Int64) -> ChatOpsConnectionState {
+        guard credentialsPresent, addressPresent else { return .disconnected }
+        guard authorizedUserID != nil else { return .error(needsRepairingMessage) }
+        return .connected(chatID: chatID)
+    }
+}
+
 /// Manages ChatOps state, persisted to UserDefaults (non-sensitive) and Keychain (tokens).
-@Observable @MainActor
+@Observable
+@MainActor
 final class ChatOpsConfigManager {
 
     static let shared = ChatOpsConfigManager()
 
     private let keychain = SecureKeyStorage()
-    private static let keychainService = Bundle.main.bundleIdentifier ?? "app.devgentic.macos"
+    private let logger = DGLogger(category: "ChatOpsConfig")
+    nonisolated private static let keychainService = Bundle.main.bundleIdentifier ?? "app.devgentic.macos"
 
     var connectionState: ChatOpsConnectionState = .disconnected
 
@@ -103,17 +207,179 @@ final class ChatOpsConfigManager {
         }
     }
 
+    /// Telegram's security tier.
+    ///
+    /// ⚠️⚠️ ONE TIER USED TO GOVERN ALL THREE PLATFORMS WHILE BEING RENDERED INSIDE EACH PLATFORM'S
+    /// OWN TAB. The Settings pane embeds the same `securityCard` in the Telegram, Discord and Slack
+    /// stacks with no qualifier anywhere, so a user who set "Full Access" on Telegram — to approve
+    /// tools from their phone — found the Discord tab already reading Full Access, and a user who
+    /// then set Discord to "Read Only" silently dropped their phone to Read Only too, whereupon its
+    /// approvals began failing with a message that named no cause.
+    ///
+    /// ⚠️ THE FILE ALREADY SOLVED THIS ONCE, FOR THE CURSOR. `ProviderSessionContext`'s header says
+    /// a service reading the bare `activeConversationID` "would have moved Discord's conversation by
+    /// writing Telegram's" — the tier is the same shape and simply never got the same treatment.
+    ///
+    /// ⚠️ THREE STORED PROPERTIES RATHER THAN ONE FUNCTION, because `@Observable` tracks key paths:
+    /// a computed `securityTier(for:)` alone could not invalidate a view when the value changed.
+    /// The switch helper below exists for call sites that hold a provider in a variable.
     var securityTier: ChatOpsSecurityTier {
         get {
             access(keyPath: \.securityTier)
-            guard let raw = UserDefaults.standard.string(forKey: AppSettings.chatOpsSecurityTierKey),
-                  let tier = ChatOpsSecurityTier(rawValue: raw) else { return .readOnly }
-            return tier
+            return Self.tier(forKey: AppSettings.chatOpsSecurityTierKey)
         }
         set {
             withMutation(keyPath: \.securityTier) {
                 UserDefaults.standard.set(newValue.rawValue, forKey: AppSettings.chatOpsSecurityTierKey)
             }
+        }
+    }
+
+    /// Discord's security tier. See `securityTier`.
+    var discordSecurityTier: ChatOpsSecurityTier {
+        get {
+            access(keyPath: \.discordSecurityTier)
+            return Self.tier(forKey: Self.discordSecurityTierKey)
+        }
+        set {
+            withMutation(keyPath: \.discordSecurityTier) {
+                UserDefaults.standard.set(newValue.rawValue, forKey: Self.discordSecurityTierKey)
+            }
+        }
+    }
+
+    /// Slack's security tier. See `securityTier`.
+    var slackSecurityTier: ChatOpsSecurityTier {
+        get {
+            access(keyPath: \.slackSecurityTier)
+            return Self.tier(forKey: Self.slackSecurityTierKey)
+        }
+        set {
+            withMutation(keyPath: \.slackSecurityTier) {
+                UserDefaults.standard.set(newValue.rawValue, forKey: Self.slackSecurityTierKey)
+            }
+        }
+    }
+
+    /// Telegram's tool-approval mode. See `ChatOpsToolApprovals`.
+    var toolApprovals: ChatOpsToolApprovals {
+        get {
+            access(keyPath: \.toolApprovals)
+            return Self.approvals(forKey: Self.telegramToolApprovalsKey)
+        }
+        set {
+            withMutation(keyPath: \.toolApprovals) {
+                UserDefaults.standard.set(newValue.rawValue, forKey: Self.telegramToolApprovalsKey)
+            }
+        }
+    }
+
+    /// Discord's tool-approval mode. See `ChatOpsToolApprovals`.
+    var discordToolApprovals: ChatOpsToolApprovals {
+        get {
+            access(keyPath: \.discordToolApprovals)
+            return Self.approvals(forKey: Self.discordToolApprovalsKey)
+        }
+        set {
+            withMutation(keyPath: \.discordToolApprovals) {
+                UserDefaults.standard.set(newValue.rawValue, forKey: Self.discordToolApprovalsKey)
+            }
+        }
+    }
+
+    /// Slack's tool-approval mode. See `ChatOpsToolApprovals`.
+    var slackToolApprovals: ChatOpsToolApprovals {
+        get {
+            access(keyPath: \.slackToolApprovals)
+            return Self.approvals(forKey: Self.slackToolApprovalsKey)
+        }
+        set {
+            withMutation(keyPath: \.slackToolApprovals) {
+                UserDefaults.standard.set(newValue.rawValue, forKey: Self.slackToolApprovalsKey)
+            }
+        }
+    }
+
+    nonisolated static let telegramToolApprovalsKey = "chatOpsToolApprovals"
+    nonisolated static let discordToolApprovalsKey = "chatOpsDiscordToolApprovals"
+    nonisolated static let slackToolApprovalsKey = "chatOpsSlackToolApprovals"
+
+    /// ⚠️ ABSENT KEY → `.ask`. The default must be the one that stops and shows you the arguments.
+    nonisolated private static func approvals(forKey key: String) -> ChatOpsToolApprovals {
+        guard let raw = UserDefaults.standard.string(forKey: key),
+              let value = ChatOpsToolApprovals(rawValue: raw) else { return .ask }
+        return value
+    }
+
+    func toolApprovals(for provider: RemoteChannel.Provider) -> ChatOpsToolApprovals {
+        switch provider {
+        case .telegram: return toolApprovals
+        case .discord:  return discordToolApprovals
+        case .slack:    return slackToolApprovals
+        }
+    }
+
+    func setToolApprovals(_ value: ChatOpsToolApprovals, for provider: RemoteChannel.Provider) {
+        switch provider {
+        case .telegram: toolApprovals = value
+        case .discord:  discordToolApprovals = value
+        case .slack:    slackToolApprovals = value
+        }
+    }
+
+    /// Whether this provider actually runs tools without asking.
+    ///
+    /// ⚠️⚠️ THE TIER IS RE-CHECKED HERE, NOT ONLY IN THE UI. The picker is revealed only at `.full`,
+    /// but the stored value survives a later drop to Standard or Read Only — so a user who granted
+    /// Autonomous and then tightened the tier would still be running unattended if this read the
+    /// approvals setting alone. The UI hides it; this makes it actually stop.
+    func isAutonomous(for provider: RemoteChannel.Provider) -> Bool {
+        securityTier(for: provider) == .full && toolApprovals(for: provider).isAutonomous
+    }
+
+    nonisolated static let discordSecurityTierKey = "chatOpsDiscordSecurityTier"
+    nonisolated static let slackSecurityTierKey = "chatOpsSlackSecurityTier"
+
+    /// ⚠️ ABSENT KEY → `.readOnly`. A provider that has never had a tier chosen for it must start at
+    /// the least-privileged one, not inherit whatever another platform was granted.
+    nonisolated private static func tier(forKey key: String) -> ChatOpsSecurityTier {
+        guard let raw = UserDefaults.standard.string(forKey: key),
+              let tier = ChatOpsSecurityTier(rawValue: raw) else { return .readOnly }
+        return tier
+    }
+
+    /// The tier governing one provider.
+    func securityTier(for provider: RemoteChannel.Provider) -> ChatOpsSecurityTier {
+        switch provider {
+        case .telegram: return securityTier
+        case .discord:  return discordSecurityTier
+        case .slack:    return slackSecurityTier
+        }
+    }
+
+    func setSecurityTier(_ tier: ChatOpsSecurityTier, for provider: RemoteChannel.Provider) {
+        switch provider {
+        case .telegram: securityTier = tier
+        case .discord:  discordSecurityTier = tier
+        case .slack:    slackSecurityTier = tier
+        }
+    }
+
+    /// Gives an ALREADY-PAIRED Discord or Slack the tier it has been running under.
+    ///
+    /// ⚠️⚠️ WITHOUT THIS THE FIX IS A SILENT DOWNGRADE. Splitting the tier means Discord and Slack
+    /// start reading their own keys, which do not exist yet — so an install that had been running at
+    /// Full Access would drop to Read Only on upgrade and its remote approvals would begin failing
+    /// with a message naming no cause. Seeded only for a provider that is ALREADY paired; one paired
+    /// after this runs gets `.readOnly`, which is the point of the split.
+    private func seedPerProviderTiers() {
+        let inherited = securityTier
+        for (provider, isPaired, key) in [
+            (RemoteChannel.Provider.discord, discordAuthorizedChannelID != nil, Self.discordSecurityTierKey),
+            (RemoteChannel.Provider.slack, slackAuthorizedChannelID != nil, Self.slackSecurityTierKey)
+        ] where isPaired && UserDefaults.standard.string(forKey: key) == nil {
+            setSecurityTier(inherited, for: provider)
+            logger.info("[CHATOPS] Seeded the \(provider.rawValue) security tier as '\(inherited.rawValue)', inherited from the single tier that used to govern all three platforms. CONSEQUENCE: an already-paired provider keeps the access it has been running under instead of silently dropping to Read Only; a provider paired from now on starts at Read Only.")
         }
     }
 
@@ -125,6 +391,32 @@ final class ChatOpsConfigManager {
         set {
             withMutation(keyPath: \.isEnabled) {
                 UserDefaults.standard.set(newValue, forKey: AppSettings.chatOpsEnabledKey)
+            }
+        }
+    }
+
+    /// The ONE remote account allowed to drive this Mac over Telegram.
+    ///
+    /// ⚠️⚠️ CHATOPS IS A SINGLE-USER REMOTE CONTROL, AND THIS IS WHERE THAT IS ENFORCED RATHER THAN
+    /// ASSUMED. Authorization used to compare the CHAT (or, on Discord and Slack, the CHANNEL) and
+    /// nothing else. A Telegram chat id in a DM happens to identify a person, so the assumption held
+    /// there by accident — but a Telegram group, a Discord channel and a Slack channel all identify a
+    /// ROOM, and every member of one could send commands, answer clarifications, and at `.full` tap
+    /// Approve on a mirrored tool call. The sender was on the wire the whole time and decoded; it was
+    /// simply never compared. Recorded at the moment the PIN matches, from the same `origin` value the
+    /// pairing lockout already computes.
+    ///
+    /// ⚠️ NIL IS REFUSED, NOT WAVED THROUGH. A pairing made before this existed has no recorded
+    /// sender, and treating "unknown" as "anyone" is the original hole with extra steps. The gate
+    /// fails closed and names re-pairing as the fix.
+    var authorizedUserID: String? {
+        get {
+            access(keyPath: \.authorizedUserID)
+            return UserDefaults.standard.string(forKey: "chatOpsAuthorizedUserID")
+        }
+        set {
+            withMutation(keyPath: \.authorizedUserID) {
+                UserDefaults.standard.set(newValue, forKey: "chatOpsAuthorizedUserID")
             }
         }
     }
@@ -214,6 +506,19 @@ final class ChatOpsConfigManager {
         }
     }
 
+    /// The ONE Discord account allowed to drive this Mac. See `authorizedUserID`.
+    var discordAuthorizedUserID: String? {
+        get {
+            access(keyPath: \.discordAuthorizedUserID)
+            return UserDefaults.standard.string(forKey: "chatOpsDiscordAuthorizedUserID")
+        }
+        set {
+            withMutation(keyPath: \.discordAuthorizedUserID) {
+                UserDefaults.standard.set(newValue, forKey: "chatOpsDiscordAuthorizedUserID")
+            }
+        }
+    }
+
     var discordBotUsername: String? {
         get {
             access(keyPath: \.discordBotUsername)
@@ -256,6 +561,9 @@ final class ChatOpsConfigManager {
     /// Resets all Telegram ChatOps state (used on disconnect).
     func reset() {
         botToken = nil
+        authorizedUserID = nil
+        securityTier = .readOnly
+        toolApprovals = .ask
         botUsername = nil
         authorizedChatID = nil
         isEnabled = false
@@ -266,6 +574,10 @@ final class ChatOpsConfigManager {
     /// Resets all Discord ChatOps state (used on disconnect).
     func resetDiscord() {
         discordBotToken = nil
+        discordAuthorizedUserID = nil
+        // ⚠️ The tier goes with the pairing — a new one must start at Read Only, not inherit Full Access.
+        discordSecurityTier = .readOnly
+        discordToolApprovals = .ask
         discordBotUsername = nil
         discordAuthorizedChannelID = nil
         discordApplicationID = nil
@@ -323,6 +635,19 @@ final class ChatOpsConfigManager {
         }
     }
 
+    /// The ONE Slack account allowed to drive this Mac. See `authorizedUserID`.
+    var slackAuthorizedUserID: String? {
+        get {
+            access(keyPath: \.slackAuthorizedUserID)
+            return UserDefaults.standard.string(forKey: "chatOpsSlackAuthorizedUserID")
+        }
+        set {
+            withMutation(keyPath: \.slackAuthorizedUserID) {
+                UserDefaults.standard.set(newValue, forKey: "chatOpsSlackAuthorizedUserID")
+            }
+        }
+    }
+
     var slackBotUsername: String? {
         get {
             access(keyPath: \.slackBotUsername)
@@ -376,6 +701,9 @@ final class ChatOpsConfigManager {
     func resetSlack() {
         slackBotToken = nil
         slackAppToken = nil
+        slackAuthorizedUserID = nil
+        slackSecurityTier = .readOnly
+        slackToolApprovals = .ask
         slackBotUsername = nil
         slackTeamName = nil
         slackAuthorizedChannelID = nil
@@ -384,18 +712,149 @@ final class ChatOpsConfigManager {
         slackConnectionState = .disconnected
     }
 
+    // MARK: - Keychain Service Migration
+
+    /// Keychain `service` strings earlier builds stored ChatOps credentials under, newest first.
+    ///
+    /// ⚠️⚠️ WHY THIS LIST EXISTS AT ALL. `keychainService` is `Bundle.main.bundleIdentifier`, and
+    /// commit `2faad1c` changed that identifier from `com.dev.devgentic` to `app.devgentic.macos`
+    /// as part of public-release prep. A Keychain item is addressed by (service, account), so on the
+    /// first launch after that build EVERY ChatOps credential became unreachable at once: all five
+    /// reads returned nothing, `isConfigured` went false, all three bridges declined to start, and
+    /// the Settings UI offered "Start Pairing" as though the user had never paired. Nothing was
+    /// deleted — the items were still there, addressed by a name no code asked for any more — so the
+    /// three live third-party bot tokens would have sat in the user's Keychain forever.
+    ///
+    /// ⚠️ A RENAME IS NOT A ONE-OFF. Any future bundle-id change (a rebrand, a separate beta
+    /// identifier, an Xcode target split) reproduces this exactly. Prepend the outgoing identifier
+    /// here in the same commit that changes it, and this stays a migration rather than a data loss.
+    ///
+    /// ⚠️ Non-ChatOps state keys off the same identifier and is NOT covered here — the RAG vector
+    /// store (`VectorStoreService`) and the SwiftData companion-store recovery path
+    /// (`StoreRecovery`) both derive paths from it. Those need their own migrations.
+    nonisolated private static let legacyKeychainServices = ["com.dev.devgentic"]
+
+    /// Every account this manager stores under `keychainService`.
+    ///
+    /// ⚠️ THE MIGRATION'S COVERAGE IS THIS LIST, so a credential added without adding it here is a
+    /// credential the next rename silently drops.
+    nonisolated private static let credentialAccounts = [
+        AppSettings.chatOpsBotTokenKey,
+        AppSettings.chatOpsDiscordBotTokenKey,
+        AppSettings.chatOpsSlackBotTokenKey,
+        AppSettings.chatOpsSlackAppTokenKey
+    ]
+
+    /// Moves credentials written under a previous bundle identifier onto the current one.
+    ///
+    /// Idempotent, and safe to run on every launch: an account already present under the current
+    /// service is never overwritten, and a legacy item is only removed once its value is readable
+    /// under the current service.
+    ///
+    /// ⚠️⚠️ `read` RATHER THAN `retrieve`, AND THE DIFFERENCE IS THE WHOLE SAFETY ARGUMENT.
+    /// `retrieve` collapses "the Keychain refused to answer" into `nil`, which here would read as
+    /// "nothing is stored under the current service" — and this function's response to that is to
+    /// copy a legacy value forward and then DELETE it. Run that against a locked or re-signed
+    /// Keychain (`errSecInteractionNotAllowed`) and the migration destroys the only copy. Every
+    /// branch below therefore acts on `.found` / `.notFound` and bails loudly on `.failed`.
+    @discardableResult
+    nonisolated static func migrateCredentialsFromLegacyServices(
+        keychain: KeychainAccessing,
+        logger: DGLogger = DGLogger(category: "ChatOpsConfig")
+    ) -> Int {
+        var migrated = 0
+
+        for account in credentialAccounts {
+            switch keychain.read(service: keychainService, account: account) {
+            case .found:
+                // Already current. Sweep any stale legacy copy so a rotated token cannot linger.
+                for legacy in legacyKeychainServices {
+                    guard case .found = keychain.read(service: legacy, account: account) else { continue }
+                    let status = keychain.delete(service: legacy, account: account)
+                    if status == errSecSuccess {
+                        logger.info("[CHATOPS] Removed the stale '\(account)' credential left under the previous Keychain service '\(legacy)'. CONSEQUENCE: the superseded copy no longer sits in the user's Keychain; the live credential under '\(keychainService)' is untouched.")
+                    } else {
+                        logger.error("[CHATOPS] Could not delete the stale '\(account)' credential under the previous Keychain service '\(legacy)' (OSStatus \(status)). CONSEQUENCE: a superseded third-party token stays in the user's Keychain indefinitely; ChatOps itself is unaffected because the current service already holds the live value.")
+                    }
+                }
+
+            case .failed(let status):
+                // ⚠️ NOT a migration trigger. See this function's header.
+                logger.error("[CHATOPS] Could not read '\(account)' under the current Keychain service '\(keychainService)' (OSStatus \(status)). CONSEQUENCE: the legacy-service migration is SKIPPED for this credential rather than guessed at — copying a legacy value forward on an unreadable Keychain and then deleting it would destroy the only copy. ChatOps may report itself unconfigured until the Keychain is readable again.")
+
+            case .notFound:
+                for legacy in legacyKeychainServices {
+                    guard case .found(let value) = keychain.read(service: legacy, account: account) else { continue }
+
+                    let saveStatus = keychain.save(value: value, service: keychainService, account: account)
+                    guard saveStatus == errSecSuccess else {
+                        logger.error("[CHATOPS] Failed to migrate '\(account)' from the previous Keychain service '\(legacy)' to '\(keychainService)' (OSStatus \(saveStatus)). CONSEQUENCE: the credential stays readable ONLY under the old service, so this ChatOps provider will present as unconfigured and the user is asked to pair again; the legacy item is deliberately NOT deleted, so retrying after the Keychain is writable still recovers it.")
+                        break
+                    }
+
+                    migrated += 1
+                    let deleteStatus = keychain.delete(service: legacy, account: account)
+                    if deleteStatus == errSecSuccess {
+                        logger.info("[CHATOPS] Migrated '\(account)' from the previous Keychain service '\(legacy)' to '\(keychainService)'. CONSEQUENCE: the credential survives the bundle-identifier change, so a paired provider keeps working across the upgrade instead of silently presenting as never configured.")
+                    } else {
+                        logger.error("[CHATOPS] Migrated '\(account)' to '\(keychainService)' but could not delete the old item under '\(legacy)' (OSStatus \(deleteStatus)). CONSEQUENCE: ChatOps works correctly — the migration itself succeeded — but a duplicate copy of a live third-party token remains in the user's Keychain.")
+                    }
+                    break
+                }
+            }
+        }
+
+        return migrated
+    }
+
     private init() {
-        // Restore Telegram connection state on launch
-        if let chatID = authorizedChatID, botToken != nil, isEnabled {
-            connectionState = .connected(chatID: chatID)
-        }
-        // Restore Discord connection state on launch
-        if discordAuthorizedChannelID != nil, discordBotToken != nil, isDiscordEnabled {
-            discordConnectionState = .connected(chatID: Int64(discordAuthorizedChannelID ?? "0") ?? 0)
-        }
-        // Restore Slack connection state on launch
-        if slackAuthorizedChannelID != nil, slackBotToken != nil, slackAppToken != nil, isSlackEnabled {
-            slackConnectionState = .connected(chatID: 0)
-        }
+        // ⚠️ FIRST, BEFORE ANY CREDENTIAL IS READ. Every restore check below reads a token, and a
+        // token that has not yet been moved onto the current Keychain service reads as absent —
+        // which would leave all three providers "disconnected" on the one launch that matters.
+        Self.migrateCredentialsFromLegacyServices(keychain: keychain)
+
+        // ⚠️ AFTER the credential migration, because it reads whether a provider is paired.
+        seedPerProviderTiers()
+
+        // ⚠️⚠️ "IS PAIRED" AND "IS SWITCHED ON" ARE DIFFERENT QUESTIONS, AND CONFLATING THEM MADE THE
+        // OFF SWITCH A ONE-WAY DOOR. These three conditions used to include `isEnabled`, so a user
+        // who turned ChatOps off — which the toggle's own description invites, "Start the Telegram
+        // long-polling listener… while this is on" — and then quit, came back to a
+        // `.disconnected` state, a Pairing card offering "Start Pairing", and an Enable toggle
+        // greyed out by `.disabled(!config.connectionState.isConnected)`. Nothing in the app could
+        // turn it back on: the only other writer of `isEnabled = true` is a pairing service. Their
+        // credentials and chat id were intact the whole time; the only way back was to re-do the
+        // pairing they never undid, on all three platforms identically.
+        //
+        // ⚠️ `connectionState` describes whether a PAIRING EXISTS — credentials plus a chat or
+        // channel id. Whether the listener is currently running is `isEnabled`, which
+        // `ChatOpsCoordinator.bootstrap()` already consults separately; the two concerns are
+        // correctly separated everywhere except here.
+        //
+        // ⚠️⚠️ AND "A PAIRING EXISTS" IS STILL NOT "SOMEONE IS AUTHORIZED TO USE IT" — the third
+        // question, added with per-sender authorization (invariant 38). `authorizedUserID` is written
+        // ONLY by a pairing service and nothing backfills it, so every pairing made before that build
+        // restores with it nil and `senderIsAuthorized` refuses every inbound message. Reading only
+        // the address here painted `.connected` — a green dot — over a bridge that could not answer
+        // anything. `ChatOpsPairingRestore.state` asks all three questions; see it for why a log line
+        // was not an adequate substitute for saying so in the UI.
+        connectionState = ChatOpsPairingRestore.state(
+            credentialsPresent: botToken != nil,
+            addressPresent: authorizedChatID != nil,
+            authorizedUserID: authorizedUserID,
+            chatID: authorizedChatID ?? 0
+        )
+        discordConnectionState = ChatOpsPairingRestore.state(
+            credentialsPresent: discordBotToken != nil,
+            addressPresent: discordAuthorizedChannelID != nil,
+            authorizedUserID: discordAuthorizedUserID,
+            chatID: Int64(discordAuthorizedChannelID ?? "0") ?? 0
+        )
+        slackConnectionState = ChatOpsPairingRestore.state(
+            credentialsPresent: slackBotToken != nil && slackAppToken != nil,
+            addressPresent: slackAuthorizedChannelID != nil,
+            authorizedUserID: slackAuthorizedUserID,
+            chatID: 0
+        )
     }
 }

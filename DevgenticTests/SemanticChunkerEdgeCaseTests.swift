@@ -198,7 +198,9 @@ final class SemanticChunkerEdgeCaseTests: XCTestCase {
             ContentBlock(id: "b2", type: .heading(level: 1, text: "  ")),
             ContentBlock(id: "b3", type: .table(headers: [], rows: [], alignments: [])),
             ContentBlock(id: "b4", type: .horizontalRule),
-            ContentBlock(id: "b5", type: .image(url: "img.png", altText: "alt"))
+            // [mc-3] An image with a path or alt text IS content now (indexed as its markdown);
+            // only one with neither is empty.
+            ContentBlock(id: "b5", type: .image(url: "", altText: nil))
         ]
         let chunks = chunker.chunk(blocks: blocks)
 

@@ -35,6 +35,7 @@ struct OllamaModelStoreContainerView: View {
     /// during background `OllamaService` polls — tying the refresh-button spinner directly
     /// to `isLoading` made the button pulse whenever the service polled in the background.
     @State private var isManualRefreshing = false
+    @State private var isSearchExpanded = false
 
     var body: some View {
         @Bindable var viewModel = coordinator.ollamaStore
@@ -47,10 +48,12 @@ struct OllamaModelStoreContainerView: View {
                 // `OllamaService.isLoadingModels`, which also flips true during
                 // background server-status polls — surfacing that as a "search in
                 // progress" spinner made the magnifying glass appear stuck.
-                IslandSearchField(
+                IslandExpandableSearchHeader(
+                    title: "Ollama Models",
+                    icon: "shippingbox.fill",
                     text: $viewModel.searchText,
-                    placeholder: "Search or enter model name to pull...",
-                    autoFocus: true,
+                    placeholder: "Search or enter model name to pull",
+                    isExpanded: $isSearchExpanded,
                     accessibilityIdentifier: "ollama.store.search",
                     onSubmit: {
                         if viewModel.displayedModels.isEmpty && !viewModel.searchText.isEmpty {
@@ -60,6 +63,8 @@ struct OllamaModelStoreContainerView: View {
                 )
             } trailing: {
                 HStack(spacing: 6) {
+                    IslandSearchToggleButton(isExpanded: $isSearchExpanded)
+
                     // Sort is client-side; don't disable it while the service polls.
                     Menu {
                         Picker("Sort By", selection: $viewModel.sortOption) {
@@ -114,6 +119,11 @@ struct OllamaModelStoreContainerView: View {
             )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear {
+            if !viewModel.searchText.isEmpty {
+                isSearchExpanded = true
+            }
+        }
         .onChange(of: viewModel.isLoading) { _, newValue in
             // Clear the manual-refresh spinner as soon as the service reports
             // loading has finished. Guarantees the spinner resolves even if the

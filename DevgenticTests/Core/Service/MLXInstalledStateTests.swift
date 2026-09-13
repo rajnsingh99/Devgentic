@@ -98,7 +98,7 @@ final class MLXInstalledStateTests: XCTestCase {
     func testAllCategoriesRemainAvailable() {
         XCTAssertEqual(
             Set(MLXModelStoreViewModel.StoreCategory.allCases),
-            [.installed, .recommended, .all, .reasoning, .toolUse, .coding, .vision],
+            [.installed, .recommended, .all, .toolUse, .vision],
             "a store category was added or removed — confirm the store's tab row still covers it"
         )
     }

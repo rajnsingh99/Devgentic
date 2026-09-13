@@ -722,6 +722,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     /// launch and whenever the settings pane changes the shortcut or enable flag. Assigning
     /// `hotKey` replaces any prior Carbon registration; nil unregisters (when disabled).
     func applyHotkeyConfig() {
+        // ⚠️⚠️ A CARBON HOTKEY IS REGISTERED SYSTEM-WIDE, WITH THE OS, FOR THE LIFE OF THE PROCESS —
+        // it is not scoped to this app's windows. A test host that registers ⌥Space STEALS the combo
+        // from the developer's own running copy of Devgentic, and the config it reads is the
+        // developer's REAL `UserDefaults` (the store redirect does not cover `UserDefaults.standard`),
+        // where QuickAccess is enabled by default.
+        guard TestHost.permits("register the system-wide QuickAccess hotkey", logger: Self.logger) else { return }
+
         let config = QuickAccessConfigManager.shared
         hotKey = nil
 
@@ -766,6 +773,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     /// that makes a shortcut conflict impossible to diagnose.
     @MainActor
     func applyJarvisHotkeyConfig() {
+        // ⚠️⚠️ WORSE THAN THE QUICKACCESS ONE, because ⌥J OPENS THE MICROPHONE. Registered
+        // system-wide from the developer's real defaults, where Jarvis push-to-talk is the default
+        // activation mode — so a keystroke during a test run could start capturing audio from a
+        // process that is about to be killed.
+        guard TestHost.permits("register the system-wide Jarvis push-to-talk hotkey (it opens the microphone)", logger: Self.logger) else { return }
+
         let config = JarvisConfigManager.shared
         jarvisHotKey = nil
 
@@ -902,6 +915,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     // MARK: - Menu-bar status item [QA revival P2d]
 
     private func setupStatusItem() {
+        // ⚠️ A VISIBLE ARTEFACT OF A TEST RUN. The item appears in the developer's real menu bar for
+        // the life of the host process and is summonable — clicking it drives a view model inside a
+        // process that exits when the suite finishes.
+        guard TestHost.permits("install the menu-bar status item", logger: Self.logger) else { return }
+
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
             // [M10] AppKit NSStrings need explicit String(localized:) — they aren't auto-extracted.

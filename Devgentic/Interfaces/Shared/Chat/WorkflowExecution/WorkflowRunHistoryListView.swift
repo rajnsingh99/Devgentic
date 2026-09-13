@@ -90,6 +90,41 @@ enum RunCardBody: Equatable {
     case output(String)
     case none
 
+    /// [workflow/vm-4] The display bound for a card's payload strings.
+    ///
+    /// A run record holds the run's WHOLE input and final output — tens of kilobytes is ordinary
+    /// — and the card showed them through `Text(...).lineLimit(1|2)`. `lineLimit` is a LAYOUT
+    /// constraint: the full string is still handed to SwiftUI, measured and retained per card,
+    /// per body pass, for up to 20 cards. Measured on an isolated release build (8 cards, ~62 KB
+    /// each, 40 forced passes): bounding the `Text` payloads alone saved ~1.1 ms/pass, and
+    /// bounding what the accessibility label reads saved ~5.1 ms/pass on top — the a11y path is
+    /// the expensive one because `RunCardSpeech.spokenPreview` allocates two full-size copies
+    /// and walks the whole string for `count` BEFORE its own 120-char cap.
+    ///
+    /// Deliberately NOT applied inside `of(status:error:finalOutput:)`: that decision function
+    /// returns the true strings, and a future copy/export consumer must not inherit a display
+    /// truncation. Callers that DISPLAY call this.
+    nonisolated static func bounded(_ text: String, limit: Int = 200) -> String {
+        // `prefix` on a String is O(limit), not O(n) — the point is to never walk the tail.
+        var result = ""
+        result.reserveCapacity(limit)
+        for character in text {
+            if result.count == limit { return result + "…" }
+            result.append(character)
+        }
+        return result
+    }
+
+    /// This body's payload, bounded for display. `.none` carries nothing to bound.
+    nonisolated var displayText: String? {
+        switch self {
+        case .failure(let message), .reason(let message), .output(let message):
+            return RunCardBody.bounded(message)
+        case .none:
+            return nil
+        }
+    }
+
     /// Pure and `nonisolated` (WF-UI5): a SwiftUI view's `if` chain is unreachable from a test, and
     /// this decision is exactly the one that was wrong.
     nonisolated static func of(
@@ -141,7 +176,7 @@ enum RunCardSpeech {
         }
 
         if !record.userInput.isEmpty {
-            parts.append(String(localized: "Input: \(spokenPreview(record.userInput))"))
+            parts.append(String(localized: "Input: \(spokenPreview(RunCardBody.bounded(record.userInput)))"))
         }
         // [XUI-5] Through the SAME decision the visible row uses. This used to test `error != nil`
         // independently, and `freeze` sets `error` on every cancel path — so once the row stopped
@@ -152,13 +187,13 @@ enum RunCardSpeech {
         switch RunCardBody.of(status: record.status, error: record.error,
                               finalOutput: record.finalOutput) {
         case .failure(let message):
-            parts.append(String(localized: "Error: \(spokenPreview(message))"))
+            parts.append(String(localized: "Error: \(spokenPreview(RunCardBody.bounded(message)))"))
         case .reason(let message):
             // Not "Error:" — a Stop is not a fault, and the status word above already said
             // "Cancelled", so this states the reason without re-classifying it.
-            parts.append(String(localized: "Reason: \(spokenPreview(message))"))
+            parts.append(String(localized: "Reason: \(spokenPreview(RunCardBody.bounded(message)))"))
         case .output(let preview):
-            parts.append(String(localized: "Output: \(spokenPreview(preview))"))
+            parts.append(String(localized: "Output: \(spokenPreview(RunCardBody.bounded(preview)))"))
         case .none:
             break
         }
@@ -171,9 +206,29 @@ enum RunCardSpeech {
         return parts.joined(separator: ". ")
     }
 
-    /// Mirrors the card's visual truncation. The card shows 1–2 lines; reading a full
-    /// multi-kilobyte output aloud for one row of a list is its own accessibility failure.
+    #if DEBUG
+    /// The longest string `spokenPreview` has been given in this process. Reset by tests.
+    nonisolated(unsafe) static var longestSpokenPreviewInputForTesting = 0
+    #endif
+
+    /// Trims to a spoken length. The card shows 1–2 lines; reading a full multi-kilobyte output
+    /// aloud for one row of a list is its own accessibility failure.
+    ///
+    /// ⚠️ [workflow/vm-4] This used to claim it "mirrors the card's visual truncation". It did
+    /// not: the card's `lineLimit` is a layout constraint applied after the whole string is
+    /// handed over, so there was no string-level bound to mirror — and this function's own
+    /// `replacingOccurrences` + `trimmingCharacters` + `count` ran over the FULL multi-kilobyte
+    /// value before the cap below could apply, three passes and two full-size copies per card
+    /// per body pass, whether or not VoiceOver was attached. Callers now hand in
+    /// `RunCardBody.bounded(_:)` output, so the mirror is real and this never sees more than the
+    /// display bound.
     static func spokenPreview(_ text: String, limit: Int = 120) -> String {
+        #if DEBUG
+        // Test seam [workflow/vm-4]: the defect is the SIZE of what reaches here, not the size
+        // of what leaves — the cap below always bounded the output, which is why an assertion on
+        // the result could not fail. Records the largest input this has been handed.
+        longestSpokenPreviewInputForTesting = max(longestSpokenPreviewInputForTesting, text.count)
+        #endif
         let flat = text
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -214,14 +269,16 @@ private struct WorkflowRunCardView: View {
         return (total, failed, notRun)
     }
 
-    private var cardAccessibilityLabel: String {
-        let stats = nodeStats
-        return RunCardSpeech.label(for: record, totalNodes: stats.total,
-                                   failedNodes: stats.failed, notRunNodes: stats.notRun)
-    }
-
     var body: some View {
-        Button(action: onSelect) {
+        // [workflow/vm-4] Both derived ONCE per pass. `nodeStats` runs two filters over
+        // `nodeResults` and was evaluated twice (the bottom strip and the accessibility label);
+        // `cardAccessibilityLabel` is a modifier ARGUMENT, so it is built eagerly whether or not
+        // an assistive client is attached.
+        let stats = nodeStats
+        let accessibilityLabel = RunCardSpeech.label(for: record, totalNodes: stats.total,
+                                                     failedNodes: stats.failed, notRunNodes: stats.notRun)
+
+        return Button(action: onSelect) {
             VStack(alignment: .leading, spacing: 8) {
                 // Row 1: Status + run duration
                 HStack(spacing: 8) {
@@ -251,7 +308,7 @@ private struct WorkflowRunCardView: View {
                         Image(systemName: "text.bubble")
                             .font(.system(size: 9))
                             .foregroundColor(theme.tertiaryText)
-                        Text(record.userInput)
+                        Text(RunCardBody.bounded(record.userInput))
                             .font(theme.fontCaption)
                             .foregroundColor(theme.secondaryText)
                             .lineLimit(1)
@@ -267,7 +324,7 @@ private struct WorkflowRunCardView: View {
                         Image(systemName: "exclamationmark.triangle")
                             .font(.system(size: 9))
                             .foregroundColor(theme.errorColor.opacity(0.7))
-                        Text(message)
+                        Text(RunCardBody.bounded(message))
                             .font(.system(size: 11))
                             .foregroundColor(theme.errorColor.opacity(0.8))
                             .lineLimit(2)
@@ -278,7 +335,7 @@ private struct WorkflowRunCardView: View {
                         Image(systemName: "stop.circle")
                             .font(.system(size: 9))
                             .foregroundColor(theme.secondaryText)
-                        Text(message)
+                        Text(RunCardBody.bounded(message))
                             .font(.system(size: 11))
                             .foregroundColor(theme.secondaryText)
                             .lineLimit(2)
@@ -289,7 +346,7 @@ private struct WorkflowRunCardView: View {
                             .font(.system(size: 9))
                             .foregroundColor(theme.tertiaryText)
                             .padding(.top, 2)
-                        Text(preview)
+                        Text(RunCardBody.bounded(preview))
                             .font(.system(size: 11))
                             .foregroundColor(theme.tertiaryText)
                             .lineLimit(2)
@@ -300,7 +357,6 @@ private struct WorkflowRunCardView: View {
 
                 // Bottom strip: Node count + status badge
                 HStack(spacing: 8) {
-                    let stats = nodeStats
                     Label("\(stats.total) node\(stats.total == 1 ? "" : "s")", systemImage: "square.on.square")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(theme.tertiaryText)
@@ -366,7 +422,7 @@ private struct WorkflowRunCardView: View {
         // fragment, just glued together. This replaces them with one composed sentence —
         // and it takes the decorative glyphs out of the tree for free.
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(cardAccessibilityLabel)
+        .accessibilityLabel(accessibilityLabel)
         .accessibilityAddTraits(.isButton)
     }
 

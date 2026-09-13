@@ -58,69 +58,9 @@ final class SpeechServiceDelayTaskTests: XCTestCase {
     }
 }
 
-// MARK: - LOW #3: Improved Token Count Estimation
-
-@MainActor
-final class TokenCountEstimationTests: XCTestCase {
-
-    /// Plain text: ~4 chars per token.
-    func testPlainTextEstimation() {
-        let msg = ChatMessage(conversationId: UUID(), sender: .user, content: .plainText("Hello world this is a test"))
-        let estimate = msg.tokenCountEstimate
-        // 26 chars / 4 ≈ 6-7 tokens
-        XCTAssertGreaterThanOrEqual(estimate, 5)
-        XCTAssertLessThanOrEqual(estimate, 8)
-    }
-
-    /// Pure code block: ~3 chars per token (tighter).
-    func testCodeBlockEstimation() {
-        let code = "func test() { return 42 }"
-        let msg = ChatMessage(conversationId: UUID(), sender: .agent, content: .codeBlock(language: "swift", code: code), backendEntityId: UUID())
-        let estimate = msg.tokenCountEstimate
-        // 25 chars / 3 ≈ 8 tokens (previously would be 25/4 ≈ 6)
-        XCTAssertGreaterThanOrEqual(estimate, 7)
-    }
-
-    /// Markdown with embedded code block uses weighted blend.
-    func testMarkdownWithCodeBlockEstimation() {
-        let markdown = """
-        Here is some explanation text.
-
-        ```swift
-        let x = 42
-        let y = x * 2
-        ```
-
-        And more prose after the code.
-        """
-        let msg = ChatMessage(conversationId: UUID(), sender: .agent, content: .markdownText(markdown), backendEntityId: UUID())
-        let estimate = msg.tokenCountEstimate
-        XCTAssertGreaterThan(estimate, 0)
-        // Should be higher than pure 4-char estimate because code portion uses 3-char ratio
-        let naiveEstimate = markdown.count / 4
-        // The blended estimate should differ from naive (at least slightly)
-        XCTAssertTrue(true, "Blended estimate: \(estimate), naive: \(naiveEstimate)")
-    }
-
-    /// Empty content returns 0 tokens.
-    func testImageContentReturnsZeroTokens() {
-        let msg = ChatMessage(conversationId: UUID(), sender: .agent, content: .mediaArtifact(MediaArtifact(kind: .image, reference: .ephemeralData(Data()), mimeType: "image/png")), backendEntityId: UUID())
-        XCTAssertEqual(msg.tokenCountEstimate, 0)
-    }
-
-    /// Error content uses prose ratio.
-    func testErrorContentEstimation() {
-        let msg = ChatMessage(conversationId: UUID(), sender: .agent, content: .error(title: "Error", details: "Something went wrong with the connection"), backendEntityId: UUID())
-        let estimate = msg.tokenCountEstimate
-        XCTAssertGreaterThan(estimate, 0)
-    }
-
-    /// Very short content returns at least 1 token.
-    func testMinimumOneToken() {
-        let msg = ChatMessage(conversationId: UUID(), sender: .user, content: .plainText("Hi"))
-        XCTAssertGreaterThanOrEqual(msg.tokenCountEstimate, 1)
-    }
-}
+// [mm-11] `TokenCountEstimationTests` was deleted here on 2026-09-12 with the
+// `tokenCountEstimate` property it existed to test — see the note at its former site in
+// ChatMessage.swift. LOW #3's improvement was real; it just never acquired a production reader.
 
 // MARK: - LOW #4: Animation Lifecycle
 

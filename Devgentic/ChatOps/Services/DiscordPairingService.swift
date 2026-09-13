@@ -25,13 +25,42 @@ import os
 @Observable @MainActor
 final class DiscordPairingService {
 
-    private let logger = Logger(subsystem: DGLogger.subsystem, category: "DiscordPairing")
+    /// ⚠️⚠️ SHARED, BECAUSE A PAIRING WINDOW OUTLIVES THE VIEW THAT STARTS IT. This was
+    /// `@State private var` in `ChatOpsSettingsView`, so the service died with the pane while its
+    /// `pairingTask` did not — `pollForPairing` is an instance method, so the task retains `self`
+    /// for the full 300-second window and no pairing service has a `deinit`. Clicking Chat, or any
+    /// other settings category, tore the view down (`MainApplicationView` renders the settings
+    /// container inside an `if !router.isShowingChat` gate). Coming back rebuilt a FRESH, idle
+    /// service while `connectionState` — which lives on the shared config — still said
+    /// `.awaitingPairing`, so the PIN card rendered with a Cancel button that cancelled a nil task.
+    /// Starting again then ran TWO windows against one bot token, and the user's correct PIN was
+    /// consumed by whichever poll held the connection — counted as a FAILED attempt against their
+    /// own origin by the orphan. One instance means `cancelPairing()` and `startPairing()` always
+    /// reach the window that is actually running.
+    static let shared = DiscordPairingService()
+
+
+    private let logger = DGLogger(category: "DiscordPairing")
     private let config = ChatOpsConfigManager.shared
 
     /// Called after pairing succeeds so the caller can start the Discord bridge.
     var onPairingComplete: (() -> Void)?
 
     private var pairingTask: Task<Void, Never>?
+
+    /// A wall-clock watchdog for the pairing window.
+    ///
+    /// ⚠️⚠️ THE DEADLINE CANNOT LIVE INSIDE THE EVENT LOOP, WHICH IS WHERE IT USED TO LIVE ON TWO OF
+    /// THE THREE PLATFORMS. Discord and Slack tested `Date() < deadline` as the first statement of a
+    /// `for await` BODY, so it could only run when the stream yielded — and neither stream emits
+    /// anything periodic (heartbeats and ACKs are consumed internally and yield nothing). On a quiet
+    /// channel the loop simply parked in `next()`: hours later the PIN was still live, the WebSocket
+    /// still open, and the credentials still sitting there with no owning session. Worse, the first
+    /// message to arrive AFTER the deadline was consumed by the expiry check and discarded — so a
+    /// user returning twenty minutes later and typing the correct PIN saw it silently do nothing.
+    /// Telegram got this right by bounding the LOOP (`while … && Date() < deadline`) rather than its
+    /// body; this watchdog gives all three the same guarantee independently of traffic.
+    private var deadlineTask: Task<Void, Never>?
     private var currentPIN: String?
 
     /// The timeout for the pairing window (5 minutes).
@@ -59,7 +88,10 @@ final class DiscordPairingService {
         config.discordBotToken = botToken
         config.discordConnectionState = .awaitingPairing(pin: pin)
 
-        logger.info("Discord pairing started. PIN: \(pin)")
+        // ⚠️ THE PIN IS NOT LOGGED — see the Telegram twin.
+        logger.info("Discord pairing window opened for \(self.pairingTimeout)s.")
+
+        armDeadline(pin: pin)
 
         pairingTask = Task {
             await pollForPairing(botToken: botToken, pin: pin)
@@ -70,6 +102,8 @@ final class DiscordPairingService {
     func cancelPairing() {
         pairingTask?.cancel()
         pairingTask = nil
+        deadlineTask?.cancel()
+        deadlineTask = nil
         currentPIN = nil
     }
 
@@ -82,10 +116,9 @@ final class DiscordPairingService {
         // Send farewell message if we have a valid connection
         if let token = config.discordBotToken, let channelID = config.discordAuthorizedChannelID {
             let client = DiscordAPIClient(botToken: token)
-            _ = try? await client.sendMessage(
-                channelID: channelID,
-                content: "Devgentic ChatOps disconnected. Goodbye!"
-            )
+            await ChatOpsFarewell.send(provider: .discord, logger: logger) {
+                _ = try await client.sendMessage(channelID: channelID, content: ChatOpsFarewell.message)
+            }
         }
 
         config.resetDiscord()
@@ -142,6 +175,9 @@ final class DiscordPairingService {
                 }
 
                 // PIN matched — pairing successful
+                // ⚠️ See the Telegram twin: `origin` (the message author's id) is what proved it knew
+                //   the PIN, and a Discord channel id identifies a ROOM, not a person.
+                config.discordAuthorizedUserID = origin
                 let channelID = message.channel_id
                 let guildID = message.guild_id
 
@@ -149,6 +185,12 @@ final class DiscordPairingService {
                 config.discordGuildID = guildID
                 config.discordApplicationID = applicationID
                 config.isDiscordEnabled = true
+                // ⚠️ THE WINDOW IS OVER THE MOMENT IT SUCCEEDS. `PairingWindowExpiry` would no-op anyway —
+                // the state no longer names this PIN — but leaving the watchdog armed keeps a task alive for
+                // the rest of the five minutes and writes a puzzling "no longer the live one" line when it
+                // fires. Disarming here says what actually happened.
+                deadlineTask?.cancel()
+                deadlineTask = nil
                 config.discordConnectionState = .connected(chatID: Int64(channelID) ?? 0)
 
                 logger.info("Discord pairing successful with channel \(channelID) in guild \(guildID ?? "DM").")
@@ -200,9 +242,28 @@ final class DiscordPairingService {
         await gatewayClient.stop()
 
         if !Task.isCancelled {
-            config.discordConnectionState = .disconnected
-            config.discordBotToken = nil
-            logger.info("Discord pairing timed out after \(self.pairingTimeout)s.")
+            PairingWindowExpiry.expire(pin: pin, platform: "Discord", timeout: pairingTimeout,
+                                       state: \.discordConnectionState, config: config, logger: logger)
+        }
+    }
+
+    /// Arms the wall-clock watchdog for this window. See `deadlineTask`.
+    ///
+    /// ⚠️ It CANCELS the polling task rather than trying to unwind it from the outside: cancellation
+    /// is what makes an `AsyncStream`'s `next()` return, which is the only way to get a loop parked
+    /// on a silent channel to move at all. Expiry is then reported here, because the cancelled loop's
+    /// own terminal arm deliberately does nothing when `Task.isCancelled` — it cannot tell a timeout
+    /// from the user pressing Cancel, and `PairingWindowExpiry` is what knows the difference.
+    private func armDeadline(pin: String) {
+        deadlineTask?.cancel()
+        deadlineTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(self?.pairingTimeout ?? 300 * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+
+            self.pairingTask?.cancel()
+            self.pairingTask = nil
+            PairingWindowExpiry.expire(pin: pin, platform: "Discord", timeout: self.pairingTimeout,
+                                       state: \.discordConnectionState, config: self.config, logger: self.logger)
         }
     }
 

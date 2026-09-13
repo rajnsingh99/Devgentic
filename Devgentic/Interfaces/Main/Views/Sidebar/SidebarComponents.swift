@@ -231,38 +231,45 @@ struct CategoryChip: View {
     @Environment(\.appTheme) private var theme
     @State private var isHovered = false
 
+    private var textColor: Color {
+        if isSelected { return theme.primaryText }
+        return isHovered ? theme.primaryText : theme.secondaryText
+    }
+
+    private var fillColor: Color {
+        if isSelected { return theme.surfaceOverlayStrong }
+        return isHovered ? theme.surfaceOverlay : theme.surfaceOverlay.opacity(0.4)
+    }
+
+    private var strokeColor: Color {
+        if isSelected { return theme.accentColor.opacity(0.55) }
+        return isHovered ? theme.secondaryText.opacity(0.25) : theme.secondaryText.opacity(0.12)
+    }
+
+    private var shadowColor: Color {
+        if isSelected { return theme.accentColor.opacity(0.18) }
+        return isHovered ? theme.shadowColor.opacity(0.35) : Color.clear
+    }
+
     var body: some View {
         Button(action: action) {
             Text(title)
                 .font(theme.fontCaption2.weight(isSelected ? .semibold : .medium))
-                .foregroundColor(
-                    isSelected
-                        ? theme.primaryText
-                        : (isHovered ? theme.primaryText : theme.secondaryText)
-                )
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .foregroundColor(textColor)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 5)
                 .background(
                     Capsule()
-                        .fill(
-                            isSelected
-                                ? theme.surfaceOverlayStrong
-                                : (isHovered ? theme.surfaceOverlay : theme.surfaceOverlay.opacity(0.4))
-                        )
+                        .fill(fillColor)
                 )
                 .overlay(
                     Capsule()
-                        .strokeBorder(
-                            isSelected
-                                ? theme.accentColor.opacity(0.55)
-                                : (isHovered ? theme.secondaryText.opacity(0.25) : theme.secondaryText.opacity(0.12)),
-                            lineWidth: 1
-                        )
+                        .strokeBorder(strokeColor, lineWidth: 1)
                 )
                 .shadow(
-                    color: isSelected
-                        ? theme.accentColor.opacity(0.18)
-                        : (isHovered ? theme.shadowColor.opacity(0.35) : Color.clear),
+                    color: shadowColor,
                     radius: isSelected ? 5 : 3,
                     x: 0,
                     y: 1

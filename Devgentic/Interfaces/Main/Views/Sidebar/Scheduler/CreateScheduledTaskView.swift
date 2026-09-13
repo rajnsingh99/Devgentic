@@ -181,7 +181,11 @@ struct CreateScheduledTaskView: View {
     // MARK: - Body
     var body: some View {
         VStack(spacing: 0) {
-            DynamicIslandBar(onBack: { router.goBack() }) {
+            DynamicIslandBar(
+                title: isEditing ? "Edit Task" : "New Scheduled Task",
+                icon: "clock.badge",
+                onBack: { router.goBack() }
+            ) {
                 actionButtons
             }
 
@@ -288,11 +292,12 @@ struct CreateScheduledTaskView: View {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Inference Engine")
-                        .font(theme.fontBody.weight(.medium))
+                        .font(theme.fontFootnote.weight(.semibold))
                         .foregroundColor(theme.primaryText)
                     Text("Backend profile used to run the prompt.")
-                        .font(theme.fontCaption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
 
                 Spacer(minLength: 16)
@@ -314,6 +319,7 @@ struct CreateScheduledTaskView: View {
 
             inlineError(fieldErrors[.profile])
         }
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -333,6 +339,7 @@ struct CreateScheduledTaskView: View {
                     .padding(.top, 4)
             }
         }
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -352,12 +359,12 @@ struct CreateScheduledTaskView: View {
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(strategy.title)
-                        .font(theme.fontSubheadline.weight(.medium))
+                        .font(theme.fontFootnote.weight(.semibold))
                         .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
                     Text(strategy.caption)
-                        .font(theme.fontCaption)
-                        .foregroundColor(theme.tertiaryText)
-                        .lineSpacing(2)
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
@@ -393,7 +400,7 @@ struct CreateScheduledTaskView: View {
                 Image(systemName: "info.circle")
                     .foregroundColor(theme.secondaryText)
                 Text("No conversations yet. Start one in chat first, then choose it here.")
-                    .font(theme.fontCaption)
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
             }
             .padding(10)
@@ -405,11 +412,12 @@ struct CreateScheduledTaskView: View {
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Conversation")
-                            .font(theme.fontBody.weight(.medium))
+                            .font(theme.fontFootnote.weight(.semibold))
                             .foregroundColor(theme.primaryText)
                         Text("Each run will be appended to this thread.")
-                            .font(theme.fontCaption)
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
+                            .lineSpacing(2.5)
                     }
 
                     Spacer(minLength: 16)
@@ -447,18 +455,27 @@ struct CreateScheduledTaskView: View {
 
     private var promptTemplateSection: some View {
         let promptInvalid = fieldErrors[.prompt] != nil
-        return VStack(alignment: .leading, spacing: 8) {
-            // Expand action — opens the floating editor matched to the
-            // selected profile type (Bot → simple editor; Agent → advanced
-            // editor with tool autocomplete).
-            HStack {
-                Spacer()
+        return VStack(alignment: .leading, spacing: 12) {
+            // Header with title, hint, and expand action
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Prompt Template")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
+                    Text("Instructions executed on each run. Dynamic context is injected at runtime.")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
+                }
+
+                Spacer(minLength: 16)
+
                 Button {
                     openExpandedEditor()
                 } label: {
                     Label("Expand", systemImage: "arrow.up.left.and.arrow.down.right")
                 }
-                .font(theme.fontCaption)
+                .font(theme.fontCaption2.weight(.medium))
                 .buttonStyle(.link)
             }
 
@@ -485,14 +502,15 @@ struct CreateScheduledTaskView: View {
                     Text("Describe what the task should do.")
                         .font(.system(size: 13, design: .monospaced))
                         .foregroundColor(theme.secondaryText.opacity(0.5))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 16)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 14)
                         .allowsHitTesting(false)
                 }
             }
 
             inlineError(fieldErrors[.prompt])
         }
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -561,11 +579,12 @@ struct CreateScheduledTaskView: View {
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Fire At")
-                            .font(theme.fontBody.weight(.medium))
+                            .font(theme.fontFootnote.weight(.semibold))
                             .foregroundColor(theme.primaryText)
                         Text("Task runs once at this date and time.")
-                            .font(theme.fontCaption)
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
+                            .lineSpacing(2.5)
                     }
 
                     Spacer(minLength: 16)
@@ -577,7 +596,7 @@ struct CreateScheduledTaskView: View {
             } else {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Recurring Pattern")
-                        .font(theme.fontBody.weight(.semibold))
+                        .font(theme.fontSubheadline.weight(.semibold))
                         .foregroundColor(theme.primaryText)
 
                     VStack(spacing: 8) {
@@ -597,6 +616,7 @@ struct CreateScheduledTaskView: View {
                 nextRunPreview(nextFire)
             }
         }
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -624,14 +644,14 @@ struct CreateScheduledTaskView: View {
         formatter.timeStyle = .short
         return HStack(spacing: 6) {
             Image(systemName: "clock.arrow.circlepath")
-                .font(.system(size: 11, weight: .medium))
+                .font(theme.fontCaption2.weight(.medium))
                 .foregroundColor(theme.secondaryText)
                 .accessibilityHidden(true)
             Text("Next run:")
-                .font(theme.fontCaption)
+                .font(theme.fontCaption2)
                 .foregroundColor(theme.secondaryText)
             Text(formatter.string(from: date))
-                .font(theme.fontCaption.weight(.semibold))
+                .font(theme.fontCaption2.weight(.semibold))
                 .foregroundColor(theme.primaryText)
                 .monospacedDigit()
             Spacer()
@@ -647,7 +667,7 @@ struct CreateScheduledTaskView: View {
         let parsedCron = (try? CronExpression(expression: customCronExpression))
         return VStack(alignment: .leading, spacing: 6) {
             Text("Custom Cron Expression")
-                .font(theme.fontCaption.weight(.semibold))
+                .font(theme.fontCaption2.weight(.semibold))
                 .foregroundColor(theme.secondaryText)
             TextField("e.g., 30 8 * * 1", text: $customCronExpression)
                 .textFieldStyle(.plain)
@@ -670,7 +690,7 @@ struct CreateScheduledTaskView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .accessibilityHidden(true)
                     Text(parsed.humanReadable)
-                        .font(theme.fontCaption)
+                        .font(theme.fontCaption2)
                 }
                 .foregroundColor(.green)
             }
@@ -703,21 +723,16 @@ struct CreateScheduledTaskView: View {
             cronPreset = preset
         } label: {
             HStack(alignment: .center, spacing: 12) {
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundColor(isSelected ? theme.accentColor : theme.surfaceOverlayStrong)
-                    .font(theme.fontTitle3)
-                    .accessibilityHidden(true)
-
                 Text(preset.localizedTitle)
-                    .font(theme.fontSubheadline.weight(.medium))
+                    .font(theme.fontFootnote.weight(.semibold))
                     .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
 
                 Spacer(minLength: 8)
 
                 if let expr = preset.expression {
                     Text(expr)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(theme.secondaryText.opacity(0.6))
+                        .font(theme.fontCodeCaption)
+                        .foregroundColor(theme.secondaryText.opacity(0.7))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
                         .background(theme.surfaceOverlay)
@@ -727,6 +742,11 @@ struct CreateScheduledTaskView: View {
                         // out "0 9 * * *".
                         .accessibilityHidden(true)
                 }
+
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(isSelected ? theme.accentColor : theme.surfaceOverlayStrong)
+                    .font(theme.fontTitle3)
+                    .accessibilityHidden(true)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -760,7 +780,7 @@ struct CreateScheduledTaskView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .accessibilityHidden(true)
                 Text(message)
-                    .font(theme.fontCaption)
+                    .font(theme.fontCaption2)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .foregroundColor(theme.errorColor)
@@ -772,16 +792,8 @@ struct CreateScheduledTaskView: View {
     private var actionButtons: some View {
         HStack(spacing: 8) {
             IslandPillButton(
-                title: "Cancel",
-                style: .secondary,
-                accessibilityLabel: "Cancel and return",
-                keyboardShortcut: .cancelAction
-            ) {
-                router.goBack()
-            }
-
-            IslandPillButton(
                 title: isEditing ? "Save Changes" : "Create Task",
+                icon: isEditing ? "checkmark" : "plus",
                 style: .primary,
                 accessibilityLabel: isEditing ? "Save task changes" : "Create scheduled task",
                 keyboardShortcut: .defaultAction

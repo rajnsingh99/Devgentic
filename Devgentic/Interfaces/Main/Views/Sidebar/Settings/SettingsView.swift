@@ -10,11 +10,19 @@
 import SwiftUI
 
 /// Enum to represent the different settings categories for easier navigation and management.
+///
+/// ⚠️ TWO CASES WERE REMOVED AND NEITHER REMOVAL WOULD HAVE BEEN CAUGHT BY ANYTHING. There is no
+/// test over `allCases`, no persisted rawValue and no deep link, so dropping a case is a silent UX
+/// change rather than a build error — the pane simply stops being reachable. The four switches
+/// below are exhaustive with no `default:`, which is the only thing that forces a new case to be
+/// handled everywhere; keep them that way.
+///
+/// - `.account` / `.models` were merged into `.general`: model storage and the HuggingFace token
+///   now live in GeneralSettingsView directly after the Observability section.
+/// - `.notifications` is gone as a category; its content is now a section at the top of General.
 enum SettingsCategory: String, CaseIterable, Identifiable {
     case general = "General"
     case coreIntelligence = "Core Intelligence"
-    case account = "Account"
-    case notifications = "Notifications"
     case theme = "Theme"
     case chatOps = "ChatOps"
     case quickAccess = "Quick Access"
@@ -31,8 +39,6 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         switch self {
         case .general:          return "General"
         case .coreIntelligence: return "Core Intelligence"
-        case .account:          return "Account"
-        case .notifications:    return "Notifications"
         case .theme:            return "Theme"
         case .chatOps:          return "ChatOps"
         case .quickAccess:      return "Quick Access"
@@ -48,10 +54,6 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
             return "gear"
         case .coreIntelligence:
             return "cpu.fill"
-        case .account:
-            return "person.crop.circle"
-        case .notifications:
-            return "bell.badge"
         case .theme:
             return "paintbrush"
         case .chatOps:
@@ -68,11 +70,9 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     /// Brief subtitle shown below the category name in the sidebar.
     var subtitle: String {
         switch self {
-        case .general: return String(localized: "Appearance and behavior")
+        case .general: return String(localized: "Speech, notifications, and storage")
         case .coreIntelligence: return String(localized: "On-device intelligence")
-        case .account: return String(localized: "API keys and providers")
-        case .notifications: return String(localized: "Alerts and sounds")
-        case .theme: return String(localized: "Colors and typography")
+        case .theme: return String(localized: "Appearance and Typography")
         case .chatOps: return String(localized: "Remote Telegram control")
         case .quickAccess: return String(localized: "Global shortcut and panel")
         case .jarvis: return String(localized: "Voice assistant and listening")
@@ -88,10 +88,6 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
             GeneralSettingsView()
         case .coreIntelligence:
             CoreIntelligenceSettingsView()
-        case .account:
-            AccountSettingsView()
-        case .notifications:
-            NotificationSettingsView()
         case .theme:
             ThemeSettingsView()
         case .chatOps:

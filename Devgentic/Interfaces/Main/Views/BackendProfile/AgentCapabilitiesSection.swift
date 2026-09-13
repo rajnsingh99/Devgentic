@@ -211,18 +211,19 @@ struct AgentCapabilitiesSection: View {
             // Toggle row — icon + labels on left, switch on right
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: icon)
-                    .font(.system(.body))
+                    .font(theme.fontBody)
                     .foregroundColor(isOn.wrappedValue ? .accentColor : theme.secondaryText)
                     .frame(width: 24, alignment: .center)
                     .padding(.top, 2)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(label)
-                        .font(theme.fontBody.weight(.medium))
+                        .font(theme.fontFootnote.weight(.semibold))
                         .foregroundColor(theme.primaryText)
                     Text(description)
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
 
                 Spacer(minLength: 16)
@@ -266,12 +267,12 @@ struct AgentCapabilitiesSection: View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(theme.fontSubheadline.weight(.medium))
+                    .font(theme.fontFootnote.weight(.semibold))
                     .foregroundColor(theme.primaryText)
                 Text(description)
-                    .font(.system(.caption))
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
-                    .lineSpacing(2)
+                    .lineSpacing(2.5)
                     .fixedSize(horizontal: false, vertical: true)
             }
 

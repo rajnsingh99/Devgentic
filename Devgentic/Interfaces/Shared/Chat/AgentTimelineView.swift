@@ -47,6 +47,10 @@ struct AgentTimelineView: View {
     /// header then reports success/degraded but never "Stopped".
     private let terminalOutcome: ExecutionOutcome?
 
+    /// `message.lifecycleState.isInterrupted`, or false for the workflow per-node inits, which
+    /// render a node's events and have no message lifecycle of their own.
+    private let isInterrupted: Bool
+
     /// The conversation this timeline BELONGS to, when the caller knows it. Threaded down to
     /// `ActionDetailView` so an "Open in viewer" whose disk read outlives a conversation switch
     /// can be dropped instead of landing a tab in whatever conversation is open when it returns
@@ -67,6 +71,7 @@ struct AgentTimelineView: View {
         self.events = message.timelineEvents
         self.revision = message.timelineRevision
         self.terminalOutcome = message.terminalOutcome
+        self.isInterrupted = message.lifecycleState.isInterrupted
         self.conversationID = message.conversationId
         self.isStreaming = message.isStreaming
         self.finalContentText = message.currentAgentContent?.textContent ?? message.content.textContent
@@ -108,6 +113,7 @@ struct AgentTimelineView: View {
         self.events = events
         self.revision = revision
         self.terminalOutcome = nil
+        self.isInterrupted = false
         self.conversationID = conversationID
         self.isStreaming = isStreaming
         self.finalContentText = finalContentText
@@ -145,6 +151,11 @@ struct AgentTimelineView: View {
             finalContentText: finalContentText
         )
         let showFooter = streamingContext?.shouldDisplay ?? false
+        // [tc-7] Read ONCE — see the `summary` property. Both the glyph, the tint and the title
+        // (which `body` needs twice: the visible `Text` and the `.accessibilityLabel`) come from
+        // these two locals.
+        let summaryValue = summary
+        let titleText = summaryTitle(nodesCount: nodes.count, summary: summaryValue)
         if !nodes.isEmpty || showFooter {
             VStack(alignment: .leading, spacing: 6) {
                 // Summary Header (collapsible toggle)
@@ -155,11 +166,11 @@ struct AgentTimelineView: View {
                     }
                 } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: isStreaming ? "sparkles" : summaryStatus.glyph)
+                        Image(systemName: isStreaming ? "sparkles" : summaryValue.status.glyph)
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(isStreaming ? theme.accentColor : summaryTint)
+                            .foregroundColor(isStreaming ? theme.accentColor : summaryTint(for: summaryValue.status))
 
-                        Text(summaryTitle(nodesCount: nodes.count))
+                        Text(titleText)
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(theme.secondaryText)
 
@@ -188,7 +199,7 @@ struct AgentTimelineView: View {
                 // VoiceOver — meaning the "3 failed" this fix adds would have reached sighted
                 // users only.
                 .accessibilityLabel(
-                    "\(summaryTitle(nodesCount: nodes.count)). "
+                    "\(titleText). "
                     + (isTimelineExpanded ? String(localized: "Collapse execution log") : String(localized: "Expand execution log"))
                 )
 
@@ -267,12 +278,19 @@ struct AgentTimelineView: View {
     /// must still read degraded there.
     enum TimelineSummaryStatus {
         case succeeded, degraded, cancelled
+        /// The run never reached a clean finish and never stamped an outcome — a force-quit
+        /// mid-run, or a `.parkedHITL` message reloaded and not resumed. Distinct from
+        /// `.degraded`, which is a run that DID end and reported how.
+        case interrupted
 
         var glyph: String {
             switch self {
-            case .succeeded: return "checkmark.circle.fill"
-            case .degraded:  return "exclamationmark.triangle.fill"
-            case .cancelled: return "slash.circle"
+            case .succeeded:   return "checkmark.circle.fill"
+            case .degraded:    return "exclamationmark.triangle.fill"
+            case .cancelled:   return "slash.circle"
+            // Deliberately a CIRCLE, not the triangle `.degraded` uses: the two states sit in
+            // the same slot and must stay tellable apart at a glance.
+            case .interrupted: return "exclamationmark.circle"
             }
         }
     }
@@ -280,8 +298,21 @@ struct AgentTimelineView: View {
     /// Failed-tool count alongside the status, so the title can say how much went wrong.
     /// `static` + internal for the same reason as `buildGroupedNodes`: it is the part with
     /// logic worth testing directly.
+    /// - Parameter isInterrupted: `message.lifecycleState.isInterrupted`. Only consulted when
+    ///   `outcome` is nil, because an outcome means the run reached an end and reported it.
+    ///   A force-quit reaches neither `finalizeMessage` nor `.executionFinished`, so nothing
+    ///   stamps `terminalOutcome` and it restores nil — while `markInterruptedByProcessDeath`
+    ///   deliberately writes NOTHING to the abandoned row (resume finds it by `output == nil`),
+    ///   so `failed` stays 0 too. Both of those are correct in themselves, and together they
+    ///   made `case .completed, nil:` return `.succeeded`: a green checkmark and "Executed 3
+    ///   steps" directly above the `InterruptedRunChip` saying the run was cut off. The header
+    ///   had no way to know — the view was never handed `lifecycleState`.
+    /// ⚠️ [tc-7] Returns `toolCount` as well, so ONE flatten answers every question the header
+    /// asks. `summaryTitle` used to run its own second `events.flatMap(\.flattenedIncludingNested)`
+    /// for exactly the same count.
     static func summarize(events: [TimelineEvent],
-                          outcome: ExecutionOutcome? = nil) -> (status: TimelineSummaryStatus, failedTools: Int) {
+                          outcome: ExecutionOutcome? = nil,
+                          isInterrupted: Bool = false) -> (status: TimelineSummaryStatus, failedTools: Int, toolCount: Int) {
         // FLATTENED, not top-level. With Plan & Execute or Reflexion on — most agent runs —
         // `CapabilityCardRouter` routes every tool event into the active step's/attempt's nested
         // array, so the top-level array holds only the card itself and ZERO tool rows. Reading it
@@ -289,9 +320,27 @@ struct AgentTimelineView: View {
         // which every tool failed: exactly the blindness CH25 was filed for, in the fix meant to
         // stop the header lying.
         var failed = 0
+        var toolCount = 0
         for event in events.flatMap(\.flattenedIncludingNested) {
             guard case .toolExecution(let data) = event else { continue }
-            if data.isSuccess == false { failed += 1 }
+            toolCount += 1
+            // ⚠️ [tc-4] A SKIPPED `ask_user` is not a failure. `ToolExecutionLoop` yields
+            // `.toolFailed(category: .cancelled)` with `isSuccess: didAnswer` == false when the
+            // user declines or ignores the prompt, and the run then continues and completes
+            // normally. Counting it made the header read "Executed 4 steps (4 tools · 1 failed)"
+            // in amber about an event the USER declined — while `ActionDetailView.statusIcon`
+            // painted that same row a muted grey `arrow.uturn.left` with no failure capsule.
+            // The row and the header disagreed about one event.
+            //
+            // Narrow on PURPOSE: only `ask_user` AND only the `.cancelled` category. An
+            // `ask_user` that failed for any other reason is a real failure, and a cancelled
+            // WRITE still counts — the write did not happen. That last point is what keeps
+            // CF-46's `testSkippedAskUserDoesNotMakeACompletedRunLookCancelled` green: its
+            // `row()` helper builds a `write_file`, so it pins the cancelled-write rule, not
+            // this one. CF-46 itself is untouched — it is about never inferring a STOPPED RUN
+            // from a per-tool category, which this does not do.
+            let isDeclinedPrompt = data.name == "ask_user" && data.failureCategory == .cancelled
+            if data.isSuccess == false, !isDeclinedPrompt { failed += 1 }
         }
         // The RUN's own outcome LEADS; the tool-failure count can only escalate from there.
         //
@@ -311,47 +360,76 @@ struct AgentTimelineView: View {
         // two changes have to land together.
         switch outcome {
         case .cancelled:
-            return (.cancelled, failed)
+            return (.cancelled, failed, toolCount)
         case .failed, .completedWithWarnings:
-            return (.degraded, failed)
+            return (.degraded, failed, toolCount)
         case .completed, nil:
-            return (failed > 0 ? .degraded : .succeeded, failed)
+            // The outcome still LEADS where there is one; this only fills the gap it leaves.
+            if outcome == nil, isInterrupted {
+                return (.interrupted, failed, toolCount)
+            }
+            return (failed > 0 ? .degraded : .succeeded, failed, toolCount)
         }
     }
 
-    private var summary: (status: TimelineSummaryStatus, failedTools: Int) {
-        Self.summarize(events: events, outcome: terminalOutcome)
+    /// ⚠️ [tc-7] COMPUTED, and therefore deliberately read EXACTLY ONCE per body pass, into a
+    /// local. It was read six times — `summaryStatus`, `summaryTint` (which read
+    /// `summaryStatus`), `summaryTitle` twice (the `Text` and the `.accessibilityLabel`), and
+    /// `summaryTitle`'s own separate tool-count flatten — each one a fresh recursive flatten of
+    /// up to `ChatMessage.maxTimelineEvents` (500) events PLUS every nested capability-card
+    /// sub-event. Cheap while streaming (the `isStreaming` ternaries short-circuit and
+    /// `summaryTitle` returns early), so the cost landed on conversation load, where every
+    /// finalized agent message renders once.
+    ///
+    /// Do not read this property more than once in `body`, and do not reintroduce a second
+    /// flatten anywhere downstream — pass the value.
+    private var summary: (status: TimelineSummaryStatus, failedTools: Int, toolCount: Int) {
+        Self.summarize(events: events, outcome: terminalOutcome, isInterrupted: isInterrupted)
     }
 
-    private var summaryStatus: TimelineSummaryStatus { summary.status }
-
-    private var summaryTint: Color {
-        switch summaryStatus {
+    private func summaryTint(for status: TimelineSummaryStatus) -> Color {
+        switch status {
         case .succeeded: return theme.successColor
         case .degraded:  return theme.warningColor
         case .cancelled: return theme.tertiaryText
+        // ⚠️ `warningColor`, matching `InterruptedRunChip` (AgentBubbleContentView), which renders
+        // on the NEXT LINE for exactly this state. The register suggested `tertiaryText`; a muted
+        // grey beside the chip's amber would have read as two different claims about one run.
+        case .interrupted: return theme.warningColor
         }
     }
 
-    private func summaryTitle(nodesCount: Int) -> String {
+    /// [tc-7] Takes the ALREADY-COMPUTED summary. It used to read the `summary` property (one
+    /// full flatten) and then run a second flatten of its own just to count tools — and `body`
+    /// called it twice, for the `Text` and the `.accessibilityLabel`.
+    private func summaryTitle(nodesCount: Int,
+                              summary: (status: TimelineSummaryStatus, failedTools: Int, toolCount: Int)) -> String {
         if isStreaming {
             return String(localized: "Agent is thinking & executing… (\(nodesCount) step\(nodesCount == 1 ? "" : "s"))")
         }
 
-        // Same flattening as `summarize` — a capability-card run has no top-level tool rows.
-        let toolCount = events.flatMap(\.flattenedIncludingNested).filter { event in
-            switch event {
-            case .toolExecution: return true
-            default: return false
+        let status = summary.status
+        let failed = summary.failedTools
+        let toolCount = summary.toolCount
+        let steps = "\(nodesCount) step\(nodesCount == 1 ? "" : "s")"
+
+        // ⚠️ BEFORE the zero-tool early return below. An interrupted run that died before its
+        // first tool would otherwise read "Thought for 2 steps" — the same clean-run claim this
+        // status exists to stop, just via the other branch.
+        if status == .interrupted {
+            guard toolCount > 0 else {
+                return String(localized: "Interrupted after \(steps)")
             }
-        }.count
+            let tools = "\(toolCount) tool\(toolCount == 1 ? "" : "s")"
+            return failed > 0
+                ? String(localized: "Interrupted after \(steps) (\(tools) · \(failed) failed)")
+                : String(localized: "Interrupted after \(steps) (\(tools))")
+        }
 
         guard toolCount > 0 else {
             return String(localized: "Thought for \(nodesCount) step\(nodesCount == 1 ? "" : "s")")
         }
 
-        let (status, failed) = summary
-        let steps = "\(nodesCount) step\(nodesCount == 1 ? "" : "s")"
         let tools = "\(toolCount) tool\(toolCount == 1 ? "" : "s")"
 
         switch status {
@@ -380,6 +458,10 @@ struct AgentTimelineView: View {
             return failed > 0
                 ? String(localized: "Stopped after \(steps) (\(tools) · \(failed) failed)")
                 : String(localized: "Stopped after \(steps) (\(tools))")
+        case .interrupted:
+            // Handled above, before the zero-tool early return. Kept exhaustive rather than
+            // `default:` so a future status cannot slip through unconsidered.
+            return String(localized: "Interrupted after \(steps) (\(tools))")
         }
     }
 
@@ -397,7 +479,27 @@ struct AgentTimelineView: View {
         // Deduplication pass 1: if not streaming and last event is narrative
         // (thought/reasoning), hide it — it usually duplicates the final outcome
         // shown immediately below.
-        if !isStreaming, let last = events.last {
+        //
+        // ⚠️ [tc-11] Gated on there BEING a final outcome below. This pass used to run
+        // unconditionally, so when the bubble had no answer to duplicate it deleted the only
+        // record of what the agent had been doing. Reachable three ways, and the workflow one is
+        // the strongest: a `.skipped` or cancelled node renders its timeline with no final text
+        // at all, so the user's last "why" vanished with it. A `.stoppedRunPlaceholder` is not an
+        // answer either — it is the synthetic marker for a run that produced nothing, which is
+        // exactly when the narrative is all there is.
+        //
+        // Deliberately NOT a containment test ("is the thought a prefix of the answer?"): that
+        // would also stop dropping the trailing system-status thought ("Composing final
+        // response…") this pass exists to hide, which pass 2's equality test cannot catch.
+        // `isSyntheticPlaceholder` rather than two inline comparisons — it already owns both
+        // placeholder spellings (and its own exact-match-after-trim rule), so a third can never
+        // be added without this gate learning about it.
+        let hasFinalAnswerBelow: Bool = {
+            guard let final = finalContentText?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !final.isEmpty else { return false }
+            return !ChatMessage.isSyntheticPlaceholder(final)
+        }()
+        if !isStreaming, hasFinalAnswerBelow, let last = events.last {
             switch last {
             case .thought, .reasoning:
                 events.removeLast()
@@ -821,9 +923,20 @@ struct TimelineFileViewerAction: Equatable {
     /// so the row gets NO affordance rather than a lying one.
     /// Tools that SHOULD produce a chip. Anything else legitimately has none, so its nil
     /// return stays silent — logging every `execute_shell` row would drown the signal.
+    /// ⚠️ `create_file` and `edit_code` belong here alongside `write_file`, and their absence was
+    /// an oversight rather than a policy. All three are `.libraryExceptCode` in
+    /// `NativeToolCatalog` — the file-editing tools a CHAT or WORKFLOW profile gets, superseded
+    /// only when the Library is opened for a Code profile — and `write_file` was already listed.
+    /// Without them, `TimelineFileViewerAction.resolve` returned nil, so `ActionEffect.from`
+    /// produced nil too: a chat-profile file write got no `+N −M`, no "Previous version", and no
+    /// PERSISTED `ActionEffect` — the record that exists precisely because the model cannot
+    /// reconstruct a file it has already overwritten.
+    /// Exposed for the drift test that ties this to `SnapshotToolContract` — see its doc.
+    static var chipEligibleToolsForTesting: Set<String> { chipEligibleTools }
+
     private static let chipEligibleTools: Set<String> = [
-        "write_file", "overwrite_file", "create_new_file",
-        "edit_code_single", "edit_code_batch", "read_file"
+        "write_file", "overwrite_file", "create_new_file", "create_file",
+        "edit_code_single", "edit_code_batch", "edit_code", "read_file"
     ]
 
     /// What to do with an append whose pre-write snapshot is missing — the one case where
@@ -838,7 +951,20 @@ struct TimelineFileViewerAction: Equatable {
         case recordFragment
     }
 
+    /// [tc-8] String-driven form — parses, then delegates.
     static func resolve(data: ToolExecutionData,
+                        missingBaseline: MissingBaselinePolicy = .skipAction) -> TimelineFileViewerAction? {
+        resolve(data: data, params: parsedParams(data.params), missingBaseline: missingBaseline)
+    }
+
+    /// [tc-8] The form that takes an ALREADY-PARSED params dictionary — see
+    /// `ToolArgFormatter.primaryLabel(tool:dict:)` for why.
+    ///
+    /// ⚠️ `params` is OPTIONAL, not a plain dictionary: nil means "the params were not decodable
+    /// JSON", which is a different diagnostic from "decoded fine but carried no path" and the two
+    /// `skip` reasons below must keep saying which happened.
+    static func resolve(data: ToolExecutionData,
+                        params: [String: Any]?,
                         missingBaseline: MissingBaselinePolicy = .skipAction) -> TimelineFileViewerAction? {
         // Not a file tool — no chip expected, nothing to explain.
         guard chipEligibleTools.contains(data.name) else { return nil }
@@ -853,7 +979,7 @@ struct TimelineFileViewerAction: Equatable {
         // In-flight or failed rows have no chip by design; the row's own status shows why.
         guard data.isSuccess == true, !data.isExecuting else { return nil }
 
-        guard let params = parsedParams(data.params) else {
+        guard let params else {
             return skip("tool params are not decodable JSON, so the target file is unknown")
         }
         // Both spellings exist: native tools take `path`, split tools `file_path`.
@@ -871,7 +997,10 @@ struct TimelineFileViewerAction: Equatable {
         let fileName = (filePath as NSString).lastPathComponent
 
         switch data.name {
-        case "write_file", "overwrite_file", "create_new_file":
+        // `create_file` carries `{file_path, content, overwrite?}` — the same full-post-state
+        // shape as these three. It has no append mode, so the `isAppendMode` branch below stays
+        // `write_file`-only.
+        case "write_file", "overwrite_file", "create_new_file", "create_file":
             guard let content = params["content"] as? String, !content.isEmpty else {
                 return skip("write to '\(fileName)' carried no 'content' argument")
             }
@@ -909,7 +1038,9 @@ struct TimelineFileViewerAction: Equatable {
                 preWriteContent: data.preWriteContent,
                 isWrite: true
             )
-        case "edit_code_single", "edit_code_batch":
+        // `edit_code` is the superseded original of these two and carries the same
+        // `{file_path, edits | old_string+new_string}` shape, so it needs the same read-back.
+        case "edit_code_single", "edit_code_batch", "edit_code":
             // Edit params carry only find/replace strings — the post-state comes from the
             // executor's read-back. Without it the change can't be represented: no chip.
             guard let post = data.postWriteContent, !post.isEmpty else {
@@ -1343,11 +1474,13 @@ struct ActionDetailView: View {
     private func resolveChip(for data: ToolExecutionData) async {
         // Label first, before any suspension: it is the cheapest of the three and the one
         // every row shows, so it must not wait behind a detached diff.
+        // [tc-8] ONE parse for this row, shared by the label and the chip resolution.
+        let parsed = ToolArgFormatter.parsedParamsForRow(data.params)
         primaryArgCache = (
             key: Self.chipKey(for: data),
-            label: ToolArgFormatter.primaryLabel(tool: data.name, params: data.params)
+            label: ToolArgFormatter.primaryLabel(tool: data.name, dict: parsed)
         )
-        let action = TimelineFileViewerAction.resolve(data: data)
+        let action = TimelineFileViewerAction.resolve(data: data, params: parsed)
         resolvedAction = action
 
         guard Self.needsMeasuredWriteDiff(hasPersistedEffect: data.effect != nil, action: action),
@@ -1366,15 +1499,20 @@ struct ActionDetailView: View {
 
     var body: some View {
         if case .toolExecution(let data) = event {
+            // ⚠️ [tc-9] Resolved ONCE per body pass. `TimelineRowDetail.resolve` trims and scans
+            // the tool output — up to 32 KB for a write row — and it was called twice on every
+            // pass: once by `actionRowButton` for the `isDisclosable` predicate and again here
+            // for the disclosed content. A `LazyVStack` re-runs this on every scroll-in.
+            let detail = rowDetail(data)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    actionRowButton(data: data)
+                    actionRowButton(data: data, detail: detail)
                     fileViewerChip(data: data)
                 }
 
                 // Disclosed by the row's own chevron, exactly like a read's content —
                 // collapsed by default, one tap to reveal.
-                if isOutputExpanded(data), let detail = rowDetail(data) {
+                if isOutputExpanded(data), let detail {
                     switch detail {
                     case .diff(let effect, let note):
                         inlineDiff(effect)
@@ -1444,12 +1582,13 @@ struct ActionDetailView: View {
             .transition(.opacity)
     }
 
-    private func actionRowButton(data: ToolExecutionData) -> some View {
+    /// - Parameter detail: resolved ONCE by `body` — see the note there. Do not re-resolve.
+    private func actionRowButton(data: ToolExecutionData, detail: TimelineRowDetail?) -> some View {
                 // ONE predicate for the chevron, the hit target and the hover affordance.
                 // A row is not disclosable while it executes (no output yet, no effect yet),
                 // and letting it highlight + scale under the pointer advertised a tap that
                 // silently did nothing for the whole duration of every tool call.
-                let isDisclosable = rowDetail(data) != nil && !data.isExecuting
+                let isDisclosable = detail != nil && !data.isExecuting
                 let isExpanded = isOutputExpanded(data)
                 return Button {
                     guard isDisclosable else { return }
@@ -1578,6 +1717,30 @@ struct ActionDetailView: View {
                         .fill(theme.errorColor.opacity(0.12))
                 )
             }
+        } else {
+            // ⚠️ [tc-10] SETTLED, but its outcome was never reported. `isExecuting == false` with
+            // `isSuccess == nil` used to fall off the end of this `if`/`else if` and render
+            // NOTHING, so a row a user Stop had closed looked the same as one still waiting for a
+            // badge — no spinner, no glyph, nothing to say the tool's fate is unknown.
+            //
+            // Reachable from EXACTLY three writers, all deliberate terminal closes in
+            // `DanglingToolRowCloser`: `closeReporting` (cancel), `closeForUserSkipReporting`
+            // (the user skipped the node) and `markInterruptedByProcessDeath`. Every normal
+            // completion pairs `isSuccess` with `isExecuting = false` — `ActiveStreamManager`
+            // :1261/:1264 and `CapabilityCardRouter` :252/:255 — and `ToolOutput.isSuccess` is a
+            // non-optional `Bool`, so a finished tool can never land here.
+            //
+            // ⚠️ `slash.circle`, matching `CapabilityStatusIcon`'s cancelled glyph — NOT
+            // `ToolFailureCategory.cancelled.icon`, which is `xmark.circle` and reads as a
+            // failure. A user's own Stop is not a failure; `summarize` still counts nothing here.
+            Image(systemName: data.failureCategory == .cancelled ? "slash.circle" : "circle.dotted")
+                .font(.system(size: 10))
+                .foregroundColor(theme.tertiaryText)
+                .padding(4)
+                .background(Circle().fill(theme.surfaceOverlay))
+                .accessibilityLabel(data.failureCategory == .cancelled
+                                    ? String(localized: "Cancelled before it finished")
+                                    : String(localized: "Outcome unknown — the run ended first"))
         }
     }
 
@@ -1876,16 +2039,27 @@ enum ToolArgFormatter {
         return plural == 1 ? "tool" : "tools"
     }
 
-    /// SF Symbol for a tool. Single vocabulary for every per-tool glyph, so rendering
-    /// paths can't drift. Superset of the old `ToolChipView.iconForTool` switch, which
-    /// went with the dynamic island in 2026-07.
-    static func icon(tool: String) -> String {
-        iconOverrides[tool] ?? "hammer.fill"
-    }
-
     /// The primary argument to surface in the row — filename for fs ops, query for searches,
     /// command prefix for shell, question for ask_user, etc. Empty string means "no useful label".
+    /// [tc-8] String form — parses, then delegates. Kept for the callers that genuinely hold only
+    /// a String (`ConversationExporter`, and `primaryArgLabel`'s cache-miss path).
     static func primaryLabel(tool: String, params: String) -> String {
+        primaryLabel(tool: tool, dict: parseParams(params))
+    }
+
+    /// [tc-8] The form that takes an ALREADY-PARSED params dictionary.
+    ///
+    /// `resolveChip` needs both this and `TimelineFileViewerAction.resolve` for the same row, and
+    /// each used to run its own `JSONSerialization` pass over the full, uncapped params — which
+    /// for a write row is the entire file. Worse than once per row: `.task(id:)` keys on
+    /// `(id, isExecuting, isSuccess)`, and completion flips `isExecuting` AND rewrites `params`,
+    /// so a normal live run resolved every write row twice — four full parses of the file on the
+    /// main actor.
+    ///
+    /// ⚠️ Deliberately NOT moved into a `Task.detached`: that inserts a suspension before
+    /// `primaryArgCache` is set, so the first render falls through to the cache-miss path and
+    /// parses anyway. Parsing once and sharing the result is the whole fix.
+    static func primaryLabel(tool: String, dict: [String: Any]?) -> String {
         // `final_answer` is a terminal signal — its `answer` arg is rendered as the
         // assistant's final message directly below this chip. Surfacing the answer
         // text in the chip duplicates it and leaks raw markdown (`###`, `**`, etc.)
@@ -1894,11 +2068,20 @@ enum ToolArgFormatter {
             return ""
         }
 
-        guard let dict = parseParams(params), !dict.isEmpty else { return "" }
+        guard let dict, !dict.isEmpty else { return "" }
 
         switch tool {
+        // ⚠️ The Code profile's intent-split tools MUST be listed here too. `CodeToolPreset`
+        // supplies `create_new_file`/`overwrite_file`/`edit_code_single`/`edit_code_batch` to
+        // every Code profile, and none of them was in this switch — so they fell through to the
+        // fallback below, which surfaced whichever String the params dictionary happened to
+        // yield first. For `{file_path, content}` that is frequently `content`, so a row for a
+        // newly created Swift file rendered `Create import SwiftUI import Foundation str…`
+        // instead of `Create Notes.swift`. The same label feeds `ConversationExporter`, so the
+        // export carried the code fragment too.
         case "read_file", "write_file", "edit_file", "edit_code", "create_file",
-             "file_overview", "fs_read_metadata", "fs_watch_folder":
+             "file_overview", "fs_read_metadata", "fs_watch_folder",
+             "create_new_file", "overwrite_file", "edit_code_single", "edit_code_batch":
             if let p = firstString(dict, keys: ["path", "file_path"]) {
                 return basename(p)
             }
@@ -1906,7 +2089,9 @@ enum ToolArgFormatter {
             if let p = firstString(dict, keys: ["path", "directory", "dir"]) {
                 return shortPath(p)
             }
-        case "grep", "grep_search", "ripgrep", "code_search", "glob_files":
+        // The three `code_search_*` splits all take `pattern`, which this already tries.
+        case "grep", "grep_search", "ripgrep", "code_search", "glob_files",
+             "code_search_text", "code_search_symbol", "code_search_files":
             if let q = firstString(dict, keys: ["pattern", "query", "regex"]) {
                 return truncate(q, 50)
             }
@@ -1957,16 +2142,46 @@ enum ToolArgFormatter {
             break
         }
 
-        // Fallback: first scalar string or number value.
-        for (_, v) in dict {
-            if let s = v as? String, !s.isEmpty {
+        // Fallback for a tool with no case above — a third-party MCP tool, or one added to the
+        // catalogue without a row here.
+        //
+        // ⚠️ Two properties this must have, both learned from the split tools falling through:
+        //  1. DETERMINISTIC. `for (_, v) in dict` iterates a bridged dictionary in an order that
+        //     is per-instance, so the SAME stored row could label differently between launches.
+        //     Sorted keys make the label a function of the params alone.
+        //  2. NEVER a payload. `content`/`old_string`/`new_string` carry whole files and code
+        //     fragments; surfacing one puts source into a 40-char chip and into the Markdown
+        //     export. An identifying value or nothing is the right choice — a row with no label
+        //     still renders its verb and object.
+        if let identifying = firstString(dict, keys: identifyingParamKeys) {
+            return pathShaped(identifying) ? basename(identifying) : truncate(identifying, 40)
+        }
+        for key in dict.keys.sorted() where !payloadParamKeys.contains(key) {
+            if let s = dict[key] as? String, !s.isEmpty {
                 return truncate(s, 40)
             }
-            if let n = v as? NSNumber {
+            if let n = dict[key] as? NSNumber {
                 return n.stringValue
             }
         }
         return ""
+    }
+
+    /// Keys that identify WHAT a tool acted on, tried in order before anything else.
+    private static let identifyingParamKeys = [
+        "file_path", "path", "query", "pattern", "command", "cmd", "url",
+        "symbol", "name", "directory", "dir", "action"
+    ]
+
+    /// Keys whose values are CONTENT rather than identity — never a chip label.
+    private static let payloadParamKeys: Set<String> = [
+        "content", "old_string", "new_string", "text", "body", "answer",
+        "data", "source", "code", "edits"
+    ]
+
+    /// A value worth reducing to its last path component.
+    private static func pathShaped(_ value: String) -> Bool {
+        value.contains("/") && !value.contains(" ")
     }
 
     // MARK: - Tables
@@ -2000,7 +2215,18 @@ enum ToolArgFormatter {
         "find_definition":             "Located",
         "file_overview":               "Analyzed",
         "codebase_map":                "Mapped",
-        "diff_files":                  "Diffed"
+        "diff_files":                  "Diffed",
+        // The Code profile's intent-splits. Without these `verbLabel` falls back to a generic
+        // verb and `objectLabel` to "tool"/"tools", so a group of three file creations in a Code
+        // profile was headed "Create 3 tools" while the same work in a Chat profile read
+        // "Created 3 files".
+        "create_new_file":             "Created",
+        "overwrite_file":              "Overwrote",
+        "edit_code_single":            "Edited",
+        "edit_code_batch":             "Edited",
+        "code_search_text":            "Searched",
+        "code_search_symbol":          "Searched",
+        "code_search_files":           "Found"
     ]
 
     private static let objectOverrides: [String: (singular: String, plural: String)] = [
@@ -2029,43 +2255,37 @@ enum ToolArgFormatter {
         "find_definition":  ("symbol", "symbols"),
         "file_overview":    ("file", "files"),
         "codebase_map":     ("codebase", "codebases"),
-        "diff_files":       ("diff", "diffs")
+        "diff_files":       ("diff", "diffs"),
+        "create_new_file":  ("file", "files"),
+        "overwrite_file":   ("file", "files"),
+        "edit_code_single": ("file", "files"),
+        "edit_code_batch":  ("file", "files"),
+        "code_search_text": ("match", "matches"),
+        "code_search_symbol": ("symbol", "symbols"),
+        "code_search_files": ("file", "files")
     ]
 
-    private static let iconOverrides: [String: String] = [
-        "read_file":                   "doc.text.fill",
-        "file_overview":               "doc.text.magnifyingglass",
-        "write_file":                  "square.and.pencil",
-        "edit_file":                   "pencil.circle.fill",
-        "edit_code":                   "pencil.circle.fill",
-        "create_file":                 "doc.badge.plus",
-        "delete_file":                 "trash.fill",
-        "list_directory":              "folder.fill",
-        "codebase_map":                "map.fill",
-        "fs_smart_search":             "magnifyingglass",
-        "fs_read_metadata":            "info.circle.fill",
-        "fs_watch_folder":            "eye.fill",
-        "fs_organize_batch":           "square.grid.3x3.fill",
-        "grep":                        "magnifyingglass",
-        "grep_search":                 "magnifyingglass",
-        "ripgrep":                     "magnifyingglass",
-        "code_search":                 "magnifyingglass",
-        "glob_files":                  "doc.on.doc",
-        "web_search":                  "globe",
-        "execute_shell":               "terminal.fill",
-        "run_shell":                   "terminal.fill",
-        "bash":                        "terminal.fill",
-        "shell":                       "terminal.fill",
-        "batch_command":               "terminal.fill",
-        "ask_user":                    "person.fill.questionmark",
-        "call_agent":                  "person.line.dotted.person.fill",
-        "recall_conversation_history": "clock.arrow.circlepath",
-        "git_tool":                    "arrow.triangle.branch",
-        "find_definition":             "curlybraces",
-        "diff_files":                  "plusminus"
-    ]
+    // [tc-12] `icon(tool:)` and its 29-entry `iconOverrides` table were DELETED here on
+    // 2026-09-12. They had zero callers — production or test — under a doc comment claiming they
+    // were "the single vocabulary for every per-tool glyph, so rendering paths can't drift": a
+    // vocabulary no renderer consulted. The 2026-09-12 tc-1 pass had just added seven Code-profile
+    // split tools to that table, which is how dead it was.
+    //
+    // Deleted rather than WIRED on purpose: hanging a glyph off `actionRowButton` would put a new
+    // icon on every row of every agent timeline — a visual change nobody asked for, justified by a
+    // row whose own evidence records no user-visible failure. The vocabulary is recoverable from
+    // git if a surface ever wants it.
+    //
+    // ⚠️ `verbOverrides` / `objectOverrides` are LIVE (`verb`, `objectLabel`) and keep their
+    // `edit_file` entry deliberately, even though no NATIVE tool is named that: MCP servers
+    // commonly expose `edit_file`, and those tables are what stop a third-party row's group title
+    // reading "Edited 3 tools". Same reasoning as the `recall_conversation_history` entries.
 
     // MARK: - Helpers
+
+    /// [tc-8] The shared entry point `resolveChip` uses so ONE parse serves the label and the
+    /// chip. `TimelineFileViewerAction.parsedParams` was byte-equivalent to this.
+    static func parsedParamsForRow(_ json: String) -> [String: Any]? { parseParams(json) }
 
     private static func parseParams(_ json: String) -> [String: Any]? {
         guard let data = json.data(using: .utf8) else { return nil }
@@ -2112,6 +2332,10 @@ extension AgentTimelineView: Equatable {
         lhs.revision == rhs.revision
             && lhs.isStreaming == rhs.isStreaming
             && lhs.compactReasoning == rhs.compactReasoning
+            // Without this a Resume — which flips `lifecycleState` to `.streaming` and back to
+            // `.final` without necessarily bumping `revision` in the same pass — could leave the
+            // interrupted header on a run that has since finished cleanly.
+            && lhs.isInterrupted == rhs.isInterrupted
             && lhs.streamingContext?.startedAt == rhs.streamingContext?.startedAt
             && (lhs.isStreaming || lhs.finalContentText == rhs.finalContentText)
     }

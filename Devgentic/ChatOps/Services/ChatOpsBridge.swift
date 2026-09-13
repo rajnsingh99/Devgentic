@@ -16,13 +16,18 @@ import os
 /// Routes incoming Telegram updates through the security gate, parses them into commands,
 /// and dispatches them to the appropriate handler (conversation management, agent pipeline, HITL).
 ///
-/// Uses the single-path architecture: remote messages flow through
-/// `MainApplicationViewModel.submitRemoteMessage()` — the same path as the Mac UI.
-/// The `RemoteMirrorService` handles mirroring events back to the transport.
+/// Uses the single-path architecture: remote messages reach the agent through the same send path
+/// the Mac UI uses. The `RemoteMirrorService` handles mirroring events back to the transport.
+///
+/// ⚠️ [BR-4] FREE TEXT GOES THROUGH `ChatOpsCommandService.submitTurn`, NOT through the view model
+/// directly. This header used to name `MainApplicationViewModel.submitRemoteMessage()`, and calling
+/// it here is exactly what let a second remote message start a second root run in a conversation
+/// that was already streaming. `submitTurn` bundles the admission check, the mirror registration
+/// and the submit so the three bridges cannot order them three different ways.
 @Observable @MainActor
 final class ChatOpsBridge {
 
-    private let logger = Logger(subsystem: DGLogger.subsystem, category: "ChatOpsBridge")
+    private let logger = DGLogger(category: "ChatOpsBridge")
 
     // MARK: - Dependencies
 
@@ -42,6 +47,10 @@ final class ChatOpsBridge {
 
     private var listeningTask: Task<Void, Never>?
     private(set) var isRunning: Bool = false
+
+    /// Which start this is. [LIFE-2] A run compares it on completion to see whether it is still the
+    /// one that owns the connection state.
+    private var generation: UInt64 = 0
 
     init(viewModel: MainApplicationViewModel) {
         self.viewModel = viewModel
@@ -81,7 +90,34 @@ final class ChatOpsBridge {
             )
         }
 
+        // ⚠️⚠️ [DC-1/LIFE-2] REFUSE A SECOND START — see `ChatOpsBridgeStart.shouldProceed` for why
+        // this refuses rather than restarting: `stop()` tears down the mirror session and would kill
+        // an in-flight tool approval. Placed after the credential guards, so a start that was never
+        // going to work is still reported as a missing token rather than as a duplicate.
+        guard ChatOpsBridgeStart.shouldProceed(isRunning: isRunning, provider: .telegram, logger: logger) else { return }
+
+        // ⚠️ [LIFE-2] THE RUN'S OWN IDENTITY. Bumped on every start so the trailing block below can
+        // tell whether it is still the live run before it writes anything user-visible.
+        generation &+= 1
+        let thisGeneration = generation
+
         isRunning = true
+
+        // ⚠️⚠️ [NEW-1] THE ONE CASE WHERE THIS BRIDGE ANNOUNCES ITSELF UNPROMPTED. A pairing made
+        // before per-sender authorization records no account, nothing backfills it, and the gate then
+        // refuses EVERY message with a bare return — so the remote user sees a bot that simply stopped
+        // answering. Settings now says so too, but they are not looking at Settings; they are looking
+        // at this chat. See `ChatOpsUpgradeNotice` for why posting here is safe and why it is once.
+        if ChatOpsUpgradeNotice.needsRepairing(addressPresent: config.authorizedChatID != nil,
+                                               authorizedUserID: config.authorizedUserID),
+           ChatOpsUpgradeNotice.claimAnnouncement(for: .telegram) {
+            Task { [weak self] in
+                guard let self else { return }
+                guard let chatID = self.config.authorizedChatID else { return }
+                await self.tell(chatID, ChatOpsUpgradeNotice.message, whenLost: "the remote user is not told WHY the bot stopped answering, so they keep sending commands into a bridge that refuses every one of them and have no way to learn that re-pairing is the fix.")
+                self.logger.error("[CHATOPS] Told the paired telegram chat that this Mac needs re-pairing: the pairing predates per-sender authorization and records no account. CONSEQUENCE: every remote command is refused until the user re-pairs from Settings — without this notice the bot simply went silent and the user had no way to learn why.")
+            }
+        }
 
         listeningTask = Task { [weak self] in
             guard let self else { return }
@@ -93,9 +129,23 @@ final class ChatOpsBridge {
                 await self.handleUpdate(update)
             }
 
+            // ⚠️⚠️ THE STREAM ENDING MEANS ONE OF TWO OPPOSITE THINGS, AND THIS IS WHERE THEY ARE
+            // TOLD APART. `stop()` ends it deliberately; a terminal API error ends it because
+            // remote control is DEAD until the user intervenes. Both used to arrive here as the
+            // same `.info` line and the same `isRunning = false`, so a revoked token left the
+            // Settings UI showing a green "Active" dot over a bridge that would never poll again.
+            let terminalFailure = await telegramListener.terminalFailure
+
             await MainActor.run {
-                self.isRunning = false
-                self.logger.info("ChatOpsBridge stopped.")
+                // ⚠️ [LIFE-2] OWNERSHIP FIRST. A run superseded by a later start must not write the
+                //   connection state — see `ChatOpsBridgeShutdown.report`.
+                let isOwner = self.generation == thisGeneration
+                if isOwner { self.isRunning = false }
+                ChatOpsBridgeShutdown.report(terminalFailure: terminalFailure,
+                                             provider: .telegram,
+                                             isOwner: isOwner,
+                                             logger: self.logger) { self.config.connectionState = $0 }
+                return
             }
         }
     }
@@ -115,13 +165,36 @@ final class ChatOpsBridge {
 
         isRunning = false
         logger.info("ChatOpsBridge stopped.")
+
+        // ⚠️⚠️ [LIFE-2/LIFE-7] RELEASE WHAT THIS RUN OWNED. `stop()` used to leave every client,
+        // transport and the command service installed, so a "stopped" bridge still held a live API
+        // client and — through `ChatOpsCommandService` — a STRONG reference to the app's main view
+        // model, defeating the `weak var viewModel` this file declares two lines up.
+        apiClient = nil
+        listener = nil
+        telegramTransport = nil
+        commands = nil
     }
 
     // MARK: - Update Routing
 
     private func handleUpdate(_ update: TelegramUpdate) async {
         // 1. Security gate
-        guard await securityGate.authorize(update, config: config) else { return }
+        let authorization = await securityGate.authorize(update, config: config)
+        if case .refused(let refusal) = authorization {
+            // ⚠️⚠️ [TG-5/SEC-6] THE ONE REFUSAL THE OPERATOR IS OWED. Every other arm stays silent on
+            // purpose — answering an unpaired room confirms a Mac is listening there. A THROTTLED
+            // sender has already proved they are the paired operator, so telling them leaks nothing,
+            // and before this they saw exactly what an intruder saw.
+            if refusal.mayReply, let chatID = update.chatID,
+               ChatOpsThrottleNotice.claim(for: .telegram),
+               case .rateLimited(let retry) = refusal.reason {
+                await tell(chatID,
+                           "⏳ Too many commands at once. Try again in \(Int(retry.rounded(.up)))s.",
+                           whenLost: "the paired operator is not told their command was throttled, so they see the bot ignore them and cannot tell a rate limit from a crash.")
+            }
+            return
+        }
 
         // 2. Acknowledge callback queries immediately to remove spinner
         if let callbackQuery = update.callback_query {
@@ -141,11 +214,34 @@ final class ChatOpsBridge {
         //     being answered. Checked BEFORE parsing, because the parser cannot see it and would
         //     fall back to the provider cursor, which is what made a second parked clarification
         //     unanswerable and let a `/new` in between misroute the answer into a new agent run.
+        //
+        //     ⚠️⚠️ THIS BRANCH IS NOT A SHORTCUT PAST THE TIER GATE OR THE PARSER, and it was both
+        //     until 2026-09-10. It ran before step 3 and step 4 and called `handleClarification`
+        //     unconditionally, which cost three separate defects: a `.readOnly` user could steer a
+        //     live agent run by replying (the gate below never saw the act); `/cancel` typed into
+        //     the ForceReply box was delivered to the agent as the literal answer text rather than
+        //     cancelling anything; and a reply to a mirrored tool-confirmation, plan-review or gate
+        //     prompt resolved the clarification continuation instead — parking that operation
+        //     forever while consuming its `hitlMessageIDs` entry, so its buttons stayed live for a
+        //     decision no surface could still make. Correlation is still decided FIRST, because
+        //     only the reply knows which operation is meant; what follows it is the same gate and
+        //     the same parser every other path uses.
         if let repliedTo = update.message?.reply_to_message?.message_id,
            let text = update.message?.text,
-           let operationID = await remoteMirrorService?.operationID(forRemoteMessageID: "\(repliedTo)") {
-            logger.info("[CHATOPS] A Telegram reply to message \(repliedTo) resolved clarification \(operationID) by correlation rather than by the conversation cursor.")
-            await remoteMirrorService?.handleClarification(operationID: operationID, text: text)
+           let operationID = await remoteMirrorService?.operationID(forRemoteMessageID: "\(repliedTo)"),
+           // ⚠️ A KNOWN VERB IN THE REPLY BOX IS A COMMAND, NOT AN ANSWER. Same table, same
+           //   judgement `parse` step 4 already makes for typed text — a user who replies `/cancel`
+           //   to a parked prompt means to stop the run, and answering the model with the string
+           //   "/cancel" is the failure `parse` moved its own slash branch above the clarification
+           //   branch to prevent. Falling through hands it to the normal switch below.
+           //   ⚠️ `/skip` is deliberately NOT a table verb: it means "answer this prompt with
+           //   nothing", which is only meaningful for the operation being replied to, so it is
+           //   handled inside `handleCorrelatedReply` where that operation is known.
+           ChatOpsVerbTable.parse(slashPrefixedText: text) == nil {
+            await handleCorrelatedReply(operationID: operationID,
+                                        repliedToMessageID: repliedTo,
+                                        text: text,
+                                        chatID: update.chatID)
             return
         }
 
@@ -157,10 +253,10 @@ final class ChatOpsBridge {
         )
 
         // 4. Tier enforcement
-        guard await securityGate.canExecute(command, tier: config.securityTier) else {
+        guard await securityGate.canExecute(command, tier: config.securityTier(for: .telegram)) else {
             if let chatID = update.chatID {
-                let msg = await securityGate.denialMessage(for: command, tier: config.securityTier)
-                let tierName = config.securityTier.rawValue
+                let msg = await securityGate.denialMessage(for: command, tier: config.securityTier(for: .telegram))
+                let tierName = config.securityTier(for: .telegram).rawValue
                 logger.error("[CHATOPS] A Telegram \(String(describing: command)) from chat \(chatID) was refused by the \(tierName) security tier. CONSEQUENCE: the command did nothing; without this line a tier refusal left no trace at all.")
                 await tell(chatID, msg, whenLost: "the remote user is not told why their command was refused, so a tier-blocked command and a dead bridge look identical to them — and the refusal itself is logged nowhere else.")
             }
@@ -222,14 +318,17 @@ final class ChatOpsBridge {
             // ⚠️ A REAL DROP, and it was a bare `break`. Reached by a plain message matching no verb
             // and by a button whose callback token no longer parses — a stale button from a
             // superseded grammar, which Telegram scrollback keeps forever.
-            logger.info("[CHATOPS/SILENT] A Telegram input parsed to `.unknown` in chat \(chatID) and was dropped. CONSEQUENCE: the user received NO reply at all and cannot tell whether the bot is alive; if this was a button tap, its token no longer parses and every copy of that button in scrollback is inert.")
+            logger.warning("[CHATOPS/SILENT] A Telegram input parsed to `.unknown` in chat \(chatID) and was dropped. CONSEQUENCE: the user received NO reply at all and cannot tell whether the bot is alive; if this was a button tap, its token no longer parses and every copy of that button in scrollback is inert.")
         }
     }
 
     // MARK: - Command Handlers
 
     private func handleFreeText(_ text: String, chatID: Int64) async {
-        guard let vm = viewModel else { return }
+        // ⚠️ [LIFE-7] NO LIVENESS GUARD HERE ANY MORE. It used to bare-return, discarding a gated,
+        // tier-checked, parsed prompt with no line and no reply. `ChatOpsCommandService` now holds
+        // its host WEAKLY and answers a lost one through `hostLost` / `hostUnavailable`, so the
+        // command is refused *and the user is told* instead of vanishing.
 
         // Ensure there's an active conversation
         guard let conversationID = config.activeConversationID else {
@@ -240,7 +339,7 @@ final class ChatOpsBridge {
         }
 
         // Resolve the backend profile for this conversation
-        guard let profile = commands?.profile(boundTo: conversationID) else {
+        guard let commands, let profile = commands.profile(boundTo: conversationID) else {
             await tell(chatID, "⚠️ No agent profile found for this conversation.",
                        whenLost: "the user is not told their prompt was dropped because the conversation resolves to no backend profile, so they wait for an answer that is never coming.")
             return
@@ -256,26 +355,34 @@ final class ChatOpsBridge {
 
         let requestConfig = BackendRequestConfig(profile: profile)
 
-        // Single-path architecture: route through the SAME flow as Mac UI.
-        // The RemoteMirrorService will observe the stream and mirror events back to Telegram.
-        // Register the remote session so the mirror service knows where to send responses.
-        remoteMirrorService?.registerSession(
-            conversationID: conversationID,
-            info: RemoteSessionInfo(
-                transport: telegramTransport!,
-                chatID: "\(chatID)",
-                source: .telegram
-            )
-        )
-
-        // Submit through the main app flow — message appears in Mac UI, agent runs,
-        // HITL banners show, and RemoteMirrorService handles the Telegram response.
-        vm.submitRemoteMessage(
+        // Single-path architecture: route through the SAME flow as Mac UI — the message appears in
+        // the Mac window, HITL banners show, and RemoteMirrorService observes the stream and
+        // mirrors events back to Telegram.
+        //
+        // ⚠️ [BR-4] ADMISSION, SESSION REGISTRATION AND SUBMIT ARE ONE CALL, and it is the command
+        // service's rather than this bridge's so that a test can watch what it submits — see
+        // `ChatOpsCommandService.submitTurn`. Calling `vm.submitRemoteMessage` directly here is what
+        // let a second remote message start a second root run in the same conversation.
+        let admission = commands.submitTurn(
             prompt: text,
             conversationID: conversationID,
             source: .telegram,
-            config: requestConfig
+            config: requestConfig,
+            attachMirror: { [weak self] in
+                guard let self,
+                      let transport = self.telegramTransport,
+                      let mirror = self.remoteMirrorService else { return false }
+                mirror.registerSession(
+                    conversationID: conversationID,
+                    info: RemoteSessionInfo(transport: transport, chatID: "\(chatID)", source: .telegram)
+                )
+                return true
+            }
         )
+
+        if case .refused(let message, let consequence) = admission {
+            await tell(chatID, message, whenLost: consequence)
+        }
     }
 
 
@@ -308,6 +415,75 @@ final class ChatOpsBridge {
     /// `resolvedBy:` and `offset:` use elsewhere in this subsystem. A new call site cannot be added
     /// without stating what the user loses when the message does not arrive, and a default would be
     /// one generic sentence quietly inherited by all of them.
+    /// Routes a reply that `operationID(forRemoteMessageID:)` matched to a parked prompt.
+    ///
+    /// Correlation has already decided WHICH operation is meant; this decides whether the user is
+    /// allowed to answer it and whether a typed answer can answer it at all. See the call site for
+    /// the three defects that existed while this logic was absent.
+    ///
+    /// ⚠️ Every arm below either resolves the operation or TELLS THE USER why it did not. A reply
+    /// that lands on the wrong kind used to disappear: no reply, no log, and a parked run.
+    private func handleCorrelatedReply(
+        operationID: UUID,
+        repliedToMessageID: Int,
+        text: String,
+        chatID: Int64?
+    ) async {
+        // 1. The same tier gate step 4 applies to a typed clarification answer. A reply IS a
+        //    `.clarificationResponse`; reaching the agent by replying rather than by typing cannot
+        //    be the thing that decides whether the tier allows it.
+        let asCommand = ChatOpsCommand.clarificationResponse(text)
+        guard await securityGate.canExecute(asCommand, tier: config.securityTier(for: .telegram)) else {
+            let tierName = config.securityTier(for: .telegram).rawValue
+            logger.error("[CHATOPS] A Telegram reply to message \(repliedToMessageID) correlated to parked operation \(operationID.uuidString) was refused by the \(tierName) security tier. CONSEQUENCE: the operation stays parked and the agent is not steered by this reply; before this gate existed a Read Only user could answer any parked prompt simply by replying to it.")
+            if let chatID {
+                let msg = await securityGate.denialMessage(for: asCommand, tier: config.securityTier(for: .telegram))
+                await tell(chatID, msg, whenLost: "the remote user is not told why their reply was refused, so a tier-blocked reply and a dead bridge look identical to them.")
+            }
+            return
+        }
+
+        // 2. Only a clarification can be answered with TEXT. Everything else parks in a different
+        //    continuation and needs its own affordance.
+        let kind = await remoteMirrorService?.pendingInteraction(forOperation: operationID)
+        switch kind {
+        case .clarification:
+            // ⚠️ `/skip` MEANS "ANSWER WITH NOTHING", and it is resolved here rather than in the
+            //   verb table because it is only meaningful against a specific parked prompt — the
+            //   table's verbs are channel-wide. `parse` step 5 makes the same translation for a
+            //   typed (non-reply) answer; this keeps the two paths saying the same thing.
+            let answer = text.trimmingCharacters(in: .whitespaces).lowercased() == "/skip" ? "" : text
+            logger.info("[CHATOPS] A Telegram reply to message \(repliedToMessageID) resolved clarification \(operationID.uuidString) by correlation rather than by the conversation cursor.")
+            await remoteMirrorService?.handleClarification(operationID: operationID, text: answer)
+
+        case .toolConfirmation, .planReview, .gate:
+            let what: String
+            let advice: String
+            switch kind {
+            case .toolConfirmation: what = "tool approval"; advice = "Tap Approve or Deny on that message."
+            case .planReview:       what = "plan review";   advice = "Tap Approve or Reject on that message."
+            default:                what = "gate";          advice = "Tap one of the options on that message."
+            }
+            logger.error("[CHATOPS] A Telegram reply to message \(repliedToMessageID) correlated to operation \(operationID.uuidString), which is a \(what) and cannot be answered with text. CONSEQUENCE: the reply is NOT delivered and the operation stays parked with its buttons live — which is correct; routing it to the clarification continuation instead, as this path used to, resumed nothing, parked the run forever and consumed the prompt's message id so its buttons could never be rewritten.")
+            if let chatID {
+                await tell(chatID,
+                           "That message is a \(what), not a question — a typed reply can't answer it. \(advice)",
+                           whenLost: "the remote user believes their reply answered the prompt when it did not, and the run stays parked with no explanation on any surface.")
+            }
+
+        case .none:
+            // ⚠️ DISTINCT FROM "WRONG KIND". The operation is gone — resolved on the Mac, by another
+            //   provider, or by a race with this very reply — and telling the user to use the
+            //   buttons would send them to a message whose buttons no longer do anything.
+            logger.error("[CHATOPS] A Telegram reply to message \(repliedToMessageID) correlated to operation \(operationID.uuidString), which is no longer pending. CONSEQUENCE: the reply is discarded; the prompt was already resolved on the Mac or by another connected provider, so there is nothing left for it to answer.")
+            if let chatID {
+                await tell(chatID,
+                           "That prompt has already been answered — on the Mac, or from another connected chat. Your reply wasn't needed.",
+                           whenLost: "the remote user believes their reply resolved a prompt that something else had already resolved, and will not understand why the run continued without it.")
+            }
+        }
+    }
+
     private func tell(_ chatID: Int64, _ text: String, whenLost consequence: String) async {
         guard let apiClient else {
             logger.error("[CHATOPS] No Telegram API client while telling the user: \"\(text.prefix(60))\". CONSEQUENCE: \(consequence)")

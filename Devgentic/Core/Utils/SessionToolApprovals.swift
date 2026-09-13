@@ -83,7 +83,21 @@ actor SessionToolApprovals {
     /// ⚠️ Deliberately checked INSIDE `isAllowed` rather than short-circuiting at the call site,
     /// so it inherits the `canReachAHuman` gate below: a blanket grant given on a live voice
     /// session must not serve a scheduled run nobody can answer.
-    private var autonomousConversations: Set<UUID> = []
+    /// ⚠️⚠️ KEYED ON (conversation, ORIGIN), NOT ON THE CONVERSATION ALONE. It used to be a bare
+    /// `Set<UUID>`, and Jarvis publishes its conversation to ChatOps on purpose — so a message from
+    /// a paired phone inherited an "approve everything" grant the user had made by VOICE, and ran
+    /// `execute_shell` with no prompt on ANY surface: the banner is skipped, so no `PendingHITL`
+    /// exists and the mirror has nothing to post either. Both halves were deliberate in isolation
+    /// (autonomous includes `execute_shell` by owner decision; a ChatOps run legitimately satisfies
+    /// `canReachAHuman`); nobody owned their composition. A grant must not cross a surface boundary.
+    private var autonomousConversations: Set<AutonomousGrant> = []
+
+    /// One conversation, for runs started from ONE surface.
+    struct AutonomousGrant: Hashable, Sendable {
+        let conversationID: UUID
+        /// ⚠️ The surface that was granted it — compared against `WorkflowRunAttendance.origin`.
+        let origin: MessageSource
+    }
 
     /// `defaults` is injectable so tests can exercise the durable round-trip on an isolated suite;
     /// the shared singleton uses `.standard`.
@@ -130,16 +144,30 @@ actor SessionToolApprovals {
     ///
     /// The spoken approval channel (`JarvisApprovalPolicy`) is a DIFFERENT question and is
     /// deliberately far narrower — see its header.
-    func setAutonomous(_ enabled: Bool, conversationID: UUID) {
+    /// - Parameter origin: the surface this grant is FOR. ⚠️ REQUIRED, not defaulted: a default
+    ///   would let a new caller grant blanket approval to every surface by omission, which is the
+    ///   defect this parameter exists to close.
+    func setAutonomous(_ enabled: Bool, conversationID: UUID, origin: MessageSource) {
+        let grant = AutonomousGrant(conversationID: conversationID, origin: origin)
         let changed = enabled
-            ? autonomousConversations.insert(conversationID).inserted
-            : autonomousConversations.remove(conversationID) != nil
+            ? autonomousConversations.insert(grant).inserted
+            : autonomousConversations.remove(grant) != nil
         guard changed else { return }
-        logger.notice("[HITL] Autonomous approval \(enabled ? "ENABLED" : "disabled") for conversation \(conversationID.uuidString.prefix(8)). CONSEQUENCE: while enabled, every tool in this conversation is approved without a prompt; the grant is in-memory only and does not survive relaunch.")
+        logger.notice("[HITL] Autonomous approval \(enabled ? "ENABLED" : "disabled") for conversation \(conversationID.uuidString.prefix(8)), origin '\(origin.rawValue)'. CONSEQUENCE: while enabled, every tool in this conversation started FROM THAT SURFACE is approved without a prompt; a run of any other origin still asks. The grant is in-memory only and does not survive relaunch.")
     }
 
+    /// Whether ANY surface holds a blanket grant on this conversation.
+    ///
+    /// ⚠️ ORIGIN-AGNOSTIC ON PURPOSE — this is a UI/reporting question ("is this conversation in
+    /// autonomous mode"), not the authorization one. The gate is `isAllowed`, which compares the
+    /// grant's origin against the run's.
     func isAutonomous(conversationID: UUID) -> Bool {
-        autonomousConversations.contains(conversationID)
+        autonomousConversations.contains { $0.conversationID == conversationID }
+    }
+
+    /// Whether the given surface holds a blanket grant on this conversation.
+    func isAutonomous(conversationID: UUID, origin: MessageSource) -> Bool {
+        autonomousConversations.contains(AutonomousGrant(conversationID: conversationID, origin: origin))
     }
 
     /// Whether the user already chose "Allow for this chat" for this tool **in this scope**.
@@ -161,6 +189,8 @@ actor SessionToolApprovals {
     /// ⚠️ A CHATOPS run still gets the grant, deliberately: it IS "this chat" with a human who
     /// can be reached, and its confirmations are mirrored with working Approve/Deny. Only a run
     /// nobody can answer is refused.
+    /// ⚠️ The blanket grant is matched against `WorkflowRunAttendance.origin`, so it serves only
+    /// runs from the surface it was granted on. See `autonomousConversations`.
     func isAllowed(toolName: String, conversationID: UUID, nodeID: UUID? = nil) -> Bool {
         guard WorkflowRunAttendance.canReachAHuman else {
             if allowed[Scope(conversationID: conversationID, nodeID: nodeID)]?.contains(toolName) == true {
@@ -168,9 +198,15 @@ actor SessionToolApprovals {
             }
             return false
         }
-        if autonomousConversations.contains(conversationID) {
-            logger.notice("[HITL] '\(toolName)' auto-approved by AUTONOMOUS mode (conv \(conversationID.uuidString.prefix(8))). CONSEQUENCE: no prompt was shown and the user did not see this tool's arguments.")
+        let origin = WorkflowRunAttendance.origin
+        if autonomousConversations.contains(AutonomousGrant(conversationID: conversationID, origin: origin)) {
+            logger.notice("[HITL] '\(toolName)' auto-approved by AUTONOMOUS mode (conv \(conversationID.uuidString.prefix(8)), origin '\(origin.rawValue)'). CONSEQUENCE: no prompt was shown and the user did not see this tool's arguments.")
             return true
+        }
+        // ⚠️ A grant EXISTS for this conversation but for a different surface. Said out loud,
+        //   because "why did my phone get a prompt when the Mac does not" is otherwise unanswerable.
+        if autonomousConversations.contains(where: { $0.conversationID == conversationID }) {
+            logger.notice("[HITL] Autonomous grant NOT served to a '\(origin.rawValue)' run of conversation \(conversationID.uuidString.prefix(8)) — the grant belongs to another surface. CONSEQUENCE: this tool asks for approval as normal; a standing 'approve everything' chosen on one surface deliberately does not carry to another.")
         }
         return allowed[Scope(conversationID: conversationID, nodeID: nodeID)]?.contains(toolName) ?? false
     }
@@ -178,7 +214,9 @@ actor SessionToolApprovals {
     /// Drops all allowances for a conversation — every node scope within it included, since the
     /// conversation is what is being deleted.
     func clear(conversationID: UUID) {
-        autonomousConversations.remove(conversationID)
+        // ⚠️ EVERY surface's grant on this conversation — the conversation is being deleted, so no
+        //   origin retains a claim on it.
+        autonomousConversations = autonomousConversations.filter { $0.conversationID != conversationID }
         let doomed = allowed.keys.filter { $0.conversationID == conversationID }
         guard !doomed.isEmpty else { return }
         for scope in doomed { allowed.removeValue(forKey: scope) }

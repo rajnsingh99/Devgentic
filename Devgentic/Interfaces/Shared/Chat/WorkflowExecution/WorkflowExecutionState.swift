@@ -375,10 +375,11 @@ final class WorkflowExecutionState {
         // failure, fixes the view for the rest of THIS run instead of only the next time it's
         // reopened from a fresh record.
         if var events = nodeTimelines[nodeID], !events.isEmpty {
-            let closed = DanglingToolRowCloser.close(&events, outcome: .failed)
-            if closed > 0 {
+            let closedRows = DanglingToolRowCloser.closeReporting(&events, outcome: .failed)
+            if !closedRows.isEmpty {
                 nodeTimelines[nodeID] = events
-                workflowLogger.info("[WF_EVENT] Node '\(profileName)' failed with \(closed) tool row(s) still executing — closed with failure semantics. CONSEQUENCE: the rows settle as 'Interrupted before the tool finished.' instead of spinning for the rest of the run.")
+                workflowLogger.info("[WF_EVENT] Node '\(profileName)' failed with \(closedRows.count) tool row(s) still executing — closed with failure semantics. CONSEQUENCE: the rows settle as 'Interrupted before the tool finished.' instead of spinning for the rest of the run.")
+                postLiveWriteCompletions(closedRows, context: "node '\(profileName)' failure")
             }
         }
     }
@@ -414,10 +415,11 @@ final class WorkflowExecutionState {
         // no failure count, an output that says what happened. `.byUser` only — a cascade skip
         // never ran, so it has no rows to close, and touching them would hide a real defect.
         if case .byUser = reason, var events = nodeTimelines[nodeID], !events.isEmpty {
-            let closed = DanglingToolRowCloser.closeForUserSkip(&events)
-            if closed > 0 {
+            let closedRows = DanglingToolRowCloser.closeForUserSkipReporting(&events)
+            if !closedRows.isEmpty {
                 nodeTimelines[nodeID] = events
-                workflowLogger.info("[WF_EVENT] Node '\(profileName)' skipped by user with \(closed) tool row(s) still executing — closed with skip semantics. CONSEQUENCE: the rows settle as 'Interrupted — the node was skipped by you' instead of spinning for the rest of the run and freezing as red failures.")
+                workflowLogger.info("[WF_EVENT] Node '\(profileName)' skipped by user with \(closedRows.count) tool row(s) still executing — closed with skip semantics. CONSEQUENCE: the rows settle as 'Interrupted — the node was skipped by you' instead of spinning for the rest of the run and freezing as red failures.")
+                postLiveWriteCompletions(closedRows, context: "user skip of node '\(profileName)'")
             }
         }
     }
@@ -433,6 +435,49 @@ final class WorkflowExecutionState {
     /// otherwise invalidate every observing view for a value none of them read. Its only consumer
     /// is `settleInFlightWork`.
     @ObservationIgnored private(set) var retryPendingNodeIDs: Set<UUID> = []
+
+    /// The conversation this run belongs to, stamped once by `WorkflowRunBootstrap.begin`.
+    ///
+    /// ⚠️ `@ObservationIgnored` and write-once: nothing renders it. Its only consumer is
+    /// `postLiveWriteCompletions`, which cannot address a Code Viewer tab without it. Optional
+    /// because the type is constructible without one — if it is ever nil at a settle, the helper
+    /// LOGS the consequence rather than silently skipping (a stranded tab is the whole defect).
+    @ObservationIgnored var conversationID: UUID?
+
+    /// Settles the live Code Viewer tab for every abandoned file write in `rows`.
+    ///
+    /// ⚠️ [cv-3] Mirrors the CF-9 loop in `ActiveStreamManager.finalizeMessage`, which cannot
+    /// cover these rows: it walks `message.timelineEvents`, and a workflow node's rows live in
+    /// `nodeTimelines`. `AgentLiveWriteEvent.began` is posted from `.toolCall` BEFORE the row is
+    /// routed by `sourceNodeID`, so a node's `write_file` DOES open a live tab — the assumption
+    /// that it does not is what left tabs stranded `.active` for the rest of the session.
+    ///
+    /// `isSuccess: false` is the honest value at every call site here: the row was still
+    /// executing when the run was cancelled, the node failed, or the user skipped it, so the
+    /// proposal did not land. `preWriteContent: nil` lets the handler fall back to the UI's own
+    /// pre-read. Posting for a row that opened no tab (an empty or over-cap write, which `began`
+    /// refuses) is a harmless no-op the handler logs at debug.
+    private func postLiveWriteCompletions(_ rows: [DanglingToolRowCloser.ClosedRow], context: String) {
+        guard !rows.isEmpty else { return }
+        guard let conversationID else {
+            workflowLogger.error("[WORKFLOW] \(rows.count) abandoned tool row(s) settled at \(context) but this run has NO conversationID, so no live-write completion can be addressed. CONSEQUENCE: a Code Viewer tab opened for one of these writes stays marked 'agent is writing this file' for the rest of the session and its ⌘S is refused as on-disk drift.")
+            return
+        }
+        for row in rows {
+            guard let payload = AgentLiveWriteEvent.completed(
+                toolName: row.name,
+                params: row.params,
+                isSuccess: false,
+                preWriteContent: nil,
+                conversationID: conversationID
+            ) else { continue }
+            NotificationCenter.default.post(
+                name: AgentLiveWriteEvent.completed, object: nil,
+                userInfo: [AgentLiveWriteEvent.payloadKey: payload]
+            )
+            workflowLogger.warning("[WORKFLOW] No completion event ever arrived for the live write of '\(payload.fileName)' (settled at \(context)); posting a failed completion now. CONSEQUENCE: if that file has a live tab it settles as rejected — the proposal never reached disk — instead of claiming the agent is still writing it.")
+        }
+    }
 
     /// [CF-30] The executor has decided to retry this node and is about to wait out the back-off.
     ///
@@ -474,9 +519,17 @@ final class WorkflowExecutionState {
     /// the node's own INPUT downstream — `WorkflowExecutor`'s user-skip arm builds `passThrough`
     /// from the node's upstream envelopes, or from the run's own query at an entry node. Reading
     /// `detail` therefore showed the node that is RUNNING RIGHT NOW the skip sentence where its
-    /// input belongs: the one string it is guaranteed not to have received. Every other skip
-    /// reason keeps `detail`, because `NodeSkipReason.keepsDownstreamAlive` is false for all of
-    /// them — nothing below them ever runs to preview anything.
+    /// input belongs: the one string it is guaranteed not to have received.
+    ///
+    /// ⚠️ [workflow/vm-1] This used to add "Every other skip reason keeps `detail`, because
+    /// `NodeSkipReason.keepsDownstreamAlive` is false for all of them — nothing below them ever
+    /// runs to preview anything." That is FALSE for a fan-in. `WorkflowState.runDecision` excuses
+    /// a dead branch whose live sibling is mutually exclusive on a common ancestor — the
+    /// diamond-over-a-Condition shape its own doc calls the most common broken canvas — so a node
+    /// DOES run below a `.notChosen` skip, and previewed "Not run — the workflow branched a
+    /// different way" as part of its input. Callers now filter with `contributesInput(_:)`; this
+    /// helper is deliberately unchanged, so a caller that asks it about any status still gets
+    /// that status's own text.
     ///
     /// ⚠️ A PREVIEW, not a byte-for-byte reconstruction. `WorkflowInputAssembler.compileForWorkflow`
     /// has its own separators and status filter; this mirrors the surrounding preview code's
@@ -488,6 +541,55 @@ final class WorkflowExecutionState {
     ///
     /// - Parameter resultsByNodeID: every result of the run, so the walk back up the edges costs
     ///   a lookup rather than a scan.
+    /// [workflow/vm-3] Bound on ONE upstream's contribution to a LIVE input preview.
+    ///
+    /// The only consumer of `NodeDisplayData.input` is the timeline's collapsed row, which cuts
+    /// at 200 characters — but it TRIMS whitespace first, so a cap close to 200 could change the
+    /// displayed text for a contribution that opens with a long run of newlines. 1,024 leaves
+    /// that degenerate case unreachable while still turning an O(total upstream bytes) copy per
+    /// body pass into O(nodes x 1 KB).
+    ///
+    /// ⚠️ Applied to the RECURSION as well as the factory. For every status but
+    /// `.skipped(.byUser)` this helper returns the stored `detail` by reference and costs
+    /// nothing; the pass-through branch below is the one place a large String is CONSTRUCTED,
+    /// so a cap applied only at the factory would truncate AFTER the ancestor's full output had
+    /// already been joined and copied — once per level of a user-skip chain.
+    ///
+    /// ⚠️ NOT applied to `WorkflowRunRecord.freeze`: a frozen record is the durable artefact and
+    /// keeps the full value. That is a deliberate divergence between the twin factories — the
+    /// record file's "everything reachable above is now identical" note says so explicitly.
+    nonisolated static let livePreviewContributionCap = 1_024
+
+    /// [workflow/vm-1] Whether an upstream with this status contributed anything to what the
+    /// node actually received.
+    ///
+    /// A verbatim mirror of `WorkflowInputAssembler.compileForWorkflow`'s `usableResults` switch
+    /// with `includeFailures: true` — which is what the profile-node path always passes — plus
+    /// `.running`, which the engine never compiles but which answers the display's own question
+    /// for a PENDING row: "what is going to arrive here".
+    ///
+    /// ⚠️ Keeping `.running` is not a rounding error, it is what stops the empty-list fallback
+    /// below from re-admitting the very string this fixes. In the diamond's pending window the
+    /// upstreams are [A running, B skipped-notChosen]; drop both and the filtered list is empty,
+    /// the fallback fires, and the skip sentence renders again.
+    ///
+    /// ⚠️ STATUS ONLY, and that is a real limit rather than an oversight. The engine also applies
+    /// a PORT filter (`WorkflowState.edgeIsLive`), which needs `activeOutputPorts` — run state
+    /// that never leaves `Devgentic/Core/Backends`, for the same reason `WorkflowCanvasRunOverlay`
+    /// gives for deriving edge state from endpoints. So a COMPLETED Condition wired into a fan-in
+    /// on the port the run did NOT take still contributes its verdict text here. That case stays
+    /// open by design; do not add a port-label rule to close it, because an upstream wired into
+    /// two ports must contribute exactly once and a label rule cannot express both.
+    nonisolated static func contributesInput(_ status: WorkflowNodeResult.Status) -> Bool {
+        switch status {
+        case .completed:         return true
+        case .failed:            return true
+        case .skipped(.byUser):  return true
+        case .running:           return true
+        case .cancelled, .skipped: return false
+        }
+    }
+
     /// - Parameter userInput: the run's own input, forwarded verbatim by a skipped ENTRY node.
     nonisolated static func upstreamInputContribution(
         of result: WorkflowNodeResult,
@@ -507,7 +609,14 @@ final class WorkflowExecutionState {
         var seen = visited
         seen.insert(result.nodeID)
 
-        let upstreamIDs = edges.filter { $0.targetNodeID == result.nodeID }.map(\.sourceNodeID)
+        // [workflow/vm-2] Same per-source de-dup as the two factories that call this. The
+        // recursion has the identical shape one level down, so a CHAINED user skip wired into
+        // two ports of ITS upstream doubled the inner join even after the outer one was fixed.
+        var seenUpstreamIDs = Set<UUID>()
+        let upstreamIDs = edges
+            .filter { $0.targetNodeID == result.nodeID }
+            .map(\.sourceNodeID)
+            .filter { seenUpstreamIDs.insert($0).inserted }
         let upstreamResults = upstreamIDs.compactMap { resultsByNodeID[$0] }
         // Mirrors the engine's own rule: with no upstream envelopes the skip forwards the run's
         // input ("An entry node's input is the user's query itself — forwarding '' there would
@@ -520,6 +629,20 @@ final class WorkflowExecutionState {
             }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
+    }
+
+    /// [workflow/vm-3] One contribution, bounded for a LIVE preview. See the cap's own note for
+    /// why the recursion above is bounded through this too rather than only at the factory.
+    nonisolated static func boundedUpstreamInputContribution(
+        of result: WorkflowNodeResult,
+        resultsByNodeID: [UUID: WorkflowNodeResult],
+        edges: [WorkflowEdge],
+        userInput: String
+    ) -> String {
+        let full = upstreamInputContribution(of: result, resultsByNodeID: resultsByNodeID,
+                                             edges: edges, userInput: userInput)
+        guard full.count > livePreviewContributionCap else { return full }
+        return String(full.prefix(livePreviewContributionCap))
     }
 
     // MARK: - Progress
@@ -629,14 +752,19 @@ final class WorkflowExecutionState {
         }
 
         var closedRows = 0
+        var abandonedWrites: [DanglingToolRowCloser.ClosedRow] = []
         for nodeID in nodeTimelines.keys {
             guard var events = nodeTimelines[nodeID] else { continue }
-            let closed = DanglingToolRowCloser.close(&events, outcome: cancelled ? .cancelled : .failed)
-            if closed > 0 {
+            let closed = DanglingToolRowCloser.closeReporting(&events, outcome: cancelled ? .cancelled : .failed)
+            if !closed.isEmpty {
                 nodeTimelines[nodeID] = events
-                closedRows += closed
+                closedRows += closed.count
+                abandonedWrites += closed
             }
         }
+        // [cv-3] After the loop, so one post per abandoned row across the whole run rather than
+        // per node — and so the row mutations are all committed before any handler observes them.
+        postLiveWriteCompletions(abandonedWrites, context: cancelled ? "run cancel" : "run failure")
 
         if settledNodes > 0 || closedRows > 0 {
             workflowLogger.warning("[WORKFLOW] Run settled at \(cancelled ? "cancel" : "failure") — force-closed \(settledNodes) node(s) still marked running and \(closedRows) dangling tool row(s). Without this the frozen record renders them as actively executing forever.")

@@ -64,8 +64,28 @@ extension DurationFormat {
         let ms = max(0, ms)
         if ms < 1000 { return "\(ms)ms" }
         let s = Double(ms) / 1000.0
-        if s < 60 { return String(format: "%.1fs", s) }
-        return clock(wholeSeconds: Int(s))
+        // ⚠️ [mm-8] Bucket on the value the FORMAT will print, not the raw one. `s < 60` was
+        // tested against the unrounded value while the string came from `%.1f`, which rounds —
+        // so 59,950–59,999 ms chose the seconds bucket and then printed "60.0s", the exact
+        // unit-drift this consolidated helper exists to remove.
+        //
+        // ⚠️ And do NOT "fix" it by rounding the input: that changes 500 ms of behaviour to
+        // correct 50 ms, and hands `clock` a ROUNDED count while `elapsed` hands it a TRUNCATED
+        // one, so the same run reads differently in an export and in the live footer.
+        //
+        // ⚠️⚠️ Deriving the whole seconds from `tenths` has the SAME defect and a wider blast
+        // radius — I shipped that first and a cold read caught it. `Int(tenths/10)` rounds at the
+        // tenth, so EVERY duration in an `[n.95, n+1)` band disagreed with `elapsed`: measured
+        // 700 disagreements across 60–200 s, i.e. ~5% of all values, versus the 50 ms this row
+        // was filed for.
+        //
+        // The bucket is chosen from the ROUNDED value (so "60.0s" is unrepresentable) while the
+        // whole seconds are TRUNCATED (so `clock` matches `elapsed` exactly). `max(60, …)` is
+        // needed only for the `[59.95, 60)` band, where the two disagree by construction — above
+        // 60 s it is a no-op. Measured: zero disagreements with `elapsed` at or above 60 s.
+        let tenths = (s * 10).rounded()
+        if tenths < 600 { return String(format: "%.1fs", s) }
+        return clock(wholeSeconds: max(60, Int(s)))
     }
 
     /// Wall-clock **elapsed** between two dates → "0s" / "45s" / "1m 5s" / "1h 2m". Clamped ≥0.
@@ -79,7 +99,9 @@ extension DurationFormat {
     static func seconds(_ d: TimeInterval) -> String {
         if d <= 0 { return "" }
         if d < 1 { return "<1s" }
-        if d < 60 { return "\(String(format: "%.1f", d))s" }
-        return clock(wholeSeconds: Int(d))
+        // [mm-8] Same rounding-vs-bucket rule as `milliseconds`, truncation included — see its note.
+        let tenths = (d * 10).rounded()
+        if tenths < 600 { return "\(String(format: "%.1f", d))s" }
+        return clock(wholeSeconds: max(60, Int(d)))
     }
 }

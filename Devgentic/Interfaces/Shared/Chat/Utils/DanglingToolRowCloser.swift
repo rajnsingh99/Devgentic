@@ -91,7 +91,10 @@ enum DanglingToolRowCloser {
     /// is the entire user-visible defect; asserting an outcome we never saw is not part of it.
     ///
     /// `isSuccess` stays nil for the same reason — the tool's fate is genuinely unknown, so the
-    /// row renders no badge rather than a fabricated success or failure, and
+    /// ⚠️ As of [tc-10] `statusIcon` DOES paint this row — a neutral `circle.dotted` in
+    /// `tertiaryText` ("Outcome unknown — the run ended first"), which states ignorance rather
+    /// than fabricating a verdict. `summarize` still counts nothing for it. The claim that it
+    /// "renders no badge" was true when this was written and is no longer.
     /// `AgentTimelineView.summarize` does not count it toward "N failed".
     @discardableResult
     static func markInterruptedByProcessDeath(_ events: inout [TimelineEvent]) -> Int {
@@ -102,21 +105,38 @@ enum DanglingToolRowCloser {
 
     /// The USER-SKIP close (Phase B increment 5): the node was deliberately skipped mid-flight,
     /// so its abandoned tool rows are neither failures nor cancellations — `isSuccess` stays nil
-    /// (statusIcon renders no badge, `summarize` counts nothing failed) and the output says what
-    /// actually happened. Without this, `WorkflowRunRecord.freeze`'s unconditional `.failed`
+    /// (`summarize` counts nothing failed) and the output says what actually happened.
+    /// ⚠️ As of [tc-10] `statusIcon` DOES paint these rows, with a neutral `circle.dotted` in
+    /// `tertiaryText` — "the run ended before this reported", not a failure. The claim that it
+    /// "renders no badge" was true when this was written and is no longer. Without this, `WorkflowRunRecord.freeze`'s unconditional `.failed`
     /// close painted a RED "Interrupted before the tool finished." row inside a node whose row
     /// says "Skipped by you" — a failure claim about a run in which nothing failed.
     @discardableResult
     static func closeForUserSkip(_ events: inout [TimelineEvent]) -> Int {
-        // Count only — no caller needs to know WHICH rows a user-skip settled. (The live-write
-        // completion CF-9 posts is a chat-path concern; a skipped workflow node has no live tab.)
+        closeForUserSkipReporting(&events).count
+    }
+
+    /// `closeForUserSkip`, returning the rows it settled.
+    ///
+    /// ⚠️ This exists because the count-only form's old comment — "a skipped workflow node has no
+    /// live tab" — was FALSE. `AgentLiveWriteEvent.began` is posted from `.toolCall`
+    /// unconditionally, BEFORE the row is routed by `sourceNodeID`, so a workflow node's
+    /// `write_file` opens a live Code Viewer tab exactly like a chat-path write. Meanwhile CF-9's
+    /// terminal (`finalizeMessage` → `closeDanglingToolRowsReporting`) walks only
+    /// `message.timelineEvents`, and a node's rows live in `WorkflowExecutionState.nodeTimelines`
+    /// — a separate array it never sees. So skipping or stopping a node mid-write left its tab
+    /// `.active` for the rest of the session: orange "Agent is writing this file" banner up,
+    /// minimized pill pulsing, and `lastSavedDisk` never set, so ⌘S was refused as on-disk drift
+    /// on a claim that is false. The caller needs the ROWS to post the completions itself.
+    @discardableResult
+    static func closeForUserSkipReporting(_ events: inout [TimelineEvent]) -> [ClosedRow] {
         walk(&events) { data in
             data.isExecuting = false
             if data.output == nil {
                 // Persisted tool output — deliberately unlocalized (category-c, must stay stable).
                 data.output = "Interrupted — the node was skipped by you."
             }
-        }.count
+        }
     }
 
     /// The shared traversal: every still-executing tool row, including rows nested inside

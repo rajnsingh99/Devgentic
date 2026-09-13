@@ -123,20 +123,12 @@ struct ConversationRowView: View {
     // MARK: - Hover Actions
     @ViewBuilder
     private var hoverActionsView: some View {
-        HStack(alignment: .center, spacing: 4) {
-            if let onPin = onPin {
-                HoverActionButton(
-                    icon: conversation.isPinned ? "pin.slash" : "pin",
-                    action: onPin
-                )
-            }
-            if let onDelete = onDelete {
-                HoverActionButton(
-                    icon: "trash",
-                    tint: theme.errorColor.opacity(0.85),
-                    action: onDelete
-                )
-            }
+        if let onDelete = onDelete {
+            HoverActionButton(
+                icon: "trash",
+                tint: theme.errorColor.opacity(0.85),
+                action: onDelete
+            )
         }
     }
 }

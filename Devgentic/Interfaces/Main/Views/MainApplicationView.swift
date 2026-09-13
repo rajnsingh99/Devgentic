@@ -315,10 +315,6 @@ struct MainApplicationView: View {
         }
         .onChange(of: viewModel.selectedConversationID) { _, newID in
             if newID != nil {
-                if chatHistoryViewModel.isUserMessagesOnlyFilterActive {
-                    chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
-                    logger.info("Reset user messages filter due to conversation change.")
-                }
                 if router.isShowingChat {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                         isInputFocused = true

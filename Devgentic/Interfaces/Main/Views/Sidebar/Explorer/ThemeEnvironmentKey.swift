@@ -26,6 +26,10 @@ private struct SurfaceStyleKey: EnvironmentKey {
     static let defaultValue: SurfaceStyle = .glassmorphic
 }
 
+private struct ButtonAccentStyleKey: EnvironmentKey {
+    static let defaultValue: ButtonAccentStyle = .themeContrast
+}
+
 extension EnvironmentValues {
     /// The currently active application theme.
     var appTheme: any Theme {
@@ -43,6 +47,12 @@ extension EnvironmentValues {
     var surfaceStyle: SurfaceStyle {
         get { self[SurfaceStyleKey.self] }
         set { self[SurfaceStyleKey.self] = newValue }
+    }
+
+    /// The button accent presentation style (Dynamic Accent vs. Monochrome Pro).
+    var buttonAccentStyle: ButtonAccentStyle {
+        get { self[ButtonAccentStyleKey.self] }
+        set { self[ButtonAccentStyleKey.self] = newValue }
     }
 }
 
@@ -62,5 +72,10 @@ extension View {
     /// Injects a surface style into the environment for this view and its descendants.
     func appSurfaceStyle(_ style: SurfaceStyle) -> some View {
         environment(\.surfaceStyle, style)
+    }
+
+    /// Injects a button accent style into the environment for this view and its descendants.
+    func appButtonAccentStyle(_ style: ButtonAccentStyle) -> some View {
+        environment(\.buttonAccentStyle, style)
     }
 }

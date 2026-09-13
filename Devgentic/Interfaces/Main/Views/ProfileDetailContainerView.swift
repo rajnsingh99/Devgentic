@@ -47,7 +47,7 @@ struct ProfileDetailContainerView: View {
                 // Keep the island visible during load so back nav stays reachable
                 // even if activation hangs (e.g. disk I/O, state restoration).
                 VStack(spacing: 0) {
-                    DynamicIslandBar(title: "Loading…", icon: "hourglass")
+                    DynamicIslandBar(title: "Loading", icon: "hourglass")
                     ProgressView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }

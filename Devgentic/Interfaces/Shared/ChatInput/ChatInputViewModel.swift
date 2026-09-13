@@ -763,6 +763,12 @@ final class ChatInputViewModel {
     }
 
     private func checkMicPermissions() async {
+        // ⚠️⚠️ CALLED FROM `init`, SO MERELY CONSTRUCTING THE COMPOSER ASKS FOR THE MICROPHONE. In a
+        // test host that is a real, modal, user-visible permission prompt raised by a process nobody
+        // is watching and which exits when the suite finishes — and once answered it is remembered,
+        // so a denial recorded here follows the developer's real app afterwards.
+        guard TestHost.permits("request microphone permission", logger: logger) else { return }
+
         self.voiceInputState = .requestingPermissions
         logger.info("Requesting microphone permission...")
         let granted = await AVAudioApplication.requestRecordPermission()

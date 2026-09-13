@@ -16,6 +16,32 @@ import os
 
 private let logger = DGLogger(category: "MediaArtifactImage")
 
+/// ⚠️ [views/bm-1] OPEN, and this is the decision procedure — not a fix waiting to be written,
+/// a measurement waiting to be taken.
+///
+/// The row says this view decodes and retains a FULL-RESOLUTION bitmap for a display bounded at
+/// `ChatUIConstants.imageMaxWidth`. True, and deliberate: `loadedImage` is the SINGLE bitmap
+/// serving the inline draw, the lightbox, Copy Image and Save, so downsampling it would degrade
+/// three lossless consumers to pay for one bounded one. `AttachedImageCardView` can downsample
+/// precisely because it keeps a SEPARATE full-size bitmap for those.
+///
+/// Whether the retention is worth closing turns on ONE unknown: how large the images actually
+/// are. Verified in source — MLX derives every aspect ratio from a 1024 base and DALL·E 3 emits
+/// at most 1792x1024, so against a ~1000px display cap both save around 5% of pixels, which is
+/// nothing. Gemini is the exception: its request body carries no size at all and the model name
+/// is user-configured, so its output resolution is whatever the model returns.
+///
+/// TO CLOSE THIS: generate one image per provider INCLUDING Gemini, then read the real dimensions
+/// off the stored file (`sips -g pixelWidth -g pixelHeight` under
+/// `~/Library/Application Support/Devgentic/MediaCache`). If Gemini's longest side is <= 1024 the
+/// row is closed as overstated. If it is materially larger, the fix is a NEW
+/// `ImageDownsampler.inline(from:maxDimension:)` wrapping through `NSBitmapImageRep` the way
+/// `fullSize` does — NOT `thumbnail`, whose `NSImage(cgImage:size:)` reports scaled
+/// `pixelsWide/High` and would break the lightbox's true-pixel caption — plus a deferred
+/// full-size decode for the three lossless consumers.
+///
+/// Checked 2026-09-13: `MediaCache` does not exist on this machine, so no generated image has
+/// ever been stored here and the measurement could not be taken.
 struct MediaArtifactImageView: View {
     let artifact: MediaArtifact
     @Environment(\.appTheme) private var theme
@@ -196,6 +222,15 @@ struct MediaArtifactImageView: View {
                 self.loadError = nil
             } else {
                 self.loadError = String(localized: "Could not decode image data")
+                // ⚠️ [bm-4] Retry is pointless for `.ephemeralData`: the bytes are already in
+                // memory and a retry re-reads the SAME ones, so the decode must fail again.
+                // Offering the button invited an endless loop on a card that can never recover.
+                // Deliberately NOT done by widening `isUnresolvable` to cover `.ephemeralData` —
+                // that would skip the decode ATTEMPT entirely and show "stored image is missing"
+                // copy for bytes that are present but undecodable (and it is pinned false by
+                // `MediaArtifactReferenceRepairTests`). A disk/store-backed reference keeps its
+                // retry: for those the bytes are re-read, so a transient failure can recover.
+                if case .ephemeralData = reference { self.loadErrorIsRetriable = false }
                 logger.error("[MEDIA] Artifact \(self.artifact.id.uuidString.prefix(8)) (\(Self.referenceKind(reference)), \(self.artifact.mimeType), \(data.count) bytes) resolved but did NOT decode. CONSEQUENCE: the picture is missing from the transcript and the error card is shown in its place.")
             }
         } catch {
@@ -451,7 +486,12 @@ struct MediaArtifactImageView: View {
 
     private func copyImage() {
         guard let image = loadedImage else { return }
-        ImageExport.copyToPasteboard(image)
+        // The checkmark is the only feedback this affordance gives, so it must follow the
+        // pasteboard's answer rather than the fact that we asked.
+        guard ImageExport.copyToPasteboard(image) else {
+            saveError = String(localized: "Couldn't copy the image. The clipboard is now empty.")
+            return
+        }
         withAnimation(.easeInOut) { didCopy = true }
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(2))

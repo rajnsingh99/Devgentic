@@ -22,13 +22,42 @@ import os
 @Observable @MainActor
 final class ChatOpsPairingService {
 
-    private let logger = Logger(subsystem: DGLogger.subsystem, category: "ChatOpsPairing")
+    /// ⚠️⚠️ SHARED, BECAUSE A PAIRING WINDOW OUTLIVES THE VIEW THAT STARTS IT. This was
+    /// `@State private var` in `ChatOpsSettingsView`, so the service died with the pane while its
+    /// `pairingTask` did not — `pollForPairing` is an instance method, so the task retains `self`
+    /// for the full 300-second window and no pairing service has a `deinit`. Clicking Chat, or any
+    /// other settings category, tore the view down (`MainApplicationView` renders the settings
+    /// container inside an `if !router.isShowingChat` gate). Coming back rebuilt a FRESH, idle
+    /// service while `connectionState` — which lives on the shared config — still said
+    /// `.awaitingPairing`, so the PIN card rendered with a Cancel button that cancelled a nil task.
+    /// Starting again then ran TWO windows against one bot token, and the user's correct PIN was
+    /// consumed by whichever poll held the connection — counted as a FAILED attempt against their
+    /// own origin by the orphan. One instance means `cancelPairing()` and `startPairing()` always
+    /// reach the window that is actually running.
+    static let shared = ChatOpsPairingService()
+
+
+    private let logger = DGLogger(category: "ChatOpsPairing")
     private let config = ChatOpsConfigManager.shared
 
     /// Called after pairing succeeds so the caller can start the ChatOps bridge.
     var onPairingComplete: (() -> Void)?
 
     private var pairingTask: Task<Void, Never>?
+
+    /// A wall-clock watchdog for the pairing window.
+    ///
+    /// ⚠️⚠️ THE DEADLINE CANNOT LIVE INSIDE THE EVENT LOOP, WHICH IS WHERE IT USED TO LIVE ON TWO OF
+    /// THE THREE PLATFORMS. Discord and Slack tested `Date() < deadline` as the first statement of a
+    /// `for await` BODY, so it could only run when the stream yielded — and neither stream emits
+    /// anything periodic (heartbeats and ACKs are consumed internally and yield nothing). On a quiet
+    /// channel the loop simply parked in `next()`: hours later the PIN was still live, the WebSocket
+    /// still open, and the credentials still sitting there with no owning session. Worse, the first
+    /// message to arrive AFTER the deadline was consumed by the expiry check and discarded — so a
+    /// user returning twenty minutes later and typing the correct PIN saw it silently do nothing.
+    /// Telegram got this right by bounding the LOOP (`while … && Date() < deadline`) rather than its
+    /// body; this watchdog gives all three the same guarantee independently of traffic.
+    private var deadlineTask: Task<Void, Never>?
     private var currentPIN: String?
 
     /// The timeout for the pairing window (5 minutes).
@@ -56,7 +85,12 @@ final class ChatOpsPairingService {
         config.botToken = botToken
         config.connectionState = .awaitingPairing(pin: pin)
 
-        logger.info("Pairing started. PIN: \(pin)")
+        // ⚠️ THE PIN IS NOT LOGGED. `PairingAttemptPolicy` already refuses to record ATTEMPTED
+        // digits because a near-miss is one character from the real PIN; logging the real one is
+        // strictly worse, and these lines reach exported diagnostic bundles.
+        logger.info("Telegram pairing window opened for \(self.pairingTimeout)s.")
+
+        armDeadline(pin: pin)
 
         pairingTask = Task {
             await pollForPairing(botToken: botToken, pin: pin)
@@ -67,6 +101,8 @@ final class ChatOpsPairingService {
     func cancelPairing() {
         pairingTask?.cancel()
         pairingTask = nil
+        deadlineTask?.cancel()
+        deadlineTask = nil
         currentPIN = nil
     }
 
@@ -81,13 +117,10 @@ final class ChatOpsPairingService {
             let client = TelegramAPIClient(botToken: token)
             // ⚠️ THE USER'S ONLY NOTICE THAT THE BOT IS GONE, and it is sent before the credentials
             // are wiped — there is no second chance after this line.
-            do {
-                _ = try await client.sendMessage(
-                    chatID: chatID,
-                    text: "Devgentic ChatOps disconnected. Goodbye!"
-                )
-            } catch {
-                logger.error("[CHATOPS] Failed to send the Telegram farewell before unpairing: \(error.localizedDescription). CONSEQUENCE: the credentials are wiped anyway, so the bot simply stops answering with no goodbye — the user is left unsure whether it is disconnected or broken, and nothing can retry because the token is gone a moment later.")
+            // ⚠️ This copy was already correct; it routes through the shared seam anyway so the
+            //   three platforms cannot drift back apart. See `ChatOpsFarewell`.
+            await ChatOpsFarewell.send(provider: .telegram, logger: logger) {
+                _ = try await client.sendMessage(chatID: chatID, text: ChatOpsFarewell.message)
             }
         }
 
@@ -131,10 +164,20 @@ final class ChatOpsPairingService {
                     // including the person actually pairing. Authorization still binds the CHAT
                     // (`authorizedChatID` below); only the lockout is per person.
                     //
-                    // ⚠️ Falling back to the chat id when `from` is absent is deliberate: channel
-                    // posts have no sender, and refusing to count them at all would leave a gap the
-                    // lockout is meant to close.
-                    let origin = update.message?.from?.id.description ?? String(chatID)
+                    // ⚠️⚠️ TWO QUESTIONS, TWO VALUES — AND FUSING THEM WAS A REAL DEFECT. `origin`
+                    // answers "who do I count this attempt against"; `senderID` answers "who am I
+                    // binding this Mac to". Falling back to the chat id is right for the FORMER —
+                    // channel posts have no sender, and refusing to count them at all would leave a
+                    // gap the lockout is meant to close — and wrong for the LATTER, because a chat id
+                    // is not an account.
+                    //
+                    // ⚠️ Until this split, the single fused `origin` was stored as `authorizedUserID`
+                    // below. A PIN arriving on a message with no `from` therefore paired
+                    // "successfully" against a CHAT id, while `ChatOpsSecurityGate` compares against
+                    // `update.message?.from?.id` with no such fallback — so every later message, which
+                    // does carry a `from`, was refused forever, naming an account the user never used.
+                    let senderID = update.message?.from?.id.description
+                    let origin = senderID ?? String(chatID)
 
                     // ⚠️ BEFORE THE PIN IS ACTED ON. A lockout that still honours a correct guess
                     // from a spent origin is not a lockout.
@@ -154,8 +197,30 @@ final class ChatOpsPairingService {
                     }
 
                     // PIN matched — pairing successful
+                    // ⚠️ THE SENDER IS RECORDED HERE AND NOWHERE ELSE. `origin` is the same value the
+                    //   lockout ledger above already computed, so the account that proved it knew the
+                    //   PIN is the account authorized from now on. ChatOps is a single-user remote
+                    //   control; without this the chat id was the whole check, and in a GROUP chat
+                    //   that authorizes every member.
+                    // ⚠️ ATTRIBUTABLE OR NOT AT ALL. A single-user binding cannot be made to a
+                    // message nobody sent; the same reasoning `senderIsAuthorized` applies on the
+                    // read side, applied here on the write side. The window deliberately stays OPEN
+                    // (`continue`, not a failure) so the user can simply send the PIN again from a
+                    // normal message.
+                    guard let senderID else {
+                        logger.error("[CHATOPS] A correct Telegram PIN arrived on a message with NO sender id, so pairing was refused. CONSEQUENCE: pairing did not complete and the window stays open — send the PIN again from a normal chat message rather than a channel post. Recording the chat id here instead would pair against something that is not an account, and every later message WOULD carry a sender id and be refused forever.")
+                        continue
+                    }
+
+                    config.authorizedUserID = senderID
                     config.authorizedChatID = chatID
                     config.isEnabled = true
+                    // ⚠️ THE WINDOW IS OVER THE MOMENT IT SUCCEEDS. `PairingWindowExpiry` would no-op anyway —
+                    // the state no longer names this PIN — but leaving the watchdog armed keeps a task alive for
+                    // the rest of the five minutes and writes a puzzling "no longer the live one" line when it
+                    // fires. Disarming here says what actually happened.
+                    deadlineTask?.cancel()
+                    deadlineTask = nil
                     config.connectionState = .connected(chatID: chatID)
 
                     logger.info("Pairing successful with chat_id \(chatID)")
@@ -184,19 +249,46 @@ final class ChatOpsPairingService {
 
                     return
                 }
-            } catch is CancellationError {
-                return
             } catch {
-                logger.error("Pairing poll error: \(error.localizedDescription)")
+                // ⚠️⚠️ [TG-6] THE FOURTH COPY OF THE DEAD ARM. `catch is CancellationError` above this
+                // block never matched a cancelled `getUpdates`, which throws `URLError(.cancelled)` —
+                // so cancelling a pairing window (the user pressing Cancel, or the watchdog firing)
+                // logged "Pairing poll error: cancelled" as a failure. That line is the one an
+                // operator reads when pairing did not work, and it was being written by pairing
+                // working exactly as asked.
+                if RemoteLoopCancellation.isCancellation(error) {
+                    logger.info("[CHATOPS] The Telegram pairing poll ended because it was cancelled. CONSEQUENCE: none — the window was closed deliberately (the user pressed Cancel, or it timed out); no pairing is recorded and nothing retries.")
+                    return
+                }
+                logger.warning("[CHATOPS] Telegram pairing poll error: \(error.localizedDescription). CONSEQUENCE: this poll produced no updates, so a PIN sent in this interval is re-read on the next poll — the window stays open and retries after a 2s backoff.")
                 try? await Task.sleep(nanoseconds: 2_000_000_000) // 2s backoff
             }
         }
 
         // Timeout — pairing window expired
         if !Task.isCancelled {
-            config.connectionState = .disconnected
-            config.botToken = nil
-            logger.info("Pairing timed out after \(self.pairingTimeout)s.")
+            PairingWindowExpiry.expire(pin: pin, platform: "Telegram", timeout: pairingTimeout,
+                                       state: \.connectionState, config: config, logger: logger)
+        }
+    }
+
+    /// Arms the wall-clock watchdog for this window. See `deadlineTask`.
+    ///
+    /// ⚠️ It CANCELS the polling task rather than trying to unwind it from the outside: cancellation
+    /// is what makes an `AsyncStream`'s `next()` return, which is the only way to get a loop parked
+    /// on a silent channel to move at all. Expiry is then reported here, because the cancelled loop's
+    /// own terminal arm deliberately does nothing when `Task.isCancelled` — it cannot tell a timeout
+    /// from the user pressing Cancel, and `PairingWindowExpiry` is what knows the difference.
+    private func armDeadline(pin: String) {
+        deadlineTask?.cancel()
+        deadlineTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(self?.pairingTimeout ?? 300 * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+
+            self.pairingTask?.cancel()
+            self.pairingTask = nil
+            PairingWindowExpiry.expire(pin: pin, platform: "Telegram", timeout: self.pairingTimeout,
+                                       state: \.connectionState, config: self.config, logger: self.logger)
         }
     }
 

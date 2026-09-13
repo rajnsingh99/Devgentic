@@ -65,6 +65,38 @@ struct ChatHistoryView: View {
         case capNotice
     }
 
+    /// [bm-2] Whether an appended newest message should yank the transcript to the bottom.
+    ///
+    /// It used to be unconditional: ANY change of `currentChatMessages.first?.id` scrolled,
+    /// with `showScrollToBottom` — the view's own "the user has scrolled away" signal, which
+    /// drives the scroll-to-bottom button — never consulted. So reading back through a long
+    /// conversation while a ChatOps message arrived for the conversation on screen, or while a
+    /// scheduled run posted into it, threw the reader back to the bottom mid-sentence.
+    ///
+    /// Two inputs, and BOTH are needed. Following only `sender == .user` does not work: a
+    /// ChatOps message IS a user message, just typed in Telegram — `messageSource` is the only
+    /// field that separates them, which is why this asks about "locally typed" and not about
+    /// the sender. Following only "not away from bottom" does not work either: after a long
+    /// streamed answer the button is already showing, so the user's OWN next message would be
+    /// inserted off-screen. A message this window typed always wins; anything else defers to
+    /// where the reader is.
+    ///
+    /// The agent placeholder that follows a local send needs no case of its own — the send
+    /// scrolled first, so the view is at the bottom and `isAwayFromBottom` is false.
+    nonisolated static func shouldFollowNewest(isLocallyTyped: Bool, isAwayFromBottom: Bool) -> Bool {
+        isLocallyTyped || !isAwayFromBottom
+    }
+
+    /// Whether this message was typed into THIS app, as opposed to arriving from a remote
+    /// surface (ChatOps), a voice HUD, or an unattended scheduled run.
+    nonisolated static func isLocallyTyped(_ message: ChatMessage) -> Bool {
+        guard message.sender == .user else { return false }
+        switch message.messageSource {
+        case .localUI, .quickAccess: return true
+        default: return false
+        }
+    }
+
     nonisolated static func loadEarlierAffordance(canLoadMore: Bool, atCap: Bool, isLoading: Bool) -> LoadEarlierAffordance {
         guard canLoadMore else { return .hidden }
         if atCap { return .capNotice }
@@ -73,6 +105,9 @@ struct ChatHistoryView: View {
 
     // MARK: - Speech Service
     private var speechService = SpeechService.shared
+    /// [sa-5] This mount's identity as a speech-transport host — stable for the view's life,
+    /// fresh for every re-mount, so registration is idempotent.
+    @State private var transportHostID = UUID()
 
     // MARK: - Cached Reversed Messages
     /// Caches the reversed message array to avoid O(n) recomputation on every body evaluation.
@@ -247,16 +282,25 @@ struct ChatHistoryView: View {
                         // conversation switch). When the bar is closed this costs nothing — the old
                         // always-rebuild here re-lowercased the whole history on every append.
                         if searchViewModel.isSearchActive, !searchViewModel.effectiveQuery.isEmpty {
-                            searchViewModel.performSearch(in: chatHistoryViewModel.searchCorpus)
+                            chatHistoryViewModel.runSearch(searchViewModel)
                         }
 
                         if !chatHistoryViewModel.isLoadingPage && !chatHistoryViewModel.isInitiallyLoadingConversation {
-                            let currentNewestID = chatHistoryViewModel.currentChatMessages.first?.id
+                            let newest = chatHistoryViewModel.currentChatMessages.first
+                            let currentNewestID = newest?.id
 
                             if currentNewestID != lastNewestMessageID {
+                                // [bm-2] The newest id ALWAYS advances, whether or not we follow
+                                // it — otherwise the next append would compare against a stale
+                                // anchor and scroll for a message the user has already seen.
                                 lastNewestMessageID = currentNewestID
-                                Task { @MainActor in
-                                    scrollToBottom(proxy: proxy, animated: true)
+                                if let newest, Self.shouldFollowNewest(
+                                    isLocallyTyped: Self.isLocallyTyped(newest),
+                                    isAwayFromBottom: showScrollToBottom
+                                ) {
+                                    Task { @MainActor in
+                                        scrollToBottom(proxy: proxy, animated: true)
+                                    }
                                 }
                             }
                         }
@@ -290,7 +334,7 @@ struct ChatHistoryView: View {
                     }
                     // MARK: - Search Query Changes (Debounced)
                     .onChange(of: searchViewModel.debouncedQuery) { _, _ in
-                        searchViewModel.performSearch(in: chatHistoryViewModel.searchCorpus)
+                        chatHistoryViewModel.runSearch(searchViewModel)
                         scrollToCurrentMatch(proxy: proxy)
                     }
                     // MARK: - Search Corpus (store-backed)
@@ -314,7 +358,26 @@ struct ChatHistoryView: View {
                     // flight at teardown wrote the full projection back with no chat view
                     // mounted and nothing left able to free it, which is the CH31/AD6/CF-38
                     // retention shape reached through the disappear ordering.
-                    .task(id: searchViewModel.isSearchActive) {
+                    // ⚠️ The id carries the CONVERSATION, not just `isSearchActive`. Keyed on the
+                    // Bool alone, this task never re-ran across a conversation switch — and
+                    // `loadConversation` invalidates the corpus without re-preparing it, so ⌘F
+                    // left open across a switch silently fell back to
+                    // `currentChatMessages.map(projectedResidentDocument)`: the ~20-message
+                    // resident window. The match count collapsed with no indication that search
+                    // had stopped reaching the stored history.
+                    //
+                    // Keyed on the OBSERVED `currentChatMessages` identity rather than on
+                    // `loadedConversationID`, which is `@ObservationIgnored` — SwiftUI would not
+                    // re-evaluate this id when it changed, leaving the re-run dependent on some
+                    // other property happening to invalidate the body. Nil while a load is in
+                    // flight (the switch empties the array first), which simply defers the
+                    // prepare to the load's completion.
+                    //
+                    // `prepareSearchCorpus` is idempotent and no-ops when the corpus already
+                    // matches `loadedConversationID`, so the extra evaluations cost nothing.
+                    .task(id: searchViewModel.isSearchActive
+                          ? chatHistoryViewModel.currentChatMessages.first?.conversationId
+                          : nil) {
                         guard searchViewModel.isSearchActive else { return }
                         await chatHistoryViewModel.prepareSearchCorpus()
                         // Cancelled means search closed or this view went away — the release
@@ -325,7 +388,7 @@ struct ChatHistoryView: View {
                         // open search bar is about to scan.
                         guard !Task.isCancelled, searchViewModel.isSearchActive else { return }
                         if !searchViewModel.effectiveQuery.isEmpty {
-                            searchViewModel.performSearch(in: chatHistoryViewModel.searchCorpus)
+                            chatHistoryViewModel.runSearch(searchViewModel)
                         }
                     }
                     // `ChatHistoryView` is built in two mutually-exclusive places
@@ -408,8 +471,36 @@ struct ChatHistoryView: View {
             .onAppear {
                 lastNewestMessageID = chatHistoryViewModel.currentChatMessages.first?.id
                 displayMessages = chatHistoryViewModel.currentChatMessages.reversed()
+                // [sa-5] This view hosts the speech island; the service stops a session that
+                // has no host left (⌘W, a switch to Workflow mode, the panel closing).
+                speechService.transportHostDidAppear(transportHostID)
+            }
+            .onDisappear {
+                speechService.transportHostDidDisappear(transportHostID)
             }
             // Stop speech when switching conversations
+            // [sa-4] The speech → Code Viewer hand-off. Observed HERE rather than on the
+            // per-message actions row that starts playback: that row lives in the transcript's
+            // `LazyVStack` and is released when it scrolls out of the render window, while the
+            // reader — a singleton — keeps going. A post into an unmounted row is lost silently
+            // (NotificationCenter does not replay, and `pendingCodeBlock` is cleared before the
+            // post), so the announcement promised a panel that never opened.
+            //
+            // ⚠️ No per-message filter is needed or wanted: `SpeechService` runs ONE session at
+            // a time and posts only for the message it is reading. Filtering on a message id
+            // here would re-introduce the same coupling to a particular row.
+            //
+            // ⚠️ Both mount sites of this view (Chat mode and Code mode) are fed the SAME
+            // app-level view model, so a transient double delivery during a mode switch resolves
+            // to one tab — `openTab` refocuses an identical snippet rather than appending.
+            // QuickAccess mounts no `ChatHistoryView`, which is correct: its view model does not
+            // own a viewer, so `SpeechService` announces a skip there and never posts at all.
+            .onReceive(NotificationCenter.default.publisher(for: .speechOpenCodeViewer)) { notification in
+                guard let userInfo = notification.userInfo,
+                      let code = userInfo["code"] as? String else { return }
+                let language = userInfo["language"] as? String
+                chatHistoryViewModel.showCodeInViewer(language: language, code: code)
+            }
             .onChange(of: mainAppViewModel.selectedConversationID) { _, _ in
                 if speechService.isActive {
                     speechService.stop()
@@ -515,14 +606,21 @@ struct ChatHistoryView: View {
             return
         }
 
-        guard chatHistoryViewModel.isMatchReachable(messageID: targetID) else {
+        // [views/bm-5] ONE corpus position for both questions below. `searchCorpusIndex` reads
+        // the COMPUTED `searchCorpus` — a dictionary rebuild plus a sort per access — and this
+        // path asked it twice for the same message: once to decide reachability, then again
+        // inside the paging call. Resolved here, on the main actor, exactly where the first of
+        // those two reads already happened.
+        let corpusIndex = chatHistoryViewModel.searchCorpusIndex(of: targetID)
+
+        guard chatHistoryViewModel.isMatchReachable(messageID: targetID, corpusIndex: corpusIndex) else {
             searchViewModel.currentMatchUnreachable = true
             logger.info("[SEARCH] Match \(targetID.uuidString.prefix(8)) is past the resident window's cap — no page-in attempted; the search bar shows it as older than the loaded history.")
             return
         }
 
         Task {
-            let reachable = await chatHistoryViewModel.ensureMessageIsResident(targetID)
+            let reachable = await chatHistoryViewModel.ensureMessageIsResident(targetID, corpusIndex: corpusIndex)
             // The user may have moved on (Next/Previous, a query edit) while pages loaded;
             // a stale attempt must neither scroll away from nor relabel the CURRENT match.
             guard searchViewModel.currentMatchMessageID == targetID else { return }
@@ -604,12 +702,15 @@ extension ChatHistoryView {
             }
         }
 
-        /// The title the service's bridge stamps on the conversation it creates.
+        /// LEGACY-ONLY fallback: the title a bridge used to stamp on conversations it created,
+        /// for rows that predate provenance being recorded.
         ///
-        /// ⚠️ These literals are duplicated from the bridges by necessity — each passes its own
-        /// string to `createConversationForScheduledTask(profileID:title:)` and none of them
-        /// share a constant: `ChatOpsBridge.swift` (Telegram), `DiscordChatOpsBridge.swift`,
-        /// `SlackChatOpsBridge.swift`. A bridge that changes its title silently loses the hint.
+        /// ⚠️ The coupling this comment used to assert is GONE. No bridge stamps these titles any
+        /// more — `ChatOpsCommandService.newConversation` creates with an empty title so
+        /// auto-titling works, and provenance is written to `RemoteConversationOriginStore`
+        /// instead. Grepping the tree, these three literals now live in exactly two places: here
+        /// and `RemoteConversationOriginStore`. Kept as literals deliberately so the pinning test
+        /// catches a fourth bridge; do NOT reintroduce the claim that a bridge writes them.
         var bridgeTitle: String {
             switch self {
             case .telegram: return "Telegram Chat"

@@ -66,10 +66,22 @@ struct TokenUsageBadge: View {
         case millions(String)
     }
 
+    /// ⚠️ [mm-9] The bucket is chosen from the ROUNDED value, not the raw count. Choosing the
+    /// bucket from `count` and only then formatting with `%.1f` let the format round PAST the
+    /// threshold the bucket was picked by: 999,950–999,999 fell in the thousands bucket and then
+    /// printed "1000.0K", and VoiceOver said "1000.0 thousand". The same shape is why `%.1f`
+    /// cannot simply be applied after a `>=` test anywhere in this file.
+    ///
+    /// Scaling is done from the MILLIONS divisor in that branch — promoting the thousands string
+    /// would print "1000.0M". 999,950 / 1,000,000 = 0.99995, which `%.1f` renders "1.0".
     nonisolated static func magnitude(of count: Int) -> Magnitude {
-        if count >= 1_000_000 { return .millions(String(format: "%.1f", Double(count) / 1_000_000)) }
-        if count >= 1_000 { return .thousands(String(format: "%.1f", Double(count) / 1_000)) }
-        return .units(count)
+        if count < 1_000 { return .units(count) }
+        // Would the thousands rendering round up to four digits? Then it is really a million.
+        let roundedThousandths = ((Double(count) / 1_000) * 10).rounded()
+        if roundedThousandths >= 10_000 {
+            return .millions(String(format: "%.1f", Double(count) / 1_000_000))
+        }
+        return .thousands(String(format: "%.1f", Double(count) / 1_000))
     }
 
     nonisolated static func abbreviated(_ count: Int) -> String {

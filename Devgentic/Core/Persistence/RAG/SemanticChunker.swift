@@ -87,8 +87,20 @@ struct SemanticChunker {
                     allChunks.append(contentsOf: chunkText(tableText))
                 }
 
-            case .horizontalRule, .image:
+            case .horizontalRule:
                 break // Not useful for embedding
+
+            case .image(let url, let altText):
+                // [mc-3] Indexed as the markdown the author wrote. Before the parser split
+                // image-bearing paragraphs, an INLINE image's `![alt](path)` sat inside the
+                // paragraph text and was embedded with it — "where did you save the histogram?"
+                // retrieved on the alt text and the path. Once the image became its own block it
+                // fell into the old `break` here and both vanished from the index. A standalone
+                // image was never indexed; it now is, for the same reason.
+                let imageText = "![\(altText ?? "")](\(url))"
+                if !(altText ?? "").isEmpty || !url.isEmpty {
+                    allChunks.append(contentsOf: chunkText(imageText))
+                }
             }
         }
 

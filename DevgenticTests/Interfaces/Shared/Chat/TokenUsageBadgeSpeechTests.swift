@@ -51,10 +51,14 @@ final class TokenUsageBadgeSpeechTests: XCTestCase {
         XCTAssertEqual(TokenUsageBadge.abbreviated(0), "0")
         XCTAssertEqual(TokenUsageBadge.abbreviated(999), "999")
         XCTAssertEqual(TokenUsageBadge.abbreviated(1_000), "1.0K")
-        // Pre-existing rounding wart, pinned as-is rather than fixed under CF-41 (which is about
-        // the LABEL disagreeing with the badge): %.1f rounds 999.999 up, so the last thousand
-        // before a million reads "1000.0K". Both renderings say it, so they still agree.
-        XCTAssertEqual(TokenUsageBadge.abbreviated(999_999), "1000.0K")
+        // ⚠️ UPDATED 2026-09-12 (mm-9). This line used to pin "1000.0K" as a known wart —
+        // deferred by CF-41, not endorsed by it: CF-41 was about the LABEL disagreeing with the
+        // badge, and the wart was left because both renderings said the same wrong thing.
+        // `magnitude` now picks its bucket from the ROUNDED value, so the last thousand before a
+        // million reads "1.0M". CF-41's invariant is untouched — badge and spoken label still
+        // come from that one function, so they still agree.
+        XCTAssertEqual(TokenUsageBadge.abbreviated(999_999), "1.0M")
+        XCTAssertEqual(TokenUsageBadge.abbreviated(999_949), "999.9K", "…and the bucket below it is unchanged")
         XCTAssertEqual(TokenUsageBadge.abbreviated(1_000_000), "1.0M")
         XCTAssertEqual(TokenUsageBadge.abbreviated(2_500_000), "2.5M")
     }

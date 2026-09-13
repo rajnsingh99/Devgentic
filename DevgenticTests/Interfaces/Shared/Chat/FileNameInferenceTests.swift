@@ -110,6 +110,144 @@ final class FileNameInferenceTests: XCTestCase {
         XCTAssertEqual(firstCodeBlock(in: markdown)?.fileName, "DijkstraSolver.java")
     }
 
+    /// ⚠️ [mc-16] PINS AN ACCEPTED FALSE POSITIVE, deliberately — this is not aspirational.
+    ///
+    /// A one-word heading that is wholly filename-shaped claims with NO markup gate, so a
+    /// framework name that happens to look like a file names the fence below it. The doc on
+    /// `fromHeading` used to imply the opposite ("must still carry markup emphasis, exactly
+    /// like prose"), which is true only of a MULTI-word heading — the existing coverage
+    /// (`## Setting up Node.js`, in RenderPipelineMarkdownTests) is multi-word and passes for a
+    /// different reason: its spaces defeat the anchored whole-string match.
+    ///
+    /// There is no shape that separates `Node.js` from a real `app.min.js`, so this is the
+    /// trade the file already makes elsewhere. If it is ever revisited, the fix is
+    /// corroborating the claim against the fence's own language at the consumption site — NOT
+    /// a `languageHint != nil` gate, which rejects nothing (that helper returns nil only for an
+    /// empty extension, which `filenameToken` already excludes).
+    func testAOneWordFrameworkHeadingClaimsAndThatIsAccepted() {
+        for heading in ["## Node.js", "## ASP.NET", "## Package.json"] {
+            let markdown = """
+            \(heading)
+
+            ```bash
+            npm install
+            ```
+            """
+            let claimed = firstCodeBlock(in: markdown)?.fileName
+            XCTAssertNotNil(claimed, "\(heading) claims today — if this is now nil, the gate changed deliberately")
+            XCTAssertEqual(claimed, heading.replacingOccurrences(of: "## ", with: ""))
+        }
+    }
+
+    /// The MULTI-word form really is gated, which is what the doc's first sentence promises.
+    func testAMultiWordHeadingEndingInAFilenameShapedWordDoesNotClaim() {
+        let markdown = """
+        ## Setting up Node.js
+
+        ```bash
+        npm install
+        ```
+        """
+        XCTAssertNil(firstCodeBlock(in: markdown)?.fileName,
+                     "spaces defeat the anchored whole-heading match; only markup could claim here")
+    }
+
+    // MARK: - render/mc-6: an inferred claim does not reach past its neighbourhood
+
+    /// ⚠️ THE pin. A prose claim used to be cleared by NOTHING but a fence or an "End of file"
+    /// marker, so it carried across any number of intervening blocks and named a later, unrelated
+    /// fence. The cost is not a wrong badge: the inferred name drives a store-backed lookup that
+    /// stamps `sourceFileID` on an exact match, which enables Apply Changes — a disk write.
+    func testAProseClaimDoesNotReachPastAnInterveningParagraph() {
+        let markdown = """
+        Here is the updated `Config.swift`:
+
+        Actually, first some unrelated background about the project.
+
+        ```swift
+        let unrelated = 1
+        ```
+        """
+        XCTAssertNil(firstCodeBlock(in: markdown)?.fileName,
+                     "the claim does not survive a block that made no claim of its own")
+    }
+
+    /// …and it still reaches the fence when that fence is the very next block.
+    func testAProseClaimStillReachesTheFenceDirectlyBelowIt() {
+        let markdown = """
+        Here is the updated `Config.swift`:
+
+        ```swift
+        let x = 1
+        ```
+        """
+        XCTAssertEqual(firstCodeBlock(in: markdown)?.fileName, "Config.swift")
+    }
+
+    /// ⚠️ REGRESSION GUARD. A HEADING claim is section-scoped by nature and its ordinary shape
+    /// puts an explanatory paragraph between the heading and the fence. Applying the prose rule
+    /// to headings would silently unbadge that — and every existing heading test puts the fence
+    /// immediately after the heading, so the regression would have shipped green.
+    func testAHeadingClaimStillReachesAFenceBelowAnInterveningParagraph() {
+        let markdown = """
+        ### Main.swift
+
+        Add the following to the top of the file:
+
+        ```swift
+        import Foundation
+        ```
+        """
+        XCTAssertEqual(firstCodeBlock(in: markdown)?.fileName, "Main.swift")
+    }
+
+    /// ⚠️ REGRESSION GUARD. A claim made INSIDE a list item is set by a node the outer loop never
+    /// sees, so the list has to report it outward — otherwise the next sibling judges it stale and
+    /// a following top-level fence loses its badge.
+    func testAClaimInsideAListItemReachesAFollowingTopLevelFence() {
+        let markdown = """
+        - Update `Config.swift`:
+
+        ```swift
+        let x = 1
+        ```
+        """
+        XCTAssertEqual(firstCodeBlock(in: markdown)?.fileName, "Config.swift")
+    }
+
+    /// ⚠️ REGRESSION GUARD. Freshness is reported by the setter, never inferred by comparing the
+    /// claim before and after: a REPEATED identical claim would compare equal, so the real setter
+    /// would be judged stale and a shape carrying two valid claims would end up with none.
+    func testARepeatedIdenticalClaimIsNotJudgedStale() {
+        let markdown = """
+        ### Main.swift
+
+        Here is the updated `Main.swift`:
+
+        ```swift
+        let x = 1
+        ```
+        """
+        XCTAssertEqual(firstCodeBlock(in: markdown)?.fileName, "Main.swift")
+    }
+
+    /// ⚠️ THE EXEMPTION, and the reason the claim carries an origin at all. An injected
+    /// `--- Start of file: X ---` wraps a WHOLE file body, so its claim must outlive every block
+    /// in between — clearing markers on a non-claiming sibling would strip the filename, and
+    /// therefore the source-file link, from every fence inside an injected file.
+    func testAMarkerClaimSurvivesInterveningBlocks() {
+        let markdown = """
+        --- Start of file: README.md ---
+
+        Some prose that makes no claim of its own.
+
+        ```swift
+        let x = 1
+        ```
+        """
+        XCTAssertEqual(firstCodeBlock(in: markdown)?.fileName, "README.md")
+    }
+
     /// A mid-sentence mention must not claim — the paragraph ends on a different word.
     func testMidSentenceMentionDoesNotClaim() {
         let markdown = """

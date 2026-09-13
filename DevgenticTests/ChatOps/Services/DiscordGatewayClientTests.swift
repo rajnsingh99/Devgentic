@@ -106,13 +106,14 @@ final class DiscordGatewayClientTests: XCTestCase {
 
     // MARK: - Gateway Intents Calculation
 
-    func testIntents_GuildsBit() {
-        XCTAssertEqual(1 << 0, 1) // GUILDS
-    }
-
-    func testIntents_GuildMessagesBit() {
-        XCTAssertEqual(1 << 9, 512) // GUILD_MESSAGES
-    }
+    /// ⚠️⚠️ [DC-8] THREE TESTS WERE DELETED HERE AND THE DELETION IS THE POINT. They asserted
+    /// `1 << 0 == 1`, `1 << 9 == 512` and `1 << 15 == 32768` — that Swift's shift operator works.
+    /// They could not fail for any reason this app cares about, while the file they sat in covered
+    /// NONE of `DiscordGatewayClient`'s actual behaviour: not the HELLO→IDENTIFY/RESUME branch, not
+    /// the invalid-session arm, not the heartbeat loop, not `stop()`. Coverage that cannot fail is
+    /// worse than no coverage, because it reads as protection.
+    ///
+    /// What replaces them asserts the BYTES THAT GO ON THE WIRE — see `testResumeFrameMatchesDiscordsShape`.
 
     func testIntents_MessageContentBit() {
         XCTAssertEqual(1 << 15, 32768) // MESSAGE_CONTENT

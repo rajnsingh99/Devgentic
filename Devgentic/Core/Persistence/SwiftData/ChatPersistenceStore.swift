@@ -45,6 +45,15 @@ protocol ChatPersistenceProtocol: Sendable {
     /// of that. Defaulted so lightweight test conformers aren't forced to implement it.
     func fetchSearchDocuments(for conversationId: UUID, limit: Int) async -> [SearchDocument]
 
+    /// [mm-4] The export projection: the newest `limit` messages, fully decoded EXCEPT that
+    /// attached images carry no `binaryData` — the export lists them by name and size and never
+    /// embeds them, and the image blob is the schema's only `@Attribute(.externalStorage)` field,
+    /// i.e. the dominant cost of `fetchMessages` (the same cost `fetchSearchDocuments` exists to
+    /// avoid). `isTruncated` is true when the conversation holds MORE than `limit` messages,
+    /// decided by a count rather than by decoding one message past the cap. Defaulted to the
+    /// full fetch plus the old probe so lightweight conformers stay honest rather than empty.
+    func fetchMessagesForExport(for conversationId: UUID, limit: Int) async -> (messages: [ChatMessage], isTruncated: Bool)
+
     /// The `limit` most-recent NON-EMPTY conversations, newest first, for a recents menu.
     ///
     /// ⚠️ On the protocol rather than at the caller because QuickAccess used to reach through
@@ -61,6 +70,11 @@ extension ChatPersistenceProtocol {
     func fetchMessage(withId id: UUID) async -> ChatMessage? { nil }
     func fetchUserMessagesWithAttachedTextFiles(for conversationId: UUID) async -> [ChatMessage] { [] }
     func fetchSearchDocuments(for conversationId: UUID, limit: Int) async -> [SearchDocument] { [] }
+    func fetchMessagesForExport(for conversationId: UUID, limit: Int) async -> (messages: [ChatMessage], isTruncated: Bool) {
+        let messages = await fetchMessages(for: conversationId, offset: 0, limit: limit)
+        let isTruncated = !(await fetchMessages(for: conversationId, offset: limit, limit: 1)).isEmpty
+        return (messages, isTruncated)
+    }
     func recentConversations(limit: Int) -> [(id: UUID, title: String)] { [] }
 }
 
@@ -254,6 +268,41 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         } catch {
             logger.error("Failed to fetch messages for \(conversationId.uuidString): \(error.localizedDescription)")
             return []
+        }
+    }
+
+    /// [mm-4] See the protocol doc. Same predicate/sort/limit as `fetchMessages`; the ONLY
+    /// difference in what comes back is that every attached image's `binaryData` is empty.
+    ///
+    /// Still main-actor (the store is `@MainActor`), so a long conversation still decodes its
+    /// four JSON blobs per message here — but no longer tens of MB of sidecar image files, and,
+    /// since the exporter now presents the save panel FIRST, only after the user has picked a
+    /// destination rather than before anything appears on screen.
+    func fetchMessagesForExport(for conversationId: UUID, limit: Int) async -> (messages: [ChatMessage], isTruncated: Bool) {
+        guard let context = mainContext else {
+            logger.error("[EXPORT] Fetch for \(conversationId.uuidString.prefix(8)) before the container was configured — exporting NOTHING. CONSEQUENCE: the file will hold only the header.")
+            return ([], false)
+        }
+
+        var descriptor = FetchDescriptor<ChatMessageSD>(
+            predicate: #Predicate { $0.conversationId == conversationId },
+            sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
+        )
+        descriptor.fetchLimit = limit
+
+        do {
+            let entities = try context.fetch(descriptor)
+            let messages = entities.map { $0.toChatMessage(omittingImageBytes: true) }
+            let total = try context.fetchCount(
+                FetchDescriptor<ChatMessageSD>(predicate: #Predicate { $0.conversationId == conversationId })
+            )
+            let isTruncated = total > limit
+            let images = messages.reduce(0) { $0 + ($1.attachedImageFiles?.count ?? 0) }
+            logger.info("[EXPORT] Fetched \(messages.count) of \(total) message(s) for \(conversationId.uuidString.prefix(8)) (cap \(limit)\(isTruncated ? ", TRUNCATED" : "")); \(images) attached image(s) projected WITHOUT their bytes.")
+            return (messages, isTruncated)
+        } catch {
+            logger.error("[EXPORT] Fetch for \(conversationId.uuidString.prefix(8)) FAILED: \(error.localizedDescription). CONSEQUENCE: the export holds only the header.")
+            return ([], false)
         }
     }
 

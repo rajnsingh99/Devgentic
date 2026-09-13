@@ -23,7 +23,7 @@ final class TelegramTransport: ChatOpsTransport, @unchecked Sendable {
     let transportID = "telegram"
 
     private let apiClient: TelegramAPIClient
-    private let logger = Logger(subsystem: DGLogger.subsystem, category: "TelegramTransport")
+    private let logger = DGLogger(category: "TelegramTransport")
 
     init(apiClient: TelegramAPIClient) {
         self.apiClient = apiClient

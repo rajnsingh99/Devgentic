@@ -17,7 +17,7 @@ actor SlackAPIClient {
     private let botToken: String
     private let session: URLSession
     private let baseURL = "https://slack.com/api"
-    private let logger = Logger(subsystem: DGLogger.subsystem, category: "SlackAPI")
+    private let logger = DGLogger(category: "SlackAPI")
 
     init(botToken: String) {
         self.botToken = botToken
@@ -69,8 +69,10 @@ actor SlackAPIClient {
 
     /// Sends multiple chunked messages for long responses.
     func sendChunkedMessage(channel: String, text: String) async throws {
+        // ⚠️ 3000 is a `section` block's text limit — NOT `chat.postMessage`'s 40 000. Invariant 28
+        // records why the tighter one binds. Measured in UTF-16 by `RemoteTextBudget.chunk`.
         let chunks = SlackAPIClient.chunkText(text, maxLength: 3000)
-        for chunk in chunks {
+        try await RemoteChunkedSend.send(chunks) { chunk in
             try await postMessage(channel: channel, text: chunk)
         }
     }
@@ -115,38 +117,6 @@ actor SlackAPIClient {
     }
 
     // MARK: - Text Chunking
-
-    /// Splits long text into chunks. Slack allows 40K chars but we keep chunks reasonable.
-    static func chunkText(_ text: String, maxLength: Int = 3000) -> [String] {
-        guard text.count > maxLength else { return [text] }
-
-        var chunks: [String] = []
-        var remaining = text
-
-        while !remaining.isEmpty {
-            if remaining.count <= maxLength {
-                chunks.append(remaining)
-                break
-            }
-
-            let searchRange = remaining.prefix(maxLength)
-            if let paragraphBreak = searchRange.range(of: "\n\n", options: .backwards) {
-                let chunk = String(remaining[remaining.startIndex..<paragraphBreak.upperBound])
-                chunks.append(chunk)
-                remaining = String(remaining[paragraphBreak.upperBound...])
-            } else if let lineBreak = searchRange.range(of: "\n", options: .backwards) {
-                let chunk = String(remaining[remaining.startIndex..<lineBreak.upperBound])
-                chunks.append(chunk)
-                remaining = String(remaining[lineBreak.upperBound...])
-            } else {
-                let idx = remaining.index(remaining.startIndex, offsetBy: maxLength)
-                chunks.append(String(remaining[remaining.startIndex..<idx]))
-                remaining = String(remaining[idx...])
-            }
-        }
-
-        return chunks
-    }
 
     // MARK: - Views
 
@@ -204,5 +174,27 @@ actor SlackAPIClient {
             let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
             throw SlackAPIError.apiError(method: method, error: "HTTP \(http.statusCode): \(errorBody)")
         }
+    }
+
+    /// Splits text to this platform's message budget.
+    ///
+    /// ⚠️ A FORWARDER, NOT AN IMPLEMENTATION. The real one is `RemoteTextBudget.chunk`, shared by all
+    /// three clients — see its header for the UTF-16 unit bug that three separate copies of this
+    /// function each carried. It stays as a named entry point so this client's own tests exercise
+    /// the same call production takes, rather than the shared helper in isolation.
+    static func chunkText(_ text: String, maxLength: Int = 3000) -> [String] {
+        RemoteTextBudget.chunk(text, limit: maxLength)
+    }
+
+}
+
+// MARK: - Rate-limit reporting
+
+extension SlackAPIError: RemoteRateLimitedError {
+    /// ⚠️ Same story as Discord: parsed from `Retry-After`, previously read only by
+    /// `errorDescription`.
+    var retryAfterSeconds: TimeInterval? {
+        guard case .rateLimited(let retryAfter) = self else { return nil }
+        return retryAfter
     }
 }

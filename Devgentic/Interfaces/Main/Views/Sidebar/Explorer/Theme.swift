@@ -25,6 +25,9 @@ enum AppAccentColor: String, CaseIterable {
     case orange = "orange"
     case pink = "pink"
     case modernSpotify = "modern_spotify"
+    case white = "white"
+    case grey = "grey"
+    case black = "black"
 
     init?(rawValue: String) {
         switch rawValue {
@@ -36,6 +39,9 @@ enum AppAccentColor: String, CaseIterable {
         case "orange": self = .orange
         case "pink": self = .pink
         case "modern_spotify", "cosmic_cyan", "cyan": self = .modernSpotify
+        case "white", "pure_white", "studio_white": self = .white
+        case "grey", "gray", "slate_grey", "slate_gray": self = .grey
+        case "black", "onyx_black", "jet_black", "pure_black": self = .black
         default: return nil
         }
     }
@@ -50,6 +56,9 @@ enum AppAccentColor: String, CaseIterable {
         case .orange: return Color(hex: "#F59E0B")        // Warm Amber
         case .pink: return Color(hex: "#EC4899")          // Rose Quartz
         case .modernSpotify: return Color(hex: "#06B6D4") // Cosmic Cyan
+        case .white: return Color(hex: "#FFFFFF")         // Pure White
+        case .grey: return Color(hex: "#8E8E93")          // Slate Grey
+        case .black: return Color(hex: "#000000")         // Onyx Black
         }
     }
 
@@ -63,6 +72,9 @@ enum AppAccentColor: String, CaseIterable {
         case .orange: return NSColor(hex: "#F59E0B")
         case .pink: return NSColor(hex: "#EC4899")
         case .modernSpotify: return NSColor(hex: "#06B6D4")
+        case .white: return NSColor(hex: "#FFFFFF")
+        case .grey: return NSColor(hex: "#8E8E93")
+        case .black: return NSColor(hex: "#000000")
         }
     }
 
@@ -76,6 +88,9 @@ enum AppAccentColor: String, CaseIterable {
         case .orange: return "Warm Amber"
         case .pink: return "Rose Quartz"
         case .modernSpotify: return "Cosmic Cyan"
+        case .white: return "Pure White"
+        case .grey: return "Slate Grey"
+        case .black: return "Onyx Black"
         }
     }
 }
@@ -124,6 +139,12 @@ struct ThemeDecorator: Theme {
 
     // Tier 1 — Controls & Accent (The heart of the decorator)
     var accentColor: Color { accentOverride ?? base.accentColor }
+    var isAccentLight: Bool {
+        switch accentColorOverride {
+        case .white: return true
+        default: return false
+        }
+    }
     var dividerColor: Color { base.dividerColor }
     var selectionColor: Color { base.selectionColor }
 
@@ -282,6 +303,8 @@ protocol Theme {
     // ── Tier 1: Control & Accent Colors ──────────────────────────────
 
     var accentColor: Color { get }
+    /// Whether the effective accent color is light (e.g. Pure White), requiring dark foreground text on CTAs.
+    var isAccentLight: Bool { get }
     var dividerColor: Color { get }
     var selectionColor: Color { get }
 
@@ -501,6 +524,7 @@ extension Theme {
     /// light/dark intent (Dracula, OneDark, OneLight, etc.) override this.
     var colorScheme: ColorScheme? { nil }
     var isDark: Bool { colorScheme != .light }
+    var isAccentLight: Bool { false }
 
     // ── Tier 2 Color Defaults ────────────────────────────────────────
 

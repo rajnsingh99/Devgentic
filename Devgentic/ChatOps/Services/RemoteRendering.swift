@@ -48,14 +48,25 @@ enum RemoteRenderLog {
     /// ⚠️ Every `.silent` view is logged with its CONSEQUENCE, per the standing logging rule. This
     /// replaces four naked `break`s in the bridges that log nothing at all, which is why a remote
     /// user who types something unrecognised today gets no reply and leaves no trace.
-    nonisolated static func silence(_ silence: RemoteSilence, channel: RemoteChannel, logger: Logger) {
-        logger.info("\(silence.tag) \(channel.provider.rawValue) channel \(channel.channelID) — nothing posted. CONSEQUENCE: \(silence.consequence)")
+    ///
+    /// ⚠️⚠️ THE LEVEL IS CHOSEN BY `strandsTheUser`, NOT FIXED. `DGLogger.shouldPersist` writes
+    /// `.warning` and above to the ring buffer a diagnostic bundle exports, and drops everything
+    /// below it. A single `.info` for all three cases meant the ONE silence that represents a
+    /// failure — a remote user whose message got no reply — was visible only in live Console on the
+    /// machine that cannot reproduce it, which is the same invisibility the naked `break`s had.
+    nonisolated static func silence(_ silence: RemoteSilence, channel: RemoteChannel, logger: DGLogger) {
+        let line = "\(silence.tag) \(channel.provider.rawValue) channel \(channel.channelID) — nothing posted. CONSEQUENCE: \(silence.consequence)"
+        if silence.strandsTheUser {
+            logger.warning(line)
+        } else {
+            logger.info(line)
+        }
     }
 
     /// `Notice.tone`'s one reader: a failure notice is logged at `.error`, everything else at
     /// `.info`. Nothing else about the tone reaches the wire — no platform offers a colour or
     /// style channel for a plain message.
-    nonisolated static func posted(_ view: RemoteView, channel: RemoteChannel, logger: Logger) {
+    nonisolated static func posted(_ view: RemoteView, channel: RemoteChannel, logger: DGLogger) {
         guard case .notice(let notice) = view, notice.tone == .failure else { return }
         logger.error("[CHATOPS/RENDER] Posted a FAILURE notice to \(channel.provider.rawValue) channel \(channel.channelID): \(notice.body). CONSEQUENCE: the remote user was told the operation failed; if this is unexpected, the command that produced it is the place to look.")
     }
@@ -106,6 +117,38 @@ enum RemoteMarkupEscaping {
         text.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
+    }
+
+    /// Strips Slack's CHANNEL-WIDE BROADCAST sequences out of text this app did not write.
+    ///
+    /// ⚠️⚠️ [BR-3/EG-3, Slack half] `<!channel>`, `<!here>` and `<!everyone>` notify every member of
+    /// the channel, and Slack resolves them from the message BODY regardless of `link_names` — so
+    /// they work from any text, including an agent's answer quoting a file it just read. The HITL
+    /// prompt path was hardened against exactly this on 2026-09-11 (`promptDraft` escapes
+    /// model-supplied substrings), but the AGENT REPLY path never was: it goes
+    /// `RemoteMirrorService` → `SlackTransport.sendChunkedMessage` → `postMessage`, and the only pass
+    /// it crosses is `RemoteEgressSanitizer.credentialsOnly`, which has no mention control.
+    ///
+    /// ⚠️ THIS IS A REWRITE OF CONTENT, WHICH THIS CODEBASE HAS GOT WRONG FOUR TIMES — so note what
+    /// makes it safe: it matches an EXACT, closed set of control sequences that have exactly one
+    /// meaning in Slack's own grammar, not a loose shape. `sanitizeHomePath` ate 221 characters of
+    /// prose because it matched a PATTERN that prose could satisfy; `<!channel>` cannot occur by
+    /// accident and means one thing.
+    ///
+    /// ⚠️ IT RENDERS THE PLAIN FORM RATHER THAN DELETING, so the reader still sees what the source
+    /// said. `@channel` is inert here: `chat.postMessage` only linkifies a bare `@name` when
+    /// `link_names` is set, and this app never sets it. ⚠️ If anyone ever does set `link_names`,
+    /// this function stops being sufficient — `SlackBroadcastNeutralisingTests` says so.
+    nonisolated static func withoutSlackBroadcasts(_ text: String) -> String {
+        var out = text
+        for broadcast in ["channel", "here", "everyone"] {
+            out = out.replacingOccurrences(of: "<!\(broadcast)>", with: "@\(broadcast)")
+            // ⚠️ Slack also accepts a labelled form, `<!channel|@channel>`, which notifies
+            // identically. Matching only the bare form would leave the documented variant live.
+            out = out.replacingOccurrences(
+                of: "<!\(broadcast)\\|[^>]*>", with: "@\(broadcast)", options: .regularExpression)
+        }
+        return out
     }
 
     nonisolated static func escape(_ text: String, for markup: RemoteCapabilities.Markup) -> String {
@@ -182,6 +225,67 @@ enum RemoteTextBudget {
             used += cost
         }
         return out + blobMarker
+    }
+
+    /// Splits `text` into pieces that each fit `limit`, preferring paragraph then line boundaries.
+    ///
+    /// ⚠️⚠️ THIS REPLACES THREE NEAR-IDENTICAL `chunkText` COPIES — one per API client — WHICH ALL
+    /// MEASURED IN THE WRONG UNIT. They used `text.count`, which counts Characters (extended
+    /// grapheme clusters); Telegram, Discord and Slack all count UTF-16 code units. One family
+    /// emoji is 1 Character and 11 UTF-16 units, so a "within budget" chunk could be an order of
+    /// magnitude over the real limit — and the platform rejects the whole message rather than
+    /// truncating it, so an emoji-dense agent reply did not arrive at all. Invariant 28 already
+    /// required UTF-16 for the render path (`measure`); the chunkers were the half that never got it.
+    ///
+    /// ⚠️ THE CUT IS ALWAYS ON A Character BOUNDARY even though the budget is counted in UTF-16 —
+    /// slicing `utf16` directly can split a grapheme and produce a replacement character. Same
+    /// reasoning as `fit(_:limit:)` above.
+    ///
+    /// ⚠️ PROGRESS IS GUARANTEED. A single grapheme costing more than `limit` leaves no room for
+    /// even one Character, and the obvious loop then appends an empty chunk forever. Such a
+    /// grapheme is emitted alone, over budget, because a message the platform will reject is still
+    /// better than a hang — and the alternative, dropping it, silently loses content.
+    nonisolated static func chunk(_ text: String, limit: Int) -> [String] {
+        guard limit > 0, measure(text) > limit else { return [text] }
+
+        var chunks: [String] = []
+        var remaining = Substring(text)
+
+        while !remaining.isEmpty {
+            if measure(String(remaining)) <= limit {
+                chunks.append(String(remaining))
+                break
+            }
+
+            // The furthest Character boundary that still fits the UTF-16 budget.
+            var fitEnd = remaining.startIndex
+            var used = 0
+            var index = remaining.startIndex
+            while index < remaining.endIndex {
+                let cost = measure(String(remaining[index]))
+                guard used + cost <= limit else { break }
+                used += cost
+                index = remaining.index(after: index)
+                fitEnd = index
+            }
+
+            let window = remaining[remaining.startIndex..<fitEnd]
+            let cut: Substring.Index
+            if let paragraph = window.range(of: "\n\n", options: .backwards) {
+                cut = paragraph.upperBound
+            } else if let line = window.range(of: "\n", options: .backwards) {
+                cut = line.upperBound
+            } else {
+                cut = fitEnd
+            }
+
+            // See the progress note above.
+            let safeCut = cut > remaining.startIndex ? cut : remaining.index(after: remaining.startIndex)
+            chunks.append(String(remaining[remaining.startIndex..<safeCut]))
+            remaining = remaining[safeCut...]
+        }
+
+        return chunks
     }
 
     private nonisolated static let blobMarker = "…"
@@ -713,6 +817,23 @@ enum SlackRemoteRenderer {
             RemoteTextBudget.fit(lines: text.components(separatedBy: "\n"), limit: capabilities.maxMessageLength)
         }
 
+        /// ⚠️⚠️ MODEL-SUPPLIED TEXT ONLY — never the app's own literals. `sectionBlock` hard-codes
+        /// `mrkdwn` (SlackModels.swift), so everything in it is interpreted, and this arm interpolated
+        /// tool names, parameters, questions, plan steps and gate prompts RAW. A `<!channel>` reaching
+        /// it from a file the agent read fired a channel-wide notification, and `<url|label>` rendered
+        /// as a clickable link whose visible text the model chose — sitting directly above the genuine
+        /// ✅ Approve button, in the same message. Escaping the whole string instead would turn this
+        /// renderer's own `*Tool Approval Required*` into literal asterisks.
+        ///
+        /// ⚠️ `RemoteView`'s comment claimed prompts deliberately do not escape "and pass no parse
+        /// mode". That is TELEGRAM's rationale — there is no parse mode to omit on Slack, because the
+        /// block declares its own markup. The comment has been corrected.
+        ///
+        /// ⚠️ Runs BEFORE `fit`, because escaping lengthens the text (`<` → `&lt;`) and a budget
+        /// applied first would be measured against a shorter string than the one actually sent.
+        /// ⚠️ Button LABELS need no escaping — `SlackBlockElement.button` builds `plain_text`.
+        func safe(_ modelText: String) -> String { RemoteMarkupEscaping.slack(modelText) }
+
         func button(_ label: String, _ token: CallbackToken, _ value: String, _ style: String?) -> SlackBlockElement {
             SlackBlockElement.button(text: label, actionID: token.wire, value: value, style: style)
         }
@@ -723,7 +844,7 @@ enum SlackRemoteRenderer {
         switch kind {
         case .toolConfirmation(let toolName, let params):
             let truncatedParams = String(params.prefix(500))
-            let messageText = "⚠️ *Tool Approval Required*\n\n*Tool:* \(toolName)\n*Params:* \(truncatedParams)"
+            let messageText = "⚠️ *Tool Approval Required*\n\n*Tool:* \(safe(toolName))\n*Params:* \(safe(truncatedParams))"
             return Draft(text: fit(messageText), blocks: [
                 .sectionBlock(text: fit(messageText)),
                 .actionsBlock(elements: [
@@ -742,7 +863,7 @@ enum SlackRemoteRenderer {
             // ⚠️ This arm previously posted TEXT ONLY, with a note that adding blocks would
             // change every clarification prompt on Slack. It does, and that is the change:
             // the text block carries the same words, and an actions block carries the button.
-            let messageText = "💬 *Agent needs clarification:*\n\n\(question)\n\nTap *Answer* to reply, or type /skip to skip."
+            let messageText = "💬 *Agent needs clarification:*\n\n\(safe(question))\n\nTap *Answer* to reply, or type /skip to skip."
             return Draft(
                 text: fit(messageText),
                 blocks: [
@@ -760,7 +881,7 @@ enum SlackRemoteRenderer {
 
         case .planReview(let subtaskDescriptions):
             let planList = subtaskDescriptions.enumerated()
-                .map { "  \($0.offset + 1). \($0.element)" }
+                .map { "  \($0.offset + 1). \(safe($0.element))" }
                 .joined(separator: "\n")
             let messageText = "📋 *Plan Review Required*\n\nThe agent has generated a plan with \(subtaskDescriptions.count) step(s):\n\n\(planList)\n\nTap to approve or reject (edit on the Mac app):"
             return Draft(text: fit(messageText), blocks: [
@@ -772,7 +893,7 @@ enum SlackRemoteRenderer {
             ])
 
         case .gate(let prompt, let options):
-            let messageText = "🚦 *Decision Required*\n\n\(prompt)\n\nChoose an option:"
+            let messageText = "🚦 *Decision Required*\n\n\(safe(prompt))\n\nChoose an option:"
             let buttons = options.enumerated().map { idx, opt in
                 button(
                     String(opt.prefix(70)),

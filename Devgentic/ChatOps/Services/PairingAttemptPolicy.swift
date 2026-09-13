@@ -26,6 +26,7 @@
 //
 
 import Foundation
+import os
 
 enum PairingAttemptPolicy {
 
@@ -141,4 +142,48 @@ struct PairingAttemptLedger {
     /// How many distinct origins have guessed. ⚠️ THE NUMBER THAT DISTINGUISHES A TYPO FROM AN
     /// ATTACK: ten failures from one chat is someone struggling; ten failures from ten chats is not.
     var distinctOrigins: Int { failures.count }
+}
+
+// MARK: - Window Expiry
+
+/// What happens when a pairing window runs out of time.
+///
+/// ⚠️⚠️ SHARED BECAUSE THE BUG WAS SHARED. All three services ended their window with the same three
+/// lines — reset the connection state, delete the credentials, log the constant — and all three
+/// carried the same two defects. Keeping one copy is what stops a future fix landing on two
+/// platforms out of three, which is how the deadline bug (Telegram's loop bounds itself; Discord's
+/// and Slack's did not) survived as long as it did.
+@MainActor
+enum PairingWindowExpiry {
+
+    /// Ends an expired window — and ONLY if this window is still the live one.
+    ///
+    /// ⚠️⚠️ (1) **THE OWNERSHIP CHECK.** `Task.isCancelled` is false for an ORPHANED window: nothing
+    /// cancelled it, the view that could have simply disappeared. So an orphan reaching its deadline
+    /// happily reset `connectionState` and deleted the token belonging to a NEWER, already-successful
+    /// pairing. `connectionState` still naming THIS window's PIN is the only available proof that the
+    /// window is still ours, and it is checked before anything is written.
+    ///
+    /// ⚠️⚠️ (2) **A TIMEOUT MUST NOT DELETE CREDENTIALS.** The old arm ran `config.botToken = nil`,
+    /// which is a Keychain DELETE. That token had been VALIDATED — the user pasted it and the
+    /// platform's own API accepted it — and running out of time to send a PIN says nothing about the
+    /// token. Wiping it silently reset the pane and made the user paste it again. Credentials are
+    /// cleared by `disconnect()` and nowhere else.
+    ///
+    /// ⚠️ `.error(...)` rather than `.disconnected`, because a bare "Disconnected" is
+    /// indistinguishable from never having started and tells the user nothing about what to do next.
+    static func expire(pin: String,
+                       platform: String,
+                       timeout: TimeInterval,
+                       state keyPath: ReferenceWritableKeyPath<ChatOpsConfigManager, ChatOpsConnectionState>,
+                       config: ChatOpsConfigManager,
+                       logger: DGLogger) {
+        guard case .awaitingPairing(let livePIN) = config[keyPath: keyPath], livePIN == pin else {
+            logger.info("[CHATOPS] A \(platform) pairing window expired but is no longer the live one, so it changed nothing. CONSEQUENCE: none — and that is the point. This window was superseded (the user started another, or pairing already completed); before this check an orphaned window's timeout reset the connection state and DELETED the bot token belonging to the newer pairing.")
+            return
+        }
+
+        config[keyPath: keyPath] = .error("Pairing timed out — no PIN arrived within 5 minutes. Start pairing again.")
+        logger.error("[CHATOPS] The \(platform) pairing window expired after \(timeout)s with no matching PIN. CONSEQUENCE: the PIN is dead and pairing did not complete; the validated token is deliberately KEPT so the user does not have to paste it again, and the Settings pane now says the window timed out rather than silently resetting to 'Disconnected'.")
+    }
 }

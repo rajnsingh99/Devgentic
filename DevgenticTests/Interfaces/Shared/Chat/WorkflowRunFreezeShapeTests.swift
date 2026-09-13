@@ -383,7 +383,17 @@ final class WorkflowRunFreezeShapeTests: XCTestCase {
     /// contribution per EDGE on the live path and — through a `Set` — one in total in the record.
     /// The literal pins today's live behaviour; the claim being pinned is that the record MATCHES
     /// it, so a future change to either factory has to change both.
-    func testAnUpstreamWiredIntoTwoPortsContributesIdenticallyOnBothSides() throws {
+    /// ⚠️ [workflow/vm-2] CONTRACT CHANGED, deliberately. This used to assert
+    /// `"VERDICT\n\nVERDICT"` — both factories joined one upstream's output once per EDGE — with
+    /// a message calling the single-copy form the defect ("the record used to collapse the two
+    /// edges"). The engine is the authority and it does the opposite:
+    /// `WorkflowState.upstreamResultEnvelopes` keeps ONE envelope per upstream node, because an
+    /// upstream with no explicit port activation passes the port filter on every edge. So the
+    /// doubled string was never what the node received; it was a preview, and a frozen record,
+    /// that disagreed with the run. CF-31's real fix was edge-declaration ORDER — pinned by
+    /// `testAFanInNodesInputPreviewIsBuiltInEdgeOrderOnBothSidesOfTheFreeze` — and the `Set`
+    /// removal was collateral.
+    func testAnUpstreamWiredIntoTwoPortsContributesOnceOnBothSides() throws {
         let cond = node("Condition"), sink = node("Sink")
         let layout = WorkflowLayout(
             nodes: [cond, sink],
@@ -400,10 +410,131 @@ final class WorkflowRunFreezeShapeTests: XCTestCase {
         let frozen = try XCTUnwrap(freeze(s, layout: layout)
             .nodeResults.first { $0.nodeID == sink.id })
 
-        XCTAssertEqual(live.input, "VERDICT\n\nVERDICT")
+        XCTAssertEqual(live.input, "VERDICT",
+                       "one upstream NODE, one contribution — what the engine actually forwarded")
         XCTAssertEqual(frozen.input, live.input,
-                       "⚠️ the record used to collapse the two edges and persist a single 'VERDICT'")
+                       "⚠️ the frozen record is the durable artefact; it persisted the doubled copy")
         XCTAssertEqual(frozen.inputSourceLabel, live.inputSourceLabel)
+        XCTAssertEqual(frozen.inputSourceLabel, "Condition",
+                       "the label named the same upstream twice as well")
+    }
+
+    // MARK: - workflow/vm-1: the preview only names upstreams that contributed
+
+    /// ⚠️ THE pin. Diamond over a Condition — C routes True, so A completes and B is skipped
+    /// `.notChosen`, and M's join EXCUSES the dead branch and runs. The engine hands M only
+    /// "ALPHA OUTPUT" (`WorkflowInputAssembler` keeps completed / user-skipped / failed), but both
+    /// display factories joined EVERY incoming edge, so M previewed
+    /// "ALPHA OUTPUT\n\nNot run — the workflow branched a different way" — part of it a string
+    /// the node is guaranteed never to have received.
+    func testAFanInDoesNotPreviewADeadBranchsSkipSentence() throws {
+        let condition = node("Condition"), alpha = node("Alpha"), bravo = node("Bravo"), merge = node("Merge")
+        let layout = WorkflowLayout(
+            nodes: [condition, alpha, bravo, merge],
+            edges: [WorkflowEdge(sourceNodeID: condition.id, targetNodeID: alpha.id, sourcePortLabel: "True"),
+                    WorkflowEdge(sourceNodeID: condition.id, targetNodeID: bravo.id, sourcePortLabel: "False"),
+                    WorkflowEdge(sourceNodeID: alpha.id, targetNodeID: merge.id),
+                    WorkflowEdge(sourceNodeID: bravo.id, targetNodeID: merge.id)],
+            annotations: [])
+        let s = state(results: [
+            result(condition, .completed, detail: "TRUE"),
+            result(alpha, .completed, detail: "ALPHA OUTPUT"),
+            result(bravo, .skipped(.notChosen), detail: "Not run — the workflow branched a different way"),
+            result(merge, .running, detail: "Running...")
+        ])
+
+        let live = try XCTUnwrap(WorkflowRunDisplayData.from(live: s, layout: layout)
+            .nodeResults.first { $0.nodeID == merge.id })
+        let frozen = try XCTUnwrap(freeze(s, layout: layout)
+            .nodeResults.first { $0.nodeID == merge.id })
+
+        XCTAssertEqual(live.input, "ALPHA OUTPUT", "the skip sentence is not part of what Merge received")
+        XCTAssertEqual(frozen.input, live.input, "the frozen record is the durable artefact")
+        XCTAssertEqual(live.inputSourceLabel, "Alpha", "and the label names only the upstream that contributed")
+        XCTAssertEqual(frozen.inputSourceLabel, live.inputSourceLabel)
+    }
+
+    /// ⚠️ REGRESSION GUARD. A failed upstream wired into one node on BOTH its `error` port and its
+    /// default port is the ordinary error-handler shape: the engine makes the error edge live,
+    /// runs the handler, and DOES hand it the failure text. A port-matching rule ("contributes
+    /// only when every edge is an error edge") would filter it out and lose text the node really
+    /// received — which is why the filter is status-only.
+    func testAFailedUpstreamWiredOnBothPortsStillPreviewsItsFailure() throws {
+        let alpha = node("Alpha"), handler = node("Handler")
+        let layout = WorkflowLayout(
+            nodes: [alpha, handler],
+            edges: [WorkflowEdge(sourceNodeID: alpha.id, targetNodeID: handler.id, sourcePortLabel: "error"),
+                    WorkflowEdge(sourceNodeID: alpha.id, targetNodeID: handler.id)],
+            annotations: [])
+        let s = state(results: [
+            result(alpha, .failed, detail: "boom: provider returned 503"),
+            result(handler, .running, detail: "Running...")
+        ])
+
+        let live = try XCTUnwrap(WorkflowRunDisplayData.from(live: s, layout: layout)
+            .nodeResults.first { $0.nodeID == handler.id })
+
+        XCTAssertEqual(live.input, "boom: provider returned 503")
+        XCTAssertEqual(live.inputSourceLabel, "Alpha", "once, not twice — the vm-2 de-dup still holds")
+    }
+
+    /// ⚠️ A RUNNING upstream is kept deliberately, and THIS is the shape that proves why.
+    ///
+    /// On a chain, excluding `.running` is invisible: the filtered list empties, the fallback
+    /// fires, and the same string comes back — so a chain test of this cannot fail. In the
+    /// diamond's PENDING window the upstreams are [A running, B skipped-notChosen]; drop the
+    /// running one and the filtered list is empty there too, the fallback restores BOTH, and the
+    /// skip sentence this row exists to remove is back on screen.
+    func testKeepingARunningUpstreamIsWhatStopsTheFallbackReadmittingTheSkipSentence() throws {
+        let condition = node("Condition"), alpha = node("Alpha"), bravo = node("Bravo"), merge = node("Merge")
+        let layout = WorkflowLayout(
+            nodes: [condition, alpha, bravo, merge],
+            edges: [WorkflowEdge(sourceNodeID: condition.id, targetNodeID: alpha.id, sourcePortLabel: "True"),
+                    WorkflowEdge(sourceNodeID: condition.id, targetNodeID: bravo.id, sourcePortLabel: "False"),
+                    WorkflowEdge(sourceNodeID: alpha.id, targetNodeID: merge.id),
+                    WorkflowEdge(sourceNodeID: bravo.id, targetNodeID: merge.id)],
+            annotations: [])
+        let s = state(results: [
+            result(condition, .completed, detail: "TRUE"),
+            result(alpha, .running, detail: "Running..."),
+            result(bravo, .skipped(.notChosen), detail: "Not run — the workflow branched a different way")
+        ])
+
+        let live = try XCTUnwrap(WorkflowRunDisplayData.from(live: s, layout: layout)
+            .nodeResults.first { $0.nodeID == merge.id })
+
+        XCTAssertEqual(live.input, "Running...")
+        XCTAssertFalse(live.input?.contains("Not run") ?? false,
+                       "the fallback must not fire here: Alpha is contributing, so the list is not empty")
+        XCTAssertEqual(live.inputSourceLabel, "Alpha")
+    }
+
+    /// ⚠️ The fallback. A node whose upstreams ALL contributed nothing still has to explain
+    /// itself — that preview is right when it is genuinely all there is, and only wrong when it
+    /// is mixed in beside real input.
+    func testANodeBelowAWhollyDeadBranchStillExplainsItself() throws {
+        let router = node("Router"), branch = node("Branch")
+        let layout = chain([router, branch])
+        let s = state(results: [
+            result(router, .skipped(.notChosen), detail: "Not run — the workflow branched a different way"),
+            result(branch, .running, detail: "Running...")
+        ])
+
+        let live = try XCTUnwrap(WorkflowRunDisplayData.from(live: s, layout: layout)
+            .nodeResults.first { $0.nodeID == branch.id })
+
+        XCTAssertEqual(live.input, "Not run — the workflow branched a different way")
+        XCTAssertEqual(live.inputSourceLabel, "Router", "text and label fall back together, never one without the other")
+    }
+
+    /// The predicate itself, stated against the assembler's rule it mirrors.
+    func testContributesInputMirrorsTheAssemblersStatusFilter() {
+        XCTAssertTrue(WorkflowExecutionState.contributesInput(.completed))
+        XCTAssertTrue(WorkflowExecutionState.contributesInput(.failed))
+        XCTAssertTrue(WorkflowExecutionState.contributesInput(.skipped(.byUser)))
+        XCTAssertTrue(WorkflowExecutionState.contributesInput(.running))
+        XCTAssertFalse(WorkflowExecutionState.contributesInput(.cancelled))
+        XCTAssertFalse(WorkflowExecutionState.contributesInput(.skipped(.notChosen)))
     }
 
     // MARK: - CF-32: the orphan log fires once, not per body pass

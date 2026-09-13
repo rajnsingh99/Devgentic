@@ -58,9 +58,13 @@ struct GeminiSettingsView: View {
             // Temperature
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Temperature").fontWeight(.medium)
+                    Text("Temperature")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Controls the randomness of the generated response. Gemini accepts 0.0–2.0; above 1.0 is markedly more divergent.")
-                        .font(.caption).foregroundColor(theme.secondaryText)
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
                 Spacer(minLength: 16)
                 HStack {
@@ -84,8 +88,13 @@ struct GeminiSettingsView: View {
             // Top P
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Top P").fontWeight(.medium)
-                    Text("Cumulative probability of tokens to consider.").font(.caption).foregroundColor(theme.secondaryText)
+                    Text("Top P")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
+                    Text("Cumulative probability of tokens to consider.")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
                 Spacer(minLength: 16)
                 HStack {
@@ -104,8 +113,13 @@ struct GeminiSettingsView: View {
             // Top K
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Top K").fontWeight(.medium)
-                    Text("Maximum number of tokens to consider.").font(.caption).foregroundColor(theme.secondaryText)
+                    Text("Top K")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
+                    Text("Maximum number of tokens to consider.")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
                 Spacer(minLength: 16)
                 HStack {
@@ -127,7 +141,7 @@ struct GeminiSettingsView: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundColor(theme.warningColor)
                     Text("Top K 1 selects only the single most likely token, so Temperature and Top P above have no effect and responses repeat verbatim. Raise Top K to let them apply.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
                 }
                 .accessibilityElement(children: .combine)
@@ -138,8 +152,13 @@ struct GeminiSettingsView: View {
             // Max Output Tokens
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Max Output Tokens").fontWeight(.medium)
-                    Text("Maximum length of the generated response.").font(.caption).foregroundColor(theme.secondaryText)
+                    Text("Max Output Tokens")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
+                    Text("Maximum length of the generated response.")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
                 Spacer(minLength: 16)
                 HStack {
@@ -154,15 +173,16 @@ struct GeminiSettingsView: View {
             
             // Safety Settings Header
             Text("Safety Settings")
-                .font(.subheadline)
-                .fontWeight(.semibold)
+                .font(theme.fontSubheadline.weight(.semibold))
+                .foregroundColor(theme.primaryText)
                 .padding(.top, 8)
             
             ForEach($config.safetySettings.toNonOptional(defaultValue: GeminiAdvancedConfig.default().safetySettings ?? [])) { $setting in
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(setting.category.localizedTitle)
-                            .fontWeight(.medium)
+                            .font(theme.fontFootnote.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
                     }
                     
                     Spacer(minLength: 16)
@@ -303,10 +323,13 @@ struct OllamaSettingsView: View {
             // Temperature
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Temperature").fontWeight(.medium)
+                    Text("Temperature")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Sharpens or flattens the next-token distribution. 0.0 = pick the single most likely token (deterministic, best for tool calls). 0.5–0.7 = natural conversation. 1.0+ = creative/varied. Above 1.5 is rarely useful.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
@@ -326,10 +349,13 @@ struct OllamaSettingsView: View {
             // Top P
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Top P").fontWeight(.medium)
+                    Text("Top P")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("After temperature, restricts sampling to the smallest set of tokens whose combined probability reaches this value (nucleus sampling). 1.0 = no filter. 0.9–0.95 = standard chat. 0.7–0.85 = tighter; pairs with higher temperature to keep output coherent.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
@@ -349,13 +375,16 @@ struct OllamaSettingsView: View {
             // Top K — TextField + Stepper combo, allows 0 (= disabled)
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Top K").fontWeight(.medium)
+                    Text("Top K")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Caps the number of candidate tokens at each step. 0 = disabled (sample from full vocabulary). 1–10 = very tight, near-greedy. 40–100 = standard. Higher = more variety. Combine with low temperature for predictable structured output.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                         .fixedSize(horizontal: false, vertical: true)
                     Text("Range: 0–1000")
-                        .font(.caption2)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText.opacity(0.7))
                 }
                 Spacer(minLength: 16)
@@ -378,13 +407,16 @@ struct OllamaSettingsView: View {
             // Context Window (numCtx) — model-derived cap
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Context Window").fontWeight(.medium)
+                    Text("Context Window")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Number of tokens the model holds in working memory (num_ctx). Ollama's default of 2048 is too low for modern long-context use — set this to your model's actual context size to unlock its full capability. Costs a few MB of RAM per 1K tokens.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                         .fixedSize(horizontal: false, vertical: true)
                     Text("Range: 256–\(numCtxCap)\(modelContextSuffix)")
-                        .font(.caption2)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText.opacity(0.7))
 
                     // Warning when the saved value exceeds this model's cap. Happens
@@ -397,7 +429,7 @@ struct OllamaSettingsView: View {
                                 .font(.system(size: 10, weight: .semibold))
                                 .accessibilityHidden(true)
                             Text("Current value \(current) exceeds this model's max context \(numCtxCap). Ollama may reject or silently clamp the request.")
-                                .font(.caption2)
+                                .font(theme.fontCaption2)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         .foregroundColor(theme.warningColor)
@@ -426,10 +458,13 @@ struct OllamaSettingsView: View {
             // Stop Sequences — multi-line editor (one stop per line)
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Stop Sequences").fontWeight(.medium)
+                    Text("Stop Sequences")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Sequences that immediately end generation when produced. One per line. Useful for cutting off model output at specific tokens (e.g. '<|end|>', '\\n\\n###'). Leave empty to use the model's built-in stops.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
@@ -441,10 +476,13 @@ struct OllamaSettingsView: View {
             // Seed — visible TextField styling matching the rest of the panel
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Fixed Seed").fontWeight(.medium)
+                    Text("Fixed Seed")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Optional fixed seed for reproducible outputs. Same seed + same prompt + same model produces identical output. Useful for testing, evaluation, and debugging. Leave empty for random.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
@@ -469,10 +507,13 @@ struct OllamaSettingsView: View {
             // Repeat Penalty
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Repeat Penalty").fontWeight(.medium)
+                    Text("Repeat Penalty")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Multiplier applied to the probability of recently-emitted tokens. 1.0 = off. 1.05–1.1 = mild (suits chat). 1.15–1.3 = stronger (helps small/Q4 models break repetition loops). Above 1.5 can make output incoherent.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
@@ -492,10 +533,13 @@ struct OllamaSettingsView: View {
             // Extended Thinking
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Extended Thinking").fontWeight(.medium)
+                    Text("Extended Thinking")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
                     Text("Enable reasoning traces before the response. Only works on reasoning models (deepseek-r1, qwq, qwen3, etc.). If the model rejects this, it will be disabled automatically.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
@@ -623,8 +667,13 @@ struct AnthropicSettingsView: View {
             // Max Tokens
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Max Output Tokens").fontWeight(.medium)
-                    Text("Maximum length of the generated response. Claude requires this explicitly.").font(.caption).foregroundColor(theme.secondaryText)
+                    Text("Max Output Tokens")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
+                    Text("Maximum length of the generated response. Claude requires this explicitly.")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
                 Spacer(minLength: 16)
                 HStack {
@@ -646,12 +695,17 @@ struct AnthropicSettingsView: View {
                 // Temperature
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Temperature").fontWeight(.medium)
+                        Text("Temperature")
+                            .font(theme.fontFootnote.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
                         if config.extendedThinking {
                             Text("Not sent while Extended Thinking is on — thinking does not permit sampling parameters.")
-                                .font(.caption).foregroundColor(.orange)
+                                .font(theme.fontCaption2).foregroundColor(.orange)
                         } else {
-                            Text("Controls the randomness of the generated response.").font(.caption).foregroundColor(theme.secondaryText)
+                            Text("Controls the randomness of the generated response.")
+                                .font(theme.fontCaption2)
+                                .foregroundColor(theme.secondaryText)
+                                .lineSpacing(2.5)
                         }
                     }
                     Spacer(minLength: 16)
@@ -673,14 +727,20 @@ struct AnthropicSettingsView: View {
                 // Top P
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Top P").fontWeight(.medium)
+                        Text("Top P")
+                            .font(theme.fontFootnote.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
                         if config.extendedThinking {
-                            Text("Not sent while Extended Thinking is on.").font(.caption).foregroundColor(.orange)
+                            Text("Not sent while Extended Thinking is on.")
+                                .font(theme.fontCaption2).foregroundColor(.orange)
                         } else if config.temperature != nil {
                             Text("Not sent while Temperature is set — Claude accepts one or the other, never both.")
-                                .font(.caption).foregroundColor(.orange)
+                                .font(theme.fontCaption2).foregroundColor(.orange)
                         } else {
-                            Text("Cumulative probability of tokens to consider.").font(.caption).foregroundColor(theme.secondaryText)
+                            Text("Cumulative probability of tokens to consider.")
+                                .font(theme.fontCaption2)
+                                .foregroundColor(theme.secondaryText)
+                                .lineSpacing(2.5)
                         }
                     }
                     Spacer(minLength: 16)
@@ -702,8 +762,13 @@ struct AnthropicSettingsView: View {
                 // Top K
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Top K").fontWeight(.medium)
-                        Text("Maximum number of tokens to consider when sampling.").font(.caption).foregroundColor(theme.secondaryText)
+                        Text("Top K")
+                            .font(theme.fontFootnote.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
+                        Text("Maximum number of tokens to consider when sampling.")
+                            .font(theme.fontCaption2)
+                            .foregroundColor(theme.secondaryText)
+                            .lineSpacing(2.5)
                     }
                     Spacer(minLength: 16)
                     HStack {
@@ -721,7 +786,7 @@ struct AnthropicSettingsView: View {
                     Image(systemName: "info.circle")
                         .foregroundColor(theme.secondaryText)
                     Text("Temperature, Top P and Top K are not available on this model — Anthropic removed them for this generation. Steer the response with your system instructions and the Thinking Effort setting instead.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
                 }
                 .accessibilityElement(children: .combine)
@@ -731,8 +796,8 @@ struct AnthropicSettingsView: View {
 
             // Extended Thinking Section
             Text("Extended Thinking")
-                .font(.subheadline)
-                .fontWeight(.semibold)
+                .font(theme.fontSubheadline.weight(.semibold))
+                .foregroundColor(theme.primaryText)
                 .padding(.top, 8)
 
             // ⚠️ HIDDEN, not disabled, on models where thinking is always on (Fable 5 / Mythos 5).
@@ -743,8 +808,13 @@ struct AnthropicSettingsView: View {
             if generation.acceptsDisabledThinking {
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Enable Thinking").fontWeight(.medium)
-                        Text("Claude will reason internally before responding. Improves complex task performance.").font(.caption).foregroundColor(theme.secondaryText)
+                        Text("Enable Thinking")
+                            .font(theme.fontFootnote.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
+                        Text("Claude will reason internally before responding. Improves complex task performance.")
+                            .font(theme.fontCaption2)
+                            .foregroundColor(theme.secondaryText)
+                            .lineSpacing(2.5)
                     }
                     Spacer(minLength: 16)
                     Toggle("", isOn: $config.extendedThinking)
@@ -757,7 +827,7 @@ struct AnthropicSettingsView: View {
                     Image(systemName: "info.circle")
                         .foregroundColor(theme.secondaryText)
                     Text("Thinking is always on for this model and cannot be switched off. Use Thinking Effort below to control how much reasoning Claude spends before answering.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
                 }
                 .accessibilityElement(children: .combine)
@@ -776,9 +846,13 @@ struct AnthropicSettingsView: View {
                 if generation.acceptsEffort {
                     HStack(alignment: .center) {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Thinking Effort").fontWeight(.medium)
+                            Text("Thinking Effort")
+                                .font(theme.fontFootnote.weight(.semibold))
+                                .foregroundColor(theme.primaryText)
                             Text("How much reasoning Claude spends before answering. Higher costs more tokens and latency.")
-                                .font(.caption).foregroundColor(theme.secondaryText)
+                                .font(theme.fontCaption2)
+                                .foregroundColor(theme.secondaryText)
+                                .lineSpacing(2.5)
                         }
                         Spacer(minLength: 16)
                         Picker("", selection: $config.thinkingEffort.toNonOptional(defaultValue: "")) {
@@ -795,11 +869,16 @@ struct AnthropicSettingsView: View {
                 } else {
                     HStack(alignment: .center) {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Thinking Budget").fontWeight(.medium)
-                            Text("Max tokens for internal reasoning. Must be less than Max Output Tokens.").font(.caption).foregroundColor(theme.secondaryText)
+                            Text("Thinking Budget")
+                                .font(theme.fontFootnote.weight(.semibold))
+                                .foregroundColor(theme.primaryText)
+                            Text("Max tokens for internal reasoning. Must be less than Max Output Tokens.")
+                                .font(theme.fontCaption2)
+                                .foregroundColor(theme.secondaryText)
+                                .lineSpacing(2.5)
                             if (config.thinkingBudgetTokens ?? 10000) >= config.maxTokens {
                                 Text("Exceeds Max Output Tokens (\(config.maxTokens)) — the request will be sent with a raised limit of \((config.thinkingBudgetTokens ?? 10000) + 1024).")
-                                    .font(.caption).foregroundColor(.orange)
+                                    .font(theme.fontCaption2).foregroundColor(.orange)
                             }
                         }
                         Spacer(minLength: 16)
@@ -837,8 +916,13 @@ struct OpenAISettingsView: View {
             // Max Tokens
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Max Output Tokens").fontWeight(.medium)
-                    Text("Maximum length of the generated response. Leave at 0 for model default.").font(.caption).foregroundColor(theme.secondaryText)
+                    Text("Max Output Tokens")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
+                    Text("Maximum length of the generated response. Leave at 0 for model default.")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
                 Spacer(minLength: 16)
                 HStack {
@@ -864,8 +948,13 @@ struct OpenAISettingsView: View {
                 // Temperature
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Temperature").fontWeight(.medium)
-                        Text("Controls the randomness of the generated response.").font(.caption).foregroundColor(theme.secondaryText)
+                        Text("Temperature")
+                            .font(theme.fontFootnote.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
+                        Text("Controls the randomness of the generated response.")
+                            .font(theme.fontCaption2)
+                            .foregroundColor(theme.secondaryText)
+                            .lineSpacing(2.5)
                     }
                     Spacer(minLength: 16)
                     HStack {
@@ -884,8 +973,13 @@ struct OpenAISettingsView: View {
                 // Top P
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Top P").fontWeight(.medium)
-                        Text("Cumulative probability of tokens to consider.").font(.caption).foregroundColor(theme.secondaryText)
+                        Text("Top P")
+                            .font(theme.fontFootnote.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
+                        Text("Cumulative probability of tokens to consider.")
+                            .font(theme.fontCaption2)
+                            .foregroundColor(theme.secondaryText)
+                            .lineSpacing(2.5)
                     }
                     Spacer(minLength: 16)
                     HStack {
@@ -906,7 +1000,7 @@ struct OpenAISettingsView: View {
                     Image(systemName: "info.circle")
                         .foregroundColor(theme.secondaryText)
                     Text("Temperature and Top P are not available on reasoning models — OpenAI fixes sampling for this family and rejects both. Steer the response with your system instructions and the Reasoning Effort setting instead.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
                 }
                 .accessibilityElement(children: .combine)
@@ -917,14 +1011,19 @@ struct OpenAISettingsView: View {
 
                 // Reasoning Effort — o-series and GPT-5 only; other models reject the parameter.
                 Text("Reasoning")
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
+                    .font(theme.fontSubheadline.weight(.semibold))
+                    .foregroundColor(theme.primaryText)
                     .padding(.top, 8)
 
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Reasoning Effort").fontWeight(.medium)
-                        Text("Controls how much the model thinks before answering.").font(.caption).foregroundColor(theme.secondaryText)
+                        Text("Reasoning Effort")
+                            .font(theme.fontFootnote.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
+                        Text("Controls how much the model thinks before answering.")
+                            .font(theme.fontCaption2)
+                            .foregroundColor(theme.secondaryText)
+                            .lineSpacing(2.5)
                     }
                     Spacer(minLength: 16)
                     Picker("Reasoning Effort", selection: $config.reasoningEffort.toNonOptional(defaultValue: "")) {

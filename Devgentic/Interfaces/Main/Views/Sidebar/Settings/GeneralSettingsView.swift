@@ -71,101 +71,8 @@ struct GeneralSettingsView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
-                
-                // 1. Developer Mode Section
-                SettingsCard(title: "Developer", icon: "hammer.fill", theme: theme) {
-                    SettingsRow(
-                        title: "Developer Mode",
-                        description: "When enabled, the console logs the full prompt sent to the model, including the file contents and personal context it carries. This is live-console only — it is never written to disk or included in an exported diagnostic bundle. Developer Mode does not change what is stored: which logs are kept on disk is decided solely by Store Diagnostic Traces below.",
-                        theme: theme
-                    ) {
-                        Toggle("", isOn: $developerMode)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                            .tint(theme.accentColor)
-                    }
 
-                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
-
-                    SettingsRow(
-                        title: "Store Diagnostic Traces",
-                        description: "Records sanitized error and warning diagnostics — logs, error analytics, and crash reports — so problem reports contain enough detail to fix issues. Nothing leaves your Mac unless you export a report. Basic execution traces are always stored locally and purged after 30 days.",
-                        theme: theme
-                    ) {
-                        Toggle("", isOn: $diagnosticsEnabled)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                            .tint(theme.accentColor)
-                    }
-
-                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
-
-                    SettingsRow(
-                        title: "Diagnostics Storage",
-                        description: "On-disk size of the local trace database (traces, spans, and events powering the Report inspector and problem reports). Entries older than 30 days are purged automatically at launch.",
-                        theme: theme
-                    ) {
-                        Text(diagnosticsStorageText)
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .foregroundColor(theme.accentColor)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(theme.accentColor.opacity(0.08))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(theme.accentColor.opacity(0.2), lineWidth: 0.5)
-                            )
-                    }
-
-                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
-
-                    SettingsRow(
-                        title: "Open Diagnostic Bundle…",
-                        description: "Inspect a diagnostic bundle (.zip) exported from another Devgentic install — view its trace, spans, and events. Read-only.",
-                        theme: theme
-                    ) {
-                        Button {
-                            showBundleViewer = true
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: "folder.badge.plus")
-                                Text("Open…")
-                            }
-                            .font(.system(size: 11, weight: .semibold))
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-                }
-                .task {
-                    guard let store = TraceStore.shared else {
-                        diagnosticsStorageText = "Unavailable"
-                        return
-                    }
-                    let bytes = store.databaseFileSizeBytes()
-                    let count = (try? store.traceCount()) ?? 0
-                    diagnosticsStorageText = "\(count) traces · " +
-                        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-                }
-                .sheet(isPresented: $showBundleViewer) { BundleViewerView() }
-
-                // 2. Language Model Section
-                SettingsCard(title: "Language Model", icon: "text.bubble.fill", theme: theme) {
-                    SettingsRow(
-                        title: "Stream LLM Responses",
-                        description: "When enabled, the LLM response will appear word-by-word. Disable this if you prefer to receive the full response at once after it has been generated.",
-                        theme: theme
-                    ) {
-                        Toggle("", isOn: Bindable(viewModel).useStreamingResponse)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
-                            .tint(theme.accentColor)
-                    }
-
-                }
-
-                // 3. Speech Recognition Section
+                // 1. Speech Recognition Section
                 SettingsCard(title: "Speech Recognition", icon: "waveform", theme: theme) {
 
                     // Model Picker
@@ -294,8 +201,100 @@ struct GeneralSettingsView: View {
                     Text(settingsAlertMessage)
                 }
 
-                // 3. Intelligence Core — Moved to dedicated settings section
-                // Navigate to Settings > Core Intelligence for full configuration.
+                // 2. Notifications Section
+                NotificationSettingsSection()
+
+                // 3. Language Model Section
+                SettingsCard(title: "Language Model", icon: "text.bubble.fill", theme: theme) {
+                    SettingsRow(
+                        title: "Stream LLM Responses",
+                        description: "When enabled, the LLM response will appear word-by-word. Disable this if you prefer to receive the full response at once after it has been generated.",
+                        theme: theme
+                    ) {
+                        Toggle("", isOn: Bindable(viewModel).useStreamingResponse)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                            .tint(theme.accentColor)
+                    }
+                }
+
+                // 4. Observability Section (formerly Developer)
+                SettingsCard(title: "Observability", icon: "chart.xyaxis.line", theme: theme) {
+                    SettingsRow(
+                        title: "Developer Mode",
+                        description: "When enabled, the console logs the full prompt sent to the model, including the file contents and personal context it carries. This is live-console only — it is never written to disk or included in an exported diagnostic bundle. Developer Mode does not change what is stored: which logs are kept on disk is decided solely by Store Diagnostic Traces below.",
+                        theme: theme
+                    ) {
+                        Toggle("", isOn: $developerMode)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                            .tint(theme.accentColor)
+                    }
+
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+
+                    SettingsRow(
+                        title: "Store Diagnostic Traces",
+                        description: "Records sanitized error and warning diagnostics — logs, error analytics, and crash reports — so problem reports contain enough detail to fix issues. Nothing leaves your Mac unless you export a report. Basic execution traces are always stored locally and purged after 30 days.",
+                        theme: theme
+                    ) {
+                        Toggle("", isOn: $diagnosticsEnabled)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                            .tint(theme.accentColor)
+                    }
+
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+
+                    SettingsRow(
+                        title: "Diagnostics Storage",
+                        description: "On-disk size of the local trace database (traces, spans, and events powering the Report inspector and problem reports). Entries older than 30 days are purged automatically at launch.",
+                        theme: theme
+                    ) {
+                        Text(diagnosticsStorageText)
+                            .font(theme.fontCodeCaption)
+                            .foregroundColor(theme.accentColor)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(theme.accentColor.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(theme.accentColor.opacity(0.2), lineWidth: 0.5)
+                            )
+                    }
+
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+
+                    SettingsRow(
+                        title: "Open Diagnostic Bundle",
+                        description: "Inspect a diagnostic bundle (.zip) exported from another Devgentic install — view its trace, spans, and events. Read-only.",
+                        theme: theme
+                    ) {
+                        TactileButton(
+                            title: "Open",
+                            icon: "folder.badge.plus",
+                            variant: .secondary,
+                            size: .compact
+                        ) {
+                            showBundleViewer = true
+                        }
+                    }
+                }
+                .task {
+                    guard let store = TraceStore.shared else {
+                        diagnosticsStorageText = "Unavailable"
+                        return
+                    }
+                    let bytes = store.databaseFileSizeBytes()
+                    let count = (try? store.traceCount()) ?? 0
+                    diagnosticsStorageText = "\(count) traces · " +
+                        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+                }
+                .sheet(isPresented: $showBundleViewer) { BundleViewerView() }
+
+                // 5. MLX Models & HuggingFace Section
+                ModelSettingsSection()
             }
             .padding(24)
             .padding(.bottom, 24)

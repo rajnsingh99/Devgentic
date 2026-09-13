@@ -22,13 +22,12 @@ import os
 @MainActor
 final class ConversationSyncService {
 
-    private let logger = Logger(subsystem: DGLogger.subsystem, category: "ConversationSync")
+    private let logger = DGLogger(category: "ConversationSync")
 
     private weak var chatHistoryViewModel: ChatHistoryViewModel?
     private weak var activeStreamManager: ActiveStreamManager?
 
     /// Tracks message IDs already in the view (to avoid duplicate insertions).
-    private var syncedMessageIDs: Set<UUID> = []
 
     /// Bridges `ActiveStreamManager.activeStreams` changes so we can inject
     /// newly-started streams into the visible conversation.
@@ -52,8 +51,10 @@ final class ConversationSyncService {
     /// ⚠️ Was `currentChatMessages.first?.conversationId` — identity inferred from POSITION, and
     /// the weakest of the competing definitions in the codebase. THE FAILURE THAT FIXES: after a
     /// pre-clear (`= []` — the welcome screen, an interface-mode switch, ⌘N) the array is empty,
-    /// so this returned nil and the observer bailed. The stream was never injected and
-    /// `syncedMessageIDs` never recorded it, leaving a bubble that only appeared on reload.
+    /// so this returned nil and the observer bailed. The stream was never injected, leaving a bubble
+    /// that only appeared on reload. (This sentence named `syncedMessageIDs` until [MIR-6] deleted
+    /// that set — a comment describing a field that no longer exists is how the next reader is sent
+    /// looking for state that is not there.)
     ///
     /// `destinationConversationID` is the authority for this question, and it is VIEWER identity:
     /// `loadingConversationID ?? viewerOwningConversationID`. It does not lead the user's
@@ -102,18 +103,21 @@ final class ConversationSyncService {
                       let asm = self.activeStreamManager else { return }
                 guard let destinationID = self.destinationConversationID else { return }
 
+                // ⚠️⚠️ [MIR-6] THE `syncedMessageIDs` SET IS GONE, AND DELETING IT IS MORE CORRECT
+                // THAN RESETTING IT. It was a second, weaker copy of the question the next line
+                // already answers authoritatively — "is this message in the view?" — and its only
+                // reset hook (`resetForConversation`) had ZERO callers, so it grew for the life of
+                // the process and could SUPPRESS an injection the view genuinely needed after a
+                // conversation switch. Keeping it would have meant either wiring the dead hook up or
+                // documenting an unwritten cross-file claim about what `loadConversation` merges —
+                // the kind of load-bearing assumption about another file this codebase's comments
+                // keep getting wrong. Asking the view directly cannot go stale, and unbounded growth
+                // becomes unrepresentable rather than merely unlikely.
                 for (_, message) in asm.activeStreams {
                     guard message.conversationId == destinationID else { continue }
-                    guard !self.syncedMessageIDs.contains(message.id) else { continue }
-
-                    let alreadyInView = chvm.currentChatMessages.contains { $0.id == message.id }
-                    guard !alreadyInView else {
-                        self.syncedMessageIDs.insert(message.id)
-                        continue
-                    }
+                    guard !chvm.currentChatMessages.contains(where: { $0.id == message.id }) else { continue }
 
                     chvm.currentChatMessages.insert(message, at: 0)
-                    self.syncedMessageIDs.insert(message.id)
                     self.logger.info("[Sync] Injected streaming message \(message.id) into displayed conversation.")
                 }
             }
@@ -122,14 +126,4 @@ final class ConversationSyncService {
 
     // CoreData observation removed — SwiftData handles persistence updates via @Observable.
 
-    /// Called when the displayed conversation changes (to reset tracking state).
-    func resetForConversation(_ conversationID: UUID?) {
-        syncedMessageIDs.removeAll()
-        // Pre-populate with existing messages in the view
-        if let messages = chatHistoryViewModel?.currentChatMessages {
-            for msg in messages {
-                syncedMessageIDs.insert(msg.id)
-            }
-        }
-    }
 }

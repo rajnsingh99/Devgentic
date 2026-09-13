@@ -131,9 +131,11 @@ final class ZZAuditTabLifecycleTests: XCTestCase {
                        "B's stash still holds B's tab")
     }
 
-    /// Close-all does not clear the dictionary entry, and a SAME-conversation reload
-    /// (the `toggleUserMessagesFilter` path) skips the stash — so the restore rehydrates
-    /// tabs the user explicitly closed.
+    /// Close-all does not clear the dictionary entry, and a SAME-conversation reload skips the
+    /// stash — so the restore rehydrates tabs the user explicitly closed. [vm-9] The route this
+    /// comment used to name (the user-messages filter) is deleted; the live one is QuickAccess
+    /// re-opening the conversation it already holds (`QuickAccessSessionViewModel` calls
+    /// `loadConversation(id:)` with its own `conversationID` on resume).
     func testClosedTabsDoNotResurrectOnSameConversationReload() async {
         await viewModel.loadConversation(id: conversationA)
         viewModel.showCodeInViewer(language: "swift", code: "let a = 1")
@@ -145,7 +147,7 @@ final class ZZAuditTabLifecycleTests: XCTestCase {
         viewModel.forceCloseAllCodeViewerTabs()
         XCTAssertTrue(viewModel.codeViewerTabs.isEmpty, "user closed everything")
 
-        // Exactly what toggleUserMessagesFilter does: reload the SAME conversation.
+        // Reload the SAME conversation — what a QuickAccess resume does.
         await viewModel.loadConversation(id: conversationA)
 
         XCTAssertTrue(viewModel.codeViewerTabs.isEmpty,

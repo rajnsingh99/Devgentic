@@ -113,10 +113,23 @@ enum ImageExport {
         return panel
     }
 
-    static func copyToPasteboard(_ image: NSImage) {
+    /// Puts an image on the general pasteboard. Returns whether it actually landed.
+    ///
+    /// ⚠️ `writeObjects` returns a Bool and this used to DISCARD it, then log "✅ Image copied to
+    /// clipboard" unconditionally — so on the one path that can fail, the log asserted success
+    /// while `clearContents()` had already emptied the clipboard, leaving the user with neither
+    /// the new image nor what they had before. Narrow, but it is a lying log over a destructive
+    /// step, which is the combination worth closing. Callers that show a "Copied ✓" affordance
+    /// should key it off the result rather than off having called this.
+    @discardableResult
+    static func copyToPasteboard(_ image: NSImage) -> Bool {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.writeObjects([image])
+        guard pasteboard.writeObjects([image]) else {
+            logger.error("[MEDIA] Image copy FAILED — the pasteboard refused the image. CONSEQUENCE: the clipboard was already cleared, so it now holds NOTHING; the caller must not report success.")
+            return false
+        }
         logger.info("✅ Image copied to clipboard.")
+        return true
     }
 }

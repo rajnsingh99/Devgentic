@@ -17,7 +17,7 @@ actor DiscordAPIClient {
     private let botToken: String
     private let session: URLSession
     private let baseURL = "https://discord.com/api/v10"
-    private let logger = Logger(subsystem: DGLogger.subsystem, category: "DiscordAPI")
+    private let logger = DGLogger(category: "DiscordAPI")
 
     /// Application ID — set after READY event provides it.
     var applicationID: String?
@@ -53,8 +53,10 @@ actor DiscordAPIClient {
 
     /// Sends multiple chunked messages for long responses (Discord's 2000-char limit).
     func sendChunkedMessage(channelID: String, content: String) async throws {
+        // ⚠️ 1950 rather than Discord's 2000 — margin for the markdown escaping applied after this
+        // budget. Measured in UTF-16 by `RemoteTextBudget.chunk`; see its header.
         let chunks = DiscordAPIClient.chunkText(content, maxLength: 1950)
-        for chunk in chunks {
+        try await RemoteChunkedSend.send(chunks) { chunk in
             try await sendMessage(channelID: channelID, content: chunk)
         }
     }
@@ -162,39 +164,6 @@ actor DiscordAPIClient {
 
     // MARK: - Text Chunking
 
-    /// Splits long text into chunks that respect Discord's 2000-char message limit.
-    /// Tries to split on paragraph boundaries first, then falls back to hard splits.
-    static func chunkText(_ text: String, maxLength: Int = 1950) -> [String] {
-        guard text.count > maxLength else { return [text] }
-
-        var chunks: [String] = []
-        var remaining = text
-
-        while !remaining.isEmpty {
-            if remaining.count <= maxLength {
-                chunks.append(remaining)
-                break
-            }
-
-            let searchRange = remaining.prefix(maxLength)
-            if let paragraphBreak = searchRange.range(of: "\n\n", options: .backwards) {
-                let chunk = String(remaining[remaining.startIndex..<paragraphBreak.upperBound])
-                chunks.append(chunk)
-                remaining = String(remaining[paragraphBreak.upperBound...])
-            } else if let lineBreak = searchRange.range(of: "\n", options: .backwards) {
-                let chunk = String(remaining[remaining.startIndex..<lineBreak.upperBound])
-                chunks.append(chunk)
-                remaining = String(remaining[lineBreak.upperBound...])
-            } else {
-                let idx = remaining.index(remaining.startIndex, offsetBy: maxLength)
-                chunks.append(String(remaining[remaining.startIndex..<idx]))
-                remaining = String(remaining[idx...])
-            }
-        }
-
-        return chunks
-    }
-
     // MARK: - Private Helpers
 
     private func request<R: Decodable>(method: String, path: String) async throws -> R {
@@ -245,6 +214,17 @@ actor DiscordAPIClient {
 
         return try JSONDecoder().decode(R.self, from: data)
     }
+
+    /// Splits text to this platform's message budget.
+    ///
+    /// ⚠️ A FORWARDER, NOT AN IMPLEMENTATION. The real one is `RemoteTextBudget.chunk`, shared by all
+    /// three clients — see its header for the UTF-16 unit bug that three separate copies of this
+    /// function each carried. It stays as a named entry point so this client's own tests exercise
+    /// the same call production takes, rather than the shared helper in isolation.
+    static func chunkText(_ text: String, maxLength: Int = 1950) -> [String] {
+        RemoteTextBudget.chunk(text, limit: maxLength)
+    }
+
 }
 
 // MARK: - Helper Types
@@ -252,3 +232,14 @@ actor DiscordAPIClient {
 private struct EmptyBody: Encodable {}
 
 struct EmptyResponse: Decodable {}
+
+// MARK: - Rate-limit reporting
+
+extension DiscordAPIError: RemoteRateLimitedError {
+    /// ⚠️ `retryAfter` was parsed from the `Retry-After` header and then read by nothing but
+    /// `errorDescription`. This is the reader that makes it do something.
+    var retryAfterSeconds: TimeInterval? {
+        guard case .rateLimited(let retryAfter) = self else { return nil }
+        return retryAfter
+    }
+}

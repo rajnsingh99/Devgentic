@@ -162,6 +162,47 @@ struct OllamaModelStoreContent: View {
             // two references in the repo — its declaration and its assignment — and
             // `modelRemoveError` had none outside the service that writes it. A refused delete or a
             // failed pull left the store looking idle and unchanged.
+            // ⚠️ Status BELOW errors in precedence, and only when there is no error to show: the
+            // outcome keeps its last value after a failure, so rendering both would put two
+            // descriptions of the same event side by side.
+            //
+            // ⚠️ THE ICON COMES FROM THE OUTCOME, NEVER FROM `isDownloading`. Deriving it from the
+            // in-flight flag meant every terminal state that was not "in progress" rendered as
+            // success — so "Download cancelled." and "Failed to pull X." both got a green tick the
+            // instant the pull stopped. A phase cannot answer "did this succeed?".
+            if viewModel.deleteErrorMessage == nil,
+               viewModel.downloadErrorMessage == nil,
+               let status = viewModel.pullStatus {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: pullStatusIcon(for: status))
+                        .foregroundColor(pullStatusColor(for: status))
+                        .accessibilityHidden(true)
+                    Text(status.message)
+                        .font(theme.fontCaption)
+                        .foregroundColor(theme.primaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 8)
+                    // ⚠️ A banner with no way out is a banner that lives forever. This one used to
+                    // persist for the rest of the process: it had no dismiss control, and the only
+                    // thing that reset the underlying value had no callers.
+                    if status.isTerminal {
+                        Button {
+                            viewModel.dismissPullStatus()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(theme.secondaryText)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Dismiss pull status")
+                    }
+                }
+                .padding(12)
+                .background(theme.secondaryBackground.opacity(0.5))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .padding(.horizontal, 20)
+                .padding(.bottom, 8)
+            }
+
             if let message = viewModel.deleteErrorMessage ?? viewModel.downloadErrorMessage {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -270,6 +311,30 @@ struct OllamaModelStoreContent: View {
     // for an Ollama pull, so `OllamaModelStoreViewModel.cancelDownload()` is now unreferenced.
     // Deleting it would remove the only implementation of a capability users arguably want, and
     // wiring a new Cancel control is a feature decision, not part of A42. Left for its own finding.
+
+    /// ⚠️ Exhaustive, no `default:` — a new outcome must fail the build here rather than silently
+    /// inherit another state's icon. Inheriting silently is exactly how cancellation and failure
+    /// came to render as success.
+    private func pullStatusIcon(for status: OllamaService.PullTerminalState) -> String {
+        switch status {
+        case .started:   return "arrow.down.circle"
+        case .succeeded: return "checkmark.circle.fill"
+        case .cancelled: return "slash.circle"
+        case .failed:    return "exclamationmark.triangle.fill"
+        }
+    }
+
+    /// ⚠️ `.cancelled` is deliberately NEITHER green NOR red: the user asked for it, so it is not
+    /// a success to celebrate and not an error to alarm them about.
+    private func pullStatusColor(for status: OllamaService.PullTerminalState) -> Color {
+        switch status {
+        case .started:   return theme.accentColor
+        case .succeeded: return theme.successColor
+        case .cancelled: return theme.secondaryText
+        case .failed:    return theme.errorColor
+        }
+    }
+
 }
 
 struct OllamaModelCardView: View {

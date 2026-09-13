@@ -87,7 +87,10 @@ final class ProviderSessionContext: ChatOpsSessionContext {
         }
     }
 
-    var securityTier: ChatOpsSecurityTier { config.securityTier }
+    /// ⚠️ PROVIDER-SCOPED, for exactly the reason this type's header gives about the cursor: reading
+    /// the bare property would report TELEGRAM's tier on Discord and Slack — which is what `/status`
+    /// did, and what every tier refusal message quoted.
+    var securityTier: ChatOpsSecurityTier { config.securityTier(for: provider) }
 }
 
 // MARK: - Profile reading
@@ -140,14 +143,41 @@ final class ChatOpsCommandService {
 
     private let logger = DGLogger(category: "ChatOpsCommands")
 
-    private let runControl: any RemoteRunControlling
+    /// ⚠️⚠️ [LIFE-7] WEAK, BECAUSE STRONG RE-CREATED THROUGH THE BACK DOOR THE EXACT RETAIN CYCLE
+    /// `ChatOpsCoordinator`'s `weak var viewModel` was written to prevent. The three bridges declare
+    /// `weak var viewModel` and then hold THIS service strongly — and this service held the view
+    /// model strongly, so the cycle closed: view model → bridge → command service → view model.
+    /// `stop()` did not clear `commands` either, so it outlived a disconnect.
+    ///
+    /// ⚠️ AND THE FIX GOT LARGER TODAY, NOT SMALLER: `submitTurn` routes all free text through this
+    /// service, so it is now on the main command path for all three providers rather than a
+    /// read-only helper. Both protocols are already `AnyObject`-constrained, so no protocol change
+    /// is needed — and deliberately NOT composed into one `RemoteHosting` type, because the tests
+    /// inject two separate fakes.
+    private weak var runControlRef: (any RemoteRunControlling)?
     private let conversations: any ConversationReading
     /// ⚠️ ONE SERVICE PER PROVIDER. The provider decides the conversation cursor, the recorded
     /// origin and the log attribution, and `session` must be scoped to the SAME one — which is why
     /// the bridge constructs both together rather than passing a provider per call.
     private let provider: RemoteChannel.Provider
     private var session: any ChatOpsSessionContext
-    private let commanding: any RemoteConversationCommanding
+    private weak var commandingRef: (any RemoteConversationCommanding)?
+
+    /// ⚠️ Named so the 13 existing call sites read unchanged; the optionality is the point.
+    private var runControl: (any RemoteRunControlling)? { runControlRef }
+    private var commanding: (any RemoteConversationCommanding)? { commandingRef }
+
+    /// What to post when the host is gone.
+    ///
+    /// ⚠️⚠️ ANSWERED, NOT SWALLOWED — the `[NEW-4]` rule this file already applies to `attachMirror`.
+    /// A bridge can outlive the window it acts for (it is retained by the coordinator, the view model
+    /// is not), and a command that silently does nothing is the failure this whole path exists to
+    /// avoid: the user sees a bot that stopped answering with no explanation anywhere.
+    private func hostLost(_ verb: String) -> RemoteView {
+        logger.error("[CHATOPS] A \(provider.rawValue) \(verb) could not run: the app's main view model was deallocated while this bridge was still listening. CONSEQUENCE: the command is REFUSED and the user is told, rather than silently doing nothing. The bridge has outlived the window it acts for and should have been stopped.")
+        return .notice(Notice(tone: .failure,
+                              body: "⚠️ Devgentic's main window is no longer available, so that command could not run. Reopen the app and try again."))
+    }
     private let profiles: any ChatOpsProfileReading
     private let recordOrigin: (RemoteConversationOrigin, UUID) -> Void
 
@@ -166,8 +196,8 @@ final class ChatOpsCommandService {
         recordOrigin: @escaping (RemoteConversationOrigin, UUID) -> Void = RemoteConversationOriginStore.record
     ) {
         self.provider = provider
-        self.runControl = runControl
-        self.commanding = commanding
+        self.runControlRef = runControl
+        self.commandingRef = commanding
         self.conversations = conversations
         self.profiles = profiles
         self.session = session ?? ProviderSessionContext(provider: provider)
@@ -280,8 +310,8 @@ final class ChatOpsCommandService {
         // ⚠️ Conversation-scoped, not app-global. `/status` once read `vm.streamingMessageID` and so
         // reported "streaming" whenever ANY conversation was busy, including a main-window run the
         // remote user has nothing to do with.
-        let isStreaming = activeID.map { runControl.hasActiveRun(inConversation: $0) } ?? false
-        let hitlPending = activeID.flatMap { runControl.pendingClarificationID(inConversation: $0) } != nil
+        let isStreaming = activeID.flatMap { runControl?.hasActiveRun(inConversation: $0) } ?? false
+        let hitlPending = activeID.flatMap { runControl?.pendingClarificationID(inConversation: $0) } != nil
 
         // ⚠️ The active conversation's title cannot come from the list above: a conversation older
         // than that window would render as "None" while still being active.
@@ -393,7 +423,7 @@ final class ChatOpsCommandService {
     /// send leaves the cursor unmoved while the user has been told it moved — and the next `/status`
     /// or free-text message goes to the wrong conversation.
     func newConversation() -> RemoteView {
-        guard let profile = Self.defaultProfile(from: profiles.sharedProfiles(), selected: commanding.defaultProfileID) else {
+        guard let profile = Self.defaultProfile(from: profiles.sharedProfiles(), selected: commanding?.defaultProfileID) else {
             return .notice(Notice(tone: .warning, body: "⚠️ No agent profile configured. Set one in Devgentic Settings."))
         }
 
@@ -406,7 +436,7 @@ final class ChatOpsCommandService {
 
         if let reusedID = reusable {
             session.activeConversationID = reusedID
-            commanding.focusConversationInMainWindow(reusedID)
+            commanding?.focusConversationInMainWindow(reusedID)
             // ⚠️ No origin record on the reuse branch — the conversation already has whatever
             // provenance it was created with, and stamping it here would relabel a locally-created
             // conversation as remote.
@@ -434,6 +464,7 @@ final class ChatOpsCommandService {
         // fallback for conversations created BEFORE origins were recorded; those keep their stamped
         // titles and keep resolving. Only new conversations change, and they change to being named
         // after what the user actually said.
+        guard let commanding else { return hostLost("/new") }
         let conversationID = commanding.createConversation(profile: profile, title: "")
         // [CF-39] Recorded while it is a FACT, before anything can rename the conversation — and
         // BEFORE the cursor moves, matching the shipping order.
@@ -482,7 +513,7 @@ final class ChatOpsCommandService {
         }
 
         session.activeConversationID = conversationID
-        commanding.focusConversationInMainWindow(conversationID)
+        commanding?.focusConversationInMainWindow(conversationID)
         logger.info("[ChatOps] Mac UI navigated to conversation \(conversationID.uuidString).")
         logger.info("[ChatOps] Switched to conversation \(conversationID.uuidString) via \(provider.rawValue).")
 
@@ -509,7 +540,7 @@ final class ChatOpsCommandService {
             return .notice(Notice(tone: .info, body: "No active conversation to cancel."))
         }
 
-        let hadActiveRun = await runControl.cancelRun(inConversation: conversationID)
+        let hadActiveRun = await runControl?.cancelRun(inConversation: conversationID) ?? false
         logger.info("[CHATOPS] /cancel via \(provider.rawValue) for conversation \(conversationID.uuidString) — hadActiveRun=\(hadActiveRun). CONSEQUENCE: the stream task itself was cancelled (not just the parked HITL), so the run stops instead of continuing after the bot claims it was cancelled.")
 
         // ⚠️ NOT `.failure` on either branch: `RemoteRenderLog.posted` logs a failure notice at
@@ -548,6 +579,78 @@ final class ChatOpsCommandService {
         }
         guard let profileID = row?.boundProfileID else { return nil }
         return profiles.profile(id: profileID)
+    }
+
+    // MARK: - Submitting a turn  (BR-4)
+
+    /// Admits or refuses a remote free-text turn, and submits it when admitted.
+    ///
+    /// ⚠️⚠️ THE THREE STEPS ARE ONE METHOD SO THEIR ORDER CANNOT BE GOT WRONG — the same reasoning
+    /// as `RemoteRunControlling.cancelRun`. They must run as: decide, then register the mirror
+    /// session, then submit. Registering before deciding attaches a remote session to a run that is
+    /// about to be refused; submitting before registering races the mirror against the first
+    /// streamed token. Exposing the steps separately would let each of the three bridges order them
+    /// differently, which is precisely how this subsystem acquired three copies of every other bug.
+    ///
+    /// ⚠️ IT LIVES HERE, NOT IN THE BRIDGES, FOR ONE REASON: THE BRIDGES ARE NOT TESTABLE. They
+    /// construct their own API client, listener and transport inside `start()` and hold a `weak var
+    /// viewModel: MainApplicationViewModel?`, so nothing can stand one up and watch what it submits.
+    /// `ChatOpsCommandService` takes `runControl` and `commanding` as injected seams, so a test can
+    /// report an active run through one and count the submits that reach the other — and a test of
+    /// `RemoteTurnAdmission.decide` alone would stay green for a bridge that never called it.
+    ///
+    /// - Parameter attachMirror: attaches the mirror to this conversation and reports whether it
+    ///   actually managed to. A closure because the transport is the one thing only the bridge holds.
+    ///   ⚠️ NOT CALLED ON A REFUSAL.
+    ///
+    ///   ⚠️⚠️ [NEW-4] IT RETURNS `Bool` BECAUSE `Void` LET IT LIE. This was `() -> Void` and the doc
+    ///   comment claimed the registration was unconditional, but every bridge passed a fully
+    ///   optional-chained body — `self?.remoteMirrorService?.registerSession(...)` — so a nil weak
+    ///   self, a nil mirror or (on Discord and Slack) a nil transport made it a silent no-op. The
+    ///   turn was then submitted anyway: the run streamed to the Mac, spent tokens, possibly ran
+    ///   tools, and the remote user waited forever with nothing logged at any layer. A closure that
+    ///   cannot report failure cannot be checked, so the caller could not have handled it.
+    /// - Returns: `.admitted` when the turn was submitted, `.refused` with the copy to post when it
+    ///   was not. ⚠️ The bridge MUST post a refusal: a silently dropped prompt is the failure this
+    ///   whole path exists to avoid.
+    @discardableResult
+    func submitTurn(prompt: String,
+                    conversationID: UUID,
+                    source: MessageSource,
+                    config: BackendRequestConfig,
+                    attachMirror: () -> Bool) -> RemoteTurnAdmission.Decision {
+
+        let decision = RemoteTurnAdmission.decide(
+            hasActiveRun: runControl?.hasActiveRun(inConversation: conversationID) ?? false
+        )
+
+        guard case .admitted = decision else {
+            logger.warning("[CHATOPS] A \(provider.rawValue) prompt for conversation \(conversationID.uuidString.prefix(8)) was REFUSED because a run is already streaming there. CONSEQUENCE: it was not submitted and the user was told to /cancel or wait; before this check a second prompt started a second root run in the same conversation, so two answers interleaved into one chat, /cancel silently killed both, and a clarification answer could resolve the wrong run's question.")
+            return decision
+        }
+
+        // ⚠️ [NEW-3/NEW-4] THE SUBMIT IS CONDITIONAL ON THE MIRROR, and that ordering is the fix: a
+        // run nobody can hear from is not worth starting. Checked BEFORE `submitRemote` so a failed
+        // attachment costs nothing at all.
+        guard attachMirror() else {
+            logger.error("[CHATOPS] A \(provider.rawValue) prompt for conversation \(conversationID.uuidString.prefix(8)) was REFUSED because the mirror could not be attached — the transport or the mirror service was unavailable. CONSEQUENCE: nothing was submitted and the user was told, which is deliberate: submitting anyway would run the agent on the Mac, spend tokens and possibly run tools while the remote user watched a chat that never answered.")
+            return RemoteTurnAdmission.mirrorUnavailable
+        }
+
+        // ⚠️ [LIFE-7 + NEW-4] A lost host cannot submit, and a turn that cannot run must be REFUSED
+        //   rather than reported as started — the same rule `attachMirror` follows above.
+        guard let commanding else {
+            logger.error("[CHATOPS] A \(provider.rawValue) prompt for conversation \(conversationID.uuidString.prefix(8)) was REFUSED because the app's main view model was deallocated while this bridge was still listening. CONSEQUENCE: nothing was submitted and the user is told, rather than waiting for an answer to a run that could never start.")
+            return RemoteTurnAdmission.hostUnavailable
+        }
+
+        commanding.submitRemote(
+            prompt: prompt,
+            conversationID: conversationID,
+            source: source,
+            config: config
+        )
+        return .admitted
     }
 
     // MARK: - Profiles  (slice 2)
@@ -661,7 +764,7 @@ final class ChatOpsCommandService {
                 body: "⚠️ No active conversation. Run /new first, then choose a profile."
             ))
         }
-        commanding.bindProfile(profile.id, toConversation: conversationID)
+        commanding?.bindProfile(profile.id, toConversation: conversationID)
         logger.info("[CHATOPS] Bound profile \(profile.id.uuidString) to conversation \(conversationID.uuidString) via \(provider.rawValue). CONSEQUENCE: every subsequent free-text message in this conversation runs under that profile, on the Mac as well as remotely.")
 
         return .notice(Notice(
@@ -824,7 +927,7 @@ final class ChatOpsCommandService {
     /// prove the parser branch works and prove nothing about the wiring that can never reach it.
     func pendingClarificationOperationID() -> UUID? {
         guard let conversationID = session.activeConversationID else { return nil }
-        return runControl.pendingClarificationID(inConversation: conversationID)
+        return runControl?.pendingClarificationID(inConversation: conversationID)
     }
 
     /// Whether an inbound plain-text reply should be read as a clarification ANSWER rather than as a

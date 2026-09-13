@@ -72,7 +72,7 @@ struct CoreIntelligenceSettingsView: View {
                                     .foregroundColor(theme.accentColor)
                                     .accessibilityHidden(true)
                                 Text("Select a model below to activate Intelligence Core features.")
-                                    .font(.system(.caption))
+                                    .font(theme.fontCaption2)
                                     .foregroundColor(theme.secondaryText)
                                 Spacer()
                             }
@@ -106,13 +106,14 @@ struct CoreIntelligenceSettingsView: View {
                         // Manage Models button
                         HStack {
                             Spacer()
-                            Button {
+                            TactileButton(
+                                title: "Manage Models",
+                                icon: "square.grid.2x2",
+                                variant: .secondary,
+                                size: .compact
+                            ) {
                                 router.navigate(to: .mlxModelStore(profileID: UUID(), filterForTools: false))
-                            } label: {
-                                Label("Manage Models", systemImage: "square.grid.2x2")
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
                         }
                         .padding(.horizontal, 16)
                         .padding(.bottom, 12)
@@ -183,18 +184,16 @@ struct CoreIntelligenceSettingsView: View {
 
                         // View Profile button (shown when User Personal is enabled)
                         if userPersonalEnabled {
-                            HStack {
+                            HStack(spacing: 8) {
                                 Spacer()
-                                Button {
+                                TactileButton(
+                                    title: "View Profile",
+                                    icon: "person.text.rectangle",
+                                    variant: .secondary,
+                                    size: .compact
+                                ) {
                                     router.navigateToUserPersonalProfile()
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "person.text.rectangle")
-                                        Text("View Profile")
-                                    }
                                 }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
 
                                 if let lastUpdated = UserPersonalService.shared.lastUpdated {
                                     Text("Updated \(lastUpdated.formatted(date: .abbreviated, time: .shortened))")
@@ -214,73 +213,55 @@ struct CoreIntelligenceSettingsView: View {
                     SettingsCard(title: "Debug — Test Intelligence Core", icon: "ant.fill", theme: theme) {
                         VStack(alignment: .leading, spacing: 12) {
                             Text("Simulate a Morning Brief generation to verify IC load/generate/unload lifecycle and memory tracking in Console logs.")
-                               .font(.system(.caption))
+                                .font(theme.fontCaption2)
                                 .foregroundColor(theme.secondaryText)
-                                .lineSpacing(2)
+                                .lineSpacing(2.5)
 
                             HStack(spacing: 12) {
-                                Button {
+                                TactileButton(
+                                    title: isTestRunning ? "Running…" : "Run User Personal",
+                                    icon: "person.text.rectangle.fill",
+                                    variant: .secondary,
+                                    size: .compact,
+                                    isLoading: isTestRunning,
+                                    isDisabled: isTestRunning || selectedModel.isEmpty
+                                ) {
                                     runUserPersonalTest()
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        if isTestRunning {
-                                            ProgressView()
-                                                .controlSize(.small)
-                                        } else {
-                                            Image(systemName: "person.text.rectangle.fill")
-                                        }
-                                        Text(isTestRunning ? "Running..." : "Run User Personal")
-                                    }
                                 }
-                                .buttonStyle(.borderedProminent)
-                                .tint(.purple)
-                                .controlSize(.small)
-                                .disabled(isTestRunning || selectedModel.isEmpty)
 
-                                Button {
+                                TactileButton(
+                                    title: isTestRunning ? "Running…" : "Run Morning Brief",
+                                    icon: "play.fill",
+                                    variant: .primary,
+                                    size: .compact,
+                                    isLoading: isTestRunning,
+                                    isDisabled: isTestRunning || selectedModel.isEmpty
+                                ) {
                                     runMorningBriefTest()
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        if isTestRunning {
-                                            ProgressView()
-                                                .controlSize(.small)
-                                        } else {
-                                            Image(systemName: "play.fill")
-                                        }
-                                        Text(isTestRunning ? "Running..." : "Run Morning Brief")
-                                    }
                                 }
-                                .buttonStyle(.borderedProminent)
-                                .tint(theme.accentColor)
-                                .controlSize(.small)
-                                .disabled(isTestRunning || selectedModel.isEmpty)
 
-                                Button {
+                                TactileButton(
+                                    title: isTestRunning ? "Running…" : "Load → Unload Cycle",
+                                    icon: "arrow.triangle.2.circlepath",
+                                    variant: .secondary,
+                                    size: .compact,
+                                    isLoading: isTestRunning,
+                                    isDisabled: isTestRunning || selectedModel.isEmpty
+                                ) {
                                     runICLoadUnloadTest()
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        if isTestRunning {
-                                            ProgressView()
-                                                .controlSize(.small)
-                                        } else {
-                                            Image(systemName: "arrow.triangle.2.circlepath")
-                                        }
-                                        Text(isTestRunning ? "Running..." : "Load → Unload Cycle")
-                                    }
                                 }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .disabled(isTestRunning || selectedModel.isEmpty)
 
                                 Spacer()
 
                                 if !testLog.isEmpty {
-                                    Button("Clear Log") {
+                                    TactileButton(
+                                        title: "Clear Log",
+                                        icon: "trash",
+                                        variant: .subtle,
+                                        size: .compact
+                                    ) {
                                         testLog.removeAll()
                                     }
-                                    .buttonStyle(.plain)
-                                    .font(.system(.caption))
-                                    .foregroundColor(theme.accentColor)
                                 }
                             }
 
@@ -314,13 +295,13 @@ struct CoreIntelligenceSettingsView: View {
                     SettingsCard(title: "Custom Behavior", icon: "text.quote", theme: theme) {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Custom Prompt")
-                                .font(theme.fontBody.weight(.medium))
+                                .font(theme.fontFootnote.weight(.semibold))
                                 .foregroundColor(theme.primaryText)
 
                             Text("Add a custom instruction that shapes how the Intelligence Core behaves across all features. For example: \"Be concise\" or \"Always respond in Spanish\".")
-                                .font(.system(.caption))
+                                .font(theme.fontCaption2)
                                 .foregroundColor(theme.secondaryText)
-                                .lineSpacing(2)
+                                .lineSpacing(2.5)
 
                             TextEditor(text: $customPrompt)
                                 .font(.system(size: 13, design: .monospaced)) // Fixed size: monospaced input
@@ -579,11 +560,11 @@ private struct SynthesisFamilySection: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Response Synthesis")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(theme.fontFootnote.weight(.semibold))
                         .foregroundColor(theme.primaryText)
 
                     Text("Has Intelligence Core rewrite the agent's final answer from its execution results. Off by default: it polishes output from smaller local models, but in front of a large model it usually shortens an answer that was already better. Pick which model families it applies to.")
-                        .font(.system(size: 11))
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
                         .lineSpacing(2.5)
                         .fixedSize(horizontal: false, vertical: true)
@@ -601,7 +582,7 @@ private struct SynthesisFamilySection: View {
                 Toggle("Remote — cloud API models", isOn: $remoteEnabled)
             }
             .toggleStyle(.checkbox)
-            .font(.system(size: 12))
+            .font(theme.fontCaption2)
             .foregroundColor(theme.primaryText)
             .tint(theme.accentColor)
             // Indented under the heading so the checkboxes read as its options.
@@ -634,7 +615,7 @@ private struct FeatureToggleRow: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
                     Text(title)
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(theme.fontFootnote.weight(.semibold))
                         .foregroundColor(theme.primaryText)
 
                     if comingSoon {
@@ -649,7 +630,7 @@ private struct FeatureToggleRow: View {
                 }
 
                 Text(description)
-                    .font(.system(size: 11))
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
                     .lineSpacing(2.5)
                     .fixedSize(horizontal: false, vertical: true)

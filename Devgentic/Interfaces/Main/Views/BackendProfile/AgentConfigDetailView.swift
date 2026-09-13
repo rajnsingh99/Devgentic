@@ -377,6 +377,8 @@ struct AgentConfigDetailView: View {
             // exist here. Default path keeps the chevron + handleBackTap so
             // the standalone profile screen behaves identically to before.
             DynamicIslandBar(
+                title: editBuffer.draft.displayName,
+                icon: "cpu",
                 onBack: handleBackTap,
                 leadingSymbol: onCancel != nil ? "xmark" : "chevron.left"
             ) {
@@ -535,10 +537,12 @@ struct AgentConfigDetailView: View {
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Inference Capability")
-                            .fontWeight(.medium)
+                            .font(theme.fontFootnote.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
                         Text("Detected architectural support for complex structured reasoning.")
-                            .font(theme.fontCaption)
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
+                            .lineSpacing(2.5)
                     }
 
                     Spacer(minLength: 16)
@@ -547,8 +551,7 @@ struct AgentConfigDetailView: View {
                         let capability = providerConfig.wrappedValue.cognitiveCapability
                         Image(systemName: capabilityIcon(for: capability))
                         Text(capability.localizedTitle)
-                            .font(theme.fontCaption)
-                            .fontWeight(.semibold)
+                            .font(theme.fontCaption2.weight(.semibold))
                     }
                     .padding(.vertical, 4)
                     .padding(.horizontal, 10)
@@ -581,18 +584,18 @@ struct AgentConfigDetailView: View {
 
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Tools")
-                                    .font(theme.fontBody.weight(.medium))
+                                    .font(theme.fontFootnote.weight(.semibold))
                                     .foregroundColor(theme.primaryText)
                                 let count = toolsBinding.wrappedValue.filter { $0.isEnabled }.count
                                 Text(count == 0 ? "No tools enabled" : "\(count) tool(s) active")
-                                    .font(theme.fontCaption)
+                                    .font(theme.fontCaption2)
                                     .foregroundColor(theme.secondaryText)
                             }
                         }
 
                         Spacer(minLength: 16)
 
-                        GlassActionButton(title: "Manage Library...", icon: "arrow.up.forward.app") {
+                        GlassActionButton(title: "Manage Library", icon: "arrow.up.forward.app") {
                             router.navigate(to: .toolLibrary(profileID: editBuffer.draft.id))
                         }
                     }
@@ -733,32 +736,33 @@ struct AgentConfigDetailView: View {
                     HStack(alignment: .center) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Reference Documents")
-                                .font(theme.fontBody.weight(.semibold))
+                                .font(theme.fontSubheadline.weight(.semibold))
                             Text("Add external documents the agent can use as context")
-                            .font(theme.fontCaption)
-                            .foregroundColor(theme.secondaryText)
-                    }
+                                .font(theme.fontCaption2)
+                                .foregroundColor(theme.secondaryText)
+                                .lineSpacing(2.5)
+                        }
 
-                    Spacer(minLength: 16)
+                        Spacer(minLength: 16)
 
-                    GlassActionButton(title: "Add File", icon: "plus") {
-                        showingKnowledgeImporter = true
-                    }
-                    .fileImporter(
-                        isPresented: $showingKnowledgeImporter,
-                        allowedContentTypes: [.item],
-                        allowsMultipleSelection: true
-                    ) { result in
-                        knowledgeImportError = KnowledgeSourceImport.apply(
-                            result, to: knowledgeSourcesBinding, profileKind: "agent")
-                    }
+                        GlassActionButton(title: "Add File", icon: "plus") {
+                            showingKnowledgeImporter = true
+                        }
+                        .fileImporter(
+                            isPresented: $showingKnowledgeImporter,
+                            allowedContentTypes: [.item],
+                            allowsMultipleSelection: true
+                        ) { result in
+                            knowledgeImportError = KnowledgeSourceImport.apply(
+                                result, to: knowledgeSourcesBinding, profileKind: "agent")
+                        }
                     }
 
                     // The reason "Add File" appeared to do nothing (register A60). Cleared as soon as the
                     // next import succeeds or is cancelled, so it never lingers past the attempt it describes.
                     if let knowledgeImportError {
                         Label(knowledgeImportError, systemImage: "exclamationmark.triangle")
-                            .font(theme.fontCaption)
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.warningColor)
                             .fixedSize(horizontal: false, vertical: true)
                             .padding(8)
@@ -767,33 +771,34 @@ struct AgentConfigDetailView: View {
                     }
 
                     if !knowledgeSourcesBinding.wrappedValue.isEmpty {
-                    VStack(spacing: 8) {
-                        ForEach(knowledgeSourcesBinding.wrappedValue) { source in
-                            KnowledgeSourceRow(source: source, theme: theme) {
-                                knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
+                        VStack(spacing: 8) {
+                            ForEach(knowledgeSourcesBinding.wrappedValue) { source in
+                                KnowledgeSourceRow(source: source, theme: theme) {
+                                    knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
+                                }
                             }
                         }
-                    }
-                    .padding(.leading, 12)
-                } else {
-                     Text("No reference documents added.")
-                        .font(theme.fontCaption)
-                        .foregroundColor(theme.secondaryText)
-                        .italic()
                         .padding(.leading, 12)
+                    } else {
+                        Text("No reference documents added.")
+                            .font(theme.fontCaption2)
+                            .foregroundColor(theme.secondaryText)
+                            .italic()
+                            .padding(.leading, 12)
+                    }
                 }
-            }
 
-            Divider()
+                Divider()
 
                 // File Handling Strategy
                 VStack(alignment: .leading, spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("File Handling")
-                            .font(theme.fontBody.weight(.semibold))
+                            .font(theme.fontSubheadline.weight(.semibold))
                         Text("How attached files and knowledge sources are delivered to the model")
-                            .font(theme.fontCaption)
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
+                            .lineSpacing(2.5)
                     }
 
                     FileContextStrategyPicker(
@@ -815,7 +820,7 @@ struct AgentConfigDetailView: View {
                 // Limits
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Limits")
-                        .font(theme.fontBody.weight(.semibold))
+                        .font(theme.fontSubheadline.weight(.semibold))
                         .foregroundColor(theme.primaryText)
 
                     ExecutionLimitsSection(
@@ -830,7 +835,7 @@ struct AgentConfigDetailView: View {
                 // Error Recovery
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Error Recovery")
-                        .font(theme.fontBody.weight(.semibold))
+                        .font(theme.fontSubheadline.weight(.semibold))
                         .foregroundColor(theme.primaryText)
 
                     ErrorRecoverySection(
@@ -848,7 +853,7 @@ struct AgentConfigDetailView: View {
                 // and when a workflow node executes this agent.
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Loop Safety")
-                        .font(theme.fontBody.weight(.semibold))
+                        .font(theme.fontSubheadline.weight(.semibold))
                         .foregroundColor(theme.primaryText)
 
                     LoopSafetySection(
@@ -863,7 +868,7 @@ struct AgentConfigDetailView: View {
                 // Conversation Memory
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Conversation Memory")
-                        .font(theme.fontBody.weight(.semibold))
+                        .font(theme.fontSubheadline.weight(.semibold))
                         .foregroundColor(theme.primaryText)
                         .padding(.bottom, 2)
 
@@ -883,12 +888,12 @@ struct AgentConfigDetailView: View {
 
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(strategy.localizedTitle)
-                                            .font(theme.fontSubheadline.weight(.medium))
+                                            .font(theme.fontFootnote.weight(.semibold))
                                             .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
                                         Text(strategy.localizedDescription)
-                                            .font(theme.fontCaption)
+                                            .font(theme.fontCaption2)
                                             .foregroundColor(theme.tertiaryText)
-                                            .lineSpacing(2)
+                                            .lineSpacing(2.5)
                                             .fixedSize(horizontal: false, vertical: true)
                                     }
 
@@ -1135,10 +1140,10 @@ struct SkillManifestRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(manifest.name)
-                    .font(theme.fontBody.weight(.medium))
+                    .font(theme.fontFootnote.weight(.semibold))
                     .foregroundColor(manifest.isEnabled ? theme.primaryText : theme.secondaryText)
                 Text(manifest.description)
-                    .font(theme.fontCaption)
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
                     .lineLimit(isExpanded ? nil : 2)
                 if let compat = manifest.compatibility {

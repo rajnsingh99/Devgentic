@@ -482,10 +482,17 @@ final class DownloadManager {
             }
         } else if let id = ollamaActiveID {
             let modelIdentifier = DownloadHistoryStore.shared.fetch(id: id)?.modelIdentifier ?? ""
-            // Prefer backend-truth over percentage threshold. After a
-            // successful pull, OllamaService `await`s `loadLocalModels`
-            // before flipping `isPullingModel = false`, so by the time
-            // we see the transition, `localModels` is fresh.
+            // Prefer backend-truth over percentage threshold. After a successful pull,
+            // OllamaService awaits its refresh before flipping `isPullingModel = false`, so by
+            // the time we see the transition, `localModels` is fresh.
+            //
+            // ⚠️ THIS COMMENT WAS AN ASSERTION THE CODE DID NOT HONOUR. The refresh call was
+            // `loadLocalModels()`, whose first line is `guard …, !isPullingModel, … else
+            // { return }` — and `isPullingModel` is still true at that point, so it returned
+            // having fetched nothing and `isInstalledNow` was ALWAYS false. Classification
+            // silently rested on the `progress >= 0.99` fallback below. The pull path now calls
+            // an unguarded `performLocalModelRefresh()`; if that is ever reverted, this line goes
+            // back to being a lie and this branch goes back to being dead.
             let isInstalledNow = OllamaService.shared.localModels.contains { $0.name == modelIdentifier }
             let classification: DownloadTerminalClassification
             if let err = errorMessage, !err.isEmpty {

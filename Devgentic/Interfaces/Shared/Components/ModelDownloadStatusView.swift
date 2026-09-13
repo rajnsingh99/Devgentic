@@ -31,6 +31,7 @@ struct ModelDownloadStatusView: View {
     let displayName: String
     let isInstalled: Bool
     var profileID: UUID? = nil
+    var showInstalledLabel: Bool = true
 
     /// Called when the user confirms a fresh download. If `nil`, the view
     /// falls back to `DownloadCoordinator.start…IfNeeded` directly.
@@ -66,6 +67,7 @@ struct ModelDownloadStatusView: View {
         displayName: String? = nil,
         isInstalled: Bool,
         profileID: UUID? = nil,
+        showInstalledLabel: Bool = true,
         onDownloadRequested: (() -> Void)? = nil,
         onDeleteRequested: (() -> Void)? = nil,
         onRevealRequested: (() -> Void)? = nil
@@ -75,6 +77,7 @@ struct ModelDownloadStatusView: View {
         self.displayName = displayName ?? modelIdentifier
         self.isInstalled = isInstalled
         self.profileID = profileID
+        self.showInstalledLabel = showInstalledLabel
         self.onDownloadRequested = onDownloadRequested
         self.onDeleteRequested = onDeleteRequested
         self.onRevealRequested = onRevealRequested
@@ -217,21 +220,23 @@ struct ModelDownloadStatusView: View {
     }
 
     private var installedView: some View {
-        HStack(spacing: 4) {
-            Label("Installed", systemImage: "checkmark.seal.fill")
-                .font(.system(.caption, weight: .medium))
-                .foregroundColor(theme.successColor)
-                // ⚠️ A pill must keep its intrinsic width. This is a SHARED component dropped
-                // into rows with very different width budgets — the MLX store card has room,
-                // the Whisper settings row does not — and without this the label wrapped and
-                // hyphenated INSIDE the capsule ("In-stal / led"). `fixedSize` opts the label
-                // out of the parent's compression; `lineLimit(1)` stops the wrap outright.
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(theme.successColor.opacity(0.12))
-                .clipShape(Capsule())
+        HStack(spacing: 6) {
+            if showInstalledLabel {
+                Label("Installed", systemImage: "checkmark.seal.fill")
+                    .font(.system(.caption, weight: .medium))
+                    .foregroundColor(theme.successColor)
+                    // ⚠️ A pill must keep its intrinsic width. This is a SHARED component dropped
+                    // into rows with very different width budgets — the MLX store card has room,
+                    // the Whisper settings row does not — and without this the label wrapped and
+                    // hyphenated INSIDE the capsule ("In-stal / led"). `fixedSize` opts the label
+                    // out of the parent's compression; `lineLimit(1)` stops the wrap outright.
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(theme.successColor.opacity(0.12))
+                    .clipShape(Capsule())
+            }
 
             Menu {
                 Button {

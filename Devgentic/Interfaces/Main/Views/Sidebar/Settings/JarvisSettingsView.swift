@@ -51,8 +51,7 @@ struct JarvisSettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                header
+            VStack(spacing: 24) {
                 jarvisCard
                 listeningCard
                 conversationCard
@@ -70,26 +69,22 @@ struct JarvisSettingsView: View {
         }
     }
 
-    // MARK: - Header
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text("Jarvis")
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundColor(theme.primaryText)
-                SoonBadge(text: "Experimental", theme: theme)
-            }
-            Text("A voice HUD you can talk to. Speech is transcribed on this Mac and discarded — no audio is recorded or stored, and nothing is sent to a speech service.")
-                .font(.system(size: 13))
-                .foregroundColor(theme.secondaryText)
-        }
-    }
-
     // MARK: - Jarvis
 
     private var jarvisCard: some View {
         SettingsCard(title: "Jarvis", icon: "atom", theme: theme) {
+            HStack(spacing: 8) {
+                SoonBadge(text: "Experimental", theme: theme)
+                Text("A voice HUD you can talk to. Speech is transcribed on this Mac and discarded — no audio is recorded or stored.")
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.secondaryText)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+
             SettingsRow(
                 title: "Enable Jarvis",
                 description: "Turn off to remove the Jarvis button from the chat composer, release its global shortcut, and close the orb if it is open.",
@@ -149,7 +144,7 @@ struct JarvisSettingsView: View {
                             AppDelegate.shared?.applyJarvisHotkeyConfig()
                         }
                         .buttonStyle(.plain)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(theme.accentColor)
                         .help("Reset to ⌥J")
                     }
@@ -321,7 +316,11 @@ struct JarvisSettingsView: View {
                         if isProbing {
                             ProgressView().controlSize(.small)
                         } else {
-                            Button("Run test") {
+                            TactileButton(
+                                title: "Run Test",
+                                icon: "play.fill",
+                                variant: .secondary
+                            ) {
                                 isProbing = true
                                 // The probe builds its own engine. Running it while the orb holds
                                 // a warm one would measure contention, not the thing under test.
@@ -331,8 +330,6 @@ struct JarvisSettingsView: View {
                                     isProbing = false
                                 }
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
                         }
                     }
                 }
@@ -357,7 +354,11 @@ struct JarvisSettingsView: View {
                         if isMicProbing {
                             ProgressView().controlSize(.small)
                         } else {
-                            Button("Run test") {
+                            TactileButton(
+                                title: "Run Test",
+                                icon: "play.fill",
+                                variant: .secondary
+                            ) {
                                 isMicProbing = true
                                 // Same reason as above: this probe's whole value is that its
                                 // engine is the only one on the device.
@@ -367,8 +368,6 @@ struct JarvisSettingsView: View {
                                     isMicProbing = false
                                 }
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
                         }
                     }
                 }
@@ -518,7 +517,7 @@ struct JarvisSettingsView: View {
 
                 if let pendingModelDownload {
                     Text("Download \(pendingModelDownload) first — Jarvis keeps using \(whisperModel).")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundStyle(theme.warningColor)
                 }
 
@@ -526,9 +525,13 @@ struct JarvisSettingsView: View {
                     ProgressView(value: downloadService.downloadProgress)
                         .frame(width: 70)
                 } else if !downloadService.isModelDownloaded(whisperModel) {
-                    Button("Download") { downloadService.downloadModel(whisperModel) }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                    TactileButton(
+                        title: "Download",
+                        icon: "arrow.down.circle",
+                        variant: .secondary
+                    ) {
+                        downloadService.downloadModel(whisperModel)
+                    }
                 }
             }
         }
@@ -562,11 +565,13 @@ struct JarvisSettingsView: View {
                     if assets.isInstalling {
                         ProgressView(value: assets.installProgress).frame(width: 70)
                     } else if !assets.isInstalled(chosen) {
-                        Button("Download") {
+                        TactileButton(
+                            title: "Download",
+                            icon: "arrow.down.circle",
+                            variant: .secondary
+                        ) {
                             Task { await assets.install(chosen) }
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
                     }
                 }
             }
@@ -619,38 +624,46 @@ struct JarvisSettingsView: View {
                 theme: theme
             ) {
                 HStack(spacing: 8) {
-                    Button("Check Access") {
+                    TactileButton(
+                        title: "Check Access",
+                        icon: "mic.badge.checkmark",
+                        variant: .secondary
+                    ) {
                         Task {
                             _ = await AVAudioApplication.requestRecordPermission()
                             micPermission = AVAudioApplication.shared.recordPermission
                         }
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
 
                     // Reachable WITHOUT the orb: the wedge can leave the panel unable to show
                     // anything useful, and it survives relaunching the app.
-                    Button("Repair Audio…") {
+                    TactileButton(
+                        title: "Repair Audio",
+                        icon: "wrench.and.screwdriver",
+                        variant: .secondary
+                    ) {
                         _ = JarvisAudioRepair.run(logger: DGLogger(category: "JarvisSettings"))
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
 
-                    Button("Privacy Settings…") {
+                    TactileButton(
+                        title: "Privacy Settings",
+                        icon: "hand.raised",
+                        variant: .secondary
+                    ) {
                         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
                             NSWorkspace.shared.open(url)
                         }
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
 
-                    Button("Reset Jarvis") {
+                    TactileButton(
+                        title: "Reset",
+                        icon: "arrow.counterclockwise",
+                        variant: .destructive
+                    ) {
                         config.resetAll()
                         profileConfig.selectedProfileID = nil
                         AppDelegate.shared?.applyJarvisHotkeyConfig()
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
                 }
             }
         }
@@ -872,7 +885,7 @@ struct JarvisSettingsView: View {
 // MARK: - Soon badge
 
 /// Small capsule marking a row whose feature has not shipped. Matches the badge already used
-/// in NotificationSettingsView so the two read as one vocabulary.
+/// in NotificationSettingsSection so the two read as one vocabulary.
 private struct SoonBadge: View {
     let text: LocalizedStringKey
     let theme: any Theme

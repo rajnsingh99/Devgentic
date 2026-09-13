@@ -546,6 +546,11 @@ struct ChatInputAreaView: View {
                     profileButtonText: profileButtonText,
                     backendConfiguration: backendConfiguration,
                     allowedProfileTypes: mainViewModel.interfaceMode.allowedProfileTypes,
+                    onManageProfiles: {
+                        if let profileID = backendConfiguration.selectedProfileID ?? profileService.sharedProfiles.first?.id {
+                            router.navigate(to: .profileDetail(profileID: profileID))
+                        }
+                    },
                     showingPopup: $showingBackendSelectorPopup
                 )
                 .disabled(!isInputEnabled)

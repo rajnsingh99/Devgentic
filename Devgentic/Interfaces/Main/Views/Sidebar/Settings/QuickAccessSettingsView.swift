@@ -26,9 +26,7 @@ struct QuickAccessSettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                header
-
+            VStack(spacing: 24) {
                 // MARK: Activation
                 SettingsCard(title: "Activation", icon: "command", theme: theme) {
                     SettingsRow(
@@ -41,7 +39,7 @@ struct QuickAccessSettingsView: View {
                             .toggleStyle(.switch)
                     }
 
-                    Divider().background(theme.dividerColor.opacity(0.3))
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                     SettingsRow(
                         title: "Global Shortcut",
@@ -65,14 +63,14 @@ struct QuickAccessSettingsView: View {
                             .disabled(!config.isEnabled)
                             .opacity(config.isEnabled ? 1 : 0.5)
 
-                            Button("Reset") {
+                            TactileIconButton(
+                                icon: "arrow.counterclockwise",
+                                tooltip: "Reset to ⌥Space",
+                                isDisabled: !config.isEnabled
+                            ) {
                                 config.resetShortcutToDefault()
                                 AppDelegate.shared.applyHotkeyConfig()
                             }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(theme.accentColor)
-                            .help("Reset to ⌥Space")
                         }
                     }
                 }
@@ -124,19 +122,6 @@ struct QuickAccessSettingsView: View {
             profileConfig.selectedProfileID = UserDefaults.standard
                 .string(forKey: GlobalConstants.quickAccessProfileID)
                 .flatMap(UUID.init)
-        }
-    }
-
-    // MARK: - Header
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Quick Access")
-                .font(.system(size: 22, weight: .bold))
-                .foregroundColor(theme.primaryText)
-            Text("A floating chat panel you can summon over any app.")
-                .font(.system(size: 13))
-                .foregroundColor(theme.secondaryText)
         }
     }
 

@@ -267,6 +267,17 @@ struct SlackPostMessagePayload: Codable, Sendable {
     let channel: String
     let text: String
     let blocks: [SlackBlock]?
+
+    /// ⚠️⚠️ [BR-3/EG-3] NEUTRALISED IN THE INITIALIZER, NOT AT THE CALL SITE, for the same reason
+    /// Discord's `allowed_mentions` is a defaulted property: a step each sender has to remember is a
+    /// step the next send path forgets. Every `chat.postMessage` this app makes goes through here.
+    /// See `RemoteMarkupEscaping.withoutSlackBroadcasts` for why rewriting this text is safe when
+    /// four previous content rewrites in this codebase were not.
+    init(channel: String, text: String, blocks: [SlackBlock]? = nil) {
+        self.channel = channel
+        self.text = RemoteMarkupEscaping.withoutSlackBroadcasts(text)
+        self.blocks = blocks
+    }
 }
 
 /// Payload for chat.update.
@@ -275,6 +286,14 @@ struct SlackUpdateMessagePayload: Codable, Sendable {
     let ts: String
     let text: String
     let blocks: [SlackBlock]?
+
+    /// ⚠️ Edits need it as much as posts — a mirrored prompt is edited in place when it resolves.
+    init(channel: String, ts: String, text: String, blocks: [SlackBlock]? = nil) {
+        self.channel = channel
+        self.ts = ts
+        self.text = RemoteMarkupEscaping.withoutSlackBroadcasts(text)
+        self.blocks = blocks
+    }
 }
 
 // MARK: - Modal Views

@@ -57,7 +57,8 @@ struct KnowledgeSourceRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(source.fileName)
-                    .font(theme.fontCallout)
+                    .font(theme.fontFootnote.weight(.medium))
+                    .foregroundColor(theme.primaryText)
                     .lineLimit(1)
 
                 if source.exists {

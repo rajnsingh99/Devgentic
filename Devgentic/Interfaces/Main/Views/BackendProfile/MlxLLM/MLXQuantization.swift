@@ -71,6 +71,19 @@ enum MLXQuantization: Int, CaseIterable, Comparable, Hashable {
     /// can use real bits-per-weight instead of inferring from disk size.
     var advisorToken: String { "\(rawValue)bit" }
 
+    /// The token handed to HuggingFace's `search=` parameter so the SERVER returns this
+    /// quantization, instead of the client thinning an already-fetched mixed page.
+    ///
+    /// ⚠️ `.sixteenBit` is NOT "16bit". The popular uploads are named `…-bf16`
+    /// (`lmstudio-community/Qwen3-1.7B-MLX-bf16`), while `16bit` matches almost nothing.
+    /// `parse(fromRepoId:)` reads `bf16` as 16-bit, so the client-side check still agrees.
+    ///
+    /// ⚠️ Deliberately NOT merged with `advisorToken`, which feeds
+    /// `ModelFitAdvisor.parseQuantizationBits` and must keep saying "16bit" there.
+    var searchToken: String {
+        self == .sixteenBit ? "bf16" : "\(rawValue)bit"
+    }
+
     /// Parses the quantization a publisher encoded in the repo id.
     ///
     /// MLX conversions overwhelmingly put it in the name (`…-MLX-4bit`, `…-8bit`, `…-bf16`)
@@ -151,12 +164,26 @@ extension MLXQuantization {
     /// ⚠️ Deliberately requires a `B` suffix immediately after the number. Without it,
     /// `Qwen2.5-3B` and `Qwen3-Coder-30B` are indistinguishable from version numbers and
     /// quantization suffixes.
+    /// Scans for `<digits>[.<digits>]B` not glued to a preceding letter/digit run that would make
+    /// it part of another token.
+    ///
+    /// ⚠️ COMPILED ONCE. This was built inside `parameterCount` on every call, and an
+    /// `NSRegularExpression(pattern:)` is ~23 µs of ICU compilation — measured at 24.0 µs/id
+    /// compiled-per-call against 1.2 µs/id cached, about two thirds of the whole RAM-fit pipeline.
+    /// That was survivable while the only caller was a card rendering once, and stopped being so
+    /// when the "Fits my Mac" filter began calling it per card per observer tick: sizes arrive one
+    /// per model, so a 5-page grid paid ~4,500 compilations (~158 ms on the main actor) for the
+    /// next page alone.
+    ///
+    /// `try?` at the top level rather than `try!`: a nil regex degrades `parameterCount` to nil,
+    /// which the fit advisor already treats as "no parameter count" and falls back from.
+    private static let parameterCountRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"(?<![A-Za-z0-9.])(\d{1,3}(?:\.\d)?)[bB](?![A-Za-z0-9])"#)
+    }()
+
     static func parameterCount(fromRepoId repoId: String) -> String? {
         let name = repoId.components(separatedBy: "/").last ?? repoId
-        // Scan for `<digits>[.<digits>]B` not glued to a preceding letter/digit run that would
-        // make it part of another token.
-        let pattern = #"(?<![A-Za-z0-9.])(\d{1,3}(?:\.\d)?)[bB](?![A-Za-z0-9])"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
+        guard let regex = Self.parameterCountRegex,
               let match = regex.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)),
               let range = Range(match.range(at: 1), in: name) else { return nil }
         return "\(name[range])B"

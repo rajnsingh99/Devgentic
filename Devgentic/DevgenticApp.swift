@@ -655,6 +655,7 @@ struct DevgenticApp: App {
                 .environment(themeManager)
                 .environment(\.appTheme, themeManager.currentTheme)
                 .environment(\.surfaceStyle, themeManager.surfaceStyle)
+                .environment(\.buttonAccentStyle, themeManager.buttonAccentStyle)
                 .environment(mainApplicationViewModel)
                 .environment(mainApplicationViewModel.explorerViewModel)
                 .environment(chatHistoryViewModel)
@@ -755,6 +756,7 @@ struct DevgenticApp: App {
                     .environment(themeManager)
                     .environment(\.appTheme, themeManager.currentTheme)
                     .environment(\.surfaceStyle, themeManager.surfaceStyle)
+                    .environment(\.buttonAccentStyle, themeManager.buttonAccentStyle)
                     .tint(themeManager.currentTheme.accentColor)
             }
         }
@@ -769,6 +771,7 @@ struct DevgenticApp: App {
                 .environment(themeManager)
                 .environment(\.appTheme, themeManager.currentTheme)
                 .environment(\.surfaceStyle, themeManager.surfaceStyle)
+                .environment(\.buttonAccentStyle, themeManager.buttonAccentStyle)
                 .frame(minWidth: 760, minHeight: 560)
                 .tint(themeManager.currentTheme.accentColor)
         }

@@ -33,6 +33,9 @@ struct IslandSearchField: View {
     /// Stable identifier for UI tests and VoiceOver rotor navigation.
     var accessibilityIdentifier: String = "island.search"
     var onSubmit: (() -> Void)? = nil
+    /// Optional collapse callback invoked when the user dismisses the search via Esc
+    /// (when text is empty) or taps the trailing close button.
+    var onCollapse: (() -> Void)? = nil
 
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -49,7 +52,7 @@ struct IslandSearchField: View {
                     Image(systemName: "magnifyingglass")
                         .font(.system(.caption, weight: .bold))
                         .imageScale(.medium)
-                        .foregroundColor(theme.secondaryText)
+                        .foregroundColor(isFocused ? theme.accentColor : theme.secondaryText)
                 }
             }
             .frame(width: 16, height: 16)
@@ -65,7 +68,13 @@ struct IslandSearchField: View {
             .foregroundColor(theme.primaryText)
             .focused($isFocused)
             .onSubmit { onSubmit?() }
-            .onExitCommand { text = "" } // esc clears
+            .onExitCommand {
+                if !text.isEmpty {
+                    text = ""
+                } else {
+                    onCollapse?()
+                }
+            }
             .accessibilityIdentifier(accessibilityIdentifier)
             .accessibilityLabel(Text(placeholder))
             .accessibilityValue(isSearching ? Text("Searching") : Text(text))
@@ -82,18 +91,43 @@ struct IslandSearchField: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .help("Clear search")
                 .accessibilityLabel("Clear search")
+                .transition(.opacity.combined(with: .scale(scale: 0.7)))
+            } else if let onCollapse {
+                Button {
+                    onCollapse()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(theme.secondaryText)
+                        .frame(width: 20, height: 20)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Close search (Esc)")
+                .accessibilityLabel("Close search")
                 .transition(.opacity.combined(with: .scale(scale: 0.7)))
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 10)
         .frame(height: 28) // matches IslandIconButton height for rhythm
-        .background(Capsule().fill(theme.surfaceOverlay))
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(theme.surfaceOverlayStrong.opacity(0.45))
+        )
         .overlay(
-            Capsule().strokeBorder(
-                isFocused ? theme.accentColor : theme.surfaceOverlayStrong.opacity(0.6),
-                lineWidth: isFocused ? 1.5 : 0.5
-            )
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(
+                    isFocused ? theme.accentColor : theme.surfaceOverlayStrong.opacity(0.7),
+                    lineWidth: isFocused ? 1.5 : 0.5
+                )
+        )
+        .shadow(
+            color: isFocused ? theme.accentColor.opacity(0.25) : Color.clear,
+            radius: isFocused ? 6 : 0,
+            x: 0,
+            y: 1
         )
         .frame(minWidth: 140, maxWidth: maxWidth)
         .dynamicTypeSize(...DynamicTypeSize.xxLarge)
@@ -102,7 +136,11 @@ struct IslandSearchField: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: isSearching)
         .background(focusShortcutButton)
         .onAppear {
-            if autoFocus { isFocused = true }
+            if autoFocus {
+                DispatchQueue.main.async {
+                    isFocused = true
+                }
+            }
         }
     }
 
@@ -117,6 +155,132 @@ struct IslandSearchField: View {
         .keyboardShortcut("f", modifiers: .command)
         .hidden()
         .accessibilityHidden(true)
+    }
+}
+
+// MARK: - IslandExpandableSearchHeader
+
+/// Reusable center header for DynamicIslandBar that smoothly morphs between an
+/// authoritative section title (`IslandTitleLabel`) in rest state and an enhanced
+/// search input (`IslandSearchField`) in active state.
+struct IslandExpandableSearchHeader: View {
+
+    let title: LocalizedStringKey
+    var icon: String? = nil
+    @Binding var text: String
+    let placeholder: String
+    @Binding var isExpanded: Bool
+    var maxWidth: CGFloat = 340
+    var isSearching: Bool = false
+    var accessibilityIdentifier: String = "island.search"
+    var onSubmit: (() -> Void)? = nil
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(
+        title: LocalizedStringKey,
+        icon: String? = nil,
+        text: Binding<String>,
+        placeholder: String,
+        isExpanded: Binding<Bool>,
+        maxWidth: CGFloat = 340,
+        isSearching: Bool = false,
+        accessibilityIdentifier: String = "island.search",
+        onSubmit: (() -> Void)? = nil
+    ) {
+        self.title = title
+        self.icon = icon
+        self._text = text
+        self.placeholder = placeholder
+        self._isExpanded = isExpanded
+        self.maxWidth = maxWidth
+        self.isSearching = isSearching
+        self.accessibilityIdentifier = accessibilityIdentifier
+        self.onSubmit = onSubmit
+    }
+
+    init(
+        title: String,
+        icon: String? = nil,
+        text: Binding<String>,
+        placeholder: String,
+        isExpanded: Binding<Bool>,
+        maxWidth: CGFloat = 340,
+        isSearching: Bool = false,
+        accessibilityIdentifier: String = "island.search",
+        onSubmit: (() -> Void)? = nil
+    ) {
+        self.init(
+            title: LocalizedStringKey(title),
+            icon: icon,
+            text: text,
+            placeholder: placeholder,
+            isExpanded: isExpanded,
+            maxWidth: maxWidth,
+            isSearching: isSearching,
+            accessibilityIdentifier: accessibilityIdentifier,
+            onSubmit: onSubmit
+        )
+    }
+
+    var body: some View {
+        Group {
+            if isExpanded {
+                IslandSearchField(
+                    text: $text,
+                    placeholder: placeholder,
+                    maxWidth: maxWidth,
+                    autoFocus: true,
+                    isSearching: isSearching,
+                    accessibilityIdentifier: accessibilityIdentifier,
+                    onSubmit: onSubmit,
+                    onCollapse: {
+                        withAnimation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.82)) {
+                            isExpanded = false
+                        }
+                    }
+                )
+                .transition(.asymmetric(
+                    insertion: .opacity.combined(with: .scale(scale: 0.95)),
+                    removal: .opacity.combined(with: .scale(scale: 0.95))
+                ))
+            } else {
+                IslandTitleLabel(title: title, icon: icon)
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .scale(scale: 0.95)),
+                        removal: .opacity.combined(with: .scale(scale: 0.95))
+                    ))
+            }
+        }
+    }
+}
+
+// MARK: - IslandSearchToggleButton
+
+/// Circular 28×28 action button for DynamicIslandBar trailing rows.
+/// Appears when search is collapsed and provides both click and ⌘F activation to expand search.
+struct IslandSearchToggleButton: View {
+
+    @Binding var isExpanded: Bool
+    var help: String = "Search (⌘F)"
+    var accessibilityLabel: String = "Search"
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        if !isExpanded {
+            IslandIconButton(
+                symbol: "magnifyingglass",
+                help: help,
+                accessibilityLabel: accessibilityLabel,
+                keyboardShortcut: KeyboardShortcut("f", modifiers: .command)
+            ) {
+                withAnimation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.82)) {
+                    isExpanded = true
+                }
+            }
+            .transition(.opacity.combined(with: .scale(scale: 0.8)))
+        }
     }
 }
 
@@ -155,6 +319,7 @@ struct IslandPillButton: View {
     @State private var feedbackTick: Int = 0
     @FocusState private var isFocused: Bool
     @Environment(\.appTheme) private var theme
+    @Environment(\.buttonAccentStyle) private var buttonAccentStyle
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -196,7 +361,7 @@ struct IslandPillButton: View {
                     )
             )
             .shadow(color: theme.shadowColor.opacity(isHovered ? 0.3 : 0.15), radius: 6, y: 2)
-            .opacity(isEnabled ? 1.0 : 0.4)
+            .opacity(isEnabled ? 1.0 : 0.45)
             .scaleEffect(shouldScale ? 1.03 : 1.0)
         }
         .buttonStyle(.plain)
@@ -238,24 +403,43 @@ struct IslandPillButton: View {
 
     private var foregroundColor: Color {
         switch style {
-        case .primary, .success:
+        case .primary:
+            if buttonAccentStyle == .themeContrast {
+                return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+            }
+            return theme.isAccentLight ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+        case .success:
             return .white
         case .secondary:
-            return isHovered ? theme.accentColor : theme.primaryText
+            return isHovered ? (buttonAccentStyle == .themeContrast ? theme.primaryText : theme.accentColor) : theme.primaryText
         case .subtle:
-            return theme.accentColor
+            return buttonAccentStyle == .themeContrast ? (isHovered ? theme.primaryText : theme.secondaryText) : theme.accentColor
         }
     }
 
     private var strokeColors: [Color] {
         switch style {
         case .primary:
+            if buttonAccentStyle == .themeContrast {
+                return theme.isDark
+                    ? [Color.white.opacity(isHovered ? 0.4 : 0.2), Color.white.opacity(0.1)]
+                    : [Color.black.opacity(isHovered ? 0.3 : 0.15), Color.black.opacity(0.08)]
+            }
+            if theme.isAccentLight {
+                return [theme.dividerColor.opacity(isHovered ? 0.8 : 0.4), theme.dividerColor.opacity(0.3)]
+            }
             return [Color.white.opacity(isHovered ? 0.4 : 0.25), theme.accentColor.opacity(0.4)]
         case .success:
             return [Color.white.opacity(isHovered ? 0.4 : 0.25), theme.successColor.opacity(0.4)]
         case .secondary:
+            if buttonAccentStyle == .themeContrast {
+                return [isHovered ? theme.primaryText.opacity(0.4) : theme.surfaceOverlayStrong, theme.surfaceOverlay]
+            }
             return [isHovered ? theme.accentColor.opacity(0.3) : theme.surfaceOverlayStrong, theme.surfaceOverlay]
         case .subtle:
+            if buttonAccentStyle == .themeContrast {
+                return [isHovered ? theme.secondaryText.opacity(0.3) : Color.clear, Color.clear]
+            }
             return [theme.accentColor.opacity(0.4), theme.accentColor.opacity(0.15)]
         }
     }
@@ -263,12 +447,20 @@ struct IslandPillButton: View {
     private var backgroundColor: Color {
         switch style {
         case .primary:
+            if buttonAccentStyle == .themeContrast {
+                return theme.isDark
+                    ? Color.white.opacity(isHovered ? 1.0 : 0.95)
+                    : Color(red: 0.12, green: 0.12, blue: 0.14).opacity(isHovered ? 1.0 : 0.95)
+            }
             return theme.accentColor.opacity(isHovered ? 1.0 : 0.9)
         case .success:
             return theme.successColor.opacity(isHovered ? 1.0 : 0.9)
         case .secondary:
             return isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay
         case .subtle:
+            if buttonAccentStyle == .themeContrast {
+                return isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay
+            }
             return theme.accentColor.opacity(isHovered ? 0.22 : 0.12)
         }
     }

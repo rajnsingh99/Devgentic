@@ -28,6 +28,9 @@ enum QuickAccessHITLKeyAction { case cancel, confirm }
 class QuickAccessPanelView: NSPanel, NSWindowDelegate {
 
     private var hostingView: NSHostingView<QuickAccessContentView>?
+    /// [sa-5] The identity this panel's transcript registers as a speech-transport host under —
+    /// shared with `QuickAccessContentView` so `windowWillClose` can deregister the same host.
+    let transportHostID = UUID()
     private let logger = DGLogger(category: "QuickAccessPanelView")
 
     /// Invoked from `windowWillClose` so the owner (AppDelegate) can drop its strong
@@ -186,7 +189,8 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
             mainAppViewModel: mainAppViewModel,
             themeManager: themeManager,
             // [M9] Let the content view register how ⌘Return / Escape answer a pending HITL.
-            onRegisterHITLKeyHandler: { [weak self] handler in self?.hitlKeyHandler = handler }
+            onRegisterHITLKeyHandler: { [weak self] handler in self?.hitlKeyHandler = handler },
+            transportHostID: transportHostID
         )
 
         let hostingView = NSHostingView(rootView: swiftUIContentView)
@@ -362,6 +366,11 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        // [sa-5] Deregister this panel's transcript as a speech-transport host on the AppKit
+        // close route too. The transcript's own `.onDisappear` does the same under the SAME id,
+        // so whichever fires (or both) leaves the host set correct; without this, a close that
+        // does not deliver `onDisappear` would leave the reader speaking with no Stop on screen.
+        SpeechService.shared.transportHostDidDisappear(transportHostID)
         let defaults = UserDefaults.standard
         let wasExpanded = isExpandedState && self.frameBeforeZoom == nil
         

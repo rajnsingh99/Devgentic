@@ -41,8 +41,11 @@ final class MainApplicationViewModel {
     /// (WF-UI4: it used to stay fully enabled during a stream and silently drop the click).
     var isSendInProgress: Bool { chatHistoryViewModel.isSending }
 
-    @ObservationIgnored private var useStreamingResponseObserver: AnyCancellable?
-    @ObservationIgnored private var intelligenceCoreObserver: AnyCancellable?
+    // ⚠️ `useStreamingResponseObserver` / `intelligenceCoreObserver` lived here. Both were
+    // DECLARED AND NEVER ASSIGNED — the Combine bridge that was supposed to persist those two
+    // toggles was designed and never wired, which is why neither setting survived a relaunch and
+    // why every Intelligence Core gate read false. Both properties now read and write
+    // `UserDefaults` directly, so there is nothing left to bridge.
 
     // Code mode — used to build ephemeral profiles on each send
     @ObservationIgnored private(set) var codeSessionManager: CodeSessionManager?
@@ -94,13 +97,73 @@ final class MainApplicationViewModel {
     var showContextArea: Bool = false
     var activeContextFilePath: String? = nil
     var attachedFiles: [FileSystemItem] = []
-    var useStreamingResponse: Bool = true
+    /// Stream the LLM response word-by-word.
+    ///
+    /// ⚠️ COMPUTED OVER `UserDefaults`, NOT STORED. As a stored `var` this held the toggle's value
+    /// in memory and NOTHING EVER WROTE IT BACK: the persist hook existed
+    /// (`SettingsCoordinator.didChangeUseStreamingResponse`) and had zero callers, and the
+    /// `AnyCancellable` that was meant to bridge them was declared and never assigned. The setting
+    /// therefore reverted on every relaunch, because `loadSettings` reads this key at startup.
+    ///
+    /// Reading through the store is what makes "the toggle shows what is used" true by
+    /// construction rather than by convention — one rule and one state, not one rule over two
+    /// copies. Same shape as `NotificationConfiguration.isGloballyEnabled`.
+    ///
+    /// ⚠️ Absent key reads as TRUE. `bool(forKey:)` alone returns false for an absent key, which
+    /// would invert the shipped default and silently disable streaming for every install that had
+    /// never touched the setting — the trap `NotificationGatePolicy` documents.
+    var useStreamingResponse: Bool {
+        get {
+            access(keyPath: \.useStreamingResponse)
+            guard UserDefaults.standard.object(forKey: AppSettings.useStreamingResponseKey) != nil else { return true }
+            return UserDefaults.standard.bool(forKey: AppSettings.useStreamingResponseKey)
+        }
+        set {
+            withMutation(keyPath: \.useStreamingResponse) {
+                UserDefaults.standard.set(newValue, forKey: AppSettings.useStreamingResponseKey)
+            }
+            logger.info("Saved 'useStreamingResponse' setting to UserDefaults: \(newValue)")
+        }
+    }
     var isWebSearchEnabled: Bool = false
     var webSearchAPIKey: String?
     var isWebSearchActive: Bool = false
 
     // Intelligence Core
-    var isIntelligenceCoreEnabled: Bool = false
+
+    /// Master switch for the on-device Intelligence Core.
+    ///
+    /// ⚠️⚠️ COMPUTED OVER `UserDefaults`, NOT STORED — THIS WAS THE MORNING BRIEF BUG. Every
+    /// consumer gates on `UserDefaults.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)`:
+    /// `MorningBriefService`, `UserPersonalService`, `AgentConnect`, `BackendOrchestrationService`
+    /// and both Welcome widgets. The settings toggle, meanwhile, bound straight to this property
+    /// as a stored `var`, and the only thing that wrote the key
+    /// (`SettingsCoordinator.didChangeIntelligenceCoreEnabled`) had ZERO callers — the
+    /// `AnyCancellable` meant to bridge them was declared and never assigned.
+    ///
+    /// So the switch turned the UI on and nothing else: the Core Intelligence pane revealed its
+    /// model picker and its debug card, while every gate still read false. Running the Morning
+    /// Brief from that very pane logged
+    /// "Gate check FAILED — IC enabled: false, Brief enabled: true, Model selected: true".
+    /// The user could see the feature enabled and could not make it run.
+    ///
+    /// ⚠️ Absent key reads as FALSE, which is the intended default — do not add a seeding branch.
+    var isIntelligenceCoreEnabled: Bool {
+        get {
+            access(keyPath: \.isIntelligenceCoreEnabled)
+            return UserDefaults.standard.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
+        }
+        set {
+            withMutation(keyPath: \.isIntelligenceCoreEnabled) {
+                UserDefaults.standard.set(newValue, forKey: AppSettings.isIntelligenceCoreEnabledKey)
+            }
+            logger.info("[IC] Intelligence Core \(newValue ? "ENABLED" : "DISABLED"). CONSEQUENCE: every gate reads this key live — Morning Brief, User Personal, AgentConnect, BackendOrchestration and the Welcome widgets all follow immediately.")
+            // Switching off must release the model; holding an idle MLX model is expensive.
+            if !newValue {
+                Task { await IntelligenceCoreService.shared.unloadNow(caller: .unknown) }
+            }
+        }
+    }
 
     /// The run the composer is talking about: what Stop targets, and whether the send button
     /// shows Send or Stop. DERIVED — never stored.
@@ -214,7 +277,6 @@ final class MainApplicationViewModel {
         selectedConversationID = nil
         backendConfiguration.selectedProfileID = nil
         chatHistoryViewModel.currentChatMessages = []
-        chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
         settingsCoordinator.didChangeInterfaceMode(mode)
         logger.info("Switched interface mode to \(mode.rawValue).")
     }
@@ -472,9 +534,18 @@ final class MainApplicationViewModel {
     }
 
     // MARK: - Initialization
+    /// - Parameter bootstrapChatOps: whether to start the ChatOps bridges.
+    ///
+    ///   ⚠️ Defaults to true so the one production call site (`DevgenticApp`) is unchanged. It exists
+    ///   so a test can construct this view model DELIBERATELY and say so, instead of the codebase
+    ///   forbidding construction by comment — which is what left the whole ChatOps lifecycle surface
+    ///   untested. ⚠️ It is NOT the safety mechanism: `ChatOpsCoordinator.bootstrap()` refuses
+    ///   outright under XCTest, because the test host constructs this object whether tests ask for it
+    ///   or not. This parameter makes the intent explicit; that guard makes it safe.
     init(
         persistenceService: ChatPersistenceProtocol = ChatPersistenceStore.shared,
         fileProcessorService: FileProcessorService = FileProcessorService(),
+        bootstrapChatOps: Bool = true,
         activeStreamManager: ActiveStreamManager,
         chatHistoryViewModel: ChatHistoryViewModel
     ) {
@@ -552,7 +623,11 @@ final class MainApplicationViewModel {
             chatHistoryViewModel: chatHistoryViewModel,
             activeStreamManager: activeStreamManager
         )
-        chatOpsCoordinator.bootstrap()
+        if bootstrapChatOps {
+            chatOpsCoordinator.bootstrap()
+        } else {
+            logger.info("[CHATOPS] bootstrap skipped — the caller asked for a view model without ChatOps. CONSEQUENCE: no bridge is started and no remote message can reach this instance; the coordinator exists so start/stop can still be exercised explicitly.")
+        }
     }
 
     // MARK: - Code Session
@@ -590,8 +665,6 @@ final class MainApplicationViewModel {
 
     deinit {
         logger.info("MainApplicationViewModel deinitialized.")
-        useStreamingResponseObserver?.cancel()
-        intelligenceCoreObserver?.cancel()
         NotificationCenter.default.removeObserver(self)
         // `conversationSwitchCoordinator` owns the former `conversationLoadTask`
         // and observation stream; they unwind via its own deinit.
@@ -603,14 +676,6 @@ final class MainApplicationViewModel {
     // kept so the SwiftUI settings views (GeneralSettings, CoreIntelligence,
     // ChatInput's API key popup) can keep calling `viewModel.didChange...()`
     // / `viewModel.saveAndEnableWebSearch(...)` without refactoring.
-
-    func didChangeUseStreamingResponse() {
-        settingsCoordinator.didChangeUseStreamingResponse()
-    }
-
-    func didChangeIntelligenceCoreEnabled() {
-        settingsCoordinator.didChangeIntelligenceCoreEnabled()
-    }
 
     func toggleWebSearch() {
         settingsCoordinator.toggleWebSearch()
@@ -760,10 +825,6 @@ final class MainApplicationViewModel {
     // All bodies live in `ConversationManagementCoordinator`. Kept here as
     // thin forwards because many SwiftUI views (sidebar, welcome, activity
     // bar) plus `MessagingCoordinator` call `viewModel.xxx(...)` directly.
-
-    func toggleUserMessagesFilter() {
-        conversationManagementCoordinator.toggleUserMessagesFilter()
-    }
 
     func startNewConversation() {
         conversationManagementCoordinator.startNewConversation()

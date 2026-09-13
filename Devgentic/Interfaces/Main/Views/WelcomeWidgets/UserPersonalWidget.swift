@@ -16,7 +16,9 @@ struct UserPersonalWidget: WelcomeWidget {
     let priority = 20
 
     func isVisible() -> Bool {
-        UserDefaults.standard.bool(forKey: AppSettings.ciFeatureUserPersonalKey)
+        let isICEnabled = UserDefaults.standard.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
+        let isUserPersonalEnabled = UserDefaults.standard.bool(forKey: AppSettings.ciFeatureUserPersonalKey)
+        return isICEnabled && isUserPersonalEnabled
     }
 
     func makeBody() -> AnyView {

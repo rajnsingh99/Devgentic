@@ -17,6 +17,9 @@ struct ChatBubbleView: View {
     var message: ChatMessage
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
     @Environment(\.appTheme) private var theme
+    /// [bm-3] The streaming min-height floor animates a frame by up to
+    /// `streamingBubbleMinHeight`; snapping that in is exactly the motion this setting suppresses.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // MARK: - State
     @State private var applyMinHeight: Bool = false
@@ -29,7 +32,12 @@ struct ChatBubbleView: View {
     private var isAgentic: Bool {
         message.profileType == .agent
             || message.profileType == .code
-            || (!message.thoughts.isEmpty && message.profileType == nil)
+            // ⚠️ [mm-10] `profileType == nil` FIRST. `thoughts` is computed and walks
+            // `flattenedTimelineEvents`, allocating an array per event; `&&` short-circuits, so
+            // written the other way round EVERY bot/workflow/imageGen message paid a full
+            // timeline flatten per body pass only to be rejected by the free test that follows.
+            // (Agent and code messages were always insulated by the two `||` clauses above.)
+            || (message.profileType == nil && !message.thoughts.isEmpty)
     }
 
     /// Single-sourced on `ChatMessage`. This was the duplicate `displayedContent`'s own comment
@@ -68,19 +76,21 @@ struct ChatBubbleView: View {
                 }
             }
         }
-        .onAppear {
-            if message.isStreaming && !applyMinHeight {
-                withAnimation(.easeInOut(duration: 0.3)) {
-                    applyMinHeight = true
-                }
-            }
-        }
-        .onChange(of: message.isStreaming) { _, isStreaming in
-            if !isStreaming {
-                withAnimation(.easeIn(duration: 0.5)) {
-                    applyMinHeight = false
-                }
-            }
+        // ⚠️ [bm-3] ONE hook on the value, `initial: true` — not an `.onAppear` that only ever
+        // turned the floor ON plus an `.onChange` that only handled the FALSE transition.
+        // Written that way, the floor engaged solely when a bubble APPEARED already streaming, so
+        // a Redo (`beginRegenerationVariant`) or a Resume — both of which set `isStreaming = true`
+        // on the SAME, already-mounted `ChatMessage` instance, under a stable view identity — got
+        // no floor at all, and the bubble collapsed to one line and re-grew as tokens arrived:
+        // precisely the thrash the guard exists to stop, on the two paths most likely to show it.
+        //
+        // The two curves stay DIFFERENT on purpose — 0.3s easeInOut growing, 0.5s easeIn
+        // collapsing — which the obvious one-line rewrite would have flattened into one.
+        .onChange(of: message.isStreaming, initial: true) { _, streaming in
+            let curve: Animation? = reduceMotion
+                ? nil
+                : (streaming ? .easeInOut(duration: 0.3) : .easeIn(duration: 0.5))
+            withAnimation(curve) { applyMinHeight = streaming }
         }
         .onDisappear {
             feedbackTask?.cancel()
@@ -275,14 +285,14 @@ struct AgentMessageActionsView: View {
             .padding(.top, theme.spacingSmall)
         }
 
-        .onReceive(NotificationCenter.default.publisher(for: .speechOpenCodeViewer)) { notification in
-            guard let messageID = notification.object as? UUID, messageID == message.id,
-                  let userInfo = notification.userInfo,
-                  let code = userInfo["code"] as? String else { return }
-
-            let language = userInfo["language"] as? String
-            chatHistoryViewModel.showCodeInViewer(language: language, code: code)
-        }
+        // [sa-4] The `.speechOpenCodeViewer` observer used to live HERE, on the per-message
+        // actions row. That row is inside the transcript's `LazyVStack`, so it is released once
+        // the message scrolls out of the render window — and Read Aloud keeps going. The reader
+        // then announced "Here is the code in the panel view", posted into nothing, and carried
+        // on (or, with pause-on-code enabled, parked waiting for a panel that never opened).
+        // NotificationCenter does not replay and `pendingCodeBlock` is already cleared by the
+        // time the post is made, so the hand-off was simply lost. It now lives on
+        // `ChatHistoryView`, which outlives any single row.
     }
 
     // MARK: - Read Aloud

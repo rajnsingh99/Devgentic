@@ -239,10 +239,6 @@ struct ToolLibraryView: View {
                             if let profileSelector {
                                 profileSelector()
                             }
-
-                            Text("\(displayedRows.count) \(displayedRows.count == 1 ? "tool" : "tools")")
-                                .font(.system(size: 11))
-                                .foregroundColor(theme.secondaryText)
                         }
                         .padding(.horizontal, 4)
                         .padding(.top, 14)
@@ -702,20 +698,6 @@ private struct ToolRowContent: View {
                             .onTapGesture { onToggleSelection() }
                     }
 
-                    // Icon
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(theme.accentColor.opacity(0.1))
-                            .frame(width: 36, height: 36)
-                        
-                        MCPIconView(
-                            icons: row.definition.icons,
-                            fallbackSymbol: row.source.type == .local ? "cpu" : "wrench.fill",
-                            size: 20
-                        )
-                        .foregroundColor(theme.accentColor)
-                    }
-                    
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(alignment: .center, spacing: 6) {
                             Text(displayTitle)

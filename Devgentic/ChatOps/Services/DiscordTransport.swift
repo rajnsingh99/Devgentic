@@ -20,7 +20,7 @@ final class DiscordTransport: ChatOpsTransport, @unchecked Sendable {
     let transportID = "discord"
 
     private let apiClient: DiscordAPIClient
-    private let logger = Logger(subsystem: DGLogger.subsystem, category: "DiscordTransport")
+    private let logger = DGLogger(category: "DiscordTransport")
 
     init(apiClient: DiscordAPIClient) {
         self.apiClient = apiClient

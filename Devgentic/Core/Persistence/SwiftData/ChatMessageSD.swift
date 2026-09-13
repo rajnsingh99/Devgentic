@@ -61,7 +61,11 @@ final class ChatMessageSD {
 
     // MARK: - Mapping
 
-    func toChatMessage() -> ChatMessage {
+    /// - Parameter omittingImageBytes: [mm-4] true to build each attached image WITHOUT its
+    ///   external-storage `binaryData` (name, size, url and extension only). Every other field
+    ///   decodes exactly as before. Off by default: the transcript renders images from these
+    ///   bytes; only projections that never draw them (export) opt out.
+    func toChatMessage(omittingImageBytes: Bool = false) -> ChatMessage {
         // [P6] Blob-decode failures used to degrade SILENTLY: content became a card
         // indistinguishable from an agent error, the timeline vanished, variants and
         // token usage disappeared — with no log line to say the STORE was the problem.
@@ -93,7 +97,9 @@ final class ChatMessageSD {
             sender: SenderRole(rawValue: senderType) ?? .user,
             content: content,
             attachedTextFiles: attachedTextFiles.isEmpty ? nil : attachedTextFiles.map { $0.toStruct() },
-            attachedImageFiles: attachedImageFiles.isEmpty ? nil : attachedImageFiles.map { $0.toStruct() }
+            attachedImageFiles: attachedImageFiles.isEmpty ? nil : attachedImageFiles.map {
+                omittingImageBytes ? $0.toStructOmittingBytes() : $0.toStruct()
+            }
         )
         // Marks the message so neither writer can replace the unreadable bytes with the card.
         message.undecodableContentPlaceholder = decodeFailurePlaceholder

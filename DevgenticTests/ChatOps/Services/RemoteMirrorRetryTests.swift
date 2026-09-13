@@ -118,7 +118,12 @@ final class RemoteMirrorRetryTests: XCTestCase {
             content: .plainText("")
         )
         message.isStreaming = true
-        mirror.activeStreamManager(streamManager, didStartStream: message, for: conversationID)
+        // ⚠️ `startedBy: .telegram` MATCHES the session registered above, which is what admits the
+        // run. This suite exercises retry behaviour and needs the run mirrored; passing the
+        // `.localUI` default would now be refused by the consent gate and every assertion here
+        // would pass vacuously against a mirror that never sent anything.
+        mirror.activeStreamManager(streamManager, didStartStream: message,
+                                   startedBy: .telegram, for: conversationID)
     }
 
     override func tearDown() async throws {

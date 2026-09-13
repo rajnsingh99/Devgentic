@@ -115,14 +115,20 @@ final class CodeApplyChangesTests: XCTestCase {
         XCTAssertEqual(out, "let a = 1")
     }
 
-    /// An all-whitespace baseline has no non-whitespace prefix boundary; prepending it would
-    /// splice the entire file in front of itself.
+    /// An all-whitespace baseline has no non-whitespace boundary on EITHER edge; restoring from
+    /// it would splice the entire file in front of (or behind) itself.
+    ///
+    /// ⚠️ EXPECTATION UPDATED 2026-09-12 (vm-6). This asserted `"new content\n"` — the old
+    /// trailing branch tested `hasSuffix("\n")` and had no all-whitespace guard, so it appended a
+    /// newline the leading side had already refused to prepend. The trailing side is now
+    /// symmetric with the leading one, so an all-whitespace baseline restores NOTHING on either
+    /// edge, which is the consistent answer.
     func test_contentToApply_allWhitespaceBaselineDoesNotSpliceItself() {
         let out = ChatHistoryViewModel.contentToApply(
             snippetCode: "new content",
             preservingEdgeWhitespaceOf: "\n\n   \n"
         )
-        XCTAssertEqual(out, "new content\n", "only the trailing newline applies")
+        XCTAssertEqual(out, "new content", "neither edge restores from an all-whitespace baseline")
     }
 
     func test_contentToApply_emptyBaselineIsANoOp() {

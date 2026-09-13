@@ -17,7 +17,24 @@ private let logger = DGLogger(category: "ActiveStreamManager")
 /// Delegate protocol for RemoteMirrorService to observe stream lifecycle.
 @MainActor
 protocol ActiveStreamMirrorDelegate: AnyObject {
-    func activeStreamManager(_ manager: ActiveStreamManager, didStartStream message: ChatMessage, for conversationID: UUID)
+    /// - Parameter startedBy: which surface started this run.
+    ///
+    ///   ⚠️⚠️ PASSED EXPLICITLY BECAUSE IT CANNOT BE READ OFF `message`. The delegate is handed the
+    ///   AGENT message, whose `messageSource` is still the `.localUI` default at this instant —
+    ///   every attributing surface assigns it AFTER `startMessageStream` returns
+    ///   (`MessagingCoordinator`, `SchedulerCoordinator`, `QuickAccessSessionViewModel`,
+    ///   `JarvisSessionController`). Two conformers already document having hit this. The USER
+    ///   message carries the truth here and is stamped before the call, so it is read from there.
+    ///
+    ///   ⚠️ **Do NOT "fix" this by stamping `agentMessage.messageSource` earlier instead.**
+    ///   `JarvisAmbientRunWatcher` reads that field off the agent message at `didEndStream` and its
+    ///   classification is calibrated to today's timing; moving the write changes what Jarvis
+    ///   announces.
+    ///
+    ///   ⚠️ `.localUI` here means "not attributed", not "definitely typed by hand" — a new surface
+    ///   that forgets to stamp lands here. A consumer deciding whether to send data OFF the machine
+    ///   must therefore treat it as a refusal, never as permission.
+    func activeStreamManager(_ manager: ActiveStreamManager, didStartStream message: ChatMessage, startedBy: MessageSource, for conversationID: UUID)
     func activeStreamManager(_ manager: ActiveStreamManager, didEndStream message: ChatMessage)
 }
 
@@ -487,7 +504,9 @@ final class ActiveStreamManager {
         liveRunQuestionIDs[agentMessage.id] = userMessage.id
         streamStartedAt[agentMessage.id] = Date()
         for delegate in liveMirrorDelegates {
-            delegate.activeStreamManager(self, didStartStream: agentMessage, for: conversationID)
+            // ⚠️ `userMessage.messageSource`, not `agentMessage`'s — see the protocol's own note.
+            delegate.activeStreamManager(self, didStartStream: agentMessage,
+                                         startedBy: userMessage.messageSource, for: conversationID)
         }
 
         // Defer initial state mutations to the next run loop tick.
@@ -497,7 +516,13 @@ final class ActiveStreamManager {
             agentMessage.agentState = .thinking(.reasoning)
         }
         
-        let streamTask = Task { [weak self] in
+        // ⚠️ THE RUN'S ORIGIN TRAVELS WITH THE RUN. Bound once, here, so no surface can forget it —
+        // see `WorkflowRunAttendance.origin` for the grant that crossed a surface boundary without it.
+        // ⚠️ Bound around the Task's CREATION, not inside its body: an unstructured `Task {}`
+        // inherits the task-local values of the context that creates it, which is the same mechanism
+        // `$hasRemoteResponder` and `$isAttended` already rely on at their binding site.
+        let streamTask = WorkflowRunAttendance.$origin.withValue(userMessage.messageSource) {
+            Task { [weak self] in
             guard let self = self else { return }
 
             // Structured Plan & Execute / Reflexion cards (chat + code agents only).
@@ -1199,6 +1224,7 @@ final class ActiveStreamManager {
             self.removeTask(for: agentMessage.id)
             onComplete()
         }
+        }
         
         activeTasks[agentMessage.id] = streamTask
         
@@ -1335,7 +1361,12 @@ final class ActiveStreamManager {
             nodeID: sourceNodeID,
             nodeName: nodeName,
             title: title,
-            profileID: profileID
+            profileID: profileID,
+            // ⚠️ WHICH RUN IS ASKING. `traceContext.messageID` is the agent message this run is
+            // streaming into — the same object `RemoteMirrorService` observes — so this is the join
+            // key that lets the mirror post only the items belonging to the run it is mirroring.
+            // Stamped here rather than at the four call sites so a fifth cannot forget it.
+            runMessageID: traceContext.messageID
         )
         interactionCenter.enqueue(PendingHITL(id: operationID, origin: origin, kind: kind))
 

@@ -18,6 +18,9 @@ struct BackendPickerButton: View {
     /// Profile types to show in the popup. Nil = show all (legacy).
     var allowedProfileTypes: Set<ProfileType>? = nil
 
+    /// Optional callback to navigate to profile management / settings.
+    var onManageProfiles: (() -> Void)? = nil
+
     @Binding var showingPopup: Bool
     @Environment(\.appTheme) private var theme
 
@@ -68,14 +71,16 @@ struct BackendPickerButton: View {
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingPopup, arrowEdge: .bottom) {
-            // Redesigned selector (search + type bubbles + single fixed-width list) — replaced the
-            // multi-column BackendSelectorPopup, whose 180pt-per-type columns overflowed the
-            // popover's resolved width and clipped.
             ProfileSelectorPopover(
                 configuration: backendConfiguration,
                 isPresented: $showingPopup,
-                allowedProfileTypes: allowedProfileTypes
+                allowedProfileTypes: allowedProfileTypes,
+                onManageProfiles: onManageProfiles
             )
+            .frame(width: 356, height: 460)
+            .environment(\.appTheme, theme)
+            .tint(theme.accentColor)
+            .preferredColorScheme(theme.colorScheme)
         }
         .onHover { hover in withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { isHovering = hover } }
         .help("Select a backend (Bot, Agent, Workflow, or Image Gen)")

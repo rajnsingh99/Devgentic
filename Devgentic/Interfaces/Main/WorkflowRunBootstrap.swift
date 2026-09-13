@@ -388,6 +388,10 @@ enum WorkflowRunBootstrap {
         let state = WorkflowExecutionState()
         state.userInput = userInput
         state.workflowProfileID = config.profile.id
+        // [cv-3] The run's settle paths post live-write completions to settle Code Viewer tabs,
+        // and a completion cannot be addressed without this. Stamped here because `begin` is the
+        // one choke point every run origin passes through — chat, scheduled, ChatOps, regenerate.
+        state.conversationID = conversationID
         state.startedAt = Date()
 
         // [WF-CS4] Decided HERE, once, at the single choke point every run origin passes through —

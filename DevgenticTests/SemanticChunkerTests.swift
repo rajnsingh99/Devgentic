@@ -308,12 +308,18 @@ final class SemanticChunkerTests: XCTestCase {
         XCTAssertTrue(chunks.isEmpty)
     }
 
-    func testChunk_ImageBlock_Skipped() {
+    /// [mc-3] Images are indexed as the markdown the author wrote. This used to assert the
+    /// opposite ("not useful for embedding"), which was harmless only because an INLINE image's
+    /// `![alt](path)` stayed inside its paragraph text and was embedded with it — once the
+    /// parser split image-bearing paragraphs, the alt text and the file path of every agent-
+    /// written chart silently left the index ("where did you save the histogram?" stopped
+    /// retrieving). A standalone image is indexed the same way, for consistency.
+    func testChunk_ImageBlock_IndexedAsItsMarkdown() {
         let chunker = SemanticChunker()
         let blocks = [ContentBlock(id: "b0", type: .image(url: "https://example.com/img.png", altText: "A photo"))]
         let chunks = chunker.chunk(blocks: blocks)
 
-        XCTAssertTrue(chunks.isEmpty)
+        XCTAssertEqual(chunks, ["![A photo](https://example.com/img.png)"])
     }
 
     // MARK: - Mixed Block Inputs
@@ -332,7 +338,9 @@ final class SemanticChunkerTests: XCTestCase {
         XCTAssertTrue(chunks[1].contains("let x = 42"))
     }
 
-    func testChunk_AllBlockTypes_SkipsHorizontalRuleAndImage() {
+    /// [mc-3] The horizontal rule is the only block type with nothing to index; the image
+    /// contributes its markdown (see `testChunk_ImageBlock_IndexedAsItsMarkdown`).
+    func testChunk_AllBlockTypes_SkipsHorizontalRuleOnly() {
         let chunker = SemanticChunker()
         let blocks = [
             ContentBlock(id: "b0", type: .heading(level: 1, text: "Title")),
@@ -349,8 +357,10 @@ final class SemanticChunkerTests: XCTestCase {
         ]
         let chunks = chunker.chunk(blocks: blocks)
 
-        // 5 content-bearing blocks, horizontalRule and image skipped
-        XCTAssertEqual(chunks.count, 5)
+        // 6 content-bearing blocks: only the horizontalRule is skipped; the image is indexed
+        // as its markdown ([mc-3]).
+        XCTAssertEqual(chunks.count, 6)
+        XCTAssertEqual(chunks.last, "![alt](img.png)")
     }
 
     // MARK: - Edge Cases

@@ -37,6 +37,18 @@ class MLXModelService {
     /// the network had failed. Callers compare this before rendering.
     var availableModelsCategory: String?
 
+    /// The server ranking and search term that produced `availableModels`, alongside the category.
+    ///
+    /// ⚠️ THE CATEGORY ALONE IS NOT THE PAYLOAD'S IDENTITY. `DestinationCoordinator` caches TWO
+    /// store view models for the app lifetime — one filtered for tool-capable models, one not —
+    /// and they share THIS array. Each keeps its own sort, search and page count, so the agent
+    /// store fetching `.all` by downloads silently replaces the general store's `.all` ranked by
+    /// date. The category matched, so the general store rendered the other instance's rows and
+    /// then paged its own offset into them. Every field the query varied by has to be recorded, or
+    /// "is this payload mine?" cannot be answered.
+    var availableModelsSort: String?
+    var availableModelsSearch: String?
+
     /// Why the last remote fetch failed, or nil if it succeeded. The store renders this
     /// instead of the generic "No models found" empty state, which previously made
     /// rate-limited, offline, gated and genuinely-empty look identical.
@@ -438,7 +450,10 @@ func refreshInstalledModels() {
     // MARK: - Remote Discovery (Metadata & Store)
     
     /// Fetches remote models with support for pagination, search, and category filtering.
-    func fetchRemoteModels(limit: Int = 30, offset: Int = 0, tags: [String]? = nil, search: String? = nil, append: Bool = false, category: String? = nil) async {
+    /// - Parameter sort: the HuggingFace `sort=` field to rank by. nil keeps `defaultSortField`.
+    ///   ⚠️ `offset` indexes into THIS ranking — a caller that changes `sort` must restart at 0,
+    ///   or it appends page 4 of one result set on top of pages 1-3 of another.
+    func fetchRemoteModels(limit: Int = 30, offset: Int = 0, tags: [String]? = nil, search: String? = nil, append: Bool = false, category: String? = nil, sort: String? = nil) async {
 
         // Generation token (A11). Category switches and the 500ms search debounce can leave
         // several fetches in flight at once; without this the SLOWEST response won, so a
@@ -450,7 +465,7 @@ func refreshInstalledModels() {
         isLoadingRemoteModels = true
         remoteLoadError = nil
 
-        guard let url = Self.listingURL(search: search, tags: tags, limit: limit, offset: offset) else {
+        guard let url = Self.listingURL(search: search, tags: tags, limit: limit, offset: offset, sort: sort) else {
             logger.error("[MLXSTORE] HF fetch: could not build a URL (search=\(search ?? "<none>")). CONSEQUENCE: the store shows no results for this query.")
             finishFetch(generation: generation, error: .invalidURL)
             return
@@ -519,7 +534,9 @@ func refreshInstalledModels() {
             } else {
                 self.availableModels = displayModels
                 self.availableModelsCategory = category
-                self.logger.info("[MLXSTORE] HF replace: total=\(self.availableModels.count) category=\(category ?? "<none>")")
+                self.availableModelsSort = sort ?? Self.defaultSortField
+                self.availableModelsSearch = search
+                self.logger.info("[MLXSTORE] HF replace: total=\(self.availableModels.count) category=\(category ?? "<none>") sort=\(self.availableModelsSort ?? "<none>") search=\(search ?? "<none>")")
             }
             finishFetch(generation: generation, error: nil)
 
@@ -536,6 +553,11 @@ func refreshInstalledModels() {
                 // and presented as this category's results.
                 availableModels = []
                 availableModelsCategory = category
+                // ⚠️ The identity must be stamped on the FAILURE path too. Leaving a stale sort
+                // or search here means the next `loadMore` compares against the query that
+                // succeeded before this one failed, and decides the empty payload is its own.
+                availableModelsSort = sort ?? Self.defaultSortField
+                availableModelsSearch = search
             }
             finishFetch(generation: generation, error: error)
         } catch {
@@ -553,14 +575,22 @@ func refreshInstalledModels() {
     /// `nonisolated static` so this is reachable from a test without standing up the service:
     /// the B7 test previously rebuilt a `URLComponents` in its own body and asserted that
     /// Foundation percent-encodes, which is true of Foundation whatever this function does.
+    /// HuggingFace's default ranking for this store, and the fallback for any `SortOption` the
+    /// API cannot rank by (repo bytes are not a field on the models listing).
+    nonisolated static let defaultSortField = "downloads"
+
     nonisolated static func listingURL(
-        search: String?, tags: [String]?, limit: Int, offset: Int
+        search: String?, tags: [String]?, limit: Int, offset: Int,
+        sort: String? = nil
     ) -> URL? {
         var components = URLComponents(string: "https://huggingface.co/api/models")
         var filters = ["mlx"]
         if let tags { filters.append(contentsOf: tags) }
         var items = [
-            URLQueryItem(name: "sort", value: "downloads"),
+            // ⚠️ `direction` stays -1 for every field sent — downloads, lastModified and likes
+            // are all "more/newer first". An ascending sort would have to vary this with the
+            // field, so do not add one without revisiting this line.
+            URLQueryItem(name: "sort", value: sort ?? Self.defaultSortField),
             URLQueryItem(name: "direction", value: "-1"),
             URLQueryItem(name: "limit", value: String(limit)),
             URLQueryItem(name: "skip", value: String(offset)),
@@ -722,6 +752,56 @@ func refreshInstalledModels() {
     /// True while an update sweep is running, so the UI can show progress.
     var isCheckingForUpdates: Bool = false
 
+    /// What a model's cached update status becomes once a download resolves it to `resolved`.
+    ///
+    /// `nil` means "drop the entry" — assigning nil through a dictionary subscript removes the
+    /// key, so the badge disappears and the next sweep re-derives the answer from scratch.
+    ///
+    /// ⚠️ ONLY claims `.upToDate` when the freshly-resolved commit IS the one the last check
+    /// reported as published. Any other outcome drops the entry rather than asserting a state
+    /// nothing verified: the publisher can push again between the check and the download, and
+    /// a badge that lies about being current is worse than no badge.
+    ///
+    /// Pure and static so the rule is testable without constructing the service, whose `init`
+    /// kicks off a filesystem scan.
+    nonisolated static func statusAfterDownload(
+        previous: MLXModelRevision.UpdateStatus?,
+        resolved: String?
+    ) -> MLXModelRevision.UpdateStatus? {
+        guard let previous, let resolved else { return nil }
+        guard case .updateAvailable(let installed, let latest) = previous else { return nil }
+        if resolved == latest { return .upToDate(revision: resolved) }
+        // ⚠️ UNCHANGED MEANS NOTHING WAS FETCHED — keep the badge. `HubApi.snapshot` takes an
+        // offline branch when the repo folder is complete: it verifies local hashes and returns
+        // normally, with no throw, no network and no bytes. The success path then ran in full and
+        // re-read the OLD commit, so dropping the entry here made the badge vanish on an update
+        // that never happened. The update really is still available.
+        if resolved == installed { return previous }
+        // Some third commit: the publisher pushed again between the check and the download, so
+        // the previous comparison no longer describes anything. Drop it and let the next sweep
+        // re-derive rather than assert a currency nothing verified.
+        return nil
+    }
+
+    /// Re-points a model's cached update status once its download lands.
+    ///
+    /// ⚠️ `updateStatus` was written in exactly ONE place and cleared NOWHERE, so a user who
+    /// acted on "Update available" kept seeing it for the rest of the session — the one signal
+    /// that the update had worked was the one signal missing.
+    func noteRevisionAfterDownload(repoId: String, resolved: String?) {
+        // No cached entry means no badge to clear; never invent one for a first install.
+        guard let previous = updateStatus[repoId] else { return }
+
+        let next = Self.statusAfterDownload(previous: previous, resolved: resolved)
+        updateStatus[repoId] = next
+
+        if let next, case .upToDate(let revision) = next {
+            logger.notice("[MLXSTORE] '\(repoId)' is now at the published revision \(MLXModelRevision.shortForm(revision)). CONSEQUENCE: its 'Update available' badge clears.")
+        } else {
+            logger.info("[MLXSTORE] Dropped the cached update status for '\(repoId)' after its download completed — the installed revision changed, so the previous comparison no longer holds. CONSEQUENCE: the badge clears and the next Check for Updates re-derives it.")
+        }
+    }
+
     /// Compares every installed model's downloaded revision against what HuggingFace publishes.
     ///
     /// ⚠️ Explicit, not automatic. One request per installed model is exactly the unbounded
@@ -821,6 +901,14 @@ func refreshInstalledModels() {
         request.cachePolicy = .useProtocolCachePolicy
         if let token = await MainActor.run(body: { HuggingFaceTokenStore.shared.token }) {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            // ⚠️ AN AUTHENTICATED RESPONSE MAY NOT COME FROM, OR GO INTO, A URL-KEYED CACHE.
+            // `URLCache` ignores the `Authorization` header, so an anonymous 200 cached while
+            // browsing signed-out could answer the very next signed-in request — and vice versa.
+            // The new "Add Token…" flow makes that sequence routine: hit a 401, add a token, and
+            // `refresh()` re-requests the same listing URL that was just cached anonymously.
+            // The token check sets this explicitly for the same reason; here it covers every
+            // other token-bearing call.
+            request.cachePolicy = .reloadIgnoringLocalCacheData
         }
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
@@ -944,6 +1032,8 @@ func refreshInstalledModels() {
                 } else {
                     self.logger.notice("[MLXSTORE] Download of '\(repoId)' finished successfully (no revision metadata found — update checks won't be available for it).")
                 }
+                // The badge that sent the user here has to go out when the work lands.
+                self.noteRevisionAfterDownload(repoId: repoId, resolved: resolved)
                 // Awaited: the DownloadManager bridge reads `installedModels` to classify the
                 // terminal state, so a fire-and-forget refresh would race it and record a
                 // successful pull as cancelled.
@@ -1771,7 +1861,7 @@ enum HFRequestError: LocalizedError, Equatable {
                 return "HuggingFace is rate-limiting requests. Try again in \(Int(retryAfter.rounded()))s."
             }
             return "HuggingFace is rate-limiting requests. Try again shortly."
-        case .unauthorized:      return "This model needs a HuggingFace access token. Add one in Settings, and make sure you've accepted the model's licence on HuggingFace."
+        case .unauthorized:      return "This model needs a HuggingFace access token. Add one in Settings › General, and make sure you've accepted the model's licence on HuggingFace."
         case .notFound:          return "That model doesn't exist on HuggingFace."
         case .serverError(let status): return "HuggingFace is unavailable (HTTP \(status))."
         case .offline:           return "No internet connection."
@@ -1808,9 +1898,18 @@ enum HFRequest {
     /// One bounded retry with jittered backoff. Deliberately small: the failures worth
     /// retrying here are transient 5xx and dropped connections, and retrying a 429 is what
     /// deepens a rate limit — so `.rateLimited` is never retried, only surfaced.
-    static func get<T: Decodable>(_ type: T.Type, from url: URL, attempt: Int = 0) async throws -> T {
+    /// - Parameter cachePolicy: defaults to the policy every listing call wants.
+    ///   ⚠️ Overridden ONLY by the token check: `URLCache` keys on the URL, NOT on the
+    ///   `Authorization` header, so a cached 200 for a shared URL can answer a request made with
+    ///   a DIFFERENT credential — which would let a revoked token verify as valid.
+    static func get<T: Decodable>(
+        _ type: T.Type,
+        from url: URL,
+        cachePolicy: URLRequest.CachePolicy = .useProtocolCachePolicy,
+        attempt: Int = 0
+    ) async throws -> T {
         do {
-            return try await perform(type, from: url)
+            return try await perform(type, from: url, cachePolicy: cachePolicy)
         } catch let error as HFRequestError {
             let retriable: Bool
             switch error {
@@ -1821,15 +1920,20 @@ enum HFRequest {
             // Jitter so a page's worth of concurrent size lookups doesn't retry in lockstep.
             let backoff = UInt64((0.4 + Double.random(in: 0...0.4)) * 1_000_000_000)
             try await Task.sleep(nanoseconds: backoff)
-            return try await get(type, from: url, attempt: attempt + 1)
+            return try await get(type, from: url, cachePolicy: cachePolicy, attempt: attempt + 1)
         }
     }
 
-    private static func perform<T: Decodable>(_ type: T.Type, from url: URL) async throws -> T {
+    private static func perform<T: Decodable>(
+        _ type: T.Type,
+        from url: URL,
+        cachePolicy: URLRequest.CachePolicy
+    ) async throws -> T {
         var request = URLRequest(url: url)
         // Authenticated requests see gated/private repos AND get a far higher rate limit —
         // anonymous throttling is part of why the size fan-out (A9) drew 429s so readily.
-        if let token = await MainActor.run(body: { HuggingFaceTokenStore.shared.token }) {
+        let token = await MainActor.run(body: { HuggingFaceTokenStore.shared.token })
+        if let token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         // Bounded so the store cannot hang on URLSession's 60s default — every other
@@ -1838,7 +1942,14 @@ enum HFRequest {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         // The list endpoint's top-30 payload is highly cacheable; let URLSession revalidate
         // instead of re-downloading an identical body every time the store opens.
-        request.cachePolicy = .useProtocolCachePolicy
+        //
+        // ⚠️ BUT AN AUTHENTICATED RESPONSE MAY NOT SHARE A URL-KEYED CACHE. `URLCache` ignores the
+        // `Authorization` header, so an anonymous 200 cached while browsing signed-out can answer
+        // the very next signed-in request — and vice versa. The "Add Token…" flow makes exactly
+        // that sequence routine: hit a 401, add a token, and `refresh()` re-requests the listing
+        // URL that was just cached anonymously, so the user adds a working token and sees the
+        // same signed-out results. The caller's policy still wins when there is no token.
+        request.cachePolicy = token == nil ? cachePolicy : .reloadIgnoringLocalCacheData
 
         let data: Data
         let response: URLResponse

@@ -65,10 +65,47 @@ final class ThemeFoundationsTests: XCTestCase {
         XCTAssertEqual(spotify.displayName, "Spotify Green")
         XCTAssertNotNil(spotify.color)
 
-        // Test backward compatibility with saved rawValues
+        // Test White, Grey, and Black
+        let white = AppAccentColor.white
+        XCTAssertEqual(white.displayName, "Pure White")
+        XCTAssertNotNil(white.color)
+        XCTAssertNotNil(white.nsColor)
+
+        let grey = AppAccentColor.grey
+        XCTAssertEqual(grey.displayName, "Slate Grey")
+        XCTAssertNotNil(grey.color)
+        XCTAssertNotNil(grey.nsColor)
+
+        let black = AppAccentColor.black
+        XCTAssertEqual(black.displayName, "Onyx Black")
+        XCTAssertNotNil(black.color)
+        XCTAssertNotNil(black.nsColor)
+
+        // Test backward compatibility with saved rawValues and aliases
         XCTAssertEqual(AppAccentColor(rawValue: "modern_spotify"), .modernSpotify)
         XCTAssertEqual(AppAccentColor(rawValue: "cosmic_cyan"), .modernSpotify)
         XCTAssertEqual(AppAccentColor(rawValue: "spotify_green"), .spotify)
+        XCTAssertEqual(AppAccentColor(rawValue: "white"), .white)
+        XCTAssertEqual(AppAccentColor(rawValue: "pure_white"), .white)
+        XCTAssertEqual(AppAccentColor(rawValue: "studio_white"), .white)
+        XCTAssertEqual(AppAccentColor(rawValue: "grey"), .grey)
+        XCTAssertEqual(AppAccentColor(rawValue: "gray"), .grey)
+        XCTAssertEqual(AppAccentColor(rawValue: "slate_grey"), .grey)
+        XCTAssertEqual(AppAccentColor(rawValue: "slate_gray"), .grey)
+        XCTAssertEqual(AppAccentColor(rawValue: "black"), .black)
+        XCTAssertEqual(AppAccentColor(rawValue: "onyx_black"), .black)
+        XCTAssertEqual(AppAccentColor(rawValue: "jet_black"), .black)
+        XCTAssertEqual(AppAccentColor(rawValue: "pure_black"), .black)
+
+        // Test isAccentLight behavior
+        let whiteDecorator = ThemeDecorator(base: AppThemes.MaterialTheme(), accentColorOverride: .white)
+        XCTAssertTrue(whiteDecorator.isAccentLight)
+
+        let blackDecorator = ThemeDecorator(base: AppThemes.MaterialTheme(), accentColorOverride: .black)
+        XCTAssertFalse(blackDecorator.isAccentLight)
+
+        let blueDecorator = ThemeDecorator(base: AppThemes.MaterialTheme(), accentColorOverride: .blue)
+        XCTAssertFalse(blueDecorator.isAccentLight)
     }
 
     func testThemeManagerAvailableThemesAndMigration() {

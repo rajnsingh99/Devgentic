@@ -92,10 +92,12 @@ struct ImageGenSettingsView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Quality")
-                            .fontWeight(.medium)
+                            .font(theme.fontFootnote.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
                         Text("HD produces higher detail at the cost of speed.")
-                            .font(.caption)
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
+                            .lineSpacing(2.5)
                     }
                     Spacer(minLength: 16)
                     Picker("", selection: $config.quality) {
@@ -116,8 +118,9 @@ struct ImageGenSettingsView: View {
                         .foregroundColor(theme.secondaryText)
                         .accessibilityHidden(true)
                     Text("This provider has no quality setting — image detail is fixed by the model you select.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
                 .accessibilityElement(children: .combine)
             }
@@ -130,10 +133,11 @@ struct ImageGenSettingsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text("Inference Steps")
-                            .fontWeight(.medium)
+                            .font(theme.fontFootnote.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
                         Spacer()
                         Text("\(stepsValue)")
-                            .font(.system(.body, design: .monospaced))
+                            .font(theme.fontFootnote.monospacedDigit())
                             .foregroundColor(theme.accentColor)
                     }
 
@@ -147,18 +151,20 @@ struct ImageGenSettingsView: View {
                     )
 
                     Text("More steps improve quality but increase generation time.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
 
                 // Guidance (CFG Scale)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text("Guidance Scale")
-                            .fontWeight(.medium)
+                            .font(theme.fontFootnote.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
                         Spacer()
                         Text(String(format: "%.1f", config.guidance ?? 3.5))
-                            .font(.system(.body, design: .monospaced))
+                            .font(theme.fontFootnote.monospacedDigit())
                             .foregroundColor(theme.accentColor)
                     }
 
@@ -172,8 +178,9 @@ struct ImageGenSettingsView: View {
                     )
 
                     Text("Higher values follow the prompt more strictly; lower values are more creative.")
-                        .font(.caption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                 }
 
                 // Reset

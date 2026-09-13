@@ -64,6 +64,21 @@ class ChatSearchViewModel {
     /// history" instead of showing "3 of 12" while the transcript visibly does nothing (CF-35).
     var currentMatchUnreachable: Bool = false
 
+    /// [vm-3] How many of `matches` lie past the resident window's cap — the "N older not shown"
+    /// half of the badge. STORED, written by `ChatHistoryViewModel.runSearch` from the same corpus
+    /// snapshot `matches` came from, so the search bar reads a value instead of walking the
+    /// corpus. Reset with `matches` (a new match set has a new count) and on dismiss.
+    ///
+    /// It used to be computed inside `ChatSearchBar.body` through `unreachableMatchCount(in:)`,
+    /// which enumerates the COMPUTED `searchCorpus`: a 1,000-entry dictionary rebuild plus sort
+    /// and a full-text hash of every resident message — on every keystroke (the TextField binds
+    /// the query `body` also reads) and on every streaming flush (reading each resident message's
+    /// `displayedContent` made the bar an observer of every resident message's content, and the
+    /// streaming message missed the memo and re-decomposed its markdown per flush). That broke
+    /// the "never call this from inside a SwiftUI body" contract in `ChatSearchDecomposition`'s
+    /// header, from a bar that has no business depending on the resident messages at all.
+    var unreachableMatchCount: Int = 0
+
     /// THE query both sides measure. `searchQuery` is the user's raw text (the TextField binds
     /// straight to it); this is what is actually searched for.
     ///
@@ -91,6 +106,24 @@ class ChatSearchViewModel {
     static let debounceInterval: TimeInterval = 0.15
 
     var totalMatchCount: Int { matches.count }
+
+    /// The match-count badge's text, built from the STORED unreachable count ([vm-3]). Lives
+    /// here rather than in `ChatSearchBar` so the string the badge shows is pinnable by a unit
+    /// test — the bar's `body` is not.
+    var matchCountLabel: String {
+        if totalMatchCount == 0 { return String(localized: "No results") }
+        let position = String(localized: "\(currentMatchIndex + 1) of \(totalMatchCount)")
+        guard unreachableMatchCount > 0 else { return position }
+        return String(localized: "\(position) · \(unreachableMatchCount) older not shown")
+    }
+
+    /// The badge's accessibility label — same inputs, spelled out.
+    var matchCountAccessibilityLabel: String {
+        if totalMatchCount == 0 { return String(localized: "No results") }
+        let position = String(localized: "Match \(currentMatchIndex + 1) of \(totalMatchCount)")
+        guard unreachableMatchCount > 0 else { return position }
+        return String(localized: "\(position), \(unreachableMatchCount) older matches not loaded and cannot be reached")
+    }
 
     var currentMatchMessageID: UUID? {
         guard !matches.isEmpty, currentMatchIndex >= 0, currentMatchIndex < matches.count else { return nil }
@@ -138,7 +171,8 @@ class ChatSearchViewModel {
             matchedQuery = nil
             currentMatchIndex = 0
             currentMatchUnreachable = false
-                return
+            unreachableMatchCount = 0
+            return
         }
 
         // Re-anchor on the SAME match across re-runs (membership changes re-run this) — but ONLY
@@ -170,6 +204,10 @@ class ChatSearchViewModel {
         }
 
         matches = results
+        // [vm-3] A new match set invalidates the old count; `runSearch` writes the new one from
+        // the same corpus snapshot right after this returns. Direct callers (tests, a future
+        // surface without residency) get the honest "nothing known to be unreachable".
+        unreachableMatchCount = 0
         currentMatchIndex = previousKey.flatMap { key in results.firstIndex { $0.id == key } }
             ?? (previousKey == nil ? 0 : (currentMatchIndex < results.count ? currentMatchIndex : 0))
         matchedQuery = query
@@ -200,6 +238,7 @@ class ChatSearchViewModel {
         matchedQuery = nil
         currentMatchIndex = 0
         currentMatchUnreachable = false
+        unreachableMatchCount = 0
     }
 
     func toggleSearch() {

@@ -53,12 +53,6 @@ final class ConversationManagementCoordinator {
         self.backendConfiguration = backendConfiguration
     }
 
-    // MARK: - Small Delegations
-
-    func toggleUserMessagesFilter() {
-        chatHistoryViewModel.toggleUserMessagesFilter()
-    }
-
     // MARK: - Create / Select
 
     func startNewConversation() {
@@ -69,7 +63,6 @@ final class ConversationManagementCoordinator {
         // draft saved for the conversation being left captured zero attachments and the
         // user lost them. See ComposerDraftStore.
         let newConversationID = createAndSelectNewConversation()
-        chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
         logger.info("Started new conversation with ID \(newConversationID.uuidString).")
     }
 
@@ -82,7 +75,6 @@ final class ConversationManagementCoordinator {
         vm.selectedConversationID = nil
         backendConfiguration.selectedProfileID = nil
         chatHistoryViewModel.currentChatMessages = []
-        chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
 
         if vm.interfaceMode == .code {
             vm.codeSessionManager?.resetSession()
@@ -104,7 +96,6 @@ final class ConversationManagementCoordinator {
             tagConversationWithCurrentMode(emptyConvID)
             chatHistoryViewModel.currentChatMessages = []
             vm.selectedConversationID = emptyConvID
-            chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
             return emptyConvID
         }
 
@@ -119,7 +110,6 @@ final class ConversationManagementCoordinator {
         tagConversationWithCurrentMode(newConversation.id)
         chatHistoryViewModel.currentChatMessages = []
         vm.selectedConversationID = newConversation.id
-        chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
 
         return newConversation.id
     }
@@ -257,6 +247,35 @@ final class ConversationManagementCoordinator {
         }
     }
 
+
+    /// Clears the ChatOps cursor for a conversation that no longer exists.
+    ///
+    /// ⚠️⚠️ THE CURSOR OUTLIVING ITS CONVERSATION IS NOT INERT — IT MISDIAGNOSES EVERY LATER
+    /// MESSAGE. The three bridges' free-text path guards `activeConversationID != nil`, then asks
+    /// `profile(boundTo:)`, which collapses "the conversation row is gone" into "no profile bound"
+    /// — so the bot answers "⚠️ No agent profile found for this conversation" forever, while
+    /// `/status` in the same chat correctly reports "Active Conversation: None". Two surfaces, two
+    /// answers, neither actionable.
+    ///
+    /// ⚠️ Cleared for EVERY provider whose cursor points here, not just the current one: three
+    /// bridges can be bound to the same conversation at once.
+    private func forgetRemoteBindings(conversationID: UUID) {
+        for provider in RemoteChannel.Provider.allCases
+        where RemoteSessionStore.shared.activeConversation(for: provider) == conversationID {
+            RemoteSessionStore.shared.setActiveConversation(nil, for: provider)
+            logger.info("[DELETE] \(conversationID.uuidString.prefix(8)) — cleared the \(provider.rawValue) ChatOps cursor, which pointed at it. CONSEQUENCE: the next remote message is answered with 'no active conversation' and a prompt to pick one, instead of a misleading 'no agent profile found' repeated indefinitely.")
+        }
+        // ⚠️ The mirror's session is an address book keyed by conversation; a deleted conversation
+        // can never legitimately be mirrored again, and `unregisterSession` had no callers at all
+        // until this one.
+        guard let vm = viewModel else { return }
+        for mirror in [vm.chatOpsBridge?.remoteMirrorService,
+                       vm.discordChatOpsBridge?.remoteMirrorService,
+                       vm.slackChatOpsBridge?.remoteMirrorService] {
+            mirror?.unregisterSession(conversationID: conversationID)
+        }
+    }
+
     func deleteConversation(conversationID: UUID) {
         guard let vm = viewModel else { return }
         let short = conversationID.uuidString.prefix(8)
@@ -268,6 +287,7 @@ final class ConversationManagementCoordinator {
         // [CF-39] Same reasoning as the draft above: a side store keyed by conversation id must
         // not outlive the conversation.
         RemoteConversationOriginStore.forget(conversationID: conversationID)
+        forgetRemoteBindings(conversationID: conversationID)
         persistenceService.deleteConversation(with: conversationID)
         // Privacy: delete the conversation's traces too (FK cascades spans/events/configs),
         // so its raw content doesn't linger in traces.sqlite after deletion (§12.5).
@@ -305,6 +325,7 @@ final class ConversationManagementCoordinator {
             drainLiveExecution(conversationID: id, vm: vm)
             ComposerDraftStore.shared.discard(for: id)
             RemoteConversationOriginStore.forget(conversationID: id)   // [CF-39]
+            forgetRemoteBindings(conversationID: id)
             persistenceService.deleteConversation(with: id)
             do {
                 try TraceStore.shared?.deleteTraces(forConversationID: id.uuidString)
@@ -344,18 +365,28 @@ final class ConversationManagementCoordinator {
         }
         let title = conversationSD.toRowStruct().displayTitle
 
-        Task { [persistenceService] in
-            let limit = 10_000
-            let messages = await persistenceService.fetchMessages(for: conversationID, offset: 0, limit: limit)
-            // `fetchMessages` sorts NEWEST-first, so hitting the cap drops the conversation's
-            // EARLIEST turns. That used to happen with no log and no notice in the file: the
-            // export simply began partway through. Probe one past the cap to distinguish
-            // "exactly at the limit" from "truncated".
-            let isTruncated = !(await persistenceService.fetchMessages(for: conversationID, offset: limit, limit: 1)).isEmpty
-            if isTruncated {
-                logger.warning("[EXPORT] Conversation \(conversationID.uuidString.prefix(8)) exceeds the \(limit)-message export cap — the export carries the most recent \(messages.count) and its EARLIEST turns are omitted. CONSEQUENCE: stated in the exported document's header so the file is not silently partial.")
+        // [mm-4] The save panel goes up FIRST; the fetch runs only after the user picks a file,
+        // through the export projection (no image bytes). It used to fetch everything — every
+        // attached image's external-storage blob included, on the main actor — before the panel
+        // existed, so a long image-heavy conversation froze the window with nothing on screen.
+        let persistenceService = persistenceService
+        let logger = logger
+        ConversationExporter.exportToFile(title: title) {
+            // The panel is modeless: the conversation can be deleted while it is up. Nil tells
+            // the exporter to report that instead of writing a header-only file.
+            guard persistenceService.getConversation(withId: conversationID) != nil else {
+                logger.warning("[EXPORT] Conversation \(conversationID.uuidString.prefix(8)) no longer exists at save time — export abandoned.")
+                return nil
             }
-            await ConversationExporter.exportToFile(title: title, messages: messages, isTruncated: isTruncated)
+            let limit = 10_000
+            let source = await persistenceService.fetchMessagesForExport(for: conversationID, limit: limit)
+            // Newest-first, so hitting the cap drops the conversation's EARLIEST turns. That used
+            // to happen with no log and no notice in the file: the export simply began partway
+            // through.
+            if source.isTruncated {
+                logger.warning("[EXPORT] Conversation \(conversationID.uuidString.prefix(8)) exceeds the \(limit)-message export cap — the export carries the most recent \(source.messages.count) and its EARLIEST turns are omitted. CONSEQUENCE: stated in the exported document's header so the file is not silently partial.")
+            }
+            return source
         }
     }
 }

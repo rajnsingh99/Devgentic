@@ -94,8 +94,28 @@ struct TelemetrySanitizer {
 
     /// Replaces macOS/Linux home-dir prefixes with a placeholder, preserving the tail.
     /// `/Users/alice/Documents/foo.swift` → `/[USER_PATH]/Documents/foo.swift`
+    ///
+    /// ⚠️⚠️ THE USERNAME CLASS IS BOUNDED, AND IT USED TO EAT PROSE. It was `[^\/]+` — "anything
+    /// that is not a slash" — which is only the username when a slash actually follows. In a
+    /// sentence it does not: an agent reply reading ``The home directory (`/Users/dev`) contains
+    /// both files and many folders. … including `Applications/` `` has NO forward slash for 221
+    /// characters after the username, so one match swallowed the whole paragraph — newlines
+    /// included — and the log line read ``The home directory (`/[USER_PATH]/`, `Desktop/` ``.
+    /// Observed in a real launch log 2026-09-11; the unsanitised twin of the same string, printed
+    /// two lines later, showed the text intact.
+    ///
+    /// ⚠️ WHY AN EXCLUSION CLASS RATHER THAN AN ALLOWLIST. `[A-Za-z0-9._-]+` describes a POSIX
+    /// username exactly and fixes the corruption — but it UNDER-redacts the cases it does not
+    /// describe: `/Users/CORP\jsmith` leaks `\jsmith` and `/Users/josé` leaks `é`. This file's
+    /// header commits to over-redacting rather than under-redacting, so the class instead excludes
+    /// the delimiters a path component cannot be followed by in prose (whitespace, quotes,
+    /// backtick, brackets, comma, semicolon) and keeps everything else. A username containing a
+    /// literal `)` or `;` would be clipped; no real one does.
+    ///
+    /// ⚠️ Sibling patterns were audited at the same time and none share this shape — every other
+    /// class in this file is bounded by `\b`, by an explicit character set, or by a closing quote.
     static func sanitizeHomePath(_ text: String) -> String {
-        replace(text, pattern: "(\\/)(?:Users|home)\\/[^\\/]+", with: "$1[USER_PATH]")
+        replace(text, pattern: "(\\/)(?:Users|home)\\/[^\\/\\s\"'`(),;]+", with: "$1[USER_PATH]")
     }
 
     /// Replaces IP addresses (v4 and v6) with `[IP_ADDR]`.
@@ -166,6 +186,18 @@ struct TelemetrySanitizer {
         // Conservative — 40+ chars to avoid redacting legitimate IDs. (This also catches full
         // git SHAs; the file's stated contract is over-redact rather than under-redact.)
         s = replace(s, pattern: "\\b[a-fA-F0-9]{40,}\\b",           with: "[API_KEY_HEX]")
+        // ⚠️ BARE JWTs. `sanitizeBearerToken` requires a literal `Bearer ` prefix, and the
+        // Discord-token pattern above is anchored `[MNO]` — so a session token echoed out of a 401
+        // body, a decoded cookie, or a config file matched NOTHING. `eyJ` is the base64url of `{"`,
+        // which is what every JWT header begins with; three dot-joined segments is the format.
+        s = replace(s, pattern: "\\beyJ[A-Za-z0-9_\\-]{8,}\\.[A-Za-z0-9_\\-]{8,}\\.[A-Za-z0-9_\\-]{8,}", with: "[JWT]")
+        // ⚠️ PEM PRIVATE KEYS, matched as a BLOCK. Nothing else here spans lines, and a key is only
+        // dangerous whole — `cat ~/.ssh/id_ed25519` in a tool result is the ordinary way one arrives.
+        // ⚠️ Non-greedy, so two keys in one string redact as two blocks rather than one span that
+        // also swallows everything between them (the greedy-match failure invariant 41 records).
+        s = replace(s,
+                    pattern: "-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+                    with: "[PRIVATE_KEY]")
         return s
     }
 
@@ -179,7 +211,20 @@ struct TelemetrySanitizer {
     /// Redacts URL basic-auth credentials: `https://user:pass@host` → `https://[CREDS]@host`
     static func sanitizeURLCredentials(_ text: String) -> String {
         replace(text,
-                pattern: "(https?|ftp|ssh|wss?)://[^/\\s:@]+:[^/\\s@]+@",
+                // ⚠️⚠️ ANY URI SCHEME, NOT A FIXED LIST. The alternation used to be
+                // `(https?|ftp|ssh|wss?)`, which meant every database URI walked straight through:
+                // `postgres://admin:hunter2@db:5432/app`, `mongodb://`, `redis://`, `mysql://`,
+                // `amqp://` — precisely the strings an agent quotes back when the user asks why the
+                // app cannot reach the database, and precisely the ones a `.env` is full of. The
+                // pattern already requires a literal `user:pass@`, which prose does not contain, so
+                // widening the scheme costs no false positives.
+                // ⚠️ The scheme stays CAPTURED — the replacement is "$1://[CREDS]@", so dropping the
+                // group would silently rewrite `postgres://u:p@h` as `://[CREDS]@h` and lose the
+                // scheme along with the password.
+                // ⚠️ THE USERNAME IS OPTIONAL (`*`, not `+`). `redis://:mypassword@host` is the
+                // ordinary Redis form and has no user at all; requiring one let it through with the
+                // password intact. The PASSWORD stays `+` — without one there is no credential here.
+                pattern: "([A-Za-z][A-Za-z0-9+.\\-]*)://[^/\\s:@]*:[^/\\s@]+@",
                 with: "$1://[CREDS]@")
     }
 

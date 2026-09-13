@@ -76,6 +76,47 @@ enum SurfaceStyle: String, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - Button Accent Style
+
+/// Controls whether primary buttons and interactive controls adopt the active theme accent color
+/// or follow a high-contrast theme-based material palette (white buttons with dark icons on dark theme,
+/// dark buttons with white icons on light theme).
+enum ButtonAccentStyle: String, CaseIterable, Identifiable {
+    case themeContrast = "theme_contrast"
+    case accent = "accent"
+
+    var id: String { rawValue }
+
+    init?(rawValue: String) {
+        switch rawValue {
+        case "theme_contrast", "monochrome": self = .themeContrast
+        case "accent": self = .accent
+        default: return nil
+        }
+    }
+
+    var displayName: LocalizedStringKey {
+        switch self {
+        case .themeContrast: return "Theme Contrast (Material)"
+        case .accent: return "Dynamic Accent"
+        }
+    }
+
+    var subtitle: LocalizedStringKey {
+        switch self {
+        case .themeContrast: return "Crisp white button on dark theme, solid dark button on light theme with theme-based icons."
+        case .accent: return "Primary CTAs adopt your selected accent color with subtle glow."
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .themeContrast: return "circle.lefthalf.filled"
+        case .accent: return "paintpalette.fill"
+        }
+    }
+}
+
 // MARK: - Theme Manager
 
 /// A class that manages the application's themes.
@@ -93,6 +134,7 @@ enum SurfaceStyle: String, CaseIterable, Identifiable {
     private static let codeViewerThemeKey = "codeViewerThemeOverride"
     private static let accentColorKey = "selectedAccentColor"
     private static let surfaceStyleKey = "selectedSurfaceStyle"
+    private static let buttonAccentStyleKey = "selectedButtonAccentStyle"
 
     /// The array of all themes available in the application.
     let availableThemes: [any Theme] = [
@@ -117,6 +159,9 @@ enum SurfaceStyle: String, CaseIterable, Identifiable {
 
     /// The surface presentation style (Liquid Glass vs. Solid Matte).
     private(set) var surfaceStyle: SurfaceStyle
+
+    /// The button accent presentation style (Dynamic Accent vs. Monochrome Pro).
+    private(set) var buttonAccentStyle: ButtonAccentStyle
 
     // MARK: - Chat Font Customization
     /// The font size for chat message body text. Default: 15pt (matches fontBody).
@@ -167,6 +212,10 @@ enum SurfaceStyle: String, CaseIterable, Identifiable {
         // Load the saved surface style (default: glassmorphic).
         let savedSurface = UserDefaults.standard.string(forKey: Self.surfaceStyleKey)
         self.surfaceStyle = savedSurface.flatMap { SurfaceStyle(rawValue: $0) } ?? .glassmorphic
+
+        // Load the saved button accent presentation style (default: themeContrast).
+        let savedButtonStyle = UserDefaults.standard.string(forKey: Self.buttonAccentStyleKey)
+        self.buttonAccentStyle = savedButtonStyle.flatMap { ButtonAccentStyle(rawValue: $0) } ?? .themeContrast
 
         // Load chat font settings (default: 15pt body, 4pt line spacing)
         let savedFontSize = UserDefaults.standard.object(forKey: AppSettings.chatFontSizeKey) as? CGFloat
@@ -221,6 +270,12 @@ enum SurfaceStyle: String, CaseIterable, Identifiable {
     func applySurfaceStyle(_ style: SurfaceStyle) {
         self.surfaceStyle = style
         UserDefaults.standard.set(style.rawValue, forKey: Self.surfaceStyleKey)
+    }
+
+    /// Applies a new button accent presentation style (Dynamic Accent vs. Monochrome Pro).
+    func applyButtonAccentStyle(_ style: ButtonAccentStyle) {
+        self.buttonAccentStyle = style
+        UserDefaults.standard.set(style.rawValue, forKey: Self.buttonAccentStyleKey)
     }
 
     // MARK: - Chat Font Actions

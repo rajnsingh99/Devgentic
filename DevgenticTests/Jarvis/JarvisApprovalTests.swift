@@ -116,14 +116,25 @@ final class JarvisAutonomousApprovalTests: XCTestCase {
         return SessionToolApprovals(defaults: suite)
     }
 
+    /// Runs `body` as a run STARTED BY JARVIS.
+    ///
+    /// ⚠️ The blanket grant is keyed on (conversation, origin) since 2026-09-11, so asking
+    /// `isAllowed` outside a voice run correctly answers no. Without this the suite would be
+    /// asserting `.localUI` behaviour while claiming to test Jarvis.
+    private func asJarvisRun<T>(_ body: () async -> T) async -> T {
+        await WorkflowRunAttendance.$origin.withValue(.jarvis) { await body() }
+    }
+
     func testAutonomousApprovesAToolThatWasNeverIndividuallyGranted() async {
         let approvals = makeApprovals()
         let conversation = UUID()
-        var allowed = await approvals.isAllowed(toolName: "execute_shell", conversationID: conversation)
+        // ⚠️ Run AS A VOICE RUN. The grant is keyed on (conversation, origin), so `isAllowed` must
+        //   be asked in the same origin it was granted for — see `SessionToolApprovals.AutonomousGrant`.
+        var allowed = await asJarvisRun { await approvals.isAllowed(toolName: "execute_shell", conversationID: conversation) }
         XCTAssertFalse(allowed, "nothing is approved before the mode is set")
 
-        await approvals.setAutonomous(true, conversationID: conversation)
-        allowed = await approvals.isAllowed(toolName: "execute_shell", conversationID: conversation)
+        await approvals.setAutonomous(true, conversationID: conversation, origin: .jarvis)
+        allowed = await asJarvisRun { await approvals.isAllowed(toolName: "execute_shell", conversationID: conversation) }
         XCTAssertTrue(allowed)
     }
 
@@ -131,17 +142,17 @@ final class JarvisAutonomousApprovalTests: XCTestCase {
         // A voice setting must never change the behaviour of a conversation the user is typing in.
         let approvals = makeApprovals()
         let voice = UUID(), typed = UUID()
-        await approvals.setAutonomous(true, conversationID: voice)
-        let leaked = await approvals.isAllowed(toolName: "execute_shell", conversationID: typed)
+        await approvals.setAutonomous(true, conversationID: voice, origin: .jarvis)
+        let leaked = await asJarvisRun { await approvals.isAllowed(toolName: "execute_shell", conversationID: typed) }
         XCTAssertFalse(leaked)
     }
 
     func testTurningItOffRevokesImmediately() async {
         let approvals = makeApprovals()
         let conversation = UUID()
-        await approvals.setAutonomous(true, conversationID: conversation)
-        await approvals.setAutonomous(false, conversationID: conversation)
-        let allowed = await approvals.isAllowed(toolName: "read_file", conversationID: conversation)
+        await approvals.setAutonomous(true, conversationID: conversation, origin: .jarvis)
+        await approvals.setAutonomous(false, conversationID: conversation, origin: .jarvis)
+        let allowed = await asJarvisRun { await approvals.isAllowed(toolName: "read_file", conversationID: conversation) }
         XCTAssertFalse(allowed)
     }
 
@@ -151,11 +162,13 @@ final class JarvisAutonomousApprovalTests: XCTestCase {
         // grant given on a live voice session must not silently auto-approve a scheduled run.
         let approvals = makeApprovals()
         let conversation = UUID()
-        await approvals.setAutonomous(true, conversationID: conversation)
+        await approvals.setAutonomous(true, conversationID: conversation, origin: .jarvis)
 
-        let allowed = await WorkflowRunAttendance.$isAttended.withValue(false) {
-            await WorkflowRunAttendance.$hasRemoteResponder.withValue(false) {
-                await approvals.isAllowed(toolName: "execute_shell", conversationID: conversation)
+        let allowed = await WorkflowRunAttendance.$origin.withValue(.jarvis) {
+            await WorkflowRunAttendance.$isAttended.withValue(false) {
+                await WorkflowRunAttendance.$hasRemoteResponder.withValue(false) {
+                    await approvals.isAllowed(toolName: "execute_shell", conversationID: conversation)
+                }
             }
         }
         XCTAssertFalse(allowed, "an unattended run must not inherit a voice session's blanket grant")
@@ -164,9 +177,9 @@ final class JarvisAutonomousApprovalTests: XCTestCase {
     func testClearingAConversationAlsoClearsItsBlanketGrant() async {
         let approvals = makeApprovals()
         let conversation = UUID()
-        await approvals.setAutonomous(true, conversationID: conversation)
+        await approvals.setAutonomous(true, conversationID: conversation, origin: .jarvis)
         await approvals.clear(conversationID: conversation)
-        let allowed = await approvals.isAllowed(toolName: "read_file", conversationID: conversation)
+        let allowed = await asJarvisRun { await approvals.isAllowed(toolName: "read_file", conversationID: conversation) }
         XCTAssertFalse(allowed)
     }
 }

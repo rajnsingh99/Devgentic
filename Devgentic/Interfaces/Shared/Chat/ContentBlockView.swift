@@ -125,6 +125,13 @@ struct ContentBlockView: View, Equatable {
     /// highlight painted a different occurrence than the one being navigated to, or nothing.
     var activeMatch: ActiveSearchMatch? = nil
 
+    /// [mc-11] What a file-reference verification depends on. `isStreaming` is part of the key
+    /// so the SETTLE re-fires it — see the task below for why text alone cannot.
+    private struct VerifyKey: Equatable {
+        let text: String
+        let isStreaming: Bool
+    }
+
     /// This block's own active index, or nil when the active match belongs elsewhere.
     /// Mismatch degrades to "paint nothing", never to "paint the wrong run".
     private var activeHighlightIndex: Int? {
@@ -183,12 +190,16 @@ struct ContentBlockView: View, Equatable {
         case .code(let lang, let codeContent, let fileName):
             // Counted and built via CodeSnippet so this card, and the snippet the viewer
             // opens when it's tapped, are derived identically — see CodeSnippet.isLarge.
-            if CodeSnippet.isLarge(codeBlockContent: codeContent) {
-                CodeBlockCardView(language: lang, lineCount: CodeSnippet.lineCount(codeBlockContent: codeContent), fileName: fileName, content: codeContent) {
+            // [mc-12] Counted ONCE per body pass and reused for the branch, the card and the
+            // accessibility label. It used to be three separate walks of the same unbounded
+            // string — `isLarge` internally counts too — on every streaming flush of the block.
+            let codeLines = CodeSnippet.lineCount(codeBlockContent: codeContent)
+            if codeLines > ChatUIConstants.codeBlockLineLimit {
+                CodeBlockCardView(language: lang, lineCount: codeLines, fileName: fileName, content: codeContent) {
                     let snippet = CodeSnippet(codeBlock: lang, content: codeContent)
                     chatHistoryViewModel.openMessageInCodeViewer(message: message, selectedSnippet: snippet)
                 }
-                .accessibilityLabel("\(lang) code block, \(CodeSnippet.lineCount(codeBlockContent: codeContent)) lines. Tap to open in viewer.")
+                .accessibilityLabel("\(lang) code block, \(codeLines) lines. Tap to open in viewer.")
             } else {
                 // The inline Viewer button gets the SAME origin identity the card branch
                 // above passes through `openMessageInCodeViewer`, so re-opening a block
@@ -224,8 +235,10 @@ struct ContentBlockView: View, Equatable {
 
         case .listItem(let prefix, let blocks, let checkbox):
             // `.firstTextBaseline` keeps the marker (number/bullet/checkbox) on the FIRST
-            // line of a wrapped item. `.top` used to float them up relative to the icon,
-            // and the icon's own HStack defaulted to `.center` — see renderPathListItem.
+            // line of a wrapped item; `.top` floated it above the text's cap height and
+            // `.center` floated it to the vertical middle of a multi-line item. (This used to
+            // point at `renderPathListItem` for the `.center` half — that helper was deleted as
+            // dead code in the same 2026-09-12 pass; see the note at its former site.)
             HStack(alignment: .firstTextBaseline, spacing: theme.spacingSmall) {
                 listMarker(prefix: prefix, checkbox: checkbox)
 
@@ -403,17 +416,56 @@ struct ContentBlockView: View, Equatable {
         // Existence checking is a `stat` per candidate and can hang for seconds on an
         // unresponsive network mount, so it never runs in `body`. Until this lands the set
         // is empty and the spans render as ordinary inline code — the silent default.
-        // Re-keyed on the text so a streaming block re-verifies as its paths arrive.
-        .task(id: text) {
+        //
+        // ⚠️ [mc-11] Keyed on (text, isStreaming), and the work is SKIPPED while streaming.
+        // Keyed on `text` alone it re-ran the whole main-actor prologue on every flush — a
+        // fresh `fileIndex` over every loaded message plus a markdown parse of the block — for
+        // a block whose paths were still arriving a character at a time. The composite key is
+        // what makes the settle itself an event: `ContentBlock.id` is POSITIONAL, so a settled
+        // block keeps its identity and, when its final text equals its last streamed text, a
+        // task keyed on text alone would never fire again — no reference in it would ever
+        // linkify, and `openFileReference` below depends on exactly that standing task.
+        .task(id: VerifyKey(text: text, isStreaming: message.isStreaming)) {
             await verifyFileReferences(in: text)
         }
         .environment(\.openURL, OpenURLAction { url in
             guard let path = FileReferenceResolver.path(fromLinkURL: url) else {
                 return .systemAction
             }
+            // ⚠️ [CR18] The scheme is NOT an authorisation check, and treating it as one let a
+            // MODEL open any file on this machine.
+            //
+            // Everything upstream of here gates which inline CODE SPANS become links:
+            // `verifyFileReferences` resolves a span against the conversation's own file index
+            // and `stat`s it, and only then does `linkURL(forVerifiedPath:)` mint a URL. None of
+            // that constrains a link the author WROTE. A reply containing
+            // `[click here](devgentic-file://open?path=/Users/you/.ssh/id_rsa)` parses to a run
+            // whose `link` carries that URL verbatim — probed: Foundation preserves a custom
+            // scheme through `AttributedString(markdown:)` — it lands here, passes the
+            // scheme/host test, and the path is opened. The reply is untrusted input.
+            //
+            // So the path must be one WE minted for this block. `resolvedFileLinks` is exactly
+            // that set: filled off-main from this block's own verified spans.
+            guard Self.isVerifiedForThisBlock(path, verifiedPaths: resolvedFileLinks.values) else {
+                // `.handled`, not `.systemAction`: refusing must not hand the URL back to the
+                // system to open by some other route.
+                logger.warning("[FileRef] REFUSED a \(FileReferenceResolver.scheme) link whose path was never verified for this block: \(path). CONSEQUENCE: nothing is opened — this link was authored in the message rather than minted from a checked file reference, and honouring it would let message content choose any path on disk.")
+                fileOpenFailureReason = String(localized: "That link points somewhere this message never referenced, so it wasn't opened.")
+                return .handled
+            }
             openFileReference(path, inBlockText: text)
             return .handled
         })
+    }
+
+    /// [CR18] Whether a tapped link's path is one THIS block verified.
+    ///
+    /// Extracted so the rule is testable: the handler that calls it lives in a SwiftUI `body` and
+    /// cannot be reached from a test, and this is the check that decides whether message content
+    /// gets to choose a path on disk.
+    nonisolated static func isVerifiedForThisBlock(_ path: String,
+                                                   verifiedPaths: some Collection<String>) -> Bool {
+        verifiedPaths.contains(path)
     }
 
     /// The "that didn't open" caption under a block whose file reference was tapped.
@@ -453,13 +505,21 @@ struct ContentBlockView: View, Equatable {
     /// plain text.
     private func verifyFileReferences(in text: String) async {
         guard chatHistoryViewModel.canPresentCodeViewer else { return }
+        // [mc-11] Exactly one verification per block, at settle. A streaming block's paths are
+        // still arriving, so every intermediate answer is provisional and the final one is the
+        // only one that can be right — and the re-key above guarantees this fires again when
+        // `isStreaming` flips.
+        guard !message.isStreaming else { return }
 
         // The index is built on the main actor because it reads the loaded messages. It is a
         // plain walk of already-decoded timeline events — writes contribute `effect.path` with
         // no parsing at all, and only small param blobs are decoded (see `maxParamsScanLength`),
         // so a write carrying a whole file never gets JSON-parsed here.
         let index = FileReferenceResolver.fileIndex(from: chatHistoryViewModel.currentChatMessages)
-        let candidates = FileReferenceResolver.candidateLinks(inMarkdown: text, index: index)
+        // ONE markdown parse, shared: `createStyledString` will parse this text again to render
+        // it, but the second parse inside `candidateLinks(inMarkdown:)` was pure duplication.
+        let spans = FileReferenceResolver.codeSpans(inMarkdown: text)
+        let candidates = FileReferenceResolver.candidateLinks(inCodeSpans: spans, index: index)
         guard !candidates.isEmpty else {
             if !resolvedFileLinks.isEmpty { resolvedFileLinks = [:] }
             return
@@ -540,36 +600,21 @@ struct ContentBlockView: View, Equatable {
         }
     }
 
-    private func isPathContent(_ text: String) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespaces)
-        // Only explicit path ROWS get the icon treatment: tool-emitted 📁/📄 markers,
-        // or items that ARE a path (start with / or ~/). The old `contains("/")`
-        // clause decorated prose that merely MENTIONED a path ("…was created in
-        // /tmp/") — some numbered items got icons, adjacent ones didn't.
-        return trimmed.hasPrefix("📁") || trimmed.hasPrefix("📄")
-            || trimmed.hasPrefix("/") || trimmed.hasPrefix("~/")
-    }
-
-    @ViewBuilder
-    private func renderPathListItem(text: String) -> some View {
-        let cleanText = text.replacingOccurrences(of: "📁 ", with: "").replacingOccurrences(of: "📄 ", with: "")
-        let isFolder = text.contains("📁") || !cleanText.contains(".")
-        
-        // `.firstTextBaseline` (not the default `.center`) pins the icon to the first line
-        // of a multi-line item instead of floating it to the vertical middle.
-        HStack(alignment: .firstTextBaseline, spacing: theme.spacingXSmall) {
-            Image(systemName: isFolder ? "folder.fill" : "doc.fill")
-                .foregroundColor(theme.accentColor)
-                .font(.system(.caption))
-
-            renderTextView(text: cleanText)
-        }
-    }
+    // [mc-9] `isPathContent` and `renderPathListItem` were DELETED here on 2026-09-12. They had
+    // had zero callers since the ContentBlock model went recursive — the folder/file icon
+    // treatment for path list items stopped rendering then and nobody noticed, which is the
+    // honest measure of how much it was worth.
+    //
+    // Deleted rather than re-wired: `renderPathListItem` takes a single `String` and ends in
+    // `renderTextView(text:)`, so calling it from the `.listItem` branch would have rendered only
+    // the item's first paragraph and SILENTLY DROPPED its other children — nested lists, extra
+    // paragraphs, fenced code. Restoring an icon by losing content is not a fix.
 
     private func createStyledString(from text: String, font: Font, weight: Font.Weight) -> AttributedString {
         // Capture theme colors for use inside AttributedString manipulation
         let textColor = theme.primaryText
         let inlineCodeHighlight = theme.inlineCodeHighlight
+        let linkColor = theme.accentColor
 
         var attributedString: AttributedString
         if let parsed = try? AttributedString(markdown: text) {
@@ -594,16 +639,28 @@ struct ContentBlockView: View, Equatable {
                     // Tappable when — and only when — this span resolved to a file that
                     // exists. `resolvedFileLinks` is filled off-main by `verifyFileReferences`,
                     // so an unresolved span simply isn't a link. `.link` is the only per-run
-                    // interactive attribute a `Text` supports; the underline it brings is the
-                    // affordance that separates a tappable reference from ordinary code.
+                    // interactive attribute a `Text` supports.
+                    //
+                    // ⚠️ The underline is set EXPLICITLY. This comment used to claim `.link`
+                    // brought one with it — an ImageRenderer pixel probe showed it does not once
+                    // the run carries an explicit `foregroundColor`, and we re-assert one two
+                    // lines below. So a verified, tappable file reference was rendering
+                    // byte-identical to ordinary inline code, with no affordance at all.
                     let span = String(attributedString[run.range].characters)
                         .trimmingCharacters(in: .whitespacesAndNewlines)
+                    // ⚠️ No `run.link != nil` case here, deliberately: a link whose LABEL is
+                    // inline code does not reach this branch at all. Probed — Foundation drops
+                    // the `.code` intent on a link label, so that run has `link` set and no
+                    // intent, and falls to the ordinary-link branch below. See
+                    // `FileReferenceResolver.codeSpans` for the probe and `LinkedCodeSpanTests`
+                    // for the pin.
                     if let path = resolvedFileLinks[span],
                        let url = FileReferenceResolver.linkURL(forVerifiedPath: path) {
                         attributedString[run.range].link = url
                         // Re-assert the colour: SwiftUI tints links with the accent otherwise,
                         // which is close to but not the same as the inline-code hue.
                         attributedString[run.range].foregroundColor = inlineCodeHighlight
+                        attributedString[run.range].underlineStyle = .single
                     }
                 } else if intent.contains(.stronglyEmphasized), intent.contains(.emphasized) {
                     attributedString[run.range].font = font.weight(.semibold).italic()
@@ -614,6 +671,17 @@ struct ContentBlockView: View, Equatable {
                 } else if intent.contains(.emphasized) {
                     attributedString[run.range].font = font.weight(weight).italic()
                     attributedString[run.range].foregroundColor = textColor
+                } else if run.link != nil {
+                    // An ordinary markdown link. It carries NO `inlinePresentationIntent`, so
+                    // before this branch existed it fell into the `else` below — which assigns
+                    // `foregroundColor = textColor`, overwriting the accent tint SwiftUI would
+                    // otherwise give a link. With no underline either, `[docs](https://…)`
+                    // rendered pixel-identical to the prose around it: the only clickable thing
+                    // in the paragraph was invisible. Colour ALONE is not enough here, which is
+                    // why the underline is explicit (see the file-reference note above).
+                    attributedString[run.range].font = font.weight(weight)
+                    attributedString[run.range].foregroundColor = linkColor
+                    attributedString[run.range].underlineStyle = .single
                 } else {
                     attributedString[run.range].font = font.weight(weight)
                     attributedString[run.range].foregroundColor = textColor

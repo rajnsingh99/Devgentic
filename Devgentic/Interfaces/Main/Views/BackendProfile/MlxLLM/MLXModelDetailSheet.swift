@@ -35,6 +35,22 @@ struct MLXModelDetailSheet: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+                    // ⚠️ ABOVE the isLoading/detail switch, not inside `factsGrid`. This is the
+                    // one fact about an installed copy that is known from DISK, so putting it in
+                    // the grid would blank it during the HuggingFace fetch and on `errorState` —
+                    // i.e. offline, which is exactly when someone inspects a model they already
+                    // have. `if let` rather than a placeholder: a copy that predates revision
+                    // tracking shows nothing instead of a made-up "unknown".
+                    // ⚠️ RESOLVED HERE, NOT CARRIED ON THE CARD. The card's `revision` was
+                    // populated only by the INSTALLED-tab mapping, so opening the sheet for the
+                    // same installed model from All or Recommended showed no row at all — which
+                    // reads as "this copy predates revision tracking", and is false. The service
+                    // is the one source that is right on every tab.
+                    if let revision = MLXModelService.shared.installedModel(named: model.id)?.revision {
+                        fact("Installed revision", MLXModelRevision.shortForm(revision),
+                             hint: "Full commit \(revision). This is the version on your disk; Check for Updates compares it against what the publisher has now.")
+                    }
+
                     if isLoading {
                         loadingState
                     } else if let detail {

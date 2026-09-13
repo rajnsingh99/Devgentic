@@ -74,7 +74,42 @@ final class ChatOpsCoordinator {
     /// Called once from the VM's init. Spins up the always-on sync service
     /// and starts each bridge whose tokens are configured and whose toggle
     /// is enabled in `ChatOpsConfigManager`.
+    /// Whether this process may open real chat connections.
+    ///
+    /// ⚠️⚠️ THE CONVENTION THIS REPLACES NEVER PROTECTED ANYTHING. Eight comments across the codebase
+    /// forbade tests and previews from constructing `MainApplicationViewModel`, on the grounds that
+    /// doing so bootstraps ChatOps. But the XCTest host IS the real app: `DevgenticApp.init` builds
+    /// the view model on every `test-without-building` run whatever the tests themselves do. Verified
+    /// empirically on 2026-09-11 — fifteen consecutive test runs each logged the three "ChatOps is
+    /// disabled" lines from `bootstrap()`. They said *disabled* only because the developer's toggles
+    /// happened to be off; with them on, every one of those runs would have opened a real Telegram,
+    /// Discord and Slack listener against live bot tokens.
+    ///
+    /// ⚠️ WHAT THAT COSTS WHEN IT FIRES. Telegram serves ONE `getUpdates` poller and answers 409 to
+    /// the other, so commands the developer sends while a test runs are swallowed at random by the
+    /// test host — and executed there, against a throwaway view model, creating conversations and
+    /// running agents in a process about to be killed. Nothing in the build output mentions it.
+    ///
+    /// ⚠️ `NSClassFromString("XCTestCase")` matches the precedent `TraceStore` already sets for this
+    /// exact hazard, and for its stated reason: it is a SAFETY NET, firing even when a test run
+    /// forgot to set an environment variable. Unlike TraceStore's it is deliberately NOT `#if DEBUG`
+    /// — that guard is compiled out because it GRANTS something (an env-supplied path a shipped app
+    /// must not honour); this one only ever REFUSES, and `XCTestCase` cannot load in a shipped app
+    /// anyway, so leaving it in costs nothing and covers a release-configuration test run too.
+    /// ⚠️ INTERNAL, not private, so a test can assert the answer IN ITS OWN PROCESS — which is the
+    /// only assertion that actually proves the guard fires where it matters.
+    static var mayOpenRealConnections: Bool {
+        if TestHost.isRunning { return false }
+        if ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1" { return false }
+        return true
+    }
+
     func bootstrap() {
+        guard Self.mayOpenRealConnections else {
+            logger.error("[CHATOPS] bootstrap() REFUSED — this process is an XCTest host or a SwiftUI preview. CONSEQUENCE: no Telegram, Discord or Slack listener is opened, so this process cannot consume the developer's real paired channels or post to them; a second poller would otherwise race their running app for the same bot token and swallow commands at random. ChatOps is unavailable in this process by design.")
+            return
+        }
+
         if conversationSyncService == nil {
             conversationSyncService = ConversationSyncService(
                 chatHistoryViewModel: chatHistoryViewModel,
@@ -122,8 +157,14 @@ final class ChatOpsCoordinator {
 
     // MARK: - Telegram
 
-    /// Start the Telegram bridge. Idempotent — reuses an existing bridge if
-    /// already created.
+    /// Start the Telegram bridge.
+    ///
+    /// ⚠️ [LIFE-2] THIS COMMENT PROMISED "Idempotent" AND THE CODE DID NOT PROVIDE IT. Reusing the
+    /// bridge OBJECT is not the same as a second `start()` being safe: the old one built a fresh
+    /// client, listener and transport and overwrote the stored references, orphaning a live poller
+    /// nothing could cancel. It is idempotent now because `ChatOpsBridgeStart.shouldProceed` REFUSES
+    /// a second start — not because it absorbs one. A comment asserting a guarantee the code does not
+    /// give is the same class of defect as a log line naming the wrong cause.
     func startTelegram() {
         let config = ChatOpsConfigManager.shared
         guard config.botToken != nil,

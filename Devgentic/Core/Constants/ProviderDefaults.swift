@@ -44,6 +44,14 @@ enum ProviderDefaults {
     /// placeholder, pre-filled to LM Studio's local server for discoverability.
     static let openAICompatibleHintURL = URL(string: "http://localhost:1234/v1")!
 
+    /// HuggingFace Inference Providers' OpenAI-compatible router.
+    ///
+    /// ⚠️ NOT in `baseURL(for:)` below — no `ApiProvider` case maps to it. HuggingFace needs no
+    /// provider of its own: the router speaks the OpenAI wire format, so `.openAICompatible`
+    /// already drives it end to end, native tool calls included. What was missing was any way to
+    /// FIND that out; this constant exists to be offered as a preset.
+    static let huggingFaceRouterBaseURL = URL(string: "https://router.huggingface.co/v1")!
+
     // MARK: - Provider Lookup
 
     /// Returns the canonical default base URL for a given provider.

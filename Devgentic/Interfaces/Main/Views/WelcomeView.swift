@@ -24,35 +24,52 @@ struct WelcomeView: View {
 
     /// One-time disclosure that on-device diagnostics are recorded (default-on, opt-out).
     @AppStorage(AppSettings.diagnosticsDisclosureSeenKey) private var diagnosticsDisclosureSeen = false
+    @AppStorage(AppSettings.isIntelligenceCoreEnabledKey) private var isIntelligenceCoreEnabled = false
+    @AppStorage(AppSettings.ciFeatureMorningBriefKey) private var morningBriefEnabled = false
+
+    /// Feed is enabled only when Core Intelligence and Morning Brief are turned on.
+    private var isFeedEnabled: Bool {
+        (viewModel.isIntelligenceCoreEnabled || isIntelligenceCoreEnabled) && morningBriefEnabled
+    }
+
+    /// Feed is visible when it is enabled and there are active widgets to show.
+    private var isFeedVisible: Bool {
+        isFeedEnabled && !WelcomeWidgetRegistry.active.isEmpty
+    }
+
+    // Left Pane: Greeting, Quick Actions & Keyboard Hints
+    @ViewBuilder
+    private var leftPane: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            greetingSection
+                .opacity(showContent ? 1 : 0)
+                .offset(y: showContent ? 0 : 12)
+            
+            Spacer()
+                .frame(height: 36)
+            
+            quickActionsGrid
+                .opacity(showActions ? 1 : 0)
+                .offset(y: showActions ? 0 : 10)
+            
+            Spacer()
+                .frame(height: 24)
+            
+            keyboardHints
+                .opacity(showShortcuts ? 1 : 0)
+                .offset(y: showShortcuts ? 0 : 8)
+        }
+    }
 
     var body: some View {
         GeometryReader { geo in
             let isWide = geo.size.width > 850
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 0) {
-                    if isWide {
+                    if isWide && isFeedVisible {
                         HStack(alignment: .top, spacing: 32) {
-                            // Left Pane: Greeting, Quick Actions & Keyboard Hints
-                            VStack(alignment: .leading, spacing: 0) {
-                                greetingSection
-                                    .opacity(showContent ? 1 : 0)
-                                    .offset(y: showContent ? 0 : 12)
-                                
-                                Spacer()
-                                    .frame(height: 36)
-                                
-                                quickActionsGrid
-                                    .opacity(showActions ? 1 : 0)
-                                    .offset(y: showActions ? 0 : 10)
-                                
-                                Spacer()
-                                    .frame(height: 24)
-                                
-                                keyboardHints
-                                    .opacity(showShortcuts ? 1 : 0)
-                                    .offset(y: showShortcuts ? 0 : 8)
-                            }
-                            .frame(maxWidth: 480)
+                            leftPane
+                                .frame(maxWidth: 480)
                             
                             // Right Pane: Active Widgets list
                             VStack(alignment: .leading, spacing: 16) {
@@ -68,7 +85,7 @@ struct WelcomeView: View {
                         .padding(.horizontal, 40)
                         .padding(.top, 50)
                     } else {
-                        // Narrow Screen: Single column centered stack
+                        // Centered stack (narrow or when feed is inactive)
                         VStack(spacing: 0) {
                             Spacer()
                                 .frame(height: 50)
@@ -80,10 +97,12 @@ struct WelcomeView: View {
                             Spacer()
                                 .frame(height: 32)
 
-                            widgetGrid
-                                .opacity(showActions ? 1 : 0)
-                                .offset(y: showActions ? 0 : 10)
-                                .padding(.bottom, 28)
+                            if isFeedVisible {
+                                widgetGrid
+                                    .opacity(showActions ? 1 : 0)
+                                    .offset(y: showActions ? 0 : 10)
+                                    .padding(.bottom, 28)
+                            }
 
                             quickActionsGrid
                                 .frame(maxWidth: 480)
@@ -116,11 +135,12 @@ struct WelcomeView: View {
         .animation(reduceMotion ? nil : .easeOut(duration: 0.4), value: showContent)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.35).delay(0.08), value: showActions)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.3).delay(0.16), value: showShortcuts)
+        .animation(.easeInOut(duration: 0.3), value: isFeedVisible)
         // Animate the grid when the set of visible widgets changes (any widget
         // appearing or disappearing), not just the Morning Brief.
         .animation(.easeInOut(duration: 0.3), value: WelcomeWidgetRegistry.active.map(\.id))
         .onAppear {
-            if !didNotifyWidgets {
+            if !didNotifyWidgets && isFeedEnabled {
                 didNotifyWidgets = true
                 WelcomeWidgetRegistry.all.forEach { $0.onWelcomeAppear() }
             }
@@ -137,6 +157,12 @@ struct WelcomeView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                     withAnimation { showShortcuts = true }
                 }
+            }
+        }
+        .onChange(of: isFeedEnabled) { _, enabled in
+            if enabled && !didNotifyWidgets {
+                didNotifyWidgets = true
+                WelcomeWidgetRegistry.all.forEach { $0.onWelcomeAppear() }
             }
         }
     }

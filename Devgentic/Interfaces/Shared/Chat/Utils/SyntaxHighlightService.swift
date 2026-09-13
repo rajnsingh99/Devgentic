@@ -61,7 +61,7 @@ actor SyntaxHighlightService {
     ///   the app theme (`Theme.codeHighlightThemeName`). This used to be a light/dark
     ///   boolean hardcoded to `atom-one-*`, so choosing Dracula still rendered Atom.
     ///
-    /// Cancellation-aware: `AsyncHighlightedCodeView` keys its `.task(id:)` on the code, so
+    /// Cancellation-aware: `CodeBlockView` keys its `.task(id:)` on the code, so
     /// a streaming block supersedes (cancels) the previous highlight on every flush. The
     /// caller already drops a cancelled RESULT, but by the time the actor hop lands here
     /// that task is usually already cancelled — without this check each superseded call
@@ -124,9 +124,11 @@ actor SyntaxHighlightService {
     /// introduced while closing the bare-fence hole. hljs resolves its own aliases, so the right
     /// move is to let it.
     ///
-    /// The residue, stated honestly: a fence with a genuinely unknown token (`DijkstraSolver.java`)
-    /// still reaches Highlightr, `hljs.highlight` returns undefined, and Highlightr falls back to
-    /// `highlightAuto`. That is exactly the pre-CF-2 behaviour for a NAMED fence, it is rare, and
+    /// The residue, stated honestly: a fence with a genuinely unknown token (```foobar) still
+    /// reaches Highlightr, `hljs.highlight` returns undefined, and Highlightr falls back to
+    /// `highlightAuto`. (A bare-FILENAME fence — ```DijkstraSolver.java — used to be the common
+    /// case of this; since [mc-5] the parser maps it to the extension's language before it gets
+    /// here.) That is exactly the pre-CF-2 behaviour for a NAMED fence, it is rare, and
     /// narrowing it further would require duplicating hljs's alias map — a second source of truth
     /// that drifts on the next Highlightr bump. The table below stays only because it maps a few
     /// tokens hljs does NOT know (`console`, `py3`, `node`, `docker`) onto ones it does.

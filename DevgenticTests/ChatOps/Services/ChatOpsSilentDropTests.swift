@@ -34,31 +34,36 @@ final class ChatOpsSilentDropTests: XCTestCase {
         "sendTypingAction": "a typing indicator is decoration; it expires on its own and the reply arrives regardless",
         "sendTypingIndicator": "same as sendTypingAction",
         "Task.sleep": "a cancelled sleep is the cancellation working, not a failure",
+        // ⚠️ Added when the sweep went tree-wide (OBS-3). Each is a `try?` that ASKS a question
+        //    rather than dropping something; a nil answer is the answer, not a lost payload.
+        "AnyCodableValue": "a type-probe decode: `try?` is asking WHICH json type this is, and nil is a valid answer",
+        "?? false": "a defaulted read — the fallback IS the decision, and it is written at the call site",
+        "?? true": "same as `?? false`",
+        "retry_after": "a missing pacing hint means no hint, not a dropped message",
+        "decodeNil": "a type probe, as with AnyCodableValue",
     ]
 
+    /// Files exempt from the tree-wide `try?` sweep, each with the reason.
+    ///
+    /// ⚠️ BY FILE AND BY REASON, never by count. `ChatOpsCommandService`'s own doc comment already
+    /// states its exemption and that it wants `throws` in a commit of its own; recording that here
+    /// keeps the sweep honest instead of silently tolerant.
+    private static let exemptFiles: [String: String] = [
+        "DiscordModels.swift": "AnyCodableValue's type probes — `try?` asks which JSON type a value is",
+        "SlackModels.swift": "same type-probe shape as DiscordModels",
+        "ChatOpsCommandService.swift": "documented at its own :114-118 — the store reads want `throws`, in a commit of their own",
+    ]
+
+    /// ⚠️ Both local readers were deleted in favour of `ChatOpsSourceScan`. The one here stripped
+    /// WHOLE comment lines only, so a trailing `// …` after code was still scanned — while two sibling
+    /// test files stripped to end-of-line. Three readers that disagree is three different answers to
+    /// "is this line code".
     private static func source(_ relativePath: String) throws -> String {
-        let repoRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-        let url = repoRoot.appendingPathComponent(relativePath)
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw XCTSkip("\(relativePath) not reachable — running outside a checkout")
-        }
-        return try String(contentsOf: url, encoding: .utf8)
+        try ChatOpsSecurityTierMatrixTests.readSourceStrippingComments(relativePath)
     }
 
-    /// Lines of real code, with comments and doc comments removed.
-    ///
-    /// ⚠️ COMMENTS MUST GO BEFORE ANY ASSERTION RUNS. These files document the very patterns being
-    /// searched for — several comments quote `_ = try? await apiClient?.sendMessage(...)` verbatim
-    /// while explaining why it was replaced. A scan that kept them would fail on the explanation of
-    /// the fix, which is the most confusing possible red.
     private static func codeLines(_ source: String) -> [(number: Int, text: String)] {
-        source.components(separatedBy: "\n").enumerated().compactMap { index, line in
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("//") { return nil }
-            return (index + 1, line)
-        }
+        ChatOpsSourceScan.lines(source)
     }
 
     // MARK: - The user-facing send paths
@@ -152,35 +157,134 @@ final class ChatOpsSilentDropTests: XCTestCase {
 
     // MARK: - Terminal arms
 
-    /// ⚠️ A BARE `break` CANNOT NAME A CONSEQUENCE. These arms are reached by input that parsed to
-    /// `.unknown` — including a button whose callback token no longer decodes, which chat scrollback
-    /// keeps forever. The user taps, nothing changes, and nothing recorded that taps are arriving
-    /// and dying, so a grammar change that orphans old buttons is invisible in the field.
+    /// ⚠️⚠️ A BARE `break` CANNOT NAME A CONSEQUENCE — and this test used to be unable to find one.
+    /// Its predicate was `line == "            break"`: full-line equality against exactly twelve
+    /// spaces, four lines below its own comment warning that "a guard that only recognises the shape
+    /// it was written against is worth very little". A `break` at 16 or 20 spaces (any nested switch),
+    /// one with a trailing space, and every one-line `default: break` all passed it.
     ///
-    /// Mutation that must turn this red: replace any of those log lines with `break`.
-    func testEveryRoutingSwitchEndsWithALogRatherThanABareBreak() throws {
-        for bridge in ["ChatOpsBridge", "DiscordChatOpsBridge", "SlackChatOpsBridge"] {
-            let source = try Self.source("Devgentic/ChatOps/Services/\(bridge).swift")
+    /// ⚠️ NOW TREE-WIDE, which only became possible with a real discriminator: bare `break` is also
+    /// how you leave a loop or a `catch`, and ChatOps contains 14 of those that are perfectly correct.
+    /// `ChatOpsSourceScan.isSwitchArmBreak` keys on the previous code line ending in `:`, which
+    /// separates a switch arm from a loop exit cleanly.
+    func testNoSwitchArmInChatOpsDropsItsInputOnABareBreak() throws {
+        let files = try ChatOpsSourceScan.chatOpsFiles()
+        XCTAssertGreaterThan(files.count, 30, "the sweep found almost nothing — it is not reading the tree")
 
-            // ⚠️⚠️ ANY BARE-BREAK ARM, NOT JUST `default:`. This test first checked only for the
-            // literal "default:\n break" — and a mutation that turned the `.unknown` arm's log back
-            // into a bare `break` sailed straight past it, because that arm is `case .unknown:`, not
-            // `default:`. A guard that only recognises the shape it was written against is worth
-            // very little; a drop is a drop whichever keyword introduces it.
-            //
-            // The three bridges currently contain ZERO of these, so the bar is absolute rather than
-            // a count — a count would let a new one in each time an old one was fixed.
-            for (number, line) in Self.codeLines(source) where line == "            break" {
-                XCTFail("""
-                    \(bridge).swift:\(number) ends a switch arm with a bare `break`. A `break` \
-                    cannot name a consequence: if this arm drops a command, log it with \
-                    [CHATOPS/SILENT]; if it is a filter that falls through to more routing, make \
-                    that explicit by returning a value the way `routeHITL` does.
-                    """)
+        var offenders: [String] = []
+        for file in files {
+            guard !Self.exemptSwitchArms.keys.contains(file.name) else { continue }
+            let lines = ChatOpsSourceScan.lines(file.code)
+            for (index, line) in lines.enumerated() {
+                if ChatOpsSourceScan.isSwitchArmBreak(lines, at: index)
+                    || ChatOpsSourceScan.isInlineSwitchArmBreak(line.text) {
+                    offenders.append("\(file.name):\(line.number)")
+                }
             }
+        }
+        XCTAssertTrue(offenders.isEmpty, """
+            These switch arms drop their input on a bare `break`, which cannot name a consequence: \
+            \(offenders). Log it with [CHATOPS/SILENT], or add a NAMED exemption to `exemptSwitchArms` \
+            saying why the drop is a non-event.
+            """)
+    }
 
-            XCTAssertTrue(source.contains("[CHATOPS/SILENT]"),
-                          "\(bridge) no longer logs its dropped commands with the silent-drop tag")
+    /// Switch arms that may stay bare, each with the reason.
+    ///
+    /// ⚠️⚠️ THESE ARE NON-EVENTS, AND LOGGING THEM WOULD BE THE WORSE BUG. `PairingAttemptPolicy`'s
+    /// header is the precedent: a line per message buries the one event that matters. Discord's opcode
+    /// and dispatch-name switches see HEARTBEAT_ACK, GUILD_CREATE and PRESENCE_UPDATE continuously, and
+    /// the pairing services see ordinary traffic for the whole five-minute window.
+    private static let exemptSwitchArms: [String: String] = [
+        "DiscordGatewayClient.swift": "op 11 HEARTBEAT_ACK and the dispatch-name default arrive continuously — a line per event is the burial PairingAttemptPolicy refuses",
+        "DiscordPairingService.swift": "`.resumed` / `.interactionCreate` during a pairing window are ordinary traffic, not dropped commands",
+        "SlackPairingService.swift": "`.interaction` / `.slashCommand` during a pairing window are ordinary traffic",
+    ]
+
+    // MARK: - The tree-wide swallow sweep
+
+    /// ⚠️⚠️ THE SCAN USED TO NAME SIX FILES, AND THE TWO WORST SWALLOWS WERE IN A SEVENTH. Three
+    /// hardcoded lists covered the bridges, two socket clients and the mirror — while
+    /// `DiscordPairingService` and `SlackPairingService` each dropped the disconnect farewell on a
+    /// `_ = try? await …`, the last message a user gets before their credentials are wiped. A list is
+    /// a promise about what exists; a tree sweep is a fact about it.
+    func testNoFileInChatOpsSwallowsAFailureWithABareTry() throws {
+        let files = try ChatOpsSourceScan.chatOpsFiles()
+
+        // ⚠️ NON-VACUITY, without which a moved directory reads as "clean".
+        XCTAssertGreaterThan(files.count, 30, "the sweep is not reading the ChatOps tree")
+        XCTAssertGreaterThan(files.filter { $0.code.contains("DGLogger(category:") }.count, 20,
+                             "the sweep is reading the wrong tree")
+
+        var offenders: [String] = []
+        for file in files {
+            guard Self.exemptFiles[file.name] == nil else { continue }
+            let lines = ChatOpsSourceScan.lines(file.code)
+            for (index, line) in lines.enumerated() where line.text.contains("try?") {
+                let named = Self.deliberateSilence.keys.contains { line.text.contains($0) }
+                if named || Self.failureIsObservable(lines, at: index) { continue }
+                offenders.append("\(file.name):\(line.number) \(line.text.trimmingCharacters(in: .whitespaces))")
+            }
+        }
+        XCTAssertTrue(offenders.isEmpty, """
+            These swallow a failure with no log: \(offenders.joined(separator: " | ")). \
+            Use do/catch and name the CONSEQUENCE, or add a named entry to `deliberateSilence`.
+            """)
+    }
+
+    // MARK: - Inbound filters must fail OPEN
+
+    /// ⚠️⚠️ [BR-6] AN INBOUND FILTER THAT MATCHES "ANYTHING UNEXPECTED" EATS REAL COMMANDS. Slack's
+    /// bridge guarded `event.subtype == nil`, which drops `file_share` — what Slack stamps on a
+    /// message the operator typed WITH a file attached — before it can reach the routing switch, with
+    /// no log and no reply. Telegram and Discord have no such pre-filter at all: an input they cannot
+    /// route reaches `.unknown` and is logged with its consequence, which is why Slack alone could
+    /// swallow a genuine command in silence.
+    ///
+    /// ⚠️ THE INVARIANT IS THE DIRECTION OF THE TEST, NOT THE LIST'S CONTENTS. An ignore-list means an
+    /// unmodelled subtype is ROUTED and at worst logged; "not nil" meant it was eaten. Asserting the
+    /// membership of `housekeepingSubtypes` would be asserting the implementation — a drift test in
+    /// this subsystem was already found defending a defect that way.
+    func testSlackDoesNotDropAMessageMerelyForHavingASubtype() throws {
+        let source = try Self.source("Devgentic/ChatOps/Services/SlackChatOpsBridge.swift")
+        XCTAssertFalse(source.contains("event.subtype == nil"),
+                       "the Slack bridge filters on \"has any subtype\", which fails CLOSED: a message "
+                       + "carrying a file attachment is a real command and is eaten before routing")
+        XCTAssertTrue(source.contains("housekeepingSubtypes"),
+                      "the filter must name what it IGNORES, so an unmodelled subtype is routed rather than dropped")
+        XCTAssertFalse(source.contains("\"file_share\""),
+                       "file_share is a message the operator typed — it must never be in the ignore-list")
+    }
+
+    /// Whether this `try?`'s failure is visible to a reader of the logs.
+    ///
+    /// ⚠️⚠️ THE FIRST VERSION OF THIS SWEEP FLAGGED TWO SITES THAT WERE ALREADY CORRECT, and that is
+    /// worth recording rather than quietly fixing: `RemoteConversationOriginStore.save` is
+    /// `guard let data = try? … else { logger.error("…CONSEQUENCE: …") }`, and `TelegramAPIClient`'s
+    /// 429 arm logs `retry_after=absent` on the very next line and throws regardless. Both are
+    /// `try?` used as a DEFAULTED READ whose fallback is stated immediately. The offence is not the
+    /// keyword — it is a failure nobody can see, so that is what the predicate must express.
+    ///
+    /// ⚠️ A four-line lookahead, not a parse. Deliberately crude and deliberately paired with the
+    /// named allow-list: the cost of a false NEGATIVE here is one unlogged drop, while the cost of a
+    /// false positive is pressure to "fix" correct code or to exempt a whole file — which is how an
+    /// allow-list rots into a list of everything.
+    private static func failureIsObservable(_ lines: [(number: Int, text: String)], at index: Int) -> Bool {
+        for offset in 0...4 where index + offset < lines.count {
+            if lines[index + offset].text.contains("logger.") { return true }
+        }
+        return false
+    }
+
+    /// ⚠️ The farewell is the one notice a user gets that the disconnect was deliberate. All three
+    /// platforms must go through the shared seam — two of them swallowed it, which is this
+    /// subsystem's signature one-fixed-two-unfixed shape.
+    func testAllThreePlatformsSendTheirFarewellThroughTheSharedSeam() throws {
+        for service in ["ChatOpsPairingService", "DiscordPairingService", "SlackPairingService"] {
+            let source = try Self.source("Devgentic/ChatOps/Services/\(service).swift")
+            XCTAssertTrue(source.contains("ChatOpsFarewell.send"),
+                          "\(service) does not send its farewell through the shared seam, so its failure "
+                          + "can be swallowed independently of the other two")
         }
     }
 }

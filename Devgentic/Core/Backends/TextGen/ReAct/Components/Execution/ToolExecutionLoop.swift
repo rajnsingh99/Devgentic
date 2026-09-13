@@ -557,15 +557,38 @@ private func executeSingleTool(
 
 /// Tools whose successful execution mutates a file on disk — all of them get a PRE-write
 /// snapshot for the timeline's "View changes" diff.
+///
+/// ⚠️ "All of them" is now TRUE. It was not: `create_file` and `edit_code` were missing while
+/// `write_file` was present, though all three are `.libraryExceptCode` in `NativeToolCatalog` —
+/// the same class, superseded by the same splits. So a CHAT or WORKFLOW profile's file write got
+/// no `preWriteContent`, and `TimelineFileViewerAction.resolve` (which gates on the mirror of
+/// this set) then produced no chip and no persisted `ActionEffect`. Keep this set and
+/// `AgentTimelineView.chipEligibleTools` in step: a name in one and not the other is a row that
+/// either has a snapshot nothing renders, or an affordance with no data behind it.
 private let preSnapshotToolNames: Set<String> = [
-    "write_file", "overwrite_file", "create_new_file", "edit_code_single", "edit_code_batch"
+    "write_file", "overwrite_file", "create_new_file", "create_file",
+    "edit_code_single", "edit_code_batch", "edit_code"
 ]
 
 /// Tools whose params DON'T carry the full post-state (`edit_code_*` carry find/replace
 /// strings only) — these get a POST-write read-back after success. Ground truth beats
 /// replicating the tool's replacement semantics (uniqueness rules, matching behavior)
 /// in the UI, where they would silently drift.
-private let postSnapshotToolNames: Set<String> = ["edit_code_single", "edit_code_batch"]
+/// `edit_code` is included for the same reason as its two splits: its params are
+/// `{file_path, edits | old_string + new_string}`, i.e. find/replace only, so the post-state
+/// exists nowhere but on disk.
+private let postSnapshotToolNames: Set<String> = ["edit_code_single", "edit_code_batch", "edit_code"]
+
+/// Drift seam. The executor's snapshot sets and `AgentTimelineView.chipEligibleTools` are two
+/// halves of ONE contract: a name in the chip set with no snapshot gets an affordance with no data
+/// behind it, and a name with a snapshot nothing renders is a file read for nothing. [tc-2] was
+/// exactly that drift — `create_file` and `edit_code` were in neither, and the fix had to add them
+/// to BOTH. Exposed so a test can assert the two stay in step, rather than each side being tested
+/// against hand-fed fixtures that cannot notice the other half is missing.
+enum SnapshotToolContract {
+    static var preSnapshot: Set<String> { preSnapshotToolNames }
+    static var postSnapshot: Set<String> { postSnapshotToolNames }
+}
 
 /// Snapshot cap: source files land far below this; anything bigger isn't worth
 /// carrying in a persisted timeline event just to render a diff.
@@ -573,10 +596,27 @@ private let preWriteSnapshotByteLimit = 512_000
 
 /// The file-target path of a mutating tool call, honoring both spellings: native tools
 /// take `path`, split tools `file_path`.
-private func fileTargetPath(in arguments: [String: JSONValue]) -> String? {
+///
+/// ⚠️ [CR19] Resolved through `FilePathResolver`, which is what the tools that actually WRITE
+/// the file use (`CodingAssistantTools`) and what the live-write events use.
+///
+/// This used to be `expandingTildeInPath` alone, which expands `~` but leaves a RELATIVE path
+/// relative — and `FileManager` then resolves it against the PROCESS working directory, which for
+/// a GUI-launched app is `/`. So for a bare `notes.md` the snapshot looked at `/notes.md` and the
+/// write tool wrote `<home>/notes.md`: two different files. `snapshotContents` found nothing,
+/// returned nil, and the empty baseline made an OVERWRITE of an existing file render as a
+/// creation — every line green, nothing shown as replaced — in the timeline chip, the diff
+/// preview and the `ActionEffect` the model reads back as its own memory of what it did.
+///
+/// The resolver is the single source of truth precisely so these cannot drift; this was the one
+/// file-touching path that had not been routed through it.
+/// Internal rather than private [CR19]: this is the one place the snapshot decides WHICH FILE it
+/// is looking at, and the defect was that it decided differently from the writer. A rule that has
+/// already drifted once needs a test that can reach it.
+func fileTargetPath(in arguments: [String: JSONValue]) -> String? {
     guard let path = arguments["path"]?.stringValue ?? arguments["file_path"]?.stringValue,
           !path.isEmpty else { return nil }
-    return (path as NSString).expandingTildeInPath
+    return FilePathResolver.resolve(path)
 }
 
 /// Size-capped UTF-8 read of a snapshot target. Nil = unreadable or over the cap.

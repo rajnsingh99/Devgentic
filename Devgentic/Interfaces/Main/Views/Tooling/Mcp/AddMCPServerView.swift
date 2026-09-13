@@ -193,7 +193,11 @@ struct AddMCPServerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            DynamicIslandBar(onBack: { onDismiss?() }) {
+            DynamicIslandBar(
+                title: isEditing ? "Edit MCP Server" : "Add MCP Server",
+                icon: "server.rack",
+                onBack: { onDismiss?() }
+            ) {
                 trailingActionButtons
             }
 
@@ -863,15 +867,6 @@ struct AddMCPServerView: View {
 
     private var trailingActionButtons: some View {
         HStack(spacing: 8) {
-            IslandPillButton(
-                title: "Cancel",
-                style: .secondary,
-                accessibilityLabel: "Cancel and return",
-                keyboardShortcut: .cancelAction
-            ) {
-                onDismiss?()
-            }
-
             IslandPillButton(
                 title: isEditing ? "Save Changes" : "Add to Library",
                 icon: isEditing ? "checkmark" : "plus",

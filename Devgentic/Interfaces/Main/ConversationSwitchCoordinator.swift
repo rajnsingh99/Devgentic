@@ -215,21 +215,31 @@ final class ConversationSwitchCoordinator {
         // the Task cannot double-load; the merge below is keyed by id and in-memory wins, so a
         // run started while the decode was in flight survives regardless of ordering.
         Task { [weak self] in
-            let records = await WorkflowRunHistoryStore.shared.loadFinalized(forConversation: conversationID)
+            // [workflow/vm-6] The loader strips node traces inside its own detached decode, so
+            // the peak here is one record's traces rather than the whole page's.
+            let loaded = await WorkflowRunHistoryStore.shared.loadFinalized(forConversation: conversationID)
             guard let self, let vm = self.viewModel else { return }
-            self.applyLoadedRunHistory(records, for: conversationID, vm: vm)
+            self.applyLoadedRunHistory(loaded.records, droppedAtLoad: loaded.droppedEvents,
+                                       for: conversationID, vm: vm)
         }
     }
 
     /// Merges disk records into the observable history — split out so the async load above stays
     /// readable. MERGE rather than replace: an in-flight run inserted while we were loading is
     /// newer than anything on disk and must survive. Keyed by id, in-memory wins.
-    private func applyLoadedRunHistory(_ records: [WorkflowRunRecord], for conversationID: UUID, vm: MainApplicationViewModel) {
+    /// - Parameter droppedAtLoad: events the LOADER already stripped ([workflow/vm-6]). The
+    ///   merge below strips again — idempotently — so its own count is 0 for these records, and
+    ///   the log would otherwise report "0 events left on disk" for a page that dropped
+    ///   thousands. Summed rather than replaced so a caller that hands in unstripped records
+    ///   (a test) still reports honestly.
+    private func applyLoadedRunHistory(_ records: [WorkflowRunRecord], droppedAtLoad: Int = 0,
+                                       for conversationID: UUID, vm: MainApplicationViewModel) {
         guard !records.isEmpty else { return }
 
         let inMemory = vm.workflowRunHistory[conversationID] ?? []
-        let result = Self.mergeLoadedHistory(existing: inMemory, loaded: records)
-        vm.workflowRunHistory[conversationID] = result.merged
+        let merge = Self.mergeLoadedHistory(existing: inMemory, loaded: records)
+        vm.workflowRunHistory[conversationID] = merge.merged
+        let result = (merged: merge.merged, droppedEvents: merge.droppedEvents + droppedAtLoad)
 
         if inMemory.isEmpty {
             logger.info("[WORKFLOW] Loaded \(records.count) persisted run(s) for conversation \(conversationID.uuidString.prefix(8)); \(result.droppedEvents) node timeline event(s) left on disk. CONSEQUENCE: opening one of these runs re-reads its trace (one off-main decode); nothing is lost and the list itself needs none of it.")

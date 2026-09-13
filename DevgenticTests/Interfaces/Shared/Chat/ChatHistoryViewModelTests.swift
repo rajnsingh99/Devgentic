@@ -209,23 +209,11 @@ final class ChatHistoryViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.currentChatMessages.last?.content.textContent, "Old")
     }
 
-    // MARK: - User Messages Filter
-
-    func testToggleUserMessagesFilter() async {
-        let convId = UUID()
-        let userMsg = ChatMessage(conversationId: convId, sender: .user, content: .plainText("User"))
-        let agentMsg = ChatMessage(conversationId: convId, sender: .agent, content: .markdownText("Agent"), backendEntityId: UUID())
-        mockStore.messages[convId] = [userMsg, agentMsg]
-
-        await viewModel.loadConversation(id: convId)
-        XCTAssertEqual(viewModel.currentChatMessages.count, 2)
-
-        viewModel.isUserMessagesOnlyFilterActive = true
-        // Toggle triggers reload internally
-        viewModel.toggleUserMessagesFilter()
-        // Wait for the async reload
-        try? await Task.sleep(nanoseconds: 100_000_000)
-    }
+    // [vm-9] `testToggleUserMessagesFilter` lived here. It set the flag, called the toggle,
+    // slept 100 ms and asserted NOTHING — it would have passed over any behaviour at all,
+    // including the in-place mutation of `currentChatMessages` that made the next page load
+    // fetch from the wrong offset and append duplicate rows. Deleted with the feature, which
+    // had no production entry point in any build.
 
     // MARK: - Sending State
 

@@ -279,12 +279,18 @@ final class ChatHistoryViewModel {
     // that doesn't cancel the previous task (e.g. fire-and-forget Task closures).
     @ObservationIgnored private var loadEpoch: UInt64 = 0
 
-    // Tracks the in-flight task spawned by `toggleUserMessagesFilter` so rapid
-    // toggles cancel the prior reload instead of racing it.
-    @ObservationIgnored private var filterTask: Task<Void, Never>?
 
     var isSending: Bool = false
-    var isUserMessagesOnlyFilterActive: Bool = false
+
+    // [vm-9] The "my messages only" filter is GONE — flag, toggle, reload task, the view that
+    // drove it (`ChatHeaderView`, referenced by nothing but its own preview) and the five reset
+    // sites. It had no production entry point in any build: no menu item, no command, no button
+    // outside that preview. Behind it sat a real corruption — `applyUserMessagesFilter` mutated
+    // `currentChatMessages` IN PLACE, and `loadMoreMessages` derives its store offset from
+    // `currentChatMessages.count` and appends with no dedup, so one page load after a filter
+    // pass fetched from the wrong offset and appended rows the array already held. `ForEach`
+    // over a duplicated `ChatMessage.id` is undefined behaviour in SwiftUI. Deleted rather than
+    // repaired because nothing could reach it to be repaired for.
 
     // MARK: - Initialization
     /// Whether THIS instance drives the Code Viewer. Exactly one view model may own it.
@@ -358,6 +364,28 @@ final class ChatHistoryViewModel {
         // conversation on the next switch.
         guard payload.conversationID == destinationConversationID else {
             logger.info("[CodeViewer] Live write for '\(payload.fileName)' ignored — it belongs to conversation \(payload.conversationID.uuidString.prefix(8)) but \(self.destinationConversationID?.uuidString.prefix(8) ?? "none") is \(self.loadingConversationID == nil ? "loaded" : "loading"). No live tab; the timeline chip still appears when that conversation is open.")
+            return
+        }
+
+        // ⚠️ NOTHING may be planted while a load is in flight, not even for the conversation
+        // being loaded. `resetCodeViewer()` runs at the TOP of `loadConversation` — it has
+        // already stashed the outgoing tabs and emptied the viewer — and
+        // `restoreCodeViewerSession` only restores INTO AN EMPTY viewer. A tab appended here
+        // makes the viewer non-empty, so the incoming conversation's own restore is skipped
+        // SILENTLY, and the next switch then stashes this single live tab OVER that
+        // conversation's entry, destroying the drafts `CodeViewerTab.editedCode` documents as
+        // existing nowhere else.
+        //
+        // This is the same refusal `AgentTimelineView.shouldDeliverOpen(origin:current:
+        // isLoadInFlight:)` already makes for the timeline's own open path, and its doc states
+        // the reasoning we are copying: a tab planted in this window also suppresses the
+        // incoming conversation's restore. The two paths must not disagree about this window.
+        //
+        // The write is NOT lost: it still runs, the timeline chip still appears, and the
+        // completion is settled by `handleAgentWriteCompleted`, which resolves against the
+        // payload's own conversation and finds no tab to settle here.
+        guard loadingConversationID == nil else {
+            logger.info("[CodeViewer] Live write for '\(payload.fileName)' NOT given a tab — a conversation load is in flight (\(self.loadingConversationID?.uuidString.prefix(8) ?? "none")). CONSEQUENCE: no tab is planted, which is deliberate — planting one here would suppress that conversation's own tab restore and the next switch would overwrite its stash, losing unsaved drafts. The write proceeds and its timeline chip is unaffected.")
             return
         }
 
@@ -441,9 +469,28 @@ final class ChatHistoryViewModel {
                     return
                 }
                 guard let index = self.codeViewerTabs.firstIndex(where: { $0.filePath == path }),
-                      self.codeViewerTabs[index].liveState == .active,
                       !self.codeViewerTabs[index].isDirty else { return }
-                self.codeViewerTabs[index].preWriteDisk = pre
+                switch self.codeViewerTabs[index].liveState {
+                case .active:
+                    // The ordinary case: the write is still in flight, park the baseline for it.
+                    self.codeViewerTabs[index].preWriteDisk = pre
+                case .rejected where self.codeViewerTabs[index].lastSavedDisk == nil:
+                    // ⚠️ The write was ALREADY settled as rejected while this read was in flight,
+                    // so the rejection branch ran with nothing to use and left `lastSavedDisk`
+                    // nil — which refuses ⌘S on that tab forever as on-disk drift, the exact
+                    // outcome this read exists to prevent. This became reachable when the
+                    // workflow close paths started posting completions MID-RUN (node failure and
+                    // user skip fire milliseconds after `.toolCall`, unlike the end-of-run CF-9
+                    // loop they mirror), so the settle can easily beat a detached `.utility` read
+                    // of a large file. Promote the bytes straight to the baseline — exactly what
+                    // the rejection branch would have done had they arrived in time.
+                    self.codeViewerTabs[index].lastSavedDisk = pre
+                    self.codeViewerTabs[index].preWriteDisk = nil
+                    logger.info("[CodeViewer] Pre-write snapshot for '\((path as NSString).lastPathComponent)' landed AFTER the write was already settled as rejected — promoted it straight to the drift baseline. CONSEQUENCE: ⌘S on that tab writes the proposal instead of being refused as drift for the rest of the session.")
+                default:
+                    // Settled successfully, or the badge was cleared — the baseline is moot.
+                    return
+                }
             }
         }
     }
@@ -458,40 +505,58 @@ final class ChatHistoryViewModel {
     /// builds the denial `ToolOutput` before `preWriteSnapshot` runs). Without a baseline
     /// the guard falls back to the proposal and refuses every save on the tab as drift.
     func handleAgentWriteCompleted(_ payload: AgentLiveWriteEvent.Completed) {
-        // MUST be the same expression `handleAgentWriteBegan` admits on. It was left reading
-        // `currentChatMessages.first?.conversationId`, which names the OUTGOING conversation for
-        // the whole duration of a switch — so a write admitted mid-load by the began-guard could
-        // never be settled here, and returned SILENTLY. The tab then keeps `liveState == .active`
-        // forever: the orange "Agent is writing this file" banner stays up, `hasLiveAgentTabs`
-        // keeps the pill pulsing, and a DENIED write is never flipped to `.rejected`, so the user
-        // is told a file is being written when the proposal never reached disk.
-        guard payload.conversationID == destinationConversationID else {
-            logger.warning("[CodeViewer] Live-write completion for '\(payload.fileName)' DROPPED — it belongs to conversation \(payload.conversationID.uuidString.prefix(8)) but \(self.destinationConversationID?.uuidString.prefix(8) ?? "none") is \(self.loadingConversationID == nil ? "loaded" : "loading"). CONSEQUENCE: if that conversation holds a live tab for this file it stays marked as writing and is never settled or marked rejected.")
-            return
-        }
-        guard let index = codeViewerTabs.firstIndex(where: { $0.filePath == payload.path && $0.liveState == .active }) else {
-            logger.debug("[CodeViewer] Live-write completion for '\(payload.fileName)' has no active live tab — settled or skipped earlier.")
+        // ⚠️ This deliberately does NOT share `handleAgentWriteBegan`'s destination guard, and
+        // the two are no longer "the same expression" — an earlier comment here said they must
+        // be, which was right only while this handler could see nothing but the live array.
+        //
+        // `began` decides where a tab may be CREATED, so it is rightly about the displayed
+        // (destination) conversation. Settling is a different question: the tab already exists,
+        // and it must be settled wherever it now lives. A conversation switch moves it — still
+        // `.active` — into `tabsByConversation` via `resetCodeViewer` → `stashCurrentCodeViewerTabs`,
+        // and the old guard then dropped its completion for belonging to a conversation that is
+        // no longer displayed. Re-opening that conversation restored a tab stuck `.active`
+        // forever: the orange "Agent is writing this file" banner never cleared, the minimized
+        // pill kept pulsing via `hasLiveAgentTabs`, and because the rejection branch never ran,
+        // `lastSavedDisk` stayed nil so ⌘S was refused with an on-disk-drift claim that is FALSE.
+        // The CF-9 backstop in `ActiveStreamManager.finalizeMessage` posts the same event and was
+        // filtered by the same guard, so it could not recover it either.
+        //
+        // Resolving against the payload's OWN conversation, live-or-stashed, is the same shape
+        // the save bookkeeping already uses (`residence(ofTabID:)` / `mutateTab(at:)`) and for
+        // the same stated reason: work that resumes after an await must look in both places.
+        guard let location = residence(ofLiveWritePath: payload.path, in: payload.conversationID) else {
+            logger.debug("[CodeViewer] Live-write completion for '\(payload.fileName)' has no active live tab in conversation \(payload.conversationID.uuidString.prefix(8)) — settled earlier, never given a tab (a load was in flight), or the tab was closed.")
             return
         }
 
-        if payload.isSuccess {
-            codeViewerTabs[index].liveState = nil
-            // The proposal IS on disk now, so the pre-write bytes must NOT become the drift
-            // baseline: `lastSavedDisk` stays nil and the guard falls back to `snippet.code`,
-            // which is what landed.
-            codeViewerTabs[index].preWriteDisk = nil
-            logger.info("[CodeViewer] Live tab '\(payload.fileName)' settled — write landed.")
-        } else {
-            codeViewerTabs[index].liveState = .rejected
-            let baseline = payload.preWriteContent ?? codeViewerTabs[index].preWriteDisk
-            codeViewerTabs[index].lastSavedDisk = baseline
-            codeViewerTabs[index].preWriteDisk = nil
-            if baseline == nil {
-                logger.warning("[CodeViewer] Live tab '\(payload.fileName)' marked rejected with NO pre-write snapshot (the completion carried none and the pre-read failed or was over the cap). CONSEQUENCE: the save guard falls back to the proposal, so ⌘S on this tab is refused as on-disk drift; Save As is the only route.")
+        var settledMessage = ""
+        mutateTab(at: location) { tab in
+            if payload.isSuccess {
+                tab.liveState = nil
+                // The proposal IS on disk now, so the pre-write bytes must NOT become the drift
+                // baseline: `lastSavedDisk` stays nil and the guard falls back to `snippet.code`,
+                // which is what landed.
+                tab.preWriteDisk = nil
+                settledMessage = "[CodeViewer] Live tab '\(payload.fileName)' settled — write landed."
             } else {
-                let source = payload.preWriteContent != nil ? "the executor's snapshot" : "the UI pre-read"
-                logger.info("[CodeViewer] Live tab '\(payload.fileName)' marked rejected — the write was denied or failed; its content never reached disk. Drift baseline set from \(source) (\(baseline?.count ?? 0) chars) so ⌘S can still write the proposal.")
+                tab.liveState = .rejected
+                let baseline = payload.preWriteContent ?? tab.preWriteDisk
+                tab.lastSavedDisk = baseline
+                tab.preWriteDisk = nil
+                if baseline == nil {
+                    settledMessage = "[CodeViewer] Live tab '\(payload.fileName)' marked rejected with NO pre-write snapshot (the completion carried none and the pre-read failed or was over the cap). CONSEQUENCE: the save guard falls back to the proposal, so ⌘S on this tab is refused as on-disk drift; Save As is the only route."
+                } else {
+                    let source = payload.preWriteContent != nil ? "the executor's snapshot" : "the UI pre-read"
+                    settledMessage = "[CodeViewer] Live tab '\(payload.fileName)' marked rejected — the write was denied or failed; its content never reached disk. Drift baseline set from \(source) (\(baseline?.count ?? 0) chars) so ⌘S can still write the proposal."
+                }
             }
+        }
+
+        switch location {
+        case .live:
+            logger.info("\(settledMessage)")
+        case .stashed(let conversationID, _):
+            logger.info("\(settledMessage) Settled on the STASHED copy for conversation \(conversationID.uuidString.prefix(8)) — the user switched away while the write was in flight, so the state is correct when that conversation is reopened.")
         }
     }
 
@@ -536,6 +601,34 @@ final class ChatHistoryViewModel {
             if let index = state.tabs.firstIndex(where: { $0.id == id }) {
                 return .stashed(conversationID: conversationID, index: index)
             }
+        }
+        return nil
+    }
+
+    /// Finds the tab with an IN-FLIGHT agent write for `path`, scoped to one conversation and
+    /// searching the live viewer or that conversation's stash.
+    ///
+    /// Scoped rather than global (unlike `residence(ofTabID:)`, where a UUID can match at most
+    /// one entry) because a path is NOT unique across conversations: two conversations can each
+    /// hold a live tab for the same file, and settling the wrong one would clear a banner for a
+    /// write that is still running while leaving the finished one pulsing forever.
+    ///
+    /// The `liveState == .active` filter is part of the key: a completion may only settle a tab
+    /// that is actually mid-write, so a second completion for the same path (the CF-9 backstop
+    /// in `finalizeMessage` re-posting one the handler already processed) finds nothing and is
+    /// a no-op instead of resurrecting a settled tab's baseline.
+    private func residence(ofLiveWritePath path: String, in conversationID: UUID) -> TabResidence? {
+        let isLiveWriteTab: (CodeViewerTab) -> Bool = { $0.filePath == path && $0.liveState == .active }
+        // The live array belongs to `conversationID` only when that conversation owns the viewer.
+        // Mid-load it is empty (`resetCodeViewer` cleared it), so this simply misses and the
+        // stash below answers — which is exactly the case this lookup exists for.
+        if viewerOwningConversationID == conversationID,
+           let index = codeViewerTabs.firstIndex(where: isLiveWriteTab) {
+            return .live(index: index)
+        }
+        if let state = tabsByConversation[conversationID],
+           let index = state.tabs.firstIndex(where: isLiveWriteTab) {
+            return .stashed(conversationID: conversationID, index: index)
         }
         return nil
     }
@@ -845,10 +938,19 @@ final class ChatHistoryViewModel {
         logger.info("[CodeViewer] Panel reopened — \(self.codeViewerTabs.count) tab(s).")
     }
 
-    // MARK: - Session persistence (tabs survive conversation switches and relaunches)
-
-    /// Cap on persisted tabs — a runaway accumulation guard, not a practical limit.
-    private static let persistedTabLimit = 20
+    // MARK: - Session persistence (tabs survive conversation switches; NOT app relaunch)
+    //
+    // [vm-7] The header used to say "and relaunches", which the type's own doc two hundred
+    // lines up contradicts ("Switching conversations keeps tabs …; quitting does not") —
+    // `tabsByConversation` is a plain in-memory dictionary and there is no persistence layer
+    // under any of this. A `private static let persistedTabLimit = 20` sat here too, with a
+    // comment calling itself "a runaway accumulation guard": it had exactly one occurrence in
+    // the repo, its own declaration, so it guarded nothing. Both are gone rather than made
+    // true — and deliberately NOT replaced with a real cap on `tabsByConversation`, which is
+    // the ONLY place an unsaved Code Viewer draft exists. Evicting an entry to bound memory
+    // would delete the user's unsaved work with no prompt, which is strictly worse than the
+    // growth it would close. If a bound is ever wanted, it belongs on the LIVE tab array and
+    // must skip any tab that is dirty, active, or receiving a live write.
 
     /// The conversation the CURRENTLY OPEN tabs belong to.
     ///
@@ -950,6 +1052,17 @@ final class ChatHistoryViewModel {
         //
         // Refusing costs a stale entry that may resurrect closed tabs on the next open — the
         // thing this method exists to prevent — which is the better of the two errors.
+        //
+        // ⚠️ As of 2026-09-12 this guard is a BACKSTOP WITH NO REACHABLE CALLER, and it is kept
+        // deliberately. Both close paths are now closed during a load: the single close needs a
+        // tab to close and `resetCodeViewer` has emptied the viewer, and
+        // `forceCloseAllCodeViewerTabs` returns at its own
+        // `guard !codeViewerTabs.isEmpty || isCodeViewerVisible` because the same reset made both
+        // false. It is therefore UNTESTED — a test written against the close-all route passed
+        // with this guard deleted, which is how that was discovered. Do not delete it on the
+        // strength of "nothing reaches it": what it prevents is the loss of unsaved drafts that
+        // live nowhere else, and the thing that currently makes it unreachable is vm-1's refusal
+        // to plant a tab mid-load — one new mid-load path and this is load-bearing again.
         guard loadingConversationID == nil else {
             logger.warning("[CodeViewer] Deferred dropping stashed tabs (\(reason)) — a conversation switch is still in flight, and the resolvable identity is the OUTGOING conversation whose tabs and drafts are already stashed. CONSEQUENCE: nothing was dropped; tabs closed during the switch may reappear when that conversation is reopened.")
             return
@@ -1076,8 +1189,9 @@ final class ChatHistoryViewModel {
     /// `CodeSnippet.normalizedCode` trims BOTH edges when a tab is opened, but this only ever
     /// restored the trailing side. The asymmetry meant a single ⌘S — even with no edits at
     /// all, since `saveTabToItsPath` has no unchanged-buffer guard — permanently deleted a
-    /// file's leading blank line or indentation, and collapsed multiple trailing blank lines
-    /// to one. The drift guard could not catch it either: it compares the two sides trimmed,
+    /// file's leading blank line or indentation. (It ALSO collapsed multiple trailing blank
+    /// lines to one and dropped a CRLF terminator outright — this sentence used to imply the
+    /// asymmetry fix had covered that; it had not, and the symmetric restore below is what does.) The drift guard could not catch it either: it compares the two sides trimmed,
     /// so the loss is invisible to it by construction.
     ///
     /// Restoring rather than un-trimming `normalizedCode` is deliberate — that trimming is
@@ -1095,10 +1209,35 @@ final class ChatHistoryViewModel {
         let lead = String(baseline.prefix(while: \.isWhitespace))
         // `lead.count != baseline.count` skips an all-whitespace baseline, which would
         // otherwise prepend the entire file to itself.
-        if !lead.isEmpty, lead.count != baseline.count, !out.hasPrefix(lead) {
+        // ⚠️ The test is "does the buffer have edge whitespace OF ITS OWN?", NOT "does it already
+        // end in the baseline's exact run". The `hasPrefix`/`hasSuffix` form is NOT IDEMPOTENT:
+        // a buffer carrying one newline of its own never matches a two-newline baseline run, so
+        // every save appended the whole run on top of what was there — and because the result
+        // becomes the next baseline (`lastSavedDisk`), the file grew by one character per ⌘S,
+        // unbounded, on all three save engines. Measured: buffer "hello\n" against disk
+        // "hello\n\n" gives \n\n\n, \n\n\n\n, \n\n\n\n\n … The drift guard cannot catch it —
+        // it compares both sides TRIMMED — so every one of those writes is accepted.
+        //
+        // A buffer that already ends in whitespace has EXPRESSED an intent there; restoring is
+        // only for a buffer the viewer trimmed, which by definition has none.
+        if !lead.isEmpty, lead.count != baseline.count, out.first?.isWhitespace != true {
             out = lead + out
         }
-        if baseline.hasSuffix("\n"), !out.hasSuffix("\n") { out += "\n" }
+        // ⚠️ [vm-6] SYMMETRIC with the leading side — capture the whole trailing whitespace RUN,
+        // not a single "\n". The old `hasSuffix("\n")` test restored exactly one newline, so a
+        // file ending in several blank lines had them collapsed to one by a save that changed
+        // nothing else. Worse for CRLF: Swift compares grapheme clusters and "\r\n" is ONE
+        // Character, so `"a\r\nb\r\n".hasSuffix("\n")` is FALSE — the guard never fired and the
+        // final line terminator was DROPPED entirely, giving git a "\ No newline at end of file"
+        // on a file nobody meant to change. Capturing the literal run fixes both, because the run
+        // is whatever bytes were actually there.
+        //
+        // `trail.count != baseline.count` mirrors the leading guard and is what stops an
+        // all-whitespace baseline splicing the file into itself.
+        let trail = String(baseline.reversed().prefix(while: \.isWhitespace).reversed())
+        if !trail.isEmpty, trail.count != baseline.count, out.last?.isWhitespace != true {
+            out += trail
+        }
         return out
     }
 
@@ -1376,29 +1515,71 @@ final class ChatHistoryViewModel {
     /// baseline, so it must be the bytes and not the editor buffer — seeding the guard with
     /// the buffer made the next save read its own restored newline as external drift.
     /// Defaults to `savedBuffer` for callers that write the buffer verbatim.
+    ///
+    /// ⚠️ `editedCode` is adopted ONLY when the editor is still showing `savedBuffer` — the
+    /// same guard `saveTabToItsPath` carries, arrived at here for a WIDER window. The caller
+    /// captures its buffer before `savePanel.begin` and the panel is MODELESS (see the
+    /// stashed branch below, where a conversation switch mid-panel was field-observed), so
+    /// every keystroke from Save-As invocation until the write completes reaches
+    /// `updateCodeViewerDraft` and lands in `editedCode`. An unconditional
+    /// `editedCode = savedBuffer` then DISCARDED them — and because `lastSavedBuffer` is set
+    /// to the same value, `isDirty` went FALSE, so the dot cleared and `closeCodeViewerTab`
+    /// stopped asking for confirmation: silent data loss with the warning suppressed. The
+    /// bookkeeping below stays unconditional in every case — the bytes really are on disk and
+    /// the tab really is linked to that path — so keeping the newer text leaves the tab
+    /// correctly DIRTY against the recorded baselines, and the next ⌘S writes it there.
     func markCodeViewerTabSavedAs(tabID: UUID, savedBuffer: String, savedTo url: URL, wroteToDisk: String? = nil) {
         guard let location = residence(ofTabID: tabID) else {
             logger.warning("[CodeViewer] Save-As bookkeeping skipped — tab \(tabID.uuidString.prefix(8)) is neither open nor stashed, so it was closed while the save panel was open; the file WAS written to \(url.path).")
             return
         }
+        var keptNewerDraft = false
         mutateTab(at: location) { tab in
-            tab.editedCode = savedBuffer
+            if tab.effectiveCode == savedBuffer {
+                tab.editedCode = savedBuffer
+            } else {
+                // ⚠️ MATERIALISE the newer text; do not merely flag it. `effectiveCode` is
+                // `editedCode ?? snippet.code`, so it also moves when the SNIPPET is replaced and
+                // `editedCode` is left nil — which `openTab`'s origin branch and
+                // `handleAgentWriteBegan`'s update branch both do while the MODELESS Save-As panel
+                // is open. Flagging alone left `editedCode == nil` while `lastSavedBuffer` became
+                // something else, and `isDirty` early-returns FALSE on nil — so the tab reported
+                // CLEAN with a buffer that did not match its restore point, ⌘W closed it without
+                // the confirmation this guard exists to preserve, and the log said "stays dirty".
+                // Assigning restores the invariant `editedCode` documents on itself.
+                tab.editedCode = tab.effectiveCode
+                keptNewerDraft = true
+            }
             tab.filePath = url.path
             tab.fileName = url.lastPathComponent
             tab.lastSavedDisk = wroteToDisk ?? savedBuffer
             tab.lastSavedBuffer = savedBuffer
             Self.clearRejectedLiveState(&tab, savedTo: url.lastPathComponent)
         }
+        if keptNewerDraft {
+            // Report the state actually REACHED — `performApplyChanges` does the same rather than
+            // asserting its happy path, and an earlier version of this line claimed "stays dirty"
+            // on a path where it did not.
+            let stillDirty = residence(ofTabID: tabID).map { loc -> Bool in
+                switch loc {
+                case .live(let i): return codeViewerTabs.indices.contains(i) && codeViewerTabs[i].isDirty
+                case .stashed(let c, let i):
+                    guard let tabs = tabsByConversation[c]?.tabs, tabs.indices.contains(i) else { return false }
+                    return tabs[i].isDirty
+                }
+            } ?? false
+            logger.info("[CodeViewer] \(url.lastPathComponent) was edited while its Save-As was in flight — the \(savedBuffer.count) chars that were written are recorded as the baseline and the newer text is kept. CONSEQUENCE: the newer edit is preserved and the tab is \(stillDirty ? "DIRTY, so ⌘S writes it to \(url.path)" : "CLEAN — the newer text equals the bytes just written").")
+        }
         switch location {
         case .live:
-            logger.info("[CodeViewer] Tab \(tabID.uuidString.prefix(8)) saved as \(url.path) (\(savedBuffer.count) chars) — the tab is now linked to that file and ⌘S writes there.")
+            logger.info("[CodeViewer] Tab \(tabID.uuidString.prefix(8)) saved as \(url.path) (\(savedBuffer.count) chars) — the tab is now linked to that file and ⌘S writes there\(keptNewerDraft ? ", and it stays DIRTY because the buffer moved during the save" : "").")
         case .stashed(let conversationID, _):
             // The save panel is MODELESS, so the sidebar stayed clickable and a conversation
             // switch stashed the tab mid-panel. Patching the stashed copy is what makes the
             // link survive the switch — this used to miss, log "closed while the save panel
             // was open" (false), and leave the restored tab unlinked and dirty so the next
             // ⌘S re-opened Save As.
-            logger.info("[CodeViewer] Tab \(tabID.uuidString.prefix(8)) saved as \(url.path) (\(savedBuffer.count) chars) while stashed for conversation \(conversationID.uuidString.prefix(8)) — the STASHED copy was linked, so reopening that conversation shows it clean and ⌘S writes there.")
+            logger.info("[CodeViewer] Tab \(tabID.uuidString.prefix(8)) saved as \(url.path) (\(savedBuffer.count) chars) while stashed for conversation \(conversationID.uuidString.prefix(8)) — the STASHED copy was linked, so reopening that conversation shows it \(keptNewerDraft ? "DIRTY (the buffer moved during the save, and the newer text was kept)" : "clean") and ⌘S writes there.")
         }
     }
 
@@ -1793,10 +1974,6 @@ final class ChatHistoryViewModel {
             self.hasReachedResidencyCap = false
 
             logger.info("Successfully loaded and merged \(persistedMessages.count) persisted and \(activeStreamingMessages.count) active messages.")
-
-            if isUserMessagesOnlyFilterActive {
-                applyUserMessagesFilter()
-            }
         } catch {
             logger.info("Conversation load for \(selectedID.uuidString) was cancelled.")
         }
@@ -1809,6 +1986,15 @@ final class ChatHistoryViewModel {
         }
     }
 
+
+    /// Test seam: advances the load epoch exactly as `loadConversation` does at its top,
+    /// without running a full load. Lets a test place a conversation switch INSIDE a store
+    /// fetch deterministically — the interleaving `loadMoreMessages`' guard exists for, and
+    /// one that is otherwise unreachable because the real switch is itself async.
+    /// Not called from app code.
+    func bumpLoadEpochForTesting() {
+        loadEpoch &+= 1
+    }
 
     func loadMoreMessages() async {
         guard !isLoadingPage, canLoadMorePages, let selectedID = currentChatMessages.first?.conversationId else {
@@ -1831,8 +2017,25 @@ final class ChatHistoryViewModel {
         let offset = currentChatMessages.count
         logger.debug("Loading page with offset \(offset) for conversation \(selectedID.uuidString).")
 
+        // ⚠️ Claim the epoch BEFORE the fetch, exactly as `loadConversation` does. This await is
+        // a real window — the sidebar stays clickable — and `loadConversation` REPLACES
+        // `currentChatMessages` wholesale. Without the check below, a switch landing inside this
+        // one fetch appended conversation A's older messages onto conversation B's rendered
+        // array, so B's transcript showed A's turns. Every other store round-trip in this file
+        // already re-validates after its await (`loadConversation` by epoch, `prepareSearchCorpus`
+        // by conversation, `performApplyChanges` by residence); this was the one that did not.
+        let myEpoch = loadEpoch
+
         // Fetches the next page of older messages, sorted newest-to-oldest.
         let olderMessages = await persistenceService.fetchMessages(for: selectedID, offset: offset, limit: subsequentPageSize)
+
+        guard myEpoch == loadEpoch else {
+            // `isLoadingPage` is reset unconditionally below — leaving it true would wedge
+            // pagination for the conversation the user actually switched TO.
+            logger.info("[PAGINATION] Discarded a page of \(olderMessages.count) message(s) for \(selectedID.uuidString.prefix(8)) — the conversation changed while the store was reading (epoch \(myEpoch), current: \(self.loadEpoch)). CONSEQUENCE: nothing is appended; the scroll-back is re-issued if the user returns and scrolls again.")
+            isLoadingPage = false
+            return
+        }
 
         if olderMessages.isEmpty {
             canLoadMorePages = false
@@ -1841,9 +2044,6 @@ final class ChatHistoryViewModel {
             // Since we are storing Descending, older messages go to the end (Index N).
             self.currentChatMessages.append(contentsOf: olderMessages)
 
-            if isUserMessagesOnlyFilterActive {
-                applyUserMessagesFilter()
-            }
             trimMarkdownCachesOutsideWindow()
         }
 
@@ -1889,7 +2089,7 @@ final class ChatHistoryViewModel {
     /// finalizing, a variant switch) are picked up — but re-decomposing the whole resident
     /// window on every keystroke is wasteful, so the result is memoized on a hash of the
     /// displayed text. Text changes → hash changes → automatic invalidation.
-    @ObservationIgnored private var residentUnitsCache: [UUID: (textHash: Int, units: [SearchUnit])] = [:]
+    @ObservationIgnored private var residentUnitsCache: [UUID: (textHash: Int, wasStreaming: Bool, units: [SearchUnit])] = [:]
     @ObservationIgnored private var searchCorpusConversationID: UUID?
 
     /// How far back search reaches. Larger than `maxResidentMessages`: finding a match is
@@ -1905,6 +2105,9 @@ final class ChatHistoryViewModel {
     /// Merging resident over stored keeps streaming and just-sent messages fresh (they are
     /// not in the store yet) while still reaching everything older.
     var searchCorpus: [SearchDocument] {
+        #if DEBUG
+        searchCorpusBuildsForTesting += 1
+        #endif
         guard searchCorpusConversationID == loadedConversationID, !searchCorpusCache.isEmpty else {
             return currentChatMessages.map(projectedResidentDocument)
         }
@@ -1918,14 +2121,58 @@ final class ChatHistoryViewModel {
         return byID.values.sorted { $0.timestamp > $1.timestamp }
     }
 
+    #if DEBUG
+    /// Test seam [vm-5]: how many times a memoized resident projection was SERVED. The defect is
+    /// that a streaming-era projection was served after the message settled, so the pin is "no
+    /// hit across the settle boundary" — which a test can only see by counting hits.
+    @ObservationIgnored private(set) var residentUnitsCacheHitsForTesting = 0
+    #endif
+
+    #if DEBUG
+    /// Test seam [vm-3]: how many times `searchCorpus` has been built. One search run must cost
+    /// exactly ONE build, and reading the search view model's stored `unreachableMatchCount` must
+    /// cost NONE — that is the whole of the fix, and the counter is what a test can pin it with.
+    @ObservationIgnored private(set) var searchCorpusBuildsForTesting = 0
+    #endif
+
+    /// [vm-3] THE way the chat view (re)runs search: ONE corpus snapshot feeds both the match
+    /// list and the stored unreachable count, so the two can never disagree and the search bar
+    /// never touches the corpus itself. The three call sites (membership change, debounced
+    /// query, bar opened) all come through here; a fourth that calls `performSearch` directly
+    /// would leave the count at its reset value of 0, i.e. under-report, never stall.
+    func runSearch(_ searchViewModel: ChatSearchViewModel) {
+        let corpus = searchCorpus
+        searchViewModel.performSearch(in: corpus)
+        searchViewModel.unreachableMatchCount = unreachableMatchCount(in: searchViewModel.matches, corpus: corpus)
+    }
+
     /// A resident message's projection, memoized on its displayed text.
     private func projectedResidentDocument(_ message: ChatMessage) -> SearchDocument {
         let hash = message.displayedContent.textContent?.hashValue ?? 0
-        if let cached = residentUnitsCache[message.id], cached.textHash == hash {
+        // ⚠️ [vm-5] The streaming flag is part of the KEY, not a gate on serving.
+        //
+        // A streaming message is decomposed through `StreamingMarkdownParser`
+        // (`ChatSearchDecomposition.units(for:)`), whose positional `block-N` ids can differ
+        // from the authoritative `parseMarkdown` that `getOrCreateMarkdownBlocks` runs once the
+        // message settles. The TEXT does not change at that moment —
+        // `resolveFinalizedContent` returns the streamed content verbatim — so the hash alone
+        // cannot notice the settle, and an entry written during the stream was served forever
+        // after, pointing search at block ids the renderer no longer has.
+        //
+        // ⚠️ Refusing to SERVE while streaming does not fix it: the last write before the settle
+        // is still a streaming projection, and the first settled read then serves it because the
+        // hash matches. Only a key that includes the flag forces the recompute. (The weaker
+        // spelling was tried first and the test below caught it.) Keying rather than gating also
+        // keeps the memo doing its job mid-stream, where repeated reads at one flush are common.
+        if let cached = residentUnitsCache[message.id], cached.textHash == hash,
+           cached.wasStreaming == message.isStreaming {
+            #if DEBUG
+            residentUnitsCacheHitsForTesting += 1
+            #endif
             return SearchDocument(id: message.id, timestamp: message.timestamp, units: cached.units)
         }
         let units = ChatSearchDecomposition.units(for: message)
-        residentUnitsCache[message.id] = (hash, units)
+        residentUnitsCache[message.id] = (hash, message.isStreaming, units)
         return SearchDocument(id: message.id, timestamp: message.timestamp, units: units)
     }
 
@@ -1996,9 +2243,20 @@ final class ChatHistoryViewModel {
     /// no longer holds (the conversation changed, or the corpus was released) is treated as
     /// unreachable rather than hunted for through the store.
     func isMatchReachable(messageID: UUID) -> Bool {
+        isMatchReachable(messageID: messageID, corpusIndex: searchCorpusIndex(of: messageID))
+    }
+
+    /// [views/bm-5] The same answer from a position the caller already has.
+    ///
+    /// `searchCorpusIndex` reads `searchCorpus`, which is COMPUTED — a 1,000-entry dictionary
+    /// rebuild, a re-projection of every resident message and a sort, per access. The scroll
+    /// path asked for the same position twice in a row (reachable? then page to it), so a
+    /// single Next press on a non-resident match paid for two rebuilds that could only ever
+    /// return the same number.
+    func isMatchReachable(messageID: UUID, corpusIndex: Int?) -> Bool {
         if currentChatMessages.contains(where: { $0.id == messageID }) { return true }
-        guard let index = searchCorpusIndex(of: messageID) else { return false }
-        return index < Self.maxResidentMessages
+        guard let corpusIndex else { return false }
+        return corpusIndex < Self.maxResidentMessages
     }
 
     /// Pages older messages in until `messageID` is rendered, so a search hit outside the
@@ -2013,9 +2271,19 @@ final class ChatHistoryViewModel {
     /// input while the rows come in.
     @discardableResult
     func ensureMessageIsResident(_ messageID: UUID) async -> Bool {
+        await ensureMessageIsResident(messageID, corpusIndex: searchCorpusIndex(of: messageID))
+    }
+
+    /// [views/bm-5] As above, with the corpus position supplied by a caller that just computed
+    /// it. Semantics are unchanged: this value was already resolved ONCE up front and never
+    /// refreshed across the paging loop, so handing it in freezes nothing that was not already
+    /// frozen — and the `loadEpoch` check inside the loop, not this index, is what stops an
+    /// orphaned walk paging a newly-opened conversation to its cap.
+    @discardableResult
+    func ensureMessageIsResident(_ messageID: UUID, corpusIndex: Int?) async -> Bool {
         if currentChatMessages.contains(where: { $0.id == messageID }) { return true }
 
-        guard let corpusIndex = searchCorpusIndex(of: messageID) else {
+        guard let corpusIndex else {
             logger.info("[SEARCH] Match \(messageID.uuidString.prefix(8)) is not in the search corpus (stale after a conversation change or corpus release) — not paging for it; the jump is skipped.")
             return false
         }
@@ -2038,10 +2306,30 @@ final class ChatHistoryViewModel {
         // not fixable here.
         var pagesLoaded = 0
         let maxPages = (Self.maxResidentMessages / subsequentPageSize) + 2
-        while canLoadMorePages, !hasReachedResidencyCap, pagesLoaded < maxPages {
+        // ⚠️ The walk is abandoned the moment ANY load starts, because the `Task.yield()` below
+        // is a real suspension point and the conversation switch behind it is debounced —
+        // `loadConversation` can complete between two pages. Nothing in the loop used to notice:
+        // `loadMoreMessages` re-derives its target from `currentChatMessages` on every call, so
+        // the orphaned walk carried on paging the NEWLY OPENED conversation up to the 300-message
+        // residency cap, on the main actor. The user saw the scroll jump, the UI jank, and a
+        // conversation they never scrolled back in reporting that older messages are not loaded —
+        // with `canLoadMorePages`/`hasReachedResidencyCap` then disabling its own scroll-back.
+        // The target message from the old conversation could never appear, so the early exit
+        // never fired either.
+        //
+        // Keyed on `loadEpoch` rather than on the conversation id so a SAME-conversation reload
+        // also abandons it: that reload invalidates the corpus this walk's `corpusIndex` came
+        // from, making the remaining pages meaningless work toward a position that no longer means
+        // anything. This is the same epoch `loadMoreMessages` and `loadConversation` check.
+        let myEpoch = loadEpoch
+        while canLoadMorePages, !hasReachedResidencyCap, pagesLoaded < maxPages, myEpoch == loadEpoch {
             let countBefore = currentChatMessages.count
             await loadMoreMessages()
             pagesLoaded += 1
+            guard myEpoch == loadEpoch else {
+                logger.info("[SEARCH] Abandoned the page-in walk for match \(messageID.uuidString.prefix(8)) after \(pagesLoaded) page(s) — a conversation load started while it was running (epoch \(myEpoch), current: \(self.loadEpoch)). CONSEQUENCE: this jump does not scroll, and the newly opened conversation is left at its own pagination state instead of being force-paged to the residency cap on its behalf.")
+                return false
+            }
             if currentChatMessages.contains(where: { $0.id == messageID }) {
                 logger.info("[SEARCH] Paged in \(pagesLoaded) page(s) to reach match \(messageID.uuidString.prefix(8)).")
                 return true
@@ -2076,9 +2364,16 @@ final class ChatHistoryViewModel {
     /// keystroke, that was a main-actor stall proportional to matches × corpus.
     func unreachableMatchCount(in matches: [SearchMatch]) -> Int {
         guard !matches.isEmpty else { return 0 }
+        return unreachableMatchCount(in: matches, corpus: searchCorpus)
+    }
+
+    /// [vm-3] The same count over a corpus snapshot the caller ALREADY holds — `runSearch` hands
+    /// in the one it just searched, so the count costs no second corpus build.
+    func unreachableMatchCount(in matches: [SearchMatch], corpus: [SearchDocument]) -> Int {
+        guard !matches.isEmpty else { return 0 }
         let resident = Set(currentChatMessages.map(\.id))
         var positionByID: [UUID: Int] = [:]
-        for (position, document) in searchCorpus.enumerated() { positionByID[document.id] = position }
+        for (position, document) in corpus.enumerated() { positionByID[document.id] = position }
         return matches.reduce(into: 0) { unreachable, match in
             if resident.contains(match.messageID) { return }
             // Absent from the corpus (conversation changed, or the corpus was released) is
@@ -2091,20 +2386,6 @@ final class ChatHistoryViewModel {
         }
     }
 
-    func toggleUserMessagesFilter() {
-        isUserMessagesOnlyFilterActive.toggle()
-        filterTask?.cancel()
-        filterTask = Task {
-            await loadConversation(id: currentChatMessages.first?.conversationId)
-        }
-    }
-    
-    private func applyUserMessagesFilter() {
-        if isUserMessagesOnlyFilterActive {
-            currentChatMessages = currentChatMessages.filter { $0.sender == .user }
-        }
-    }
-    
     func resetSendingState() async {
         self.isSending = false
         logger.info("✅ [Request Finished] Sending state has been reset.")

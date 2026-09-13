@@ -82,11 +82,32 @@ enum ChatOpsCommand {
         }
 
         // 3. Pairing attempt
+        //
+        // ⚠️⚠️ THE PIN SHAPE IS REQUIRED, AND WITHOUT IT THIS BRANCH ATE ORDINARY PROMPTS. It used to
+        // accept `PAIR ` followed by ANYTHING non-empty, case-insensitively — so "Pair these two CSVs
+        // on the id column and write the result to out.csv" parsed as
+        // `.pairingAttempt("THESE TWO CSVS ON…")`, cleared the tier gate (pairing is allowed at every
+        // tier), and was then dropped by all three bridges without a reply: no answer, no error, no
+        // typing indicator. `parseSlack` and `parseDiscord` both delegate here for plain text, so it
+        // was every platform.
+        //
+        // ⚠️ SIX ASCII DIGITS, EXACTLY, AND THE WHOLE REMAINDER. `generatePIN()` mints
+        // `Int.random(in: 100_000...999_999)`, so a real attempt always has this shape; anything else
+        // falls through to the verb table and then to the agent, which is where a sentence belongs.
+        // ⚠️ `isASCII` as well as `isNumber`: `Character.isNumber` is true for Arabic-Indic and other
+        // non-ASCII numerals, which a PIN never contains.
+        //
+        // ⚠️ THIS IS NOT `PairingAttemptPolicy.classify`, WHICH IS DELIBERATELY LOOSER. That one runs
+        // only inside an open pairing window and treats `PAIR <anything>` as a failed attempt on
+        // purpose — someone fumbling the format is still someone trying to pair, and it needs to see
+        // them. This is the always-on command parser, where the same looseness is a swallowed prompt.
         let upper = text.uppercased()
         if upper.hasPrefix("PAIR ") {
             let pin = String(upper.dropFirst(5)).trimmingCharacters(in: .whitespaces)
-            guard !pin.isEmpty else { return .unknown }
-            return .pairingAttempt(pin)
+            if pin.count == 6, pin.allSatisfy({ $0.isASCII && $0.isNumber }) {
+                return .pairingAttempt(pin)
+            }
+            // Not a PIN — fall through so the verb table and free text get their turn.
         }
 
         // 4. Slash commands — one alias table, shared with the Discord and Slack entry points.

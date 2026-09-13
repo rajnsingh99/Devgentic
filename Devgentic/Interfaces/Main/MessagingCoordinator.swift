@@ -761,8 +761,11 @@ final class MessagingCoordinator {
             logger.error("[ChatOps] Could not find conversation for ID: \(conversationID.uuidString)")
             return
         }
-        guard let vm = viewModel else {
-            logger.warning("[ChatOps] submitRemoteMessage aborted — view model deallocated.")
+        // ⚠️ An existence check, not a binding: the view model is re-acquired inside the Task below,
+        // and the only outer use was the window navigation this method no longer does. Kept as an
+        // early abort so a deallocated VM is reported here rather than as a silent no-op later.
+        guard viewModel != nil else {
+            logger.warning("[ChatOps] submitRemoteMessage aborted — view model deallocated. CONSEQUENCE: the remote user's message is not submitted and they receive no reply; nothing retries it.")
             return
         }
 
@@ -771,13 +774,26 @@ final class MessagingCoordinator {
             conversationSD.userDefinedTitle = prompt
         }
 
-        // Auto-navigate Mac UI to this conversation so the user can see remote activity,
-        // HITL banners, and agent responses in real-time. Setting selectedConversationID
-        // triggers the conversation loader which loads messages and merges active streams.
-        if vm.selectedConversationID != conversationID {
-            logger.info("[ChatOps] Auto-navigating Mac UI to conversation \(conversationID.uuidString).")
-            vm.selectedConversationID = conversationID
-        }
+        // ⚠️⚠️ THE MAC WINDOW IS NOT MOVED, AND THAT IS THE POINT. This used to assign
+        // `vm.selectedConversationID = conversationID` on every remote turn, so a message arriving
+        // while the user was working in another conversation yanked the window to it — clearing the
+        // web-search toggle and repointing the app-global composer profile, which
+        // `ChatOpsHosting`'s own seam calls out as the thing a remote write must never do
+        // ("exposed READ-ONLY on purpose: a remote write would retarget the local user's composer").
+        //
+        // ⚠️ IT WAS NEVER LOAD-BEARING FOR ROUTING. Every step below is keyed by the passed
+        // `conversationID` — the lookup, the user message, its persistence, the workflow ticket and
+        // the stream — and the mirror replies to the session's own chat id. The ONLY thing that
+        // depended on the selection was the UI insert below, whose comment read "the conversation is
+        // now guaranteed to be selected"; that line is now guarded instead, so the assumption it
+        // relied on no longer has to be manufactured by moving the user.
+        //
+        // ⚠️ A REMOTE RUN DOES NOT NEED THE WINDOW. Streams are conversation-scoped and survive a
+        // switch — `ConversationSwitchCoordinator` cancels only its load task, and
+        // `cancelStreams(forConversation:)` is reached only from an explicit Stop and from delete —
+        // so the run completes, is persisted, and is waiting in the conversation when the user opens
+        // it. Accepted cost: there is no longer a visual signal on the Mac that a remote run
+        // happened unless the user is already looking at that conversation.
 
         Task { @MainActor [weak self] in
             guard let self, let vm = self.viewModel else { return }
@@ -785,8 +801,21 @@ final class MessagingCoordinator {
             let userMessage = await self.createUserMessage(conversationID: conversationID, query: prompt, files: [])
             userMessage.messageSource = source
 
-            // Insert into Mac UI — the conversation is now guaranteed to be selected
-            self.chatHistoryViewModel.currentChatMessages.insert(userMessage, at: 0)
+            // ⚠️ ONLY WHEN THIS CONVERSATION IS THE ONE ON SCREEN. Unguarded, this dropped the
+            // remote user's question into whichever conversation the user happened to be viewing —
+            // which is why the window was moved first, to make the assumption true. The agent's
+            // reply is injected by `ConversationSyncService` under the same predicate; this is its
+            // counterpart for the question, so a local user watching the conversation still sees
+            // both halves live, and one watching a different conversation sees neither.
+            //
+            // ⚠️ `destinationConversationID`, not `selectedConversationID`: it is VIEWER identity
+            // (`loadingConversationID ?? viewerOwningConversationID`), so a message arriving during
+            // an in-flight switch is filed against the conversation actually being loaded rather
+            // than the one being left. `ConversationSyncService` uses the same authority for the
+            // same decision.
+            if self.chatHistoryViewModel.destinationConversationID == conversationID {
+                self.chatHistoryViewModel.currentChatMessages.insert(userMessage, at: 0)
+            }
 
             Task { [persistenceService = self.persistenceService] in
                 await persistenceService.addMessage(userMessage, toConversation: conversationID)
@@ -817,6 +846,21 @@ final class MessagingCoordinator {
             // refusing it would delete a shipped capability whose only remedy for a plain agent
             // chat is disabling Ask-first globally. The two flags answer different questions; see
             // `WorkflowRunAttendance.hasRemoteResponder`.
+            // ⚠️⚠️ THE POLICY IS RE-APPLIED EVERY TURN, NOT ONCE AT PAIRING — the same discipline
+            // `JarvisSessionController` states for its own: "the setting can change while the orb is
+            // open, and a stale autonomous grant is exactly the kind of invisible state this feature
+            // must not have." Re-asserting here also means the surface about to run is always the
+            // last writer, so a grant made on another surface cannot be inherited by accident.
+            // ⚠️ `isAutonomous(for:)` re-checks the `.full` tier, so tightening the tier revokes the
+            // grant even though the stored approvals setting stays put.
+            if let provider = source.remoteProvider {
+                let autonomous = ChatOpsConfigManager.shared.isAutonomous(for: provider)
+                Task {
+                    await SessionToolApprovals.shared.setAutonomous(
+                        autonomous, conversationID: conversationID, origin: source)
+                }
+            }
+
             let agentMessage = WorkflowRunAttendance.$hasRemoteResponder.withValue(true) {
             WorkflowRunAttendance.$isAttended.withValue(false) {
                 self.activeStreamManager.startMessageStream(

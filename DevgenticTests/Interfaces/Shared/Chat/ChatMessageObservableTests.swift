@@ -394,16 +394,7 @@ final class ChatMessageObservableTests: XCTestCase {
 
     // MARK: - Token Count Estimate
 
-    func testTokenCountEstimate() {
-        let msg = makeUserMessage(text: String(repeating: "a", count: 400))
-        // ~4 chars per token → 400 / 4 = 100
-        XCTAssertEqual(msg.tokenCountEstimate, 100)
-    }
 
-    func testTokenCountEstimateForEmptyContent() {
-        let msg = ChatMessage(conversationId: UUID(), sender: .user, content: .mediaArtifact(MediaArtifact(kind: .image, reference: .ephemeralData(Data()), mimeType: "image/png")))
-        XCTAssertEqual(msg.tokenCountEstimate, 0)
-    }
 
     // MARK: - Markdown Cache
 

@@ -102,6 +102,11 @@ final class CrashDiagnosticsCollector: NSObject, MXMetricManagerSubscriber {
 
     /// Deletes persisted MetricKit JSONs older than `date` (same 30-day policy as traces).
     static func purgeDiagnostics(olderThan date: Date) {
+        // ⚠️ DELETES REAL FILES FROM THE DEVELOPER'S `Application Support/Devgentic/CrashDiagnostics`.
+        // The store redirect does not cover this directory, so a test run silently ages out the
+        // developer's own crash payloads — the ones a diagnostic bundle would have carried.
+        guard TestHost.permits("purge crash-diagnostic payloads", logger: logger) else { return }
+
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(
             at: diagnosticsDirectory, includingPropertiesForKeys: [.contentModificationDateKey]

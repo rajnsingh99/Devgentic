@@ -62,10 +62,12 @@ final class SettingsCoordinator {
         if UserDefaults.standard.object(forKey: AppSettings.useStreamingResponseKey) == nil {
             UserDefaults.standard.set(true, forKey: AppSettings.useStreamingResponseKey)
         }
-        vm.useStreamingResponse = UserDefaults.standard.bool(forKey: AppSettings.useStreamingResponseKey)
-
-        // Intelligence Core (default-off — absent key reads as false)
-        vm.isIntelligenceCoreEnabled = UserDefaults.standard.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
+        // ⚠️ NOTHING TO COPY INTO THE VIEW MODEL ANY MORE. `useStreamingResponse` and
+        // `isIntelligenceCoreEnabled` are computed over `UserDefaults`, so assigning them here
+        // would write back the value just read. The seeding above stays: it is load-bearing for
+        // the DIRECT readers of the key (e.g. `WorkflowPreferenceSource`), which use
+        // `bool(forKey:)` and would read an absent key as false — the opposite of the shipped
+        // default.
 
         // Web search: API key presence determines enablement; active state starts off.
         vm.webSearchAPIKey = UserDefaults.standard.string(forKey: webSearchAPIKeyDefaultsKey)
@@ -82,24 +84,11 @@ final class SettingsCoordinator {
 
     // MARK: - Individual-Setting Change Persisters
 
-    /// Persists a change to `useStreamingResponse`. Called from the VM's
-    /// forwarding method which the settings UI toggle invokes.
-    func didChangeUseStreamingResponse() {
-        guard let vm = viewModel else { return }
-        UserDefaults.standard.set(vm.useStreamingResponse, forKey: AppSettings.useStreamingResponseKey)
-        logger.info("Saved 'useStreamingResponse' setting to UserDefaults: \(vm.useStreamingResponse)")
-    }
-
-    /// Persists a change to `isIntelligenceCoreEnabled`. Disabling the feature
-    /// also triggers an unload of the underlying service so we don't hold on
-    /// to an expensive loaded model.
-    func didChangeIntelligenceCoreEnabled() {
-        guard let vm = viewModel else { return }
-        UserDefaults.standard.set(vm.isIntelligenceCoreEnabled, forKey: AppSettings.isIntelligenceCoreEnabledKey)
-        if !vm.isIntelligenceCoreEnabled {
-            Task { await IntelligenceCoreService.shared.unloadNow(caller: .unknown) }
-        }
-    }
+    // ⚠️ `didChangeUseStreamingResponse` and `didChangeIntelligenceCoreEnabled` lived here and
+    // were the ONLY writers of their two keys. Neither had a single caller: the settings toggles
+    // bound straight to the stored view-model properties, so flipping one updated the UI and
+    // nothing else. Both properties now persist in their own setters, so a second persistence
+    // path would be exactly the "one rule over two copies" shape that caused the bug.
 
     /// Persists the interface-mode change. Called from `switchInterfaceMode` on
     /// the VM after the mode has been updated in memory.

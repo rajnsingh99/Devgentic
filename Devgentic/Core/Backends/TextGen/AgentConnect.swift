@@ -215,6 +215,7 @@ class AgentConnect: @unchecked Sendable {
                         conversationID: conversationID,
                         providerConfig: llmConfig,
                         profileID: profile.id,
+                        runMessageID: traceContext.messageID,
                         registeredAt: Date()
                     ))
 
@@ -724,6 +725,7 @@ class AgentConnect: @unchecked Sendable {
                         conversationID: conversationID,
                         providerConfig: llmConfig,
                         profileID: profile.id,
+                        runMessageID: traceContext.messageID,
                         registeredAt: Date()
                     ))
 

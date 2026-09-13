@@ -23,12 +23,41 @@ import os
 @Observable @MainActor
 final class SlackPairingService {
 
-    private let logger = Logger(subsystem: DGLogger.subsystem, category: "SlackPairing")
+    /// ⚠️⚠️ SHARED, BECAUSE A PAIRING WINDOW OUTLIVES THE VIEW THAT STARTS IT. This was
+    /// `@State private var` in `ChatOpsSettingsView`, so the service died with the pane while its
+    /// `pairingTask` did not — `pollForPairing` is an instance method, so the task retains `self`
+    /// for the full 300-second window and no pairing service has a `deinit`. Clicking Chat, or any
+    /// other settings category, tore the view down (`MainApplicationView` renders the settings
+    /// container inside an `if !router.isShowingChat` gate). Coming back rebuilt a FRESH, idle
+    /// service while `connectionState` — which lives on the shared config — still said
+    /// `.awaitingPairing`, so the PIN card rendered with a Cancel button that cancelled a nil task.
+    /// Starting again then ran TWO windows against one bot token, and the user's correct PIN was
+    /// consumed by whichever poll held the connection — counted as a FAILED attempt against their
+    /// own origin by the orphan. One instance means `cancelPairing()` and `startPairing()` always
+    /// reach the window that is actually running.
+    static let shared = SlackPairingService()
+
+
+    private let logger = DGLogger(category: "SlackPairing")
     private let config = ChatOpsConfigManager.shared
 
     var onPairingComplete: (() -> Void)?
 
     private var pairingTask: Task<Void, Never>?
+
+    /// A wall-clock watchdog for the pairing window.
+    ///
+    /// ⚠️⚠️ THE DEADLINE CANNOT LIVE INSIDE THE EVENT LOOP, WHICH IS WHERE IT USED TO LIVE ON TWO OF
+    /// THE THREE PLATFORMS. Discord and Slack tested `Date() < deadline` as the first statement of a
+    /// `for await` BODY, so it could only run when the stream yielded — and neither stream emits
+    /// anything periodic (heartbeats and ACKs are consumed internally and yield nothing). On a quiet
+    /// channel the loop simply parked in `next()`: hours later the PIN was still live, the WebSocket
+    /// still open, and the credentials still sitting there with no owning session. Worse, the first
+    /// message to arrive AFTER the deadline was consumed by the expiry check and discarded — so a
+    /// user returning twenty minutes later and typing the correct PIN saw it silently do nothing.
+    /// Telegram got this right by bounding the LOOP (`while … && Date() < deadline`) rather than its
+    /// body; this watchdog gives all three the same guarantee independently of traffic.
+    private var deadlineTask: Task<Void, Never>?
     private var currentPIN: String?
     private let pairingTimeout: TimeInterval = 300
 
@@ -58,7 +87,10 @@ final class SlackPairingService {
         config.slackAppToken = appToken
         config.slackConnectionState = .awaitingPairing(pin: pin)
 
-        logger.info("Slack pairing started. PIN: \(pin)")
+        // ⚠️ THE PIN IS NOT LOGGED — see the Telegram twin.
+        logger.info("Slack pairing window opened for \(self.pairingTimeout)s.")
+
+        armDeadline(pin: pin)
 
         pairingTask = Task {
             await pollForPairing(botToken: botToken, appToken: appToken, pin: pin)
@@ -68,6 +100,8 @@ final class SlackPairingService {
     func cancelPairing() {
         pairingTask?.cancel()
         pairingTask = nil
+        deadlineTask?.cancel()
+        deadlineTask = nil
         currentPIN = nil
     }
 
@@ -78,10 +112,9 @@ final class SlackPairingService {
 
         if let token = config.slackBotToken, let channelID = config.slackAuthorizedChannelID {
             let client = SlackAPIClient(botToken: token)
-            _ = try? await client.postMessage(
-                channel: channelID,
-                text: "Devgentic ChatOps disconnected. Goodbye!"
-            )
+            await ChatOpsFarewell.send(provider: .slack, logger: logger) {
+                _ = try await client.postMessage(channel: channelID, text: ChatOpsFarewell.message)
+            }
         }
 
         config.resetSlack()
@@ -135,10 +168,33 @@ final class SlackPairingService {
                     continue
                 }
 
-                guard let channelID = slackEvent.channel else { continue }
+                // ⚠️⚠️ [NEW-5] A BARE `continue` HERE DISCARDED A CORRECT PIN. By this line
+                // `PairingAttemptPolicy.classify` has already ruled the message a MATCH — the
+                // `.wrongPIN` arm returned above — so this is the user's real PIN being dropped with
+                // no trace, three lines before the assignments that would have completed pairing.
+                // Every neighbouring refusal in this loop names its consequence; this one said
+                // nothing, so a user whose pairing silently failed had no way to tell it apart from
+                // a bot that never received the message at all.
+                //
+                // ⚠️ STILL A `continue`, NOT A FAILURE: without a channel there is no address to
+                // listen on, so pairing genuinely cannot complete — but the window stays open and the
+                // user only has to send the PIN again from a normal channel message.
+                guard let channelID = slackEvent.channel else {
+                    logger.error("[CHATOPS] A correct Slack PIN arrived on an event carrying NO channel, so pairing could not complete. CONSEQUENCE: nothing was paired and the window stays OPEN — send the PIN again as an ordinary channel message. Pairing needs a channel because that address is what the bridge listens on; recording the user alone would leave nowhere to receive commands.")
+                    continue
+                }
 
+                // ⚠️ See the Telegram twin: `origin` (the Slack `user`) is what proved it knew the
+                //   PIN, and a Slack channel id identifies a ROOM, not a person.
+                config.slackAuthorizedUserID = origin
                 config.slackAuthorizedChannelID = channelID
                 config.isSlackEnabled = true
+                // ⚠️ THE WINDOW IS OVER THE MOMENT IT SUCCEEDS. `PairingWindowExpiry` would no-op anyway —
+                // the state no longer names this PIN — but leaving the watchdog armed keeps a task alive for
+                // the rest of the five minutes and writes a puzzling "no longer the live one" line when it
+                // fires. Disarming here says what actually happened.
+                deadlineTask?.cancel()
+                deadlineTask = nil
                 config.slackConnectionState = .connected(chatID: 0) // chatID not meaningful for Slack
 
                 logger.info("Slack pairing successful with channel \(channelID).")
@@ -170,10 +226,28 @@ final class SlackPairingService {
         await socketClient.stop()
 
         if !Task.isCancelled {
-            config.slackConnectionState = .disconnected
-            config.slackBotToken = nil
-            config.slackAppToken = nil
-            logger.info("Slack pairing timed out after \(self.pairingTimeout)s.")
+            PairingWindowExpiry.expire(pin: pin, platform: "Slack", timeout: pairingTimeout,
+                                       state: \.slackConnectionState, config: config, logger: logger)
+        }
+    }
+
+    /// Arms the wall-clock watchdog for this window. See `deadlineTask`.
+    ///
+    /// ⚠️ It CANCELS the polling task rather than trying to unwind it from the outside: cancellation
+    /// is what makes an `AsyncStream`'s `next()` return, which is the only way to get a loop parked
+    /// on a silent channel to move at all. Expiry is then reported here, because the cancelled loop's
+    /// own terminal arm deliberately does nothing when `Task.isCancelled` — it cannot tell a timeout
+    /// from the user pressing Cancel, and `PairingWindowExpiry` is what knows the difference.
+    private func armDeadline(pin: String) {
+        deadlineTask?.cancel()
+        deadlineTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(self?.pairingTimeout ?? 300 * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+
+            self.pairingTask?.cancel()
+            self.pairingTask = nil
+            PairingWindowExpiry.expire(pin: pin, platform: "Slack", timeout: self.pairingTimeout,
+                                       state: \.slackConnectionState, config: self.config, logger: self.logger)
         }
     }
 

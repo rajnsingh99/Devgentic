@@ -164,6 +164,7 @@ struct WorkflowMarkdownView: View {
     private func createStyledString(from text: String, font: Font, weight: Font.Weight) -> AttributedString {
         let inlineCodeHighlight = theme.inlineCodeHighlight
         let textColor = theme.primaryText
+        let linkColor = theme.accentColor
 
         var attributedString: AttributedString
         if let parsed = try? AttributedString(markdown: text) {
@@ -188,6 +189,16 @@ struct WorkflowMarkdownView: View {
                     // timeline must render the same markdown identically.
                     attributedString[run.range].font = font.weight(weight).italic()
                     attributedString[run.range].foregroundColor = textColor
+                } else if run.link != nil {
+                    // Kept in step with `ContentBlockView.createStyledString`, which carries the
+                    // full reasoning: a markdown link has NO `inlinePresentationIntent`, so it
+                    // fell into the `else` below and had SwiftUI's accent tint overwritten with
+                    // body colour — leaving a workflow node's links indistinguishable from the
+                    // prose around them. The underline must be explicit; `.link` does not bring
+                    // one once the run carries its own `foregroundColor`.
+                    attributedString[run.range].font = font.weight(weight)
+                    attributedString[run.range].foregroundColor = linkColor
+                    attributedString[run.range].underlineStyle = .single
                 } else {
                     attributedString[run.range].font = font.weight(weight)
                     attributedString[run.range].foregroundColor = textColor

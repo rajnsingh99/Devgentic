@@ -97,13 +97,7 @@ enum FileReferenceResolver {
     /// Every candidate path in a markdown block, resolving bare filenames through `index`.
     /// Returns span → absolute path, since a bare span cannot be re-derived later.
     static func candidateLinks(inMarkdown text: String, index: [String: String]) -> [String: String] {
-        var links: [String: String] = [:]
-        for span in codeSpans(inMarkdown: text) {
-            let key = span.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard links[key] == nil, let path = candidatePath(span, in: index) else { continue }
-            links[key] = path
-        }
-        return links
+        candidateLinks(inCodeSpans: codeSpans(inMarkdown: text), index: index)
     }
 
     /// Every distinct candidate path in a rendered block, in no particular order.
@@ -112,6 +106,21 @@ enum FileReferenceResolver {
     /// ordinary prose is ignored: only text the author marked as code is eligible.
     static func candidates(inCodeSpans spans: [String]) -> Set<String> {
         Set(spans.compactMap(candidatePath))
+    }
+
+    /// [mc-11] `candidateLinks` over spans the caller ALREADY parsed.
+    ///
+    /// The span→path DICTIONARY, not the `Set` the sibling above returns: a bare filename cannot
+    /// be re-derived from its path, so the renderer needs the key to decide which run becomes a
+    /// link. Swapping in the `Set` version to save the parse would leave every run unlinked.
+    static func candidateLinks(inCodeSpans spans: [String], index: [String: String]) -> [String: String] {
+        var links: [String: String] = [:]
+        for span in spans {
+            let key = span.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard links[key] == nil, let path = candidatePath(span, in: index) else { continue }
+            links[key] = path
+        }
+        return links
     }
 
     /// The text of every inline `code` span in a markdown string.
@@ -123,6 +132,15 @@ enum FileReferenceResolver {
         guard let parsed = try? AttributedString(markdown: text) else { return [] }
         return parsed.runs.compactMap { run in
             guard (run.inlinePresentationIntent ?? []).contains(.code) else { return nil }
+            // ⚠️ An author's link whose LABEL is inline code — `[`Main.java`](https://…)` — is
+            // NOT a hazard here, and a guard against it was written and then removed. PROBED on
+            // this machine (macOS 26): Foundation's `AttributedString(markdown:)` drops the
+            // `.code` intent on a link label, emitting ONE run with `link` set and
+            // `inlinePresentationIntent` empty. So such a span never reaches this test, can
+            // never become a candidate, and the renderer's `.code` branch never sees it either —
+            // it falls to the ordinary-link branch and gets the accent colour and underline.
+            // Pinned in `LinkedCodeSpanTests`. Do not add a `run.link == nil` guard on the
+            // strength of reasoning about markdown: this parser does not work that way.
             return String(parsed[run.range].characters)
         }
     }
@@ -222,6 +240,13 @@ enum FileReferenceResolver {
     }
 
     /// The path carried by one of our link URLs, or nil if this isn't one of ours.
+    ///
+    /// ⚠️ [CR18] "One of ours" means THE SHAPE IS OURS — nothing more. This is a parser, not an
+    /// authorisation check, and a caller must not treat a non-nil return as permission to open
+    /// the path. A model can write `[x](devgentic-file://open?path=/anything)` in an ordinary
+    /// reply and it reaches here indistinguishable from a link we minted. The caller has to
+    /// check the path against the set it actually verified — `ContentBlockView` does that against
+    /// `resolvedFileLinks`.
     static func path(fromLinkURL url: URL) -> String? {
         guard url.scheme == scheme, url.host == "open" else { return nil }
         guard let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?

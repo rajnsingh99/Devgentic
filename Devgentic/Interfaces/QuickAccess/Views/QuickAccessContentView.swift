@@ -83,6 +83,9 @@ struct QuickAccessContentView: View {
     /// [CF-21] The shared reader, so this panel can mount its transport while it is speaking.
     /// `SpeechControlIsland` reads the same singleton, so no injection is needed.
     private var speechService = SpeechService.shared
+    /// [sa-5] The identity this panel's transcript registers as a speech-transport host under.
+    /// Owned by the panel so its close path can deregister the same id.
+    private let transportHostID: UUID
     private var iconColor: Color { theme.secondaryText }
     private var placeholderTextColor: Color { theme.placeholderText }
     private var textColor: Color { theme.primaryText }
@@ -106,7 +109,9 @@ struct QuickAccessContentView: View {
          shouldResumeSession: Bool = true,
          mainAppViewModel: MainApplicationViewModel,
          themeManager: ThemeManager,
-         onRegisterHITLKeyHandler: ((@escaping (QuickAccessHITLKeyAction) -> Bool) -> Void)? = nil) {
+         onRegisterHITLKeyHandler: ((@escaping (QuickAccessHITLKeyAction) -> Bool) -> Void)? = nil,
+         transportHostID: UUID = UUID()) {
+        self.transportHostID = transportHostID
         self.dismiss = dismiss
         self.onResize = onResize
         self.onToggleZoom = onToggleZoom
@@ -510,6 +515,7 @@ extension QuickAccessContentView {
             .environment(session.searchViewModel)
             .environment(themeManager)
             .environment(\.appTheme, themeManager.currentTheme)
+            .environment(\.buttonAccentStyle, themeManager.buttonAccentStyle)
             // [QA revival P1c] Hide Redo/Resume in panel bubbles — they target the main
             // window's conversation state and would no-op here.
             .environment(\.chatActionsSuppressed, true)
@@ -545,6 +551,17 @@ extension QuickAccessContentView {
                     .animation(.spring(response: 0.4, dampingFraction: 0.7), value: speechService.isActive)
             }
         }
+        // [sa-5] The transcript is this panel's transport host — the island above lives inside
+        // it, and it renders only while expanded. Closing the panel (Esc → `orderOut` + `close`)
+        // AND collapsing it both tear it down; when no other host (a main-window
+        // `ChatHistoryView`) remains, the service stops the reader instead of leaving it
+        // speaking with no Stop on screen. Registered here rather than on the panel's
+        // `.onDisappear` beside the mic cleanup so the collapsed-panel case is covered too.
+        // The id is the PANEL's (`QuickAccessPanelView.transportHostID`), which also deregisters
+        // it from `closePanel()` — so the panel closing stops the reader even if AppKit's
+        // `orderOut` + `close` on a retained panel does not deliver this `onDisappear`.
+        .onAppear { speechService.transportHostDidAppear(transportHostID) }
+        .onDisappear { speechService.transportHostDidDisappear(transportHostID) }
     }
 
     private func scrollToLatest(_ proxy: ScrollViewProxy) {
@@ -691,8 +708,14 @@ extension QuickAccessContentView {
             ProfileSelectorPopover(
                 configuration: session.backendConfiguration,
                 isPresented: $showingProfilePopup,
-                allowedProfileTypes: QuickAccessSessionViewModel.allowedProfileTypes
+                allowedProfileTypes: QuickAccessSessionViewModel.allowedProfileTypes,
+                onManageProfiles: {
+                    if let id = session.backendConfiguration.selectedProfileID ?? session.selectedProfile?.id {
+                        onOpenProfileSettings?(id)
+                    }
+                }
             )
+            .frame(width: 356, height: 460)
             .environment(\.appTheme, themeManager.currentTheme)
             .tint(themeManager.currentTheme.accentColor)
             .preferredColorScheme(themeManager.currentTheme.colorScheme)

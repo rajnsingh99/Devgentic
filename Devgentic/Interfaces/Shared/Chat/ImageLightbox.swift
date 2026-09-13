@@ -19,6 +19,10 @@ struct ImageLightbox: View {
     /// The image's own description — alt text, or an artifact label. Drives the title and
     /// the VoiceOver label, so the viewer says what the picture IS rather than "image".
     let altText: String?
+    /// [bm-8] The saved file's base name when the caller knows one (an attachment's own
+    /// filename, extension already removed). Nil means "derive it from `altText`", which is
+    /// right for a generated image whose label is prose.
+    var fileBaseName: String? = nil
     /// Original bytes. Saved verbatim so nothing is re-encoded on the way out.
     let data: Data?
     let mimeType: String?
@@ -190,7 +194,7 @@ struct ImageLightbox: View {
         saveError = nil
         savedURL = nil
         do {
-            savedURL = try ImageExport.saveToDownloads(
+            savedURL = try ImageExport.saveToDownloads(   // [bm-8] base name, not the label
                 data: data,
                 declaredMimeType: mimeType,
                 baseName: suggestedBaseName
@@ -200,9 +204,32 @@ struct ImageLightbox: View {
         }
     }
 
+    private var suggestedBaseName: String {
+        Self.suggestedBaseName(altText: altText, fileBaseName: fileBaseName)
+    }
+
     /// Name the file after what it depicts when we know, so Downloads doesn't fill up with
     /// interchangeable "devgentic-image-a1b2c3" files.
-    private var suggestedBaseName: String {
+    ///
+    /// [bm-8] `fileBaseName` wins when the caller has a real filename, and is used VERBATIM:
+    /// slugifying "Screenshot 2026-09-11.png" gave "screenshot-2026-09-11-png", and
+    /// `saveToDownloads` then appended the sniffed extension, so saving from the lightbox
+    /// produced "screenshot-2026-09-11-png.png" while the same image saved from the card's
+    /// context menu produced "Screenshot 2026-09-11.png".
+    ///
+    /// ⚠️ The extension is stripped by the CALLER, not here. A blanket `deletingPathExtension`
+    /// inside this function would maul prose: "diagram.of.the.system" → "diagram.of.the"
+    /// (probed). A generated image's label is prose and must keep going through the slug path
+    /// below untouched, which is why this takes a separate parameter instead of a flag.
+    ///
+    /// `nonisolated static` so the naming rule is testable without presenting a sheet.
+    nonisolated static func suggestedBaseName(altText: String?, fileBaseName: String?) -> String {
+        if let fileBaseName {
+            let trimmed = fileBaseName.trimmingCharacters(in: .whitespacesAndNewlines)
+            // An empty/whitespace name is no name: fall through rather than hand
+            // `saveToDownloads` a base it cannot make unique.
+            if !trimmed.isEmpty { return String(trimmed.prefix(60)) }
+        }
         guard let altText, !altText.isEmpty else {
             return "devgentic-image-\(UUID().uuidString.prefix(6))"
         }
@@ -225,17 +252,21 @@ extension View {
     /// `AttachedImageCardView` held every opened photo's pixels in row state for as long as the
     /// conversation stayed on screen. Callers whose image is the one the bubble itself renders
     /// (`MediaArtifactImageView`) leave it nil — that bitmap is not the sheet's to release.
+    /// [bm-8] `fileBaseName` names the SAVED FILE only — the title and the VoiceOver label
+    /// keep using `altText`. A caller whose `altText` is a filename passes the extension-less
+    /// form here rather than changing `altText`, which would have changed all three.
     func imageLightbox(
         isPresented: Binding<Bool>,
         image: NSImage?,
         altText: String?,
         data: Data?,
         mimeType: String? = nil,
+        fileBaseName: String? = nil,
         onDismiss: (() -> Void)? = nil
     ) -> some View {
         sheet(isPresented: isPresented, onDismiss: onDismiss) {
             if let image {
-                ImageLightbox(image: image, altText: altText, data: data, mimeType: mimeType)
+                ImageLightbox(image: image, altText: altText, fileBaseName: fileBaseName, data: data, mimeType: mimeType)
             }
         }
     }

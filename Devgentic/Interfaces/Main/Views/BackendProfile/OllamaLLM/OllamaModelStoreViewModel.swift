@@ -37,6 +37,13 @@ class OllamaModelStoreViewModel {
     var isDownloading: Bool = false
     var downloadErrorMessage: String? = nil
 
+    /// The service's own pull narration, mirrored so it can actually be rendered.
+    ///
+    /// ⚠️ `OllamaService.pullStatusMessage` is written SEVEN times — including "Successfully
+    /// pulled …" — and was read ZERO times anywhere in the app. A user who pulled a multi-GB
+    /// model was never told it had finished; they had to press Refresh and look for the card.
+    var pullStatus: OllamaService.PullTerminalState? = nil
+
     // Deletion State
     //
     // ⚠️ `OllamaService.modelRemoveError` had ZERO readers anywhere in the app: `removeModel`
@@ -124,6 +131,12 @@ class OllamaModelStoreViewModel {
                 _ = self.service.isLoadingModels
                 _ = self.service.isPullingModel
                 _ = self.service.modelPullError
+                // ⚠️ `pullTerminalState`, NOT `pullStatusMessage`. The latter is rewritten
+                // once per NDJSON line, so tracking it ran this observer's `applyFilterAndSort`
+                // — a full re-filter and re-sort — for every progress line of a multi-GB pull.
+                // That is precisely what the note above excludes `pullProgress` for, and the
+                // offending line had been added directly beneath it.
+                _ = self.service.pullTerminalState
                 _ = self.service.isRemovingModel
                 _ = self.service.modelRemoveError
             },
@@ -133,6 +146,7 @@ class OllamaModelStoreViewModel {
                 self.isLoading = self.service.isLoadingModels
                 self.isDownloading = self.service.isPullingModel
                 self.downloadErrorMessage = self.service.modelPullError
+                self.pullStatus = self.service.pullTerminalState
                 self.isDeleting = self.service.isRemovingModel
                 self.deleteErrorMessage = self.service.modelRemoveError
             }
@@ -199,11 +213,28 @@ class OllamaModelStoreViewModel {
     }
 
     /// Clears whichever error banner the store is showing.
+    /// Clears the pull outcome banner.
+    ///
+    /// ⚠️ Must clear it on the SERVICE too. The view model's copy is re-mirrored from
+    /// `service.pullTerminalState` on the very next observer tick, so nilling only the local one
+    /// makes the banner reappear. That is also why the banner could never be dismissed before:
+    /// `clearPullActionStatus()` is the only thing that resets the service-side value and it has
+    /// no callers anywhere in the tree.
+    func dismissPullStatus() {
+        pullStatus = nil
+        service.pullTerminalState = nil
+    }
+
     func dismissErrors() {
         deleteErrorMessage = nil
         downloadErrorMessage = nil
         service.modelRemoveError = nil
         service.modelPullError = nil
+        // ⚠️ The outcome banner is suppressed while an error is showing, so dismissing the error
+        // used to REVEAL a stale one — dismiss a failed pull's error and "Failed to pull X."
+        // surfaced underneath it, under a green tick. They describe the same event; they go
+        // together.
+        dismissPullStatus()
     }
     
     func cancelDownload() {

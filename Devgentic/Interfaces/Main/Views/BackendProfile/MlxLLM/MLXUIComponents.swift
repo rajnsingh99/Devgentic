@@ -71,11 +71,10 @@ struct MLXDownloadProgressCircle: View {
 }
 
 /// A visual badge representing a specific model capability (e.g. "Reasoning", "Vision").
-/// Uses a unified neutral style across all capabilities — the accent color is
-/// expressed only through the small leading icon, keeping the card calm when
-/// multiple badges stack together.
+/// In icon-only mode (default), renders as a compact 24×24 circular icon chip with a hover tooltip.
 struct CapabilityBadge: View {
     let capability: MLXModelCapability
+    var iconOnly: Bool = true
 
     @Environment(\.appTheme) private var theme
 
@@ -90,18 +89,35 @@ struct CapabilityBadge: View {
     }
 
     var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: capability.icon)
-                .font(.system(.caption2, weight: .semibold))
-                .foregroundColor(accentColor)
+        Group {
+            if iconOnly {
+                Image(systemName: capability.icon)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(accentColor)
+                    .frame(width: 24, height: 24)
+                    .background(theme.surfaceOverlay)
+                    .clipShape(Circle())
+                    .overlay(
+                        Circle()
+                            .stroke(theme.surfaceOverlayStrong.opacity(0.6), lineWidth: 0.5)
+                    )
+            } else {
+                HStack(spacing: 5) {
+                    Image(systemName: capability.icon)
+                        .font(.system(.caption2, weight: .semibold))
+                        .foregroundColor(accentColor)
 
-            Text(capability.localizedTitle)
-                .font(.caption2)
-                .foregroundColor(theme.primaryText.opacity(0.85))
+                    Text(capability.localizedTitle)
+                        .font(.caption2)
+                        .foregroundColor(theme.primaryText.opacity(0.85))
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(theme.surfaceOverlay)
+                .clipShape(Capsule())
+            }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(theme.surfaceOverlay)
-        .clipShape(Capsule())
+        .help(capability.localizedTitle)
+        .accessibilityLabel(capability.localizedTitle)
     }
 }

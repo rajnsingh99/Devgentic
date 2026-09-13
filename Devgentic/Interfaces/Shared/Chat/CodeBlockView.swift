@@ -44,6 +44,18 @@ struct CodeBlockView: View {
     /// must be paid once per click, never in `body`. Returning nil (block not found) falls
     /// back to content-equality dedup, i.e. today's behaviour.
     var resolveOriginBlockIndex: (() -> Int?)? = nil
+    /// [mc-17] The highlight lives HERE, not in the view that renders it.
+    ///
+    /// It used to be `@State` on `AsyncHighlightedCodeView`, which `body` instantiated in BOTH
+    /// arms of the `exceedsHeightCap` if/else. The two arms are distinct structural positions,
+    /// so crossing the height cap mid-stream destroyed that state and the block dropped back to
+    /// `updateNSView`'s uncoloured `labelColor` placeholder for a full highlight round-trip
+    /// (`SyntaxHighlightService` has no result cache). At 12 pt the cap falls at 22 lines —
+    /// well inside the 50-line window where this view is used at all — so an ordinary streamed
+    /// answer flickered from coloured to plain and back exactly once, mid-answer.
+    ///
+    /// `CodeBlockView` itself keeps its identity across that flip, so the highlight survives it.
+    @State private var highlightedCode: NSAttributedString?
     @State private var isCopied = false
     @State private var isHovering = false
     @State private var isOpenHovering = false
@@ -53,16 +65,49 @@ struct CodeBlockView: View {
     /// Content with trailing newlines stripped for DISPLAY — LLM fences usually end
     /// with "\n", which rendered as a phantom empty line inflating the block.
     /// Copy still delivers the original `content` verbatim.
-    private var displayContent: String {
+    private var displayContent: String { Self.displayContent(of: content) }
+
+    /// [mc-12] `nonisolated static` so the header badge's count can be composed exactly the way
+    /// `body` composes it, in a test, without presenting the view.
+    ///
+    /// ⚠️ `last.isNewline`, NOT `hasSuffix("\n") || hasSuffix("\r")`. Swift's `"\r\n"` is ONE
+    /// grapheme cluster, so BOTH of those suffix tests are false for a block ending in CRLF and
+    /// the loop stopped immediately: a one-line block written with Windows line endings kept the
+    /// phantom trailing line this function exists to remove, rendered a blank line under its
+    /// code, and reported "3 lines" in the header (`components(separatedBy: .newlines)` splits
+    /// CRLF at both characters). Found while pinning the counters; the defect predates [mc-12].
+    /// `isNewline` is true for the CRLF cluster and for every separator `CharacterSet.newlines`
+    /// splits on, so the trim and the count now agree on what a line ending is.
+    nonisolated static func displayContent(of content: String) -> String {
         var trimmed = content
-        while trimmed.hasSuffix("\n") || trimmed.hasSuffix("\r") {
+        while let last = trimmed.last, last.isNewline {
             trimmed.removeLast()
         }
         return trimmed
     }
 
-    private var lineCount: Int {
-        displayContent.isEmpty ? 0 : displayContent.components(separatedBy: .newlines).count
+    /// ⚠️ [mc-12] `components(separatedBy: .newlines)`, matching `CodeSnippet.lineCount`
+    /// EXACTLY. The two decide different things about the same block — this one the scroll
+    /// cap and the header's "N lines", that one the card/inline boundary and
+    /// `openMessageInCodeViewer`'s `largeSnippets` filter — and `CodeSnippet.isLarge`'s doc
+    /// records what happens when they disagree: a block renders a card the viewer's filter
+    /// then excludes, so the user's click cannot reach the snippet they clicked. A faster
+    /// count is not equivalent: for "a\r\nb\r\nc" this yields 5 (CharacterSet splitting
+    /// treats CRLF as two separators) where counting newline characters yields 3. Change
+    /// BOTH or neither.
+    ///
+    /// ⚠️ Known, PRE-EXISTING divergence (found while pinning this, not introduced by it): the
+    /// two normalise differently at the LEADING edge. `CodeSnippet.normalizedCode` trims
+    /// whitespace at both ends; `displayContent(of:)` strips trailing newlines only, because it
+    /// feeds the RENDERER and dropping a block's leading blank lines would change what is drawn.
+    /// So a block that opens with blank lines reports more lines in this header than
+    /// `CodeSnippet` counts. It is cosmetic: the card/inline boundary
+    /// (`ContentBlockView`) and the viewer's `largeSnippets` filter BOTH use `CodeSnippet`, so
+    /// they cannot disagree with each other, which is the failure `CodeSnippet.isLarge`'s doc
+    /// warns about. Only the "N lines" badge and the scroll-cap estimate see the larger number,
+    /// and the estimate erring HIGH means a scrollbar slightly early, never clipped content.
+    nonisolated static func lineCount(of display: String) -> Int {
+        display.isEmpty ? 0 : display.components(separatedBy: .newlines).count
     }
 
     /// Whether this block is tall enough to be worth scrolling instead of rendering whole.
@@ -72,14 +117,21 @@ struct CodeBlockView: View {
     /// Wrapped lines aren't counted, so the estimate errs LOW: a block that wraps past the
     /// cap renders at full height (today's behaviour) rather than gaining a scrollbar it
     /// shouldn't have. Erring the other way would clip content.
+    /// [mc-12] Takes the count rather than recomputing it: `body` needs the same number for
+    /// the header badge and this decision, and it used to walk the whole (unbounded) block
+    /// once for each — on every streaming flush.
     @MainActor
-    private var exceedsHeightCap: Bool {
-        let lineHeight = AsyncHighlightedCodeView.monoFont(size: fontSize).boundingRectForFont.height
-        let estimated = CGFloat(lineCount) * lineHeight + 24  // + vertical padding
+    private func exceedsHeightCap(lines: Int) -> Bool {
+        let lineHeight = HighlightedCodeViewRepresentable.monoFont(size: fontSize).boundingRectForFont.height
+        let estimated = CGFloat(lines) * lineHeight + 24  // + vertical padding
         return estimated > ChatUIConstants.codeBlockMaxHeight
     }
 
     var body: some View {
+        // [mc-12] Both derived once per pass, then handed to every consumer below.
+        let display = displayContent
+        let lines = Self.lineCount(of: display)
+
         VStack(spacing: 0) {
             // MARK: - Mac Window Header
             HStack(spacing: 8) {
@@ -105,8 +157,8 @@ struct CodeBlockView: View {
                     .accessibilityLabel("From file \(fileName)")
                 }
 
-                if lineCount > 1 {
-                    Text("\(lineCount) lines")
+                if lines > 1 {
+                    Text("\(lines) lines")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(theme.codeBlockHeaderSecondaryText)
                 }
@@ -177,20 +229,35 @@ struct CodeBlockView: View {
                 .frame(height: 0.5)
 
             // MARK: - Editor Content
-            if exceedsHeightCap {
+            if exceedsHeightCap(lines: lines) {
                 ScrollView(.vertical) {
-                    AsyncHighlightedCodeView(language: language, code: displayContent, fontSize: fontSize)
+                    HighlightedCodeViewRepresentable(attributedString: highlightedCode, code: display, fontSize: fontSize)
                         .padding(12)
                         .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
                 .frame(height: ChatUIConstants.codeBlockMaxHeight)
                 .background(theme.codeBlockEditorBackground)
             } else {
-                AsyncHighlightedCodeView(language: language, code: displayContent, fontSize: fontSize)
+                HighlightedCodeViewRepresentable(attributedString: highlightedCode, code: display, fontSize: fontSize)
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                     .background(theme.codeBlockEditorBackground)
             }
+        }
+        // [mc-17] One highlight for the block, keyed on what it depends on — outside the
+        // if/else, so crossing the height cap re-uses it instead of restarting it.
+        .task(id: HighlightKey(code: display, themeName: theme.codeHighlightThemeName, fontSize: fontSize)) {
+            let result = await SyntaxHighlightService.shared.highlight(
+                display,
+                language: language,
+                themeName: theme.codeHighlightThemeName
+            )
+            // A streaming block supersedes this highlight on every flush. `.task(id:)`
+            // cancels us then — drop the stale result instead of writing it back
+            // (the previous code awaited a `Task.detached`, which ignores
+            // cancellation entirely and let superseded work pile up).
+            guard !Task.isCancelled else { return }
+            highlightedCode = result.map { Self.applyingBaseFont($0, size: fontSize) }
         }
         .fixedSize(horizontal: false, vertical: true)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -199,6 +266,26 @@ struct CodeBlockView: View {
                 .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
         )
         .shadow(color: theme.shadowColor.opacity(0.3), radius: 6, x: 0, y: 3)
+    }
+
+    /// Re-highlight trigger. Holds the code by reference (Swift strings are COW) rather
+    /// than the old `"\(isLight)\u{0}\(code)"` key, which allocated a full copy of the
+    /// code on EVERY body pass just to compare it.
+    ///
+    /// Keyed on the THEME NAME, not a light/dark flag: switching Dracula → One Dark keeps
+    /// `colorScheme == .dark`, so a boolean key left the old palette on screen.
+    private struct HighlightKey: Equatable {
+        let code: String
+        let themeName: String
+        let fontSize: CGFloat
+    }
+
+    /// Applies the base mono font over Highlightr's colors.
+    @MainActor
+    private static func applyingBaseFont(_ highlighted: NSAttributedString, size: CGFloat) -> NSAttributedString {
+        let result = NSMutableAttributedString(attributedString: highlighted)
+        result.addAttribute(.font, value: HighlightedCodeViewRepresentable.monoFont(size: size), range: NSRange(location: 0, length: result.length))
+        return result
     }
 
     private func copyToClipboard() {
@@ -215,86 +302,6 @@ struct CodeBlockView: View {
         }
     }
 }
-
-// MARK: - AsyncHighlightedCodeView
-/// This new View wraps the NSViewRepresentable and handles the asynchronous highlighting.
-/// It uses .task to initiate the background operation whenever the code content changes.
-struct AsyncHighlightedCodeView: View {
-    let language: String
-    let code: String
-    /// Point size for the mono font. Comes from `chatFontSize` so code scales with the
-    /// rest of the conversation; it used to be baked into a `static let` at 12pt, which
-    /// meant a reader at 20pt prose got 12pt code and no way to change it.
-    var fontSize: CGFloat = ChatUIConstants.defaultCodeFontSize
-
-    @State private var highlightedCode: NSAttributedString?
-    @Environment(\.appTheme) private var theme
-
-    /// Re-highlight trigger. Holds the code by reference (Swift strings are COW) rather
-    /// than the old `"\(isLight)\u{0}\(code)"` key, which allocated a full copy of the
-    /// code on EVERY body pass just to compare it.
-    ///
-    /// Keyed on the THEME NAME, not a light/dark flag: switching Dracula → One Dark keeps
-    /// `colorScheme == .dark`, so a boolean key left the old palette on screen.
-    private struct HighlightKey: Equatable {
-        let code: String
-        let themeName: String
-        let fontSize: CGFloat
-    }
-
-    var body: some View {
-        // The representable just displays the result of the async operation.
-        HighlightedCodeViewRepresentable(attributedString: highlightedCode, code: code, fontSize: fontSize)
-            .task(id: HighlightKey(code: code, themeName: theme.codeHighlightThemeName, fontSize: fontSize)) {
-                let result = await SyntaxHighlightService.shared.highlight(
-                    code,
-                    language: language,
-                    themeName: theme.codeHighlightThemeName
-                )
-                // A streaming block supersedes this highlight on every flush. `.task(id:)`
-                // cancels us then — drop the stale result instead of writing it back
-                // (the previous code awaited a `Task.detached`, which ignores
-                // cancellation entirely and let superseded work pile up).
-                guard !Task.isCancelled else { return }
-                highlightedCode = result.map { Self.applyingBaseFont($0, size: fontSize) }
-            }
-    }
-
-    /// Applies the base mono font over Highlightr's colors.
-    @MainActor
-    private static func applyingBaseFont(_ highlighted: NSAttributedString, size: CGFloat) -> NSAttributedString {
-        let result = NSMutableAttributedString(attributedString: highlighted)
-        result.addAttribute(.font, value: monoFont(size: size), range: NSRange(location: 0, length: result.length))
-        return result
-    }
-
-    /// The monospaced font used for code rendering.
-    ///
-    /// Cached per size rather than as one `static let`: deriving a monospaced NSFont from a
-    /// descriptor isn't free and this runs on every highlight, but the size now varies with
-    /// `chatFontSize` so a single instance can't serve it. There are only ever a handful of
-    /// distinct sizes, so the cache never grows.
-    ///
-    /// MainActor-isolated rather than lock-guarded: the only caller is the `.task` closure
-    /// in `body`, which is already on the main actor.
-    @MainActor
-    static func monoFont(size: CGFloat) -> NSFont {
-        if let cached = fontCache[size] { return cached }
-        let font: NSFont = {
-            if let descriptor = NSFont.systemFont(ofSize: size, weight: .regular).fontDescriptor.withDesign(.monospaced),
-               let font = NSFont(descriptor: descriptor, size: size) {
-                return font
-            }
-            // Fallback: use Menlo or system font if monospaced design unavailable
-            return NSFont(name: "Menlo", size: size) ?? NSFont.systemFont(ofSize: size)
-        }()
-        fontCache[size] = font
-        return font
-    }
-
-    @MainActor private static var fontCache: [CGFloat: NSFont] = [:]
-}
-
 
 // MARK: - SizingTextView
 /// A custom NSTextView that automatically adjusts its height to fit its content.
@@ -367,7 +374,7 @@ struct HighlightedCodeViewRepresentable: NSViewRepresentable {
             // AppKit then sent `_isDefaultFace` to a __SwiftValue at render time. `Any`
             // means the compiler can't help here; the hosting tests caught it.
             let attributes: [NSAttributedString.Key: Any] = [
-                .font: AsyncHighlightedCodeView.monoFont(size: fontSize),
+                .font: Self.monoFont(size: fontSize),
                 .foregroundColor: NSColor.labelColor
             ]
             textToSet = NSAttributedString(string: code, attributes: attributes)
@@ -378,4 +385,32 @@ struct HighlightedCodeViewRepresentable: NSViewRepresentable {
              nsView.invalidateIntrinsicContentSize()
         }
     }
+
+    /// The monospaced font used for code rendering.
+    ///
+    /// Cached per size rather than as one `static let`: deriving a monospaced NSFont from a
+    /// descriptor isn't free and this runs on every highlight, but the size now varies with
+    /// `chatFontSize` so a single instance can't serve it. There are only ever a handful of
+    /// distinct sizes, so the cache never grows.
+    ///
+    /// MainActor-isolated rather than lock-guarded: every caller is on the main actor.
+    /// [mc-17] Lives here rather than on the deleted `AsyncHighlightedCodeView` — this is the
+    /// view that actually draws the text, and the placeholder branch below is its closest
+    /// caller.
+    @MainActor
+    static func monoFont(size: CGFloat) -> NSFont {
+        if let cached = fontCache[size] { return cached }
+        let font: NSFont = {
+            if let descriptor = NSFont.systemFont(ofSize: size, weight: .regular).fontDescriptor.withDesign(.monospaced),
+               let font = NSFont(descriptor: descriptor, size: size) {
+                return font
+            }
+            // Fallback: use Menlo or system font if monospaced design unavailable
+            return NSFont(name: "Menlo", size: size) ?? NSFont.systemFont(ofSize: size)
+        }()
+        fontCache[size] = font
+        return font
+    }
+
+    @MainActor private static var fontCache: [CGFloat: NSFont] = [:]
 }

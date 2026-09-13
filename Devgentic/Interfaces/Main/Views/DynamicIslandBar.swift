@@ -95,7 +95,7 @@ struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
             // black-tint on light) so the edge stays legible on any wallpaper
             // bleeding through the glass — unlike dividerColor, which can match
             // the backdrop on some themes and disappear.
-            Capsule()
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(theme.surfaceOverlayStrong.opacity(0.7), lineWidth: 0.5)
         )
         .frame(maxWidth: ViewLayout.maxContentWidth)
@@ -168,27 +168,28 @@ struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
 
 // MARK: - Backdrop Modifier
 
-/// Liquid Glass by default; switches to a solid themed capsule when the user has
+/// Liquid Glass by default; switches to a solid themed rounded rectangle when the user has
 /// "Reduce Transparency" enabled in System Settings → Accessibility.
 private struct IslandBackdropModifier: ViewModifier {
     let reduceTransparency: Bool
     let theme: any Theme
+    var cornerRadius: CGFloat = 12
     @Environment(\.surfaceStyle) private var surfaceStyle
 
     func body(content: Content) -> some View {
         if reduceTransparency || surfaceStyle == .solid {
             content
                 .background(
-                    Capsule()
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                         .fill(theme.secondaryBackground)
                         .shadow(color: theme.primaryText.opacity(0.08), radius: 8, x: 0, y: 2)
                 )
                 .overlay(
-                    Capsule()
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                         .stroke(theme.isDark ? Color.white.opacity(0.08) : theme.dividerColor.opacity(0.7), lineWidth: 1)
                 )
         } else {
-            content.glassEffect(.regular, in: .capsule)
+            content.glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
         }
     }
 }
@@ -271,6 +272,22 @@ extension DynamicIslandBar where CenterContent == IslandTitleLabel {
         self.center = IslandTitleLabel(title: title, icon: icon)
         self.trailing = trailing()
     }
+
+    init(
+        title: String,
+        icon: String? = nil,
+        onBack: (() -> Void)? = nil,
+        leadingSymbol: String = "chevron.left",
+        @ViewBuilder trailing: () -> TrailingContent
+    ) {
+        self.init(
+            title: LocalizedStringKey(title),
+            icon: icon,
+            onBack: onBack,
+            leadingSymbol: leadingSymbol,
+            trailing: trailing
+        )
+    }
 }
 
 extension DynamicIslandBar where CenterContent == IslandTitleLabel, TrailingContent == EmptyView {
@@ -281,6 +298,10 @@ extension DynamicIslandBar where CenterContent == IslandTitleLabel, TrailingCont
         self.leadingSymbol = leadingSymbol
         self.center = IslandTitleLabel(title: title, icon: icon)
         self.trailing = EmptyView()
+    }
+
+    init(title: String, icon: String? = nil, onBack: (() -> Void)? = nil, leadingSymbol: String = "chevron.left") {
+        self.init(title: LocalizedStringKey(title), icon: icon, onBack: onBack, leadingSymbol: leadingSymbol)
     }
 }
 

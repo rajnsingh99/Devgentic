@@ -60,10 +60,29 @@ struct MLXModelStoreContent: View {
     var showSearchBar: Bool = true
     /// When true, content is centered with maxWidth: 1000 to match DynamicIslandBar width.
     var centeredLayout: Bool = false
+    /// Presents the inline token field from the 401 state and the gated badge.
+    @State private var showingTokenEntry = false
     @Environment(\.appTheme) private var theme
+
+    private var hasActiveFilters: Bool {
+        !viewModel.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || viewModel.quantizationFilter != nil
+            || viewModel.fitsMyMacOnly
+            || (filterForTools && viewModel.showToolCapableOnly)
+    }
+
+    private func resetFilters() {
+        viewModel.searchText = ""
+        viewModel.quantizationFilter = nil
+        viewModel.fitsMyMacOnly = false
+        if filterForTools {
+            viewModel.showToolCapableOnly = false
+        }
+    }
 
     private var emptyStateIcon: String {
         if viewModel.loadError != nil { return "exclamationmark.icloud" }
+        if hasActiveFilters { return "line.3.horizontal.decrease.circle" }
         return viewModel.selectedCategory == .installed ? "externaldrive" : "magnifyingglass"
     }
 
@@ -83,7 +102,7 @@ struct MLXModelStoreContent: View {
         VStack(spacing: 0) {
 
             // MARK: - Header & Filter Bar
-            VStack(spacing: showSearchBar ? 16 : 0) {
+            VStack(spacing: showSearchBar ? 16 : 12) {
                 // Title + Search — only in sheet mode
                 if showSearchBar {
                     // Title Row
@@ -172,89 +191,150 @@ struct MLXModelStoreContent: View {
                     .padding(.horizontal, 2)
                 }
 
-                // Storage accounting: the app held 76 GB of models on the dev machine and
-                // could not tell the user that, or which model was the large one.
-                if viewModel.selectedCategory == .installed, let used = viewModel.installedStorageSummary {
-                    // ⚠️ ONE row. This was a storage HStack, then a bare `Spacer()`, then the
-                    // button — and that Spacer was a child of the enclosing VStack, not of the
-                    // HStack, so it expanded VERTICALLY and pushed "Check for Updates", the
-                    // quantization picker and the whole grid ~400pt down the Installed tab,
-                    // leaving a void under the summary. Found by running the app; no test
-                    // asserts layout.
-                    HStack(spacing: 6) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "internaldrive")
-                                .font(.caption)
-                            // Both halves must describe the SAME set. Using the filtered count
-                            // beside the whole-library size read as "1 installed model totalling
-                            // 81.52 GB". The row is storage accounting for the library, so the
-                            // library totals lead; the filter is reported separately.
-                            Text(viewModel.isFilteringInstalled
-                                 ? "\(viewModel.displayedModels.count) of \(viewModel.installedCount) shown · \(used) on disk"
-                                 : "\(viewModel.installedCount) installed · \(used) on disk")
-                                .font(.caption)
-                        }
-                        .foregroundColor(theme.secondaryText)
-                        // ⚠️ `.combine` only over the label pair — applied to the whole row it
-                        // would swallow the button below into one unactionable element.
-                        .accessibilityElement(children: .combine)
-
-                        Spacer()
-
-                        // ⚠️ Explicit rather than automatic: one request per installed model on
-                        // every store open is exactly the unbounded fan-out A9 removed.
-                        Button {
-                            viewModel.checkForUpdates()
+                // Filter & Storage Toolbar Row
+                HStack(spacing: 10) {
+                    // Quantization picker
+                    //
+                    // ⚠️ Read ONCE into a local. `availableQuantizations` is a computed property,
+                    // and `Menu`'s content builder runs immediately, so reading it here and again
+                    // inside the menu evaluated it twice per body — and on the Installed tab each
+                    // evaluation re-parses every installed repo id. The body re-evaluates on every
+                    // observer tick, so a 20-model library paid for it ~30 times per page load.
+                    let quantizations = viewModel.availableQuantizations
+                    if quantizations.count > 1 || viewModel.quantizationFilter != nil {
+                        Menu {
+                            Button("Any Quantization") { viewModel.quantizationFilter = nil }
+                            Divider()
+                            ForEach(quantizations, id: \.self) { quant in
+                                Button(quant.localizedTitle) { viewModel.quantizationFilter = quant }
+                            }
                         } label: {
-                            if viewModel.isCheckingForUpdates {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Text("Check for Updates").font(.caption)
+                            HStack(spacing: 5) {
+                                Image(systemName: viewModel.quantizationFilter != nil ? "square.stack.3d.down.right.fill" : "square.stack.3d.down.right")
+                                    .font(.caption2)
+                                    .foregroundColor(viewModel.quantizationFilter != nil ? theme.accentColor : theme.secondaryText)
+                                Text(viewModel.quantizationFilter?.localizedTitle ?? "Quantization: Any")
+                                    .font(.caption)
+                                    .foregroundColor(viewModel.quantizationFilter != nil ? theme.primaryText : theme.secondaryText)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundColor(viewModel.quantizationFilter != nil ? theme.accentColor : theme.secondaryText)
                             }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(viewModel.quantizationFilter != nil ? theme.accentColor.opacity(0.12) : theme.surfaceOverlay)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .strokeBorder(viewModel.quantizationFilter != nil ? theme.accentColor.opacity(0.4) : theme.surfaceOverlayStrong, lineWidth: 0.5)
+                            )
                         }
-                        .buttonStyle(.link)
-                        .disabled(viewModel.isCheckingForUpdates)
-                        .help("Compares each installed model against the version currently published on HuggingFace.")
+                        .buttonStyle(.plain)
+                        .menuIndicator(.hidden)
+                        .help("Filter by bit-depth quantization (e.g. 4-bit, 8-bit, 16-bit).")
                     }
-                }
 
-                // Quantization picker. Only shown when the current results actually contain
-                // more than one — a single-option filter is just clutter.
-                // ⚠️ …but ALWAYS shown while a filter is active, whatever the count. The
-                // control that clears a filter must never be hidden by the filter's own
-                // effect; that combination is how the grid could go empty with no way back.
-                if viewModel.availableQuantizations.count > 1 || viewModel.quantizationFilter != nil {
-                    HStack(spacing: 8) {
-                        Text("Quantization")
-                            .font(.caption)
-                            .foregroundColor(theme.secondaryText)
-                        Picker("Quantization", selection: $viewModel.quantizationFilter) {
-                            Text("Any").tag(MLXQuantization?.none)
-                            ForEach(viewModel.availableQuantizations, id: \.self) { quant in
-                                Text(quant.localizedTitle).tag(MLXQuantization?.some(quant))
+                    // "Fits my Mac" toggle chip
+                    if viewModel.selectedCategory != .installed {
+                        Button {
+                            viewModel.fitsMyMacOnly.toggle()
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: viewModel.fitsMyMacOnly ? "checkmark.circle.fill" : "circle")
+                                    .font(.caption2)
+                                    .foregroundColor(viewModel.fitsMyMacOnly ? theme.accentColor : theme.secondaryText)
+                                Text("Fits my Mac")
+                                    .font(.caption)
+                                    .foregroundColor(viewModel.fitsMyMacOnly ? theme.primaryText : theme.secondaryText)
+                                if viewModel.fitsMyMacOnly && viewModel.hiddenByFitFilter > 0 {
+                                    Text("(\(viewModel.hiddenByFitFilter) hidden)")
+                                        .font(.caption2)
+                                        .foregroundColor(theme.secondaryText)
+                                }
                             }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(viewModel.fitsMyMacOnly ? theme.accentColor.opacity(0.12) : theme.surfaceOverlay)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .strokeBorder(viewModel.fitsMyMacOnly ? theme.accentColor.opacity(0.4) : theme.surfaceOverlayStrong, lineWidth: 0.5)
+                            )
                         }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .frame(maxWidth: 130)
-                        .help("Lower bit counts are smaller and faster; higher ones keep more of the original quality.")
-                        Spacer()
+                        .buttonStyle(.plain)
+                        .help("Hides models estimated to need more than this Mac's \(SystemHardwareProfiler.shared.profile.formattedEffectiveBudget) memory budget.")
                     }
-                }
 
-                // The tool-capability filter is the user's to control. It used to be an
-                // unconditional filter with no override, so a heuristic false negative made
-                // a model unreachable in Agent profiles entirely.
-                if filterForTools {
-                    HStack {
-                        Toggle("Show tool-capable models only", isOn: $viewModel.showToolCapableOnly)
-                            .toggleStyle(.checkbox)
-                            .font(.caption)
+                    if filterForTools {
+                        Button {
+                            viewModel.showToolCapableOnly.toggle()
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: viewModel.showToolCapableOnly ? "checkmark.circle.fill" : "circle")
+                                    .font(.caption2)
+                                    .foregroundColor(viewModel.showToolCapableOnly ? theme.accentColor : theme.secondaryText)
+                                Text("Tool-Capable Only")
+                                    .font(.caption)
+                                    .foregroundColor(viewModel.showToolCapableOnly ? theme.primaryText : theme.secondaryText)
+                            }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(viewModel.showToolCapableOnly ? theme.accentColor.opacity(0.12) : theme.surfaceOverlay)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .strokeBorder(viewModel.showToolCapableOnly ? theme.accentColor.opacity(0.4) : theme.surfaceOverlayStrong, lineWidth: 0.5)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Spacer()
+
+                    // Storage summary + Check for Updates (Installed Tab)
+                    if viewModel.selectedCategory == .installed, let used = viewModel.installedStorageSummary {
+                        HStack(spacing: 8) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "internaldrive")
+                                    .font(.caption2)
+                                Text(viewModel.isFilteringInstalled
+                                     ? "\(viewModel.displayedModels.count) of \(viewModel.installedCount) · \(used) on disk"
+                                     : "\(viewModel.installedCount) installed · \(used) on disk")
+                                    .font(.caption)
+                            }
                             .foregroundColor(theme.secondaryText)
-                            .help("Tool support is detected from the model name and is often wrong for new or re-quantized models. Turn this off to see everything.")
-                        Spacer()
+
+                            Button {
+                                viewModel.checkForUpdates()
+                            } label: {
+                                if viewModel.isCheckingForUpdates {
+                                    ProgressView().controlSize(.mini)
+                                } else {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "arrow.clockwise")
+                                            .font(.caption2)
+                                        Text("Check Updates")
+                                            .font(.caption)
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(theme.surfaceOverlay))
+                                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(theme.surfaceOverlayStrong, lineWidth: 0.5))
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(viewModel.isCheckingForUpdates)
+                            .help("Compares each installed model against the version currently published on HuggingFace.")
+                        }
                     }
                 }
+                .padding(.top, 6)
             }
             .padding(20)
             .frame(maxWidth: centeredLayout ? 1000 : .infinity)
@@ -307,11 +387,25 @@ struct MLXModelStoreContent: View {
                             .foregroundColor(theme.secondaryText.opacity(0.5))
 
                         if viewModel.selectedCategory == .installed {
-                            Text(filterForTools ? "No installed tool-supported models" : "No installed models")
-                                .font(.title3)
-                                .fontWeight(.medium)
-                            Text(filterForTools ? "Download models from the 'Tool Use' tab." : "Download models from the 'All' or specific category tabs.")
-                                .foregroundColor(theme.secondaryText)
+                            if hasActiveFilters {
+                                Text("No matching installed models")
+                                    .font(.title3)
+                                    .fontWeight(.medium)
+                                Text("No installed models match your search or filter criteria.")
+                                    .foregroundColor(theme.secondaryText)
+                                Button("Reset Filters") {
+                                    resetFilters()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(theme.accentColor)
+                                .padding(.top, 4)
+                            } else {
+                                Text(filterForTools ? "No installed tool-supported models" : "No installed models")
+                                    .font(.title3)
+                                    .fontWeight(.medium)
+                                Text(filterForTools ? "Download models from the 'Tool Use' tab." : "Download models from the 'All' or specific category tabs.")
+                                    .foregroundColor(theme.secondaryText)
+                            }
                         } else if let error = viewModel.loadError {
                             Text(errorTitle(for: error))
                                 .font(.title3)
@@ -323,9 +417,40 @@ struct MLXModelStoreContent: View {
                             // No retry button while throttled: retrying is what deepens a
                             // 429, and the old "Try Reloading" fired another 31 requests
                             // straight back into the same wall.
-                            if !error.isRateLimited {
-                                Button("Try Again") { viewModel.refresh() }
+                            HStack(spacing: 10) {
+                                // ⚠️ The 401 copy says "Add one in Settings › General" and then
+                                // offered no way to get there — the one screen that knows a
+                                // token is missing was the one screen that could not take it.
+                                if case .unauthorized = error {
+                                    Button("Add Token…") { showingTokenEntry = true }
+                                        .buttonStyle(.borderedProminent)
+                                }
+                                // No retry button while throttled: retrying is what deepens a
+                                // 429, and the old "Try Reloading" fired another 31 requests
+                                // straight back into the same wall.
+                                if !error.isRateLimited {
+                                    Button("Try Again") { viewModel.refresh() }
+                                }
                             }
+                        } else if hasActiveFilters {
+                            Text("No matching models")
+                                .font(.title3)
+                                .fontWeight(.medium)
+                            Text("Try adjusting your search terms or clearing active filters.")
+                                .foregroundColor(theme.secondaryText)
+                            HStack(spacing: 10) {
+                                Button("Reset Filters") {
+                                    resetFilters()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(theme.accentColor)
+
+                                Button("Reload Models") {
+                                    viewModel.refresh()
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                            .padding(.top, 4)
                         } else {
                             Text("No models found")
                                 .font(.title3)
@@ -333,6 +458,9 @@ struct MLXModelStoreContent: View {
                             Button("Try Reloading") {
                                 viewModel.refresh()
                             }
+                            .buttonStyle(.borderedProminent)
+                            .tint(theme.accentColor)
+                            .padding(.top, 4)
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -382,6 +510,12 @@ struct MLXModelStoreContent: View {
                 // Downloads sidebar surfaces any active pull cross-backend.
             }
         }
+        .sheet(isPresented: $showingTokenEntry) {
+            // ⚠️ Retries on SAVE, not on a `.valid` verdict. The token is in the Keychain and in
+            // use either way, and gating the retry on a network check would strand a user whose
+            // check was merely inconclusive — the failure this whole flow exists to avoid.
+            HuggingFaceTokenEntrySheet { viewModel.refresh() }
+        }
     }
 }
 
@@ -423,6 +557,42 @@ struct ModelCardView: View {
             toastManager.show("Re-downloading \(model.displayName)…", style: .success)
         case .startedFresh:
             toastManager.show("Downloading \(model.displayName)…", style: .success)
+        case .failed(let reason):
+            toastManager.show(reason, style: .error)
+        }
+    }
+
+    /// Re-pulls an installed model at the publisher's current revision.
+    ///
+    /// ⚠️ Byte-for-byte the path the "Re-download…" overflow item takes
+    /// (`ModelDownloadStatusView.triggerDownload(force: true)`): delete the stale history
+    /// record so the new pull gets its own row, then call the coordinator with `force` so the
+    /// installed-on-disk short-circuit is skipped. WITHOUT `force` this is a guaranteed no-op —
+    /// the install check reads the FILESYSTEM, and the model is by definition already there.
+    ///
+    /// Unlike `startDownload()` this passes `profileID`, so the record says who asked.
+    @MainActor
+    private func startUpdate() async {
+        if let record = DownloadHistoryStore.shared.fetchMostRecent(
+            backend: .mlx,
+            modelIdentifier: model.id
+        ) {
+            _ = DownloadHistoryStore.shared.delete(id: record.id)
+        }
+
+        let outcome = await DownloadCoordinator.startMLXDownloadIfNeeded(
+            repoId: model.id,
+            profileID: profileID,
+            force: true
+        )
+        switch outcome {
+        case .alreadyInstalled:
+            // Unreachable with `force: true`, but a silent no-op would read as a dead button.
+            toastManager.show("\(model.displayName) is already up to date", style: .success)
+        case .alreadyInProgress:
+            toastManager.show("Already downloading \(model.displayName)", style: .warning)
+        case .resumedFromHistory, .startedFresh:
+            toastManager.show("Updating \(model.displayName)…", style: .success)
         case .failed(let reason):
             toastManager.show(reason, style: .error)
         }
@@ -474,63 +644,71 @@ struct ModelCardView: View {
 
     @ViewBuilder
     private var actionsView: some View {
-        VStack(alignment: .trailing, spacing: 8) {
+        HStack(spacing: 6) {
+            // Subtle checkmark icon for installed models
+            if isInstalled {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(.caption, weight: .semibold))
+                    .foregroundColor(theme.successColor)
+                    .help("Installed on this Mac")
+                    .accessibilityLabel("Installed on this Mac")
+            }
+
             // Intelligence Core selection is MLX-specific and only meaningful once the model
             // is on disk, so it stays here rather than moving into the shared component.
             if isInstalled, viewModel.selectedCategory == .installed {
                 if coreIntelligenceModel == model.id {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 4) {
                         Image(systemName: "cpu.fill")
-                            .font(.system(.caption2, weight: .semibold))
-                            .foregroundColor(.purple)
-                        Text("Intelligence Core")
-                            .font(.caption2)
-                            .foregroundColor(theme.primaryText.opacity(0.85))
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(theme.accentColor)
+                        Text("IC")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(theme.primaryText.opacity(0.9))
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
                     .background(theme.surfaceOverlay)
                     .clipShape(Capsule())
+                    .help("Current Intelligence Core Model")
                 } else {
                     Button {
                         coreIntelligenceModel = model.id
                     } label: {
-                        Label("Set as IC", systemImage: "cpu")
-                            .font(.caption2)
+                        HStack(spacing: 3) {
+                            Image(systemName: "cpu")
+                                .font(.system(size: 10, weight: .medium))
+                            Text("Set as IC")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .buttonStyle(.plain)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(theme.surfaceOverlay)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(theme.surfaceOverlayStrong, lineWidth: 0.5)
+                    )
                     .help("Set as Intelligence Core model")
                 }
             }
 
-            // ⚠️ Driven by the REAL `isInstalled`. This used to be hard-coded `false` and
-            // rendered only inside an `else if isInstalled`, so the shared component's
-            // Installed state — the capsule plus the overflow menu carrying "Re-download…"
-            // and "Delete" — was unreachable for MLX. That made MLX the only backend with no
-            // re-download path: to re-pull a model the user had to delete it and find it
-            // again. The card's own bespoke Installed capsule and standalone trash button are
-            // gone; all three backends now present an installed model identically.
             ModelDownloadStatusView(
                 backend: .mlx,
                 modelIdentifier: model.id,
                 displayName: model.displayName,
                 isInstalled: isInstalled,
                 profileID: profileID,
+                showInstalledLabel: false,
                 onDownloadRequested: {
                     let verdict = fitAssessment.verdict
-                    // `.unknown` deliberately does NOT raise the advisory sheet. We don't
-                    // know the model is risky, and during a rate-limit every card is
-                    // unknown — interrupting each download with a sheet that can only say
-                    // "we couldn't check" is noise. The card's badge carries that state
-                    // instead: describe, don't gate.
                     if verdict == .risky || verdict == .incompatible {
                         showingFitAdvisory = true
                     } else {
-                        // Must route through DownloadCoordinator (not
-                        // `viewModel.downloadModel` directly) so the pre-seed HF size fetch
-                        // fires — without it the bridge has no total bytes, the speed
-                        // sampler can't compute a rate, and the UI is stuck on "calculating…".
                         Task { @MainActor in await startDownload() }
                     }
                 },
@@ -544,161 +722,130 @@ struct ModelCardView: View {
         }
     }
 
-    /// Shared icon (44×44 rounded rectangle with the accent "cube" glyph).
-    /// Used by both the standard and downloading layouts.
-    private var cardIcon: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(theme.controlBackground)
-                .frame(width: 44, height: 44)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
-                )
-
-            Image(systemName: "cube.fill")
-                .font(.title2)
-                .foregroundColor(theme.accentColor)
-        }
-    }
-
     /// Standard card layout — used when no download is in progress.
     private var standardCard: some View {
-        HStack(alignment: .top, spacing: 14) {
-            cardIcon
-
-            VStack(alignment: .leading, spacing: 6) {
-                // Name + Organization
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
+            // Header row: Title + Org + Spacer + Actions
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(model.displayName)
                         .font(.headline)
                         .foregroundColor(theme.primaryText)
                         .lineLimit(1)
                         .truncationMode(.tail)
-                        .layoutPriority(1)
 
-                    if !model.organization.isEmpty {
-                        Text(model.organization)
-                            .font(.caption)
-                            .foregroundColor(theme.secondaryText)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                    Spacer(minLength: 0)
-                }
-                // Reserve room for the `.topTrailing` actions overlay. Without this a long
-                // name plus an org label runs underneath "Set as IC" and the delete button —
-                // which became common once every model carried an org (previously only
-                // `mlx-community` models did, so most titles were short and unqualified).
-                .padding(.trailing, actionsReserve)
-
-                // Meta info row
-                HStack(spacing: 12) {
-                    if model.downloads > 0 {
-                        Label("\(model.downloads.formatted())", systemImage: "arrow.down.circle")
-                    }
-                    if let size = model.size {
-                        Label(size, systemImage: "internaldrive")
-                    }
-                    if viewModel.selectedCategory == .installed, let desc = model.description {
-                        Text(desc)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                }
-                .font(.caption)
-                .foregroundColor(theme.secondaryText)
-
-                // Badges + Fit — full card width now that actions overlay
-                ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
-                        ForEach(Array(model.capabilities), id: \.self) { cap in
-                            CapabilityBadge(capability: cap)
+                        if !model.organization.isEmpty {
+                            Text(model.organization)
+                                .font(.caption)
+                                .foregroundColor(theme.secondaryText)
+                                .lineLimit(1)
                         }
 
-                        // "Update available" — the publisher pushed a newer commit than the
-                        // one this copy was downloaded at. `.unknown` deliberately shows
-                        // nothing rather than implying up-to-date.
-                        if viewModel.updateStatus(for: model)?.needsUpdate == true {
-                            HStack(spacing: 4) {
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                                    .font(.caption2)
-                                Text("Update available")
-                                    .font(.caption2)
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(theme.accentColor.opacity(0.15))
-                            .clipShape(Capsule())
-                            .foregroundColor(theme.accentColor)
-                            .help("The publisher has pushed a newer version. Use Re-download to update — HubApi verifies each file and fetches only what changed.")
+                        if model.downloads > 0 {
+                            Text("·")
+                                .font(.caption)
+                                .foregroundColor(theme.secondaryText)
+                            Label("\(model.downloads.formatted())", systemImage: "arrow.down.circle")
+                                .font(.caption)
+                                .foregroundColor(theme.secondaryText)
                         }
 
-                        // Gated repos rendered as ordinary cards, so the only way to learn a
-                        // download could never succeed was to start it and read the failure.
-                        // ⚠️ A label, never a disabled button: the user may well have a token
-                        // configured, and gating on a listing flag would block a download that
-                        // works perfectly.
-                        if model.isGated {
-                            HStack(spacing: 4) {
-                                Image(systemName: "lock.fill")
-                                    .font(.caption2)
-                                Text("Gated")
-                                    .font(.caption2)
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.orange.opacity(0.15))
-                            .clipShape(Capsule())
-                            .foregroundColor(.orange)
-                            .help(HuggingFaceTokenStore.shared.hasToken
-                                  ? "Needs an access token and an accepted licence on HuggingFace. You have a token saved."
-                                  : "Needs a HuggingFace access token. Add one in Settings › Account.")
-                            .accessibilityElement(children: .ignore)
-                            .accessibilityLabel("Gated model — requires a HuggingFace access token")
-                        }
-
-                        // Quantization was invisible: the live top-30 lists four gemma-4
-                        // variants distinguished only by a suffix buried in the title.
-                        if let quant = model.quantization {
-                            HStack(spacing: 4) {
-                                Image(systemName: "square.stack.3d.down.right")
-                                    .font(.caption2)
-                                Text(quant.localizedTitle)
-                                    .font(.caption2)
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(theme.surfaceOverlay)
-                            .clipShape(Capsule())
-                            .foregroundColor(theme.primaryText.opacity(0.85))
-                            .help(quant.guidance)
-                            .accessibilityElement(children: .ignore)
-                            // `localizedTitle`, matching the visible badge. `shortLabel` is the
-                            // same text but as a plain `String`, so VoiceOver was reading an
-                            // untranslated form of a label that renders translated.
-                            .accessibilityLabel(Text("Quantization: \(Text(quant.localizedTitle))"))
-                            .accessibilityHint(quant.guidance)
-                        }
-
-                        // `.unknown` must render too. The old gate required a non-nil size
-                        // AND a positive RAM estimate, so a failed size fetch hid the badge
-                        // entirely — the user got no signal that the fit was unchecked
-                        // rather than fine.
-                        if fitAssessment.verdict == .unknown
-                            || (model.size != nil && fitAssessment.estimatedRuntimeRAM > 0) {
-                            ModelFitBadgeView(assessment: fitAssessment)
+                        if let size = model.size {
+                            Text("·")
+                                .font(.caption)
+                                .foregroundColor(theme.secondaryText)
+                            Label(size, systemImage: "internaldrive")
+                                .font(.caption)
+                                .foregroundColor(theme.secondaryText)
                         }
                     }
                 }
+
+                Spacer(minLength: 8)
+
+                actionsView
+                    .opacity(actionsOpacity)
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: actionsOpacity)
             }
 
-            Spacer(minLength: 0)
-        }
-        .overlay(alignment: .topTrailing) {
-            actionsView
-                .opacity(actionsOpacity)
-                .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: actionsOpacity)
+            // Badges + Fit row
+            HStack(spacing: 6) {
+                ForEach(Array(model.capabilities), id: \.self) { cap in
+                    CapabilityBadge(capability: cap, iconOnly: true)
+                }
+
+                if isInstalled,
+                   let status = viewModel.updateStatus(for: model),
+                   case .updateAvailable(let installed, let latest) = status {
+                    Button {
+                        Task { @MainActor in await startUpdate() }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.caption2)
+                            Text("Update")
+                                .font(.caption2)
+                            Text(verbatim: "\(MLXModelRevision.shortForm(installed)) → \(MLXModelRevision.shortForm(latest))")
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundColor(theme.accentColor.opacity(0.75))
+                        }
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(theme.accentColor.opacity(0.15))
+                        .clipShape(Capsule())
+                        .foregroundColor(theme.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Update available")
+                }
+
+                if model.isGated {
+                    HStack(spacing: 4) {
+                        Image(systemName: "lock.fill")
+                            .font(.caption2)
+                        Text("Gated")
+                            .font(.caption2)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.orange.opacity(0.15))
+                    .clipShape(Capsule())
+                    .foregroundColor(.orange)
+                    .help(HuggingFaceTokenStore.shared.hasToken
+                          ? "Needs an access token and an accepted licence on HuggingFace. You have a token saved."
+                          : "Needs a HuggingFace access token. Add one in Settings › General.")
+                }
+
+                if let quant = model.quantization {
+                    HStack(spacing: 4) {
+                        Image(systemName: "square.stack.3d.down.right")
+                            .font(.caption2)
+                        Text(quant.localizedTitle)
+                            .font(.caption2)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(theme.surfaceOverlay)
+                    .clipShape(Capsule())
+                    .foregroundColor(theme.primaryText.opacity(0.85))
+                    .help(quant.guidance)
+                }
+
+                // ⚠️ Read ONCE. `fitAssessment` is a computed property with no storage, so this
+                // chain used to run the full `ModelFitAdvisor.assess` three times per body — each
+                // re-parsing the repo id AND emitting its own `logger.info("Assessment: …")`. Every
+                // card with a badge therefore logged the same line three times and paid for it,
+                // on every observer tick.
+                let fit = fitAssessment
+                if fit.verdict == .unknown || (model.size != nil && fit.estimatedRuntimeRAM > 0) {
+                    ModelFitBadgeView(assessment: fit)
+                }
+
+                Spacer(minLength: 0)
+            }
         }
     }
 
@@ -710,8 +857,6 @@ struct ModelCardView: View {
         let snapshot = DownloadManager.shared.activeSpeeds[record.id]
 
         return HStack(alignment: .center, spacing: 14) {
-            cardIcon
-
             VStack(alignment: .leading, spacing: 4) {
                 Text(model.displayName)
                     .font(.headline)
@@ -749,13 +894,30 @@ struct ModelCardView: View {
             }
         }
         .padding(14)
-        .background(isHovered ? theme.controlBackground : theme.secondaryBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(
+                    isInstalled
+                        ? theme.successColor.opacity(isHovered ? 0.08 : 0.04)
+                        : (isHovered ? theme.controlBackground : theme.secondaryBackground)
+                )
+        )
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isHovered ? theme.accentColor.opacity(0.4) : theme.surfaceOverlayStrong, lineWidth: 1)
+                .strokeBorder(
+                    isInstalled
+                        ? theme.successColor.opacity(isHovered ? 0.50 : 0.25)
+                        : (isHovered ? theme.accentColor.opacity(0.4) : theme.surfaceOverlayStrong),
+                    lineWidth: 1
+                )
         )
-        .shadow(color: theme.primaryText.opacity(isHovered ? 0.05 : 0.03), radius: isHovered ? 12 : 6, y: isHovered ? 6 : 3)
+        .shadow(
+            color: isInstalled
+                ? theme.successColor.opacity(isHovered ? 0.08 : 0.03)
+                : theme.primaryText.opacity(isHovered ? 0.05 : 0.03),
+            radius: isHovered ? 10 : 5,
+            y: isHovered ? 4 : 2
+        )
         .onHover { hovering in
             withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
                 isHovered = hovering

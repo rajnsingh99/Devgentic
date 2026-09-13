@@ -48,9 +48,16 @@ enum RemoteView: Equatable, Sendable, Codable {
     /// InteractionCenter raises a question — the debt this case carried from C2 to C8.5, when the
     /// dedicated `sendHITLPrompt` method and its three implementations were deleted in favour of it.
     ///
-    /// ⚠️ Rendering a prompt is the ONE path that does not escape its text and passes no parse mode:
+    /// ⚠️ Rendering a prompt passes no parse mode ON TELEGRAM, and that is where the rationale ends:
     /// the payload carries model-supplied tool names and parameters, and running those through a
     /// Markdown parser is the 400 the notice path escapes to avoid.
+    ///
+    /// ⚠️⚠️ THIS WAS WRITTEN AS "the ONE path that does not escape its text" AND SLACK READ IT AS
+    /// PERMISSION. There is no parse mode to omit on Slack — `sectionBlock` declares `mrkdwn` itself,
+    /// so the text IS interpreted whatever this case does. Model text reached that block raw until
+    /// 2026-09-11: `<!channel>` fired a channel-wide notification and `<url|label>` rendered a
+    /// clickable link with model-chosen visible text, directly above the real Approve button.
+    /// `SlackRemoteRenderer.promptDraft` now escapes the model-supplied substrings only.
     case prompt(operationID: UUID, kind: HITLType)
 }
 
@@ -76,6 +83,27 @@ enum RemoteSilence: Equatable, Sendable, Codable {
 
     /// Bracket tag for the log line.
     var tag: String { "[CHATOPS/SILENT]" }
+
+    /// Whether this drop left the remote user with nothing — no reply, no way to tell the bot is
+    /// alive.
+    ///
+    /// ⚠️⚠️ THIS IS A LOG-LEVEL DECISION, AND THE LEVEL IS THE WHOLE DIFFERENCE BETWEEN A LINE THAT
+    /// REACHES A BUG REPORT AND ONE THAT DOES NOT. `DGLogger.shouldPersist` persists `.warning` and
+    /// above and nothing below it, so an `.info` line exists only in the live Console stream on the
+    /// user's own machine — which is precisely where a remote-control failure cannot be observed.
+    /// Logging all three cases at one level therefore either buries the dead-end among two routine
+    /// events, or floods every exported bundle with the routine ones. They are different events and
+    /// they get different levels.
+    ///
+    /// ⚠️ `.handledElsewhere` and `.resolvedInteraction` are NOT failures — each of their own
+    /// `consequence` strings says the silence is correct, because another component already replied.
+    /// Only `.unrecognized` describes a user staring at a chat that did not answer.
+    var strandsTheUser: Bool {
+        switch self {
+        case .handledElsewhere, .resolvedInteraction: return false
+        case .unrecognized: return true
+        }
+    }
 
     /// What a reader of the log needs to know followed from the drop.
     var consequence: String {

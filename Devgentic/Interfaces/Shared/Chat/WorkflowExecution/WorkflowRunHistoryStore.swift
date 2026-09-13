@@ -104,10 +104,20 @@ final class WorkflowRunHistoryStore {
     /// workflow-heavy conversation hitched the main thread — runs detached. Mirrors
     /// `upsertFinalized`, which moved the ENCODE off-main for the same reason. Rows carrying a
     /// warm `_cachedRecord` decode for free either way.
-    func loadFinalized(forConversation conversationID: UUID) async -> [WorkflowRunRecord] {
+    ///
+    /// [workflow/vm-6] Returns records with their node traces ALREADY STRIPPED, plus the number
+    /// of events dropped. The one caller (`ConversationSwitchCoordinator.applyLoadedRunHistory`)
+    /// stripped them on arrival and nothing read a trace in between, so every finalized run of
+    /// the conversation was materialised whole — each node up to 400 `TimelineEvent`s, tool rows
+    /// holding outputs up to `ToolExecutionData.maxPersistedOutputLength` — and then thrown away.
+    /// Stripping inside the task makes the peak ONE record's traces instead of the whole page.
+    /// The count is returned rather than recomputed because the caller logs it, and because
+    /// `mergeLoadedHistory` keeps its own (now idempotent) strip: that strip is what a mutation
+    /// test pins, and a mutant that stopped stripping there survived the first battery.
+    func loadFinalized(forConversation conversationID: UUID) async -> (records: [WorkflowRunRecord], droppedEvents: Int) {
         guard let context = mainContext else {
             logger.error("loadFinalized(forConversation:) called before container was configured — returning [].")
-            return []
+            return ([], 0)
         }
 
         let predicate = #Predicate<WorkflowRunRecordSD> { $0.conversationID == conversationID }
@@ -121,12 +131,22 @@ final class WorkflowRunHistoryStore {
             snapshots = try context.fetch(descriptor).map(\.rowSnapshot)
         } catch {
             logger.error("Failed to fetch run history for \(conversationID): \(error.localizedDescription)")
-            return []
+            return ([], 0)
         }
-        guard !snapshots.isEmpty else { return [] }
+        guard !snapshots.isEmpty else { return ([], 0) }
 
-        return await Task.detached(priority: .userInitiated) {
-            snapshots.map { WorkflowRunRecordSD.decodeRecord(from: $0) }
+        return await Task.detached(priority: .userInitiated) { () -> (records: [WorkflowRunRecord], droppedEvents: Int) in
+            var dropped = 0
+            // ⚠️ `decodeRecord` stays THE app's one decode (CF-34): all three on-disk envelope
+            // shapes are read in that one place. Stripping AFTER it keeps that invariant — a
+            // second, trace-free decode path would buy at most half the cost (JSONDecoder parses
+            // the whole blob regardless of which keys are consumed) and cost the single reader.
+            let records = snapshots.map { snapshot -> WorkflowRunRecord in
+                let (record, droppedHere) = WorkflowRunRecordSD.decodeRecord(from: snapshot).strippingNodeTimelines()
+                dropped += droppedHere
+                return record
+            }
+            return (records, dropped)
         }.value
     }
 

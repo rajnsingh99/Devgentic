@@ -104,6 +104,10 @@ struct AttachedImageCardView: View {
                        altText: file.name,
                        data: file.binaryData,
                        mimeType: "image/\(ImageExport.fileExtension(for: file.binaryData))",
+                       // [bm-8] The SAVE name only — the same value this card's own
+                       // context-menu Save has always used, so the two routes agree. `altText`
+                       // keeps the full filename for the title and the spoken label.
+                       fileBaseName: (file.name as NSString).deletingPathExtension,
                        // [CF-25] The full-size bitmap belongs to the open sheet and nothing
                        // else — the chip renders from `thumbnail`. Holding it past dismissal
                        // retained ~45 MB per opened 12 MP photo in a row the user had scrolled

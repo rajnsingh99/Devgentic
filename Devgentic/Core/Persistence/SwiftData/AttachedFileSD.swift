@@ -128,6 +128,25 @@ final class AttachedImageFileSD {
                           fileExtension: fileExtension, binaryData: binaryData, size: size)
     }
 
+    /// [mm-4] The struct WITHOUT its bytes. `binaryData` is the schema's only
+    /// `@Attribute(.externalStorage)` field and the ONE property this method never reads, so
+    /// the sidecar file is never faulted in — for consumers that need the name and size only
+    /// (the conversation export lists images by name and size and never embeds them). `size`
+    /// is the byte count recorded at attach time, which is what `ConversationExporter.
+    /// imageByteCount` falls back to when `binaryData` is empty.
+    ///
+    /// The "never faulted in" part is MEASURED, not assumed (2026-09-12, standalone SwiftData
+    /// probe, on-disk store, 40 rows × 2 MB, fresh process): fetching all rows and reading
+    /// `name`/`size` only took ~1 ms; reading `data.count` took ~9 ms and the store had written
+    /// 40 sidecar files. SwiftData loads an external-storage blob on ATTRIBUTE access, not when
+    /// the object fault fires. The unit test can only pin the struct's shape (it runs in-memory,
+    /// where there is no sidecar), which is why the number lives here.
+    func toStructOmittingBytes() -> AttachedImageFile {
+        AttachedImageFile(id: id, name: name,
+                          url: resolvePersistedURL(url, rowID: id, kind: "AttachedImageFile"),
+                          fileExtension: fileExtension, binaryData: Data(), size: size)
+    }
+
     static func from(_ file: AttachedImageFile) -> AttachedImageFileSD {
         AttachedImageFileSD(id: file.id, name: file.name, url: file.url.absoluteString,
                             fileExtension: file.fileExtension, binaryData: file.binaryData, size: file.size)

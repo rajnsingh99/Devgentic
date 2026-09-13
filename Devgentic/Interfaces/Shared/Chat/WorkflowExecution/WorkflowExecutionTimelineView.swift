@@ -833,7 +833,7 @@ struct WorkflowExecutionTimelineView: View {
     /// transition anywhere in the list paid for it. The answer only changes when the node's error
     /// text or its trace does, which is exactly what `DuplicationKey` carries.
     ///
-    /// MainActor-isolated static, mirroring `AsyncHighlightedCodeView.monoFont`: the only callers
+    /// MainActor-isolated static, mirroring `HighlightedCodeViewRepresentable.monoFont`: the only callers
     /// are view bodies, already on the main actor.
     @MainActor
     static func errorBodyIsDuplicated(nodeID: UUID, body: String, events: [TimelineEvent]) -> Bool {

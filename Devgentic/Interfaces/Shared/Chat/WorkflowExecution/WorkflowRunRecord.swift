@@ -433,34 +433,56 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
         // Per-node input from edge topology (Tier 2), and the label naming where it came from.
         func derivedInput(for nodeID: UUID) -> (text: String?, sourceLabel: String?) {
             guard let layout else { return (nil, nil) }
-            // ⚠️ [CF-31] EDGE-DECLARATION order, multiplicity preserved — built exactly the way
+            // ⚠️ [CF-31] EDGE-DECLARATION order — built exactly the way
             // `WorkflowRunDisplayData.buildNodesFromLayout` builds it, because these two lists ARE
             // the parity. It used to be `Set(edges…)` plus a filter over `state.nodeResults`, i.e.
-            // event-ARRIVAL order with a repeated source collapsed: identical on a chain, but for a
-            // fan-in node on a parallel level the joined text and its `inputSourceLabel` came out
-            // in a DIFFERENT order once the record factory took over from the live one, and an
-            // upstream wired into two ports lost a contribution outright.
-            // ⚠️ That divergence is in the DATA, not on screen — see the note below on why
-            // nothing renders a record's `input` today. It is fixed here because a record is the
-            // durable artefact: a consumer added later would otherwise inherit a frozen value that
-            // silently disagreed with what the run displayed while it was live.
+            // event-ARRIVAL order: identical on a chain, but for a fan-in node on a parallel level
+            // the joined text and its `inputSourceLabel` came out in a DIFFERENT order once the
+            // record factory took over from the live one. THAT is what CF-31 fixed; dropping the
+            // `Set` was collateral, and the old wording here — "an upstream wired into two ports
+            // lost a contribution outright" — described a loss that was never a loss.
+            // ⚠️ [workflow/vm-2] De-duplicated by SOURCE NODE, first-seen edge order preserved,
+            // because the ENGINE is the reference and it de-dupes exactly this way
+            // (`WorkflowState.upstreamResultEnvelopes`: "keep a single envelope per upstream so
+            // its output isn't injected twice" — an upstream with no explicit port activation
+            // passes the port filter on EVERY edge). Without it, a node wired from one upstream
+            // into two of its ports froze that upstream's entire output TWICE into the persisted
+            // node-results blob: doubled bytes on disk and a durable record disagreeing with what
+            // the executor actually fed the node. De-dup by node ID, never by `profileName` —
+            // two distinct nodes can run the same profile and must both contribute.
             // It is also the O(1) lookup instead of a scan of `nodeResults` per node.
-            let upstreamResults = layout.edges
+            var seenUpstreamIDs = Set<UUID>()
+            let allUpstreamResults = layout.edges
                 .filter { $0.targetNodeID == nodeID }
                 .map(\.sourceNodeID)
+                .filter { seenUpstreamIDs.insert($0).inserted }
                 .compactMap { resultByNodeID[$0] }
+            // [workflow/vm-1] Same status filter and same fallback as the live factory — this is
+            // the FROZEN half of that pair, and the value it persists is the durable one.
+            let contributingUpstreams = allUpstreamResults.filter { WorkflowExecutionState.contributesInput($0.status) }
+            let upstreamResults = contributingUpstreams.isEmpty ? allUpstreamResults : contributingUpstreams
             guard !upstreamResults.isEmpty else { return (nil, nil) }
             // [CF-31] `upstreamInputContribution`, NOT `\.detail` — see that function for why a
             // user-skipped upstream's detail is the one string the downstream node did NOT get.
             // ⚠️ The empty filter and the nil fall-back are new WITH it: a pass-through can now
             // resolve to "" where a skip sentence never could.
             //
-            // ⚠️ THE ONE THING THE TWO FACTORIES STILL DO DIFFERENTLY, stated so the next reader
-            // does not have to find it: for a node with NO settled upstream (a source node, or one
-            // whose upstreams have not reported yet) the live factory falls back to
-            // `state.userInput` / "User input", and this returns `(nil, nil)`. Everything reachable
-            // above — which upstreams count, in what order, how many times, and what text each
-            // contributes — is now identical. Nothing renders a RECORD's `input` today (its only
+            // ⚠️ THE TWO THINGS THE TWO FACTORIES DO DIFFERENTLY, stated so the next reader does
+            // not have to find them:
+            // (1) for a node with NO settled upstream (a source node, or one whose upstreams have
+            //     not reported yet) the live factory falls back to `state.userInput` / "User
+            //     input", and this returns `(nil, nil)`;
+            // (1b) [workflow/vm-1] both now apply the ASSEMBLER's status filter, so an upstream
+            //     the engine never forwarded no longer contributes its own text. Neither applies
+            //     the ROUTER's port filter — `activeOutputPorts` never leaves the engine — so a
+            //     completed Condition wired on the untaken port still contributes on both sides.
+            // (2) [workflow/vm-3] the LIVE factory BOUNDS each contribution at
+            //     `WorkflowExecutionState.livePreviewContributionCap` because it rebuilds this on
+            //     every body pass for a view that shows 200 characters. This one does not: a
+            //     frozen record is the durable artefact and keeps the full text.
+            // Which upstreams count, in what order and how many times is still identical — only
+            // the LENGTH of each contribution differs, and only while the run is live.
+            // Nothing renders a RECORD's `input` today (its only
             // reader is `WorkflowExecutionTimelineView.collapsedPreview`, and only in the
             // `.pending`/`.running` arm, which a frozen record has no rows for), so a future
             // consumer inherits parity on the upstream join and this one documented gap.

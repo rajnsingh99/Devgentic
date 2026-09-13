@@ -100,7 +100,7 @@ struct UserPersonalContainerView: View {
             } else {
                 // --- View mode: Analyze + Export + Edit + More ---
                 IslandPillButton(
-                    title: service.isAnalyzing ? "Analyzing…" : "Analyze",
+                    title: service.isAnalyzing ? "Analyzing" : "Analyze",
                     icon: service.isAnalyzing ? nil : "sparkles",
                     style: .subtle,
                     accessibilityLabel: "Analyze recent conversations",
