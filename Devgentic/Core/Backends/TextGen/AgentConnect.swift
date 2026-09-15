@@ -68,7 +68,6 @@ class AgentConnect: @unchecked Sendable {
                     let rawTools: [Tool]
                     let isBotFlow: Bool
                     var skillManifests: [SkillManifest]?
-                    var skillFolderPath: String?
                     
                     switch profile.details {
                     case .bot(let config):
@@ -77,15 +76,20 @@ class AgentConnect: @unchecked Sendable {
                         rawTools = []
                         isBotFlow = true
                         skillManifests = nil
-                        skillFolderPath = nil
 
                     case .agent(let config):
                         llmConfig = config.llmConfig
                         instructions = config.instructions
                         rawTools = config.tools
                         isBotFlow = false
-                        skillManifests = config.skillConfig?.manifests.filter(\.isEnabled)
-                        skillFolderPath = config.skillConfig?.folderURL.path
+                        // Dual-read cut-over (v8): references resolve against the global registry,
+                        // and a profile that predates v8 falls back to its blob's manifest copies.
+                        // ⚠️ The registry is authoritative for `description` — the text the model
+                        // ROUTES on — so a skill edited on disk now changes every linked profile at
+                        // once instead of only whichever one last pressed Rescan.
+                        skillManifests = await MainActor.run {
+                            SkillResolution.resolve(for: config, profileName: profile.displayName)?.manifests
+                        }
 
                     case .workflow:
                         // Workflow: each node resolves its own model, tools, and generator.
@@ -140,8 +144,26 @@ class AgentConnect: @unchecked Sendable {
                         instructions = config.instructions
                         rawTools = config.tools
                         isBotFlow = false
+                        // ⚠️ Code profiles do NOT get skills, and this is a decision, not an
+                        // oversight — but persistence disagrees with it: the `.code` arm of
+                        // ProfileDetails encodes and decodes `skillConfig` like any other, so a
+                        // profile converted from `.agent`, or one written by an older build, can
+                        // carry skills the runtime then discards here in silence. The config
+                        // editor never offers the section for `.code` (its binding matches
+                        // `case .agent` only), so a user in this state has no way to see it.
+                        // Logged rather than honoured: turning it on is a product decision about
+                        // Code mode's ephemeral profile identity, not a bug fix.
                         skillManifests = nil
-                        skillFolderPath = nil
+                        // ⚠️⚠️ READ BOTH SHAPES. This looked ONLY at `config.skillConfig?.manifests`
+                        // — the pre-V6 blob — so after the migration moved every profile's skills
+                        // into `skillSelections` it could never fire again. The one state it exists
+                        // to make visible, a Code profile carrying skills the runtime discards, went
+                        // silent for exactly the profiles that reach it. The legacy arm stays for a
+                        // profile that has not been through the sweep.
+                        let unique = CodeModeSkillDiagnostics.inertSkillNames(in: config)
+                        if !unique.isEmpty {
+                            logger.notice("[CODE] Profile carries \(unique.count) enabled skill(s) that Code mode does NOT load: \(unique.joined(separator: ", ")). CONSEQUENCE: they are absent from <available_skills> and `load_skill` is not registered, so the model cannot reach them — the skills are configured but inert. Move the work to an Agent profile if they are needed.")
+                        }
                         logger.info("[CODE] AgentConnect extracted Code config — provider: \(config.llmConfig.apiProvider.rawValue), model: \(config.llmConfig.modelName), tools: \(config.tools.count), projectPath: \(config.projectPath ?? "nil"), traceID: \(traceContext.traceID)")
                     }
 
@@ -503,7 +525,6 @@ class AgentConnect: @unchecked Sendable {
                         rateLimitCategory: rateLimitCategory,
                         instructions: instructions,
                         skillManifests: skillManifests,
-                        skillFolderPath: skillFolderPath,
                         retryPolicy: retryPolicy,
                         errorRecovery: errorRecovery,
                         resiliencePolicy: resiliencePolicy,
@@ -652,7 +673,6 @@ class AgentConnect: @unchecked Sendable {
                     let rawTools: [Tool]
                     let isBotFlow: Bool
                     var skillManifests: [SkillManifest]?
-                    var skillFolderPath: String?
 
                     switch profile.details {
                     case .bot(let config):
@@ -661,23 +681,31 @@ class AgentConnect: @unchecked Sendable {
                         rawTools = []
                         isBotFlow = true
                         skillManifests = nil
-                        skillFolderPath = nil
 
                     case .agent(let config):
                         llmConfig = config.llmConfig
                         instructions = config.instructions
                         rawTools = config.tools
                         isBotFlow = false
-                        skillManifests = config.skillConfig?.manifests.filter(\.isEnabled)
-                        skillFolderPath = config.skillConfig?.folderURL.path
+                        // Dual-read cut-over (v8): references resolve against the global registry,
+                        // and a profile that predates v8 falls back to its blob's manifest copies.
+                        // ⚠️ The registry is authoritative for `description` — the text the model
+                        // ROUTES on — so a skill edited on disk now changes every linked profile at
+                        // once instead of only whichever one last pressed Rescan.
+                        skillManifests = await MainActor.run {
+                            SkillResolution.resolve(for: config, profileName: profile.displayName)?.manifests
+                        }
 
                     case .code(let config):
                         llmConfig = config.llmConfig
                         instructions = config.instructions
                         rawTools = config.tools
                         isBotFlow = false
+                        // Same deliberate exclusion as the chat path above; see the note there.
                         skillManifests = nil
-                        skillFolderPath = nil
+                        if let orphaned = config.skillConfig?.manifests.filter(\.isEnabled), !orphaned.isEmpty {
+                            logger.notice("[CODE] Workflow-node Code profile carries \(orphaned.count) enabled skill(s) that Code mode does NOT load: \(orphaned.map(\.name).joined(separator: ", ")). CONSEQUENCE: they are absent from <available_skills> and unreachable by the model for this node.")
+                        }
 
                     case .workflow, .imageGen:
                         continuation.yield(.error("Unsupported profile type for workflow node: \(profile.profileType.rawValue)"))
@@ -824,7 +852,6 @@ class AgentConnect: @unchecked Sendable {
                         rateLimitCategory: rateLimitCategory,
                         instructions: instructions,
                         skillManifests: skillManifests,
-                        skillFolderPath: skillFolderPath,
                         retryPolicy: retryPolicy,
                         errorRecovery: errorRecovery,
                         resiliencePolicy: ResolvedResiliencePolicy.resolved(

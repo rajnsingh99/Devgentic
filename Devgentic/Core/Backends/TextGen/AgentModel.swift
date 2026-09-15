@@ -671,7 +671,6 @@ struct AgentInput: Sendable {
 
     // Skills — on-demand discovery layer
     var skillManifests: [SkillManifest]?
-    var skillFolderPath: String?
 
     // Resilience configuration from AgentConfig
     var retryPolicy: RetryPolicy
@@ -774,7 +773,6 @@ struct AgentInput: Sendable {
         rateLimitCategory: RateLimitCategory = .geminiFlash,
         instructions: String? = nil,
         skillManifests: [SkillManifest]? = nil,
-        skillFolderPath: String? = nil,
         retryPolicy: RetryPolicy = RetryPolicy(),
         errorRecovery: ErrorRecovery = ErrorRecovery(),
         resiliencePolicy: ResolvedResiliencePolicy? = nil,
@@ -808,7 +806,6 @@ struct AgentInput: Sendable {
 
         self.instructions = instructions
         self.skillManifests = skillManifests
-        self.skillFolderPath = skillFolderPath
         self.retryPolicy = retryPolicy
         self.errorRecovery = errorRecovery
         self.resiliencePolicy = resiliencePolicy ?? .resolved(for: .cloud, legacy: retryPolicy)

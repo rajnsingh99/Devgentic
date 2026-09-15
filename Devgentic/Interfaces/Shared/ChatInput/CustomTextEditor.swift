@@ -7,6 +7,22 @@ import os
 
 private let customTextEditorLogger = DGLogger(category: "CustomTextEditor")
 
+/// Whether a keystroke belongs to an open suggestion picker rather than to the text.
+///
+/// ⚠️⚠️ EXTRACTED BECAUSE ITS OMISSION SHIPPED. Inline in `keyDown` this read `prompt || file` when
+/// the `/` skill picker was added, so that picker was invisible to the keyboard: arrows did not move
+/// the selection, and Return fell through to `onCommit` and SENT the half-typed `/co do the thing`
+/// as literal text. The picker rendered and highlighted correctly throughout, which is exactly why
+/// it looked finished — and being a `let` inside an `NSTextView` subclass, no test could reach it.
+///
+/// Every trigger that can open a picker must be a parameter here. Adding a case to
+/// `TextTriggerAnalyzer` without adding one here yields a mouse-only trigger, silently.
+enum ComposerSuggestionKeyRouting {
+    static func anyPickerIsOpen(prompt: Bool, file: Bool, skill: Bool) -> Bool {
+        prompt || file || skill
+    }
+}
+
 struct CustomTextEditor: NSViewRepresentable {
     // MARK: - Bindings and Properties
     @Binding var text: String
@@ -24,6 +40,9 @@ struct CustomTextEditor: NSViewRepresentable {
     @Binding var showFileSuggestions: Bool
     @Binding var fileSuggestionQuery: String
     @Binding var activeFileMentionTriggerRange: NSRange?
+    @Binding var showSkillSuggestions: Bool
+    @Binding var skillSuggestionQuery: String
+    @Binding var activeSkillTriggerRange: NSRange?
 
     @Binding var attributedTextInsertion: AttributedTextInsertionAction?
     var textViewRef: ((CustomTextEditor.CustomNSTextView?) -> Void)?
@@ -32,6 +51,15 @@ struct CustomTextEditor: NSViewRepresentable {
     var onConfirmSuggestion: (() -> Void)?
     var onNavigateQueryHistory: ((MainApplicationViewModel.QueryNavigationDirection) -> Void)?
     var onTextManuallyChanged: (() -> Void)?
+
+    /// Called AFTER trigger analysis has written the query and range for this keystroke.
+    ///
+    /// ⚠️⚠️ ORDER IS THE WHOLE POINT. `onTextManuallyChanged` fires at the TOP of `textDidChange`,
+    /// before the analyzer runs, so anything that filters against the trigger query from there sees
+    /// the PREVIOUS keystroke's state. The `/` picker did exactly that: on the first `/` its
+    /// `isShowing` guard had not been set yet so it returned early and rendered "No skills in the
+    /// library yet" on a full library, and every keystroke after that filtered one character behind.
+    var onTriggerStateChanged: (() -> Void)?
 
     /// When true, Escape is forwarded to the window instead of NSTextView's default handling
     /// (which maps Escape → `complete:`, the word-completion popup). The QuickAccess panel needs
@@ -465,8 +493,11 @@ struct CustomTextEditor: NSViewRepresentable {
                 return
             }
 
-            let suggestionsActive = coordinator?.parent.showPromptSuggestions == true || coordinator?.parent.showFileSuggestions == true
-            
+            let suggestionsActive = ComposerSuggestionKeyRouting.anyPickerIsOpen(
+                prompt: coordinator?.parent.showPromptSuggestions == true,
+                file: coordinator?.parent.showFileSuggestions == true,
+                skill: coordinator?.parent.showSkillSuggestions == true)
+
             if suggestionsActive {
                 switch event.keyCode {
                 case 125: coordinator?.parent.onNavigateSuggestions?(.down); return
@@ -617,16 +648,29 @@ struct CustomTextEditor: NSViewRepresentable {
                 case .prompt:
                     updatePromptState(result: result)
                     clearFileState()
+                    clearSkillState()
                 case .file:
                     updateFileState(result: result)
                     clearPromptState()
+                    clearSkillState()
+                case .skill:
+                    updateSkillState(result: result)
+                    clearPromptState()
+                    clearFileState()
                 }
             } else {
                 clearPromptState()
                 clearFileState()
+                clearSkillState()
             }
+
+            // Every branch above has now written this keystroke's trigger state.
+            parent.onTriggerStateChanged?()
+
             
-            if !parent.showPromptSuggestions && !parent.showFileSuggestions {
+            // Same enumeration as `suggestionsActive` above, and it must stay in step: while a
+            // picker is open the pending trigger token owns the typing attributes.
+            if !parent.showPromptSuggestions && !parent.showFileSuggestions && !parent.showSkillSuggestions {
                 if currentSelectedRange.length == 0 {
                     textView.typingAttributes = defaultTypingAttributes
                 }
@@ -643,6 +687,20 @@ struct CustomTextEditor: NSViewRepresentable {
             if !parent.showFileSuggestions { parent.showFileSuggestions = true }
             if parent.fileSuggestionQuery != result.query { parent.fileSuggestionQuery = result.query }
             if parent.activeFileMentionTriggerRange != result.range { parent.activeFileMentionTriggerRange = result.range }
+        }
+
+        private func updateSkillState(result: TextTriggerAnalyzer.Result) {
+            if !parent.showSkillSuggestions { parent.showSkillSuggestions = true }
+            if parent.skillSuggestionQuery != result.query { parent.skillSuggestionQuery = result.query }
+            if parent.activeSkillTriggerRange != result.range { parent.activeSkillTriggerRange = result.range }
+        }
+
+        private func clearSkillState() {
+            if parent.showSkillSuggestions || parent.activeSkillTriggerRange != nil || !parent.skillSuggestionQuery.isEmpty {
+                parent.showSkillSuggestions = false
+                parent.skillSuggestionQuery = ""
+                parent.activeSkillTriggerRange = nil
+            }
         }
 
         private func clearPromptState() {

@@ -123,6 +123,7 @@ enum NativeToolCatalog {
     /// Order is presentational only — lookup is by name via `entry(named:)`.
     static let entries: [NativeToolEntry] = [
         // MARK: Offered in the Tool Library (63)
+        .make(.library) { _ in UpdateSkillTool() },
         .make(.library) { _ in ListDirectoryTool() },
         .make(.library) { _ in ReadFileTool() },
         .make(.libraryExceptCode(supersededBy: "the preset's create_new_file / overwrite_file")) { _ in WriteFileTool() },

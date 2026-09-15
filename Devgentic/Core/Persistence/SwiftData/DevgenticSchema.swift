@@ -52,7 +52,7 @@ enum DevgenticSchema {
     /// `structuralFingerprint` unchanged, so the launch-sweep gate would have reported `.run` on
     /// precisely the launch a schema change happened. Guarded by
     /// `SchemaMigrationTests.testProductionSchemaTracksTheDeclaredCurrentVersion`.
-    static var currentVersion: any VersionedSchema.Type { DevgenticSchemaV3.self }
+    static var currentVersion: any VersionedSchema.Type { DevgenticSchemaV6.self }
 
     /// The entity list of the CURRENT schema version.
     ///

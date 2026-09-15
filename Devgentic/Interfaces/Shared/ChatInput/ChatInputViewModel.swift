@@ -82,6 +82,25 @@ struct PromptSuggestionState {
     var selectedID: DevPrompt.ID? = nil
 }
 
+/// ⚠️ Holds `SkillSD` ids as plain strings rather than the model objects. The picker is a composer
+/// concern and must not keep SwiftData objects alive across a store change; the name is all the
+/// selection needs, since a skill command addresses skills BY NAME.
+struct SkillSuggestionState {
+    var isShowing: Bool = false
+    var query: String = ""
+    var filteredItems: [SkillCommandItem] = []
+    var triggerRange: NSRange? = nil
+    var selectedID: String? = nil
+}
+
+/// One row in the `/` picker.
+struct SkillCommandItem: Identifiable, Equatable, Hashable {
+    let id: String
+    let name: String
+    let displayName: String
+    let description: String
+}
+
 struct FileSuggestionState {
     var isShowing: Bool = false
     var query: String = ""
@@ -133,6 +152,7 @@ final class ChatInputViewModel {
     // MARK: - Suggestions
     var promptSuggestionState = PromptSuggestionState()
     var fileSuggestionState = FileSuggestionState()
+    var skillSuggestionState = SkillSuggestionState()
     var attributedTextInsertionRequest: CustomTextEditor.AttributedTextInsertionAction? = nil
 
     /// Set to `true` to request that the chat input's `TextEditor` grab
@@ -452,6 +472,66 @@ final class ChatInputViewModel {
 
     // MARK: - Actions (View Triggers)
 
+    /// Replaces the `/query` the user is typing with `/skill-name `, ready for their request.
+    ///
+    /// ⚠️ Inserts the COMMAND, not the skill's body — unlike `selectPrompt`, which expands a prompt's
+    /// text. A skill body belongs in a tool result the model asked for, not pasted into the user's
+    /// own turn: it is often thousands of words, and putting it there would make every skill use
+    /// look like the user typed a manual.
+    func selectSkillCommand(_ item: SkillCommandItem) {
+        guard let range = skillSuggestionState.triggerRange else { return }
+        logger.log("Skill command selected: '\(item.name)'")
+
+        let insertionText = NSAttributedString(string: "/\(item.name) ", attributes: defaultTypingAttributes)
+        self.attributedTextInsertionRequest = .init(range: range, attributedString: insertionText)
+
+        resetSkillState()
+    }
+
+    func resetSkillState() {
+        skillSuggestionState.isShowing = false
+        skillSuggestionState.query = ""
+        skillSuggestionState.filteredItems = []
+        skillSuggestionState.triggerRange = nil
+        skillSuggestionState.selectedID = nil
+    }
+
+    /// Re-filters the `/` picker against the library.
+    ///
+    /// ⚠️ DRAFTS ARE EXCLUDED — `fetchRunnableSkills` — because a draft is never offered to an agent
+    /// even where it is linked, so a picker that listed one would let the user invoke something that
+    /// then silently does nothing.
+    @MainActor
+    func refreshSkillSuggestions(reachableNames: Set<String>) {
+        guard skillSuggestionState.isShowing else { return }
+        // ⚠️⚠️ SCOPED TO WHAT THE SEND PATH WILL ACTUALLY EXPAND. This listed the whole library,
+        // while `expandSkillCommand` accepted only names the profile had linked — so picking an
+        // offered-but-unlinked skill sent the raw `/name …` text to the model, looking for all the
+        // world like the trigger had silently failed. Both sides now read
+        // `SkillCommandReachability`, so the picker cannot advertise what the send path refuses.
+        let all = ((try? SkillStore.shared.fetchRunnableSkills().get()) ?? [])
+            .filter { reachableNames.contains($0.name) }
+            .map {
+                SkillCommandItem(id: $0.id, name: $0.name, displayName: $0.displayName,
+                                 description: $0.latestVersion?.skillDescription ?? "")
+            }
+        let query = skillSuggestionState.query.lowercased()
+        let matched = query.isEmpty ? all : all.filter {
+            $0.name.lowercased().contains(query) || $0.displayName.lowercased().contains(query)
+        }
+        // Prefix matches first — typing "co" should put `code-review` above `pandoc-convert`.
+        skillSuggestionState.filteredItems = matched.sorted { lhs, rhs in
+            let lhsPrefix = lhs.name.lowercased().hasPrefix(query)
+            let rhsPrefix = rhs.name.lowercased().hasPrefix(query)
+            if lhsPrefix != rhsPrefix { return lhsPrefix }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+        if skillSuggestionState.selectedID == nil ||
+            !skillSuggestionState.filteredItems.contains(where: { $0.id == skillSuggestionState.selectedID }) {
+            skillSuggestionState.selectedID = skillSuggestionState.filteredItems.first?.id
+        }
+    }
+
     func selectPrompt(_ prompt: DevPrompt) {
         guard let range = promptSuggestionState.triggerRange else { return }
         logger.log("Prompt selected: '\(prompt.title)'")
@@ -553,6 +633,12 @@ final class ChatInputViewModel {
             navigateGeneric(
                 items: fileSuggestionState.filteredItems,
                 selectedID: &fileSuggestionState.selectedID,
+                direction: direction
+            )
+        case .skill:
+            navigateGeneric(
+                items: skillSuggestionState.filteredItems,
+                selectedID: &skillSuggestionState.selectedID,
                 direction: direction
             )
         }

@@ -17,6 +17,7 @@ struct AgentTimelineView: View {
     private let isStreaming: Bool
 
     @Environment(\.appTheme) private var theme
+    @AppStorage(AppSettings.chatFontSizeKey) private var chatFontSize: Double = 15.0
 
     /// Optional text of the final content shown below the timeline. Used to
     /// deduplicate narrative events that would otherwise repeat the same text.
@@ -66,8 +67,14 @@ struct AgentTimelineView: View {
     /// chat view model by the switch debounce; see the property's doc there.
     private let conversationID: UUID?
 
+    /// When true, the expanded nodes container is constrained to a fixed/proportional
+    /// maximum height with vertical scrolling, preventing long tool sequences from pushing
+    /// the final answer off-screen. Set to false by callers that already own the vertical
+    /// scroll container (e.g. `WorkflowExecutionTimelineView`).
+    private let scrollable: Bool
+
     /// Initialize from a ChatMessage (existing usage in chat bubbles).
-    init(message: ChatMessage) {
+    init(message: ChatMessage, scrollable: Bool = true) {
         self.events = message.timelineEvents
         self.revision = message.timelineRevision
         self.terminalOutcome = message.terminalOutcome
@@ -80,6 +87,7 @@ struct AgentTimelineView: View {
             isStreaming: message.isStreaming
         )
         self.compactReasoning = true
+        self.scrollable = scrollable
     }
 
     /// Initialize from raw timeline events (used by workflow per-node detail views).
@@ -101,6 +109,9 @@ struct AgentTimelineView: View {
     ///   much as a top-level row does, and `CapabilityCardRouter` puts most agent runs' tool
     ///   rows there. The workflow per-node callers leave it nil — see the `conversationID`
     ///   property for what nil does and does not mean there.
+    /// - Parameter scrollable: When `true`, wraps expanded nodes in an internal scroll container
+    ///   capped at `ChatUIConstants.agentTimelineMaxHeight`. Defaults to `false` for raw event
+    ///   views since parent containers typically manage their own scrolling.
     init(
         events: [TimelineEvent],
         revision: UInt64 = 0,
@@ -108,7 +119,8 @@ struct AgentTimelineView: View {
         chatFidelity: Bool = false,
         streamingStartedAt: Date? = nil,
         finalContentText: String? = nil,
-        conversationID: UUID? = nil
+        conversationID: UUID? = nil,
+        scrollable: Bool = false
     ) {
         self.events = events
         self.revision = revision
@@ -123,10 +135,21 @@ struct AgentTimelineView: View {
             self.streamingContext = nil
         }
         self.compactReasoning = chatFidelity
+        self.scrollable = scrollable
     }
 
     @State private var isTimelineExpanded: Bool = false
     @State private var userToggled: Bool = false
+    @State private var timelineContentHeight: CGFloat = 0
+
+    private var timelineMaxHeight: CGFloat {
+        ChatUIConstants.agentTimelineMaxHeight(forChatFontSize: CGFloat(chatFontSize))
+    }
+
+    private func initialEstimatedHeight(for count: Int) -> CGFloat {
+        let estimated = CGFloat(count) * 44.0 + (streamingContext?.shouldDisplay == true ? 32.0 : 0.0) + 10.0
+        return min(estimated, timelineMaxHeight)
+    }
 
     /// Which tool rows the user has expanded, keyed by the tool event's stable id.
     ///
@@ -207,23 +230,72 @@ struct AgentTimelineView: View {
                 if Self.showsTimelineBody(isTimelineExpanded: isTimelineExpanded,
                                           isStreaming: isStreaming,
                                           userToggled: userToggled) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(nodes) { node in
-                            TimelineNodeGroupView(
-                                node: node,
-                                compactReasoning: compactReasoning,
-                                isStreaming: isStreaming,
-                                conversationID: conversationID,
-                                expandedRowIDs: $expandedRowIDs
-                            )
+                    if scrollable {
+                        ScrollViewReader { proxy in
+                            ScrollView(.vertical, showsIndicators: true) {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    ForEach(nodes) { node in
+                                        TimelineNodeGroupView(
+                                            node: node,
+                                            compactReasoning: compactReasoning,
+                                            isStreaming: isStreaming,
+                                            conversationID: conversationID,
+                                            expandedRowIDs: $expandedRowIDs
+                                        )
+                                        .id(node.id)
+                                    }
+                                    if let ctx = streamingContext, ctx.shouldDisplay {
+                                        StreamingTimelineFooter(context: ctx)
+                                            .id("streaming_footer")
+                                            .transition(.opacity)
+                                    }
+                                }
+                                .padding(.top, 4)
+                                .padding(.bottom, 6)
+                                .padding(.horizontal, 2)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .onGeometryChange(for: CGFloat.self) { p in
+                                    p.size.height
+                                } action: { newHeight in
+                                    timelineContentHeight = newHeight
+                                }
+                            }
+                            .frame(height: timelineContentHeight > 0 ? min(timelineContentHeight, timelineMaxHeight) : initialEstimatedHeight(for: nodes.count))
+                            .frame(maxHeight: timelineMaxHeight)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .onChange(of: revision) { _, _ in
+                                if isStreaming {
+                                    withAnimation(.easeOut(duration: 0.2)) {
+                                        if let ctx = streamingContext, ctx.shouldDisplay {
+                                            proxy.scrollTo("streaming_footer", anchor: .bottom)
+                                        } else if let lastID = nodes.last?.id {
+                                            proxy.scrollTo(lastID, anchor: .bottom)
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        if let ctx = streamingContext, ctx.shouldDisplay {
-                            StreamingTimelineFooter(context: ctx)
-                                .transition(.opacity)
+                        .padding(.top, 2)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    } else {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(nodes) { node in
+                                TimelineNodeGroupView(
+                                    node: node,
+                                    compactReasoning: compactReasoning,
+                                    isStreaming: isStreaming,
+                                    conversationID: conversationID,
+                                    expandedRowIDs: $expandedRowIDs
+                                )
+                            }
+                            if let ctx = streamingContext, ctx.shouldDisplay {
+                                StreamingTimelineFooter(context: ctx)
+                                    .transition(.opacity)
+                            }
                         }
+                        .padding(.top, 2)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                     }
-                    .padding(.top, 2)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
             .padding(.vertical, 4)
@@ -2332,6 +2404,7 @@ extension AgentTimelineView: Equatable {
         lhs.revision == rhs.revision
             && lhs.isStreaming == rhs.isStreaming
             && lhs.compactReasoning == rhs.compactReasoning
+            && lhs.scrollable == rhs.scrollable
             // Without this a Resume — which flips `lifecycleState` to `.streaming` and back to
             // `.final` without necessarily bumping `revision` in the same pass — could leave the
             // interrupted header on a run that has since finished cleanly.

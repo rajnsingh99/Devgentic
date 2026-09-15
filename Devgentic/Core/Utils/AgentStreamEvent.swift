@@ -629,7 +629,18 @@ enum HITLRiskTier: String, Sendable, Codable, Equatable, CaseIterable {
              // Split out of read/write multiplexers 2026-07-31 precisely so they could be
              // labelled and gated as what they are. Each removes something with no undo:
              // an event, a reminder, a process (SIGKILL), or every tag on a file.
-             "delete_calendar_event", "delete_reminder", "kill_process", "replace_finder_tags":
+             "delete_calendar_event", "delete_reminder", "kill_process", "replace_finder_tags",
+             // Writes instructions that are injected into the model's context on every future run
+             // of every profile linked to that skill — the approval is per-conversation, the effect
+             // is not, and there is no undo the approving conversation can reach. `.destructive` is
+             // what makes `SessionToolApprovals.allow` refuse a durable "allow for this chat" grant
+             // for it, inside the actor.
+             //
+             // ⚠️ Deliberately NOT added to `ToolCapability.arbitraryCodeExecution`. That set is
+             // build-enforced in BOTH directions by ToolCapabilityTests: it means "hands its own
+             // argument to an interpreter", which `update_skill` does not do, and adding it there
+             // to reach `.destructive` faster would fail the test that keeps the set honest.
+             "update_skill":
             return .destructive
         case "write_file", "move_file", "copy_file", "create_folder", "fs_watch_folder":
             return .moderate

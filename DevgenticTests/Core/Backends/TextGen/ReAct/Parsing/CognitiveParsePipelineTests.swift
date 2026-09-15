@@ -357,6 +357,14 @@ final class CognitiveParsePipelineTests: XCTestCase {
         let result = pipeline.parse(raw: input)
         XCTAssertEqual(result.toolCalls.count, 0)
         XCTAssertEqual(result.parseOutcome, .genuineCompletion)
+
+        // ⚠️ Added 2026-09-13. The comment above has always claimed "Stage 1 returns text as
+        // reasoning" and this test never checked it — so it stayed green for the whole period
+        // `NativeJSONParser` was returning `reasoning: ""` and this dialect was delivering
+        // EMPTY final answers. A `.genuineCompletion` that carries no text is not a completion
+        // the user can read; the outcome and the text have to be asserted together.
+        XCTAssertEqual(result.reasoning, input,
+                       "a genuine completion must carry the model's answer, not just the verdict")
     }
 
     // MARK: - Bug 3: Malformed Content Recovery Through Pipeline

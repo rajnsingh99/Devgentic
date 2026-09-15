@@ -97,31 +97,6 @@ struct ExplorerSidebarView: View {
 
 // MARK: - Components
 
-struct HeaderActionButton: View {
-    let icon: String
-    let help: LocalizedStringKey
-    let action: () -> Void
-    
-    @Environment(\.appTheme) private var theme
-    @State private var isHovering = false
-    
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(theme.fontCaption2)
-                .foregroundColor(isHovering ? theme.primaryText : theme.secondaryText)
-                .frame(width: 20, height: 20)
-                .background(isHovering ? theme.surfaceOverlay : Color.clear)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-        }
-        .buttonStyle(.plain)
-        .help(help)
-        .accessibilityLabel(help)
-        .onHover { isHovering = $0 }
-    }
-}
-
-
 // MARK: - NSViewRepresentable for NSOutlineView
 struct FileOutlineView: NSViewRepresentable {
     var viewModel: ExplorerViewModel

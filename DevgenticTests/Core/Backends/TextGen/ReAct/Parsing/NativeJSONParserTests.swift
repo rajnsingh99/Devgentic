@@ -89,8 +89,22 @@ final class NativeJSONParserTests: XCTestCase {
 
     // MARK: - Fallback to HeuristicCognitiveParser
 
-    func testFallback_MalformedJSON_DelegatesToHeuristic() {
-        // Missing comma — fast-path fails, should delegate to heuristic parser
+    // MARK: - Recovery is the PIPELINE's job, not this parser's
+    //
+    // ⚠️ These two tests asserted `parser.parse(...)` recovered tool calls by delegating to
+    // `HeuristicCognitiveParser` internally. That delegation was deliberately removed — this
+    // file's header states why: doing it inside the parser bypasses the pipeline's
+    // `parseOutcome` tracking, so a rescued call was indistinguishable from a clean fast-path
+    // hit and nothing downstream knew recovery had happened. The tests were never re-pointed,
+    // so they asserted removed behaviour and had been failing against committed code.
+    //
+    // Re-pointed at the real contract rather than deleted: the recovery they cared about is
+    // genuine and still required, it simply belongs one layer up. Each now asserts BOTH halves —
+    // the parser yields, and the pipeline recovers — so neither the yield nor the rescue can
+    // regress unnoticed.
+
+    func testMalformedJSON_ParserYields_PipelineRecovers() {
+        // Missing comma between the two objects — the strict fast path cannot decode it.
         let input = """
         {
           "content": "Searching.",
@@ -100,18 +114,31 @@ final class NativeJSONParserTests: XCTestCase {
           ]
         }
         """
-        let result = parser.parse(rawResponse: input)
-        // Heuristic should recover at least some tool calls
-        XCTAssertGreaterThanOrEqual(result.toolCalls.count, 1, "Heuristic fallback should recover at least 1 tool")
+
+        let parserResult = parser.parse(rawResponse: input)
+        XCTAssertTrue(parserResult.toolCalls.isEmpty,
+                      "the parser must yield rather than rescue — rescuing here loses parseOutcome")
+        XCTAssertFalse(parserResult.reasoning.isEmpty,
+                       "yielding must not discard the text (see ConversationalExitContractTests)")
+
+        let recovered = CognitiveParsePipeline(expectedDialect: .nativeJSON, registeredTools: [])
+            .parse(raw: input)
+        XCTAssertGreaterThanOrEqual(recovered.toolCalls.count, 1,
+                                    "the pipeline's heuristic stage must recover at least one tool")
     }
 
-    func testFallback_LegacySingleFormat() {
-        // Not NativeArraySchema — should fall through to heuristic
+    func testLegacySingleFormat_ParserYields_PipelineRecovers() {
+        // `tool_name` at the top level — not `NativeArraySchema`, so the fast path misses.
         let input = """
         {"content": "Executing.", "tool_name": "list_directory", "arguments": {"path": "/"}}
         """
-        let result = parser.parse(rawResponse: input)
-        XCTAssertEqual(result.toolCalls.count, 1)
-        XCTAssertEqual(result.toolCalls.first?.name, "list_directory")
+
+        let parserResult = parser.parse(rawResponse: input)
+        XCTAssertTrue(parserResult.toolCalls.isEmpty, "the parser must yield, not rescue")
+
+        let recovered = CognitiveParsePipeline(expectedDialect: .nativeJSON, registeredTools: [])
+            .parse(raw: input)
+        XCTAssertEqual(recovered.toolCalls.count, 1)
+        XCTAssertEqual(recovered.toolCalls.first?.name, "list_directory")
     }
 }

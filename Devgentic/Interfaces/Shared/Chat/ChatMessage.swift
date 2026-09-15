@@ -9,14 +9,6 @@
 
 import Foundation
 
-enum GenerationType: String, Codable, CaseIterable, Identifiable {
-    case text
-    case imageData
-    case videoData
-    
-    var id: String { self.rawValue }
-}
-
 struct ResponseMessageVariant: Codable, Equatable {
 
     /// Stable identity for this variant, preserved across a save/load cycle.

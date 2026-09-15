@@ -121,10 +121,24 @@ actor ReActAgentExecutor: Executor {
                     // wrapper (Planning/Reflexion) may pass a SHARED instance so answers —
                     // including the pre-plan clarification — carry across subtasks/trials.
                     let interactionMemory = input.interactionMemory ?? RunInteractionMemory()
+                    // The wire format THIS run parses back, and the source for BOTH corrective
+                    // alerts — `LLMRetryStrategy`'s (thrown, unclassified errors) and
+                    // `ParseFailureReason.modelCorrectiveAlert`'s (the typed parse failures a
+                    // generator RETURNS). One local so the two can never name different formats
+                    // for the same run.
+                    //
+                    // Taken from the generator rather than from `ProviderConfig`, because the
+                    // generator is what actually parses the response — and on the `.singleAction`
+                    // path (AgentConnect.swift:985-994) the two disagree by design: the profile's
+                    // stored dialect is discarded there and every model is asked for ReAct
+                    // markdown. Reading the profile would teach the model the format nothing in
+                    // the run is prepared to parse. nil on native flows, which is correct.
+                    let runDialect = input.generatorStrategy.expectedDialect
                     var retryStrategy = LLMRetryStrategy(
                         maxConsecutiveParseFailures: input.resiliencePolicy.cognitive.maxParseFailures,
                         backoffStrategy: input.resiliencePolicy.transport.backoffStrategy,
-                        transport: input.resiliencePolicy.transport
+                        transport: input.resiliencePolicy.transport,
+                        dialect: runDialect
                     )
                     let toolMediator = ToolExecutionMediator()
                     let terminationEvaluator = EpisodeTerminationEvaluator()
@@ -519,7 +533,26 @@ actor ReActAgentExecutor: Executor {
                             // Proactive throttling: when budget is fully exhausted, nudge the
                             // model toward synthesis rather than continued exploration.
                             // This is a soft signal — the agent can still call tools if needed.
-                            if utilization >= 1.0 {
+                            //
+                            // ⚠️ ONCE PER RUN, via the same `didInjectFullBudgetAlert` the native
+                            // path uses at :1115. That flag's own declaration comment already says
+                            // it "gates the synthesis nudge to once (re-appending it every
+                            // iteration was the bug this fixes)" — the fix simply never reached
+                            // this path, and the two are mutually exclusive (`nativeGenerator ==
+                            // nil` guards this block), so one flag correctly means one nudge per
+                            // run either way.
+                            //
+                            // ⚠️ Un-guarded, this was self-reinforcing rather than merely noisy.
+                            // The message is a CONSTANT, so every over-budget iteration recorded a
+                            // byte-identical alert; each one added ~183 chars to
+                            // `budgetUtilization`, which pushed utilization higher, which re-fired
+                            // this branch next iteration. In a real 2026-09-13 run the reported
+                            // figure climbed 78 → 90 → 101 → 120 → 138 → 157 → 175%, and three
+                            // copies of this one sentence were enough to fill every
+                            // `maxSystemAlerts` slot — evicting the format correctives that were
+                            // the only thing that could have rescued the run.
+                            if utilization >= 1.0, !didInjectFullBudgetAlert {
+                                didInjectFullBudgetAlert = true
                                 let memoryAlert = "Working memory is full. Older observations have been evicted. "
                                     + "Prioritize synthesizing a final answer from available context "
                                     + "rather than calling additional tools."
@@ -774,8 +807,51 @@ actor ReActAgentExecutor: Executor {
                         if !step.reasoning.isEmpty && step.reasoning != step.thought {
                             let sanitized = OutputSanitizer.sanitizeForUI(step.reasoning)
                             if !sanitized.isEmpty {
+                                // The UI still shows it. On a failed parse this is the user's ONLY
+                                // window onto what the model actually emitted — the raw output is
+                                // logged at `.debug`, which never reaches an exported bundle.
                                 continuation.yield(.reasoning(sanitized))
-                                memoryStrategy.recordReasoning(stepId: currentIteration, text: sanitized)
+
+                                // ⚠️ NOT written to working memory when the parse FAILED, and that
+                                // asymmetry is the whole point of this branch.
+                                //
+                                // On a typed failure `step.reasoning` is not reasoning at all — it
+                                // is the raw unparseable blob (HeuristicCognitiveParser.swift:197
+                                // returns `reasoning: rawText`; CognitiveParsePipeline's exhausted
+                                // path does the same). Recording it put the model's own malformed
+                                // output back in front of it next iteration as `[Step N thought]`,
+                                // and the model copied it.
+                                //
+                                // ⚠️ That is not a theory. In the 2026-09-13 gemma:7b agent run the
+                                // scratchpad reached 13 copies of one broken JSON object, and from
+                                // iteration 4 on every response contained `“arguments”...[truncated]`
+                                // — OUR truncation marker, appended by `perEntryCap` — proving the
+                                // model was transcribing its own recorded output rather than
+                                // generating. Outputs went byte-identical and the run died on the
+                                // identical-output detector at iteration 14, after 75 seconds. The
+                                // scratchpad hit 176% of budget carrying nothing but that garbage,
+                                // which then evicted the entries that mattered.
+                                //
+                                // The corrective alert already carries everything the model needs —
+                                // that its last output could not be parsed, the attempt count, and
+                                // (since invariant 80) the exact format this run CAN read. Re-showing
+                                // the unparseable text adds no information and supplies a template to
+                                // copy.
+                                //
+                                // ⚠️ The identical-output detector is unaffected: it reads
+                                // `step.reasoning` directly (:825), never working memory, so the
+                                // stuck-model abort still fires.
+                                if case .failed = step.parseOutcome {
+                                    logger.debug(
+                                        "[MEMORY] Iteration \(currentIteration) produced an unparseable "
+                                        + "step — its raw output is NOT recorded as reasoning. "
+                                        + "CONSEQUENCE: the scratchpad carries the typed corrective "
+                                        + "alert instead of the malformed text, so the model cannot "
+                                        + "copy its own failed output on the retry."
+                                    )
+                                } else {
+                                    memoryStrategy.recordReasoning(stepId: currentIteration, text: sanitized)
+                                }
                             }
                         }
                         
@@ -865,7 +941,10 @@ actor ReActAgentExecutor: Executor {
                             }()
 
                             let toolNames = availableToolsThisIteration.map(\.name)
-                            let modelAlert = reason.modelCorrectiveAlert(availableToolNames: toolNames)
+                            let modelAlert = reason.modelCorrectiveAlert(
+                                availableToolNames: toolNames,
+                                dialect: runDialect
+                            )
                             memoryStrategy.recordSystemAlert(msg: modelAlert)
                             if let adapter = nativeGenerator?.toolTurnAdapter {
                                 liveConversationTurns.append(adapter.systemAlertTurn(message: modelAlert))

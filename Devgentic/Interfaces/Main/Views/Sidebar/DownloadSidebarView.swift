@@ -165,6 +165,27 @@ struct DownloadSidebarView: View {
                 .font(theme.fontBody.weight(.semibold))
                 .foregroundColor(theme.primaryText)
             Spacer()
+            // ⚠️⚠️ THE DOWNLOAD MANAGER HAD NO ENTRY POINT. `DownloadManagerContainerView` exists,
+            // `MainApplicationView` renders it for `.downloadManager`, and
+            // `MainViewRouter.navigateToDownloadManager()` exists to get there — but nothing called
+            // it, so the whole screen was unreachable. This view even held
+            // `@Environment(MainViewRouter.self)` for a call that was never written: the dependency
+            // was injected, the navigation was not. Correct code, no caller.
+            Button {
+                router.navigateToDownloadManager()
+            } label: {
+                Image(systemName: "arrow.down.circle")
+                    .font(.system(.caption, weight: .semibold))
+                    .frame(width: 22, height: 22)
+                    .foregroundColor(theme.secondaryText)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(theme.surfaceOverlay)
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("Open the Download Manager")
+
             if !historyRecords.isEmpty {
                 Menu {
                     Button(role: .destructive) {

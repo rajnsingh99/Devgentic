@@ -207,7 +207,10 @@ struct ActivityBarView: View {
     @Binding var isSidebarVisible: Bool
     @Environment(\.appTheme) private var theme
 
-    private let topTabs: [SidebarTab] = [.conversations, .explorer, .promptLibrary, .scheduler, .backendProfiles, .tools, .downloads]
+    // ⚠️ The ONE site that is not compiler-enforced. Every other `SidebarTab` switch fails the
+    // build when a case is missing; this hand-written array does not — a tab omitted here exists,
+    // routes, and persists its selection, with no button anywhere to reach it.
+    private let topTabs: [SidebarTab] = [.conversations, .explorer, .promptLibrary, .scheduler, .backendProfiles, .tools, .skills, .downloads]
     private let bottomTabs: [SidebarTab] = [.settings]
 
     var body: some View {

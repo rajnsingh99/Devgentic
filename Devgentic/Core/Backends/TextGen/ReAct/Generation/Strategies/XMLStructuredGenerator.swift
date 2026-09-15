@@ -20,6 +20,10 @@ private let logLLMOps = DGLogger(category: "LLMOps")
 /// A cognitive strategy for Mistral-family models that wrap tool calls in
 /// pseudo-XML boundaries (<tool_call>...</tool_call>).
 struct XMLStructuredGenerator: CognitiveGenerator {
+
+    /// The one value this generator both declares and parses with.
+    private static let dialect: ModelDialect = .mistralXML
+    var expectedDialect: ModelDialect? { Self.dialect }
     let toolAdapter: ToolSchemaAdapter
 
     let dialectRules: String? = """
@@ -74,7 +78,7 @@ struct XMLStructuredGenerator: CognitiveGenerator {
         }
 
         let pipeline = CognitiveParsePipeline(
-            expectedDialect: .mistralXML,
+            expectedDialect: Self.dialect,
             modelId: model.modelName,
             iteration: iteration,
             knownToolNames: Set(context.availableTools.map(\.name)),

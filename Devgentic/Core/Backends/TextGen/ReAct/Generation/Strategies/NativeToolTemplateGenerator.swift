@@ -41,7 +41,18 @@ struct NativeToolTemplateGenerator: CognitiveGenerator {
 
     /// Which parser to route the raw output through. Also used by pipeline for
     /// drift detection and confidence classification.
-    let expectedDialect: ModelDialect
+    /// The dialect this generator asks for and parses back.
+    ///
+    /// ⚠️ Stored NON-optional and exposed through the optional-typed `expectedDialect` witness
+    /// below, NOT named `expectedDialect` itself. `CognitiveGenerator` requires
+    /// `ModelDialect?`, and Swift matches a property witness on its exact type — a stored
+    /// `ModelDialect` of that name would NOT become the witness, so the protocol extension's
+    /// `nil` default would win silently and every one of the 14 chat-template dialects would
+    /// report "no dialect" to anything reading it through the protocol. The type still
+    /// conforms, so nothing would have failed to build.
+    let dialect: ModelDialect
+
+    var expectedDialect: ModelDialect? { dialect }
 
     /// Short reinforcement hint appended to the user-message prompt trigger each iteration.
     /// Kept brief and attention-proximate; the chat template provides the authoritative
@@ -75,7 +86,7 @@ struct NativeToolTemplateGenerator: CognitiveGenerator {
     // MARK: - Init
 
     init(expectedDialect: ModelDialect, triggerSuffix: String, logTag: String) {
-        self.expectedDialect = expectedDialect
+        self.dialect = expectedDialect
         self.triggerSuffix = triggerSuffix
         self.logTag = logTag
     }
@@ -109,7 +120,7 @@ struct NativeToolTemplateGenerator: CognitiveGenerator {
         iteration: Int
     ) async throws -> ModernCognitiveStep {
         let reqId = UUID().uuidString.prefix(8)
-        logLLMOps.info("⚡️ [\(self.logTag):\(reqId)] Start Generation - Iteration: \(iteration) - Dialect: \(self.expectedDialect.rawValue)")
+        logLLMOps.info("⚡️ [\(self.logTag):\(reqId)] Start Generation - Iteration: \(iteration) - Dialect: \(self.dialect.rawValue)")
 
         var executionMessages = compileMessages(from: context)
         executionMessages.append(["role": "user", "content": promptTrigger(for: iteration)])
@@ -149,7 +160,7 @@ struct NativeToolTemplateGenerator: CognitiveGenerator {
         }
 
         let pipeline = CognitiveParsePipeline(
-            expectedDialect: expectedDialect,
+            expectedDialect: dialect,
             modelId: model.modelName,
             iteration: iteration,
             knownToolNames: Set(context.availableTools.map(\.name)),

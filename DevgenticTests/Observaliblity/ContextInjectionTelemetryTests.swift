@@ -23,6 +23,7 @@ final class ContextInjectionTelemetryTests: XCTestCase {
         iteration: Int = 1,
         knowledge: String? = nil,
         rag: String = "",
+        skills: [SkillManifest]? = nil,
         layerConfig: PromptLayerConfig = .agent
     ) -> SemanticContext {
         var ctx = SemanticContext(
@@ -41,7 +42,7 @@ final class ContextInjectionTelemetryTests: XCTestCase {
             hallucinatedTools: [],
             availableTools: [],
             userProfile: nil,
-            skillManifests: nil,
+            skillManifests: skills,
             promptLayerConfig: layerConfig,
             workflowContext: nil,
             attachmentContext: nil,
@@ -85,6 +86,50 @@ final class ContextInjectionTelemetryTests: XCTestCase {
         let kb = try XCTUnwrap(events.first { RunReportProjection.detailValue($0, "source") == "knowledge_base" })
         XCTAssertEqual(RunReportProjection.detailValue(kb, "chars"), "\("KB payload".count)")
         XCTAssertEqual(RunReportProjection.detailValue(kb, "preview"), "KB payload")
+    }
+
+    /// ⚠️ The skills layer was absent from `layerSizes`/`layerContents` from the day it shipped, so
+    /// the one diagnostic built to answer "what did the model actually read?" was blind to it — a
+    /// profile carrying fifty skills looked identical to one carrying none.
+    ///
+    /// This asserts on the EMITTED EVENT, which is what that claim is about. A companion test in
+    /// `SkillDiscoveryRenderingTests` used to carry the name but asserted only that the render
+    /// helper agreed with itself; it never touched the diagnostic.
+    func testSkillsLayerIsEmittedAsItsOwnContextRow() async throws {
+        let trace = await beginTrace()
+        let skill = SkillManifest(
+            id: UUID(), name: "code-review", description: "Review code quality.",
+            folderPath: "/tmp/skills/code-review", resourceCount: 0, hasScripts: false,
+            compatibility: nil, isEnabled: true
+        )
+        let semantic = makeContext(traceContext: trace, iteration: 1, skills: [skill])
+        _ = PromptBuilder.buildStandardMessages(context: semantic, layerConfig: .agent)
+
+        let events = try await contextEvents(trace.traceID)
+        let row = try XCTUnwrap(
+            events.first { RunReportProjection.detailValue($0, "source") == "available_skills" },
+            "the skills layer must emit its own context row, or the Run Report cannot show it"
+        )
+
+        let preview = RunReportProjection.detailValue(row, "preview") ?? ""
+        XCTAssertTrue(preview.contains("code-review"),
+                      "the row must carry the rendered skill, got: \(preview)")
+        XCTAssertTrue(preview.contains("Review code quality."))
+
+        let chars = Int(RunReportProjection.detailValue(row, "chars") ?? "0") ?? 0
+        XCTAssertGreaterThan(chars, 0, "a shipped layer must report a non-zero size")
+    }
+
+    /// A profile with no skills must emit NO row — an empty layer that reported itself would make
+    /// every prompt look like it carried skills.
+    func testNoSkillsEmitsNoSkillsRow() async throws {
+        let trace = await beginTrace()
+        _ = PromptBuilder.buildStandardMessages(
+            context: makeContext(traceContext: trace, iteration: 1), layerConfig: .agent
+        )
+
+        let events = try await contextEvents(trace.traceID)
+        XCTAssertNil(events.first { RunReportProjection.detailValue($0, "source") == "available_skills" })
     }
 
     func testLaterIterationsEmitNothing() async throws {

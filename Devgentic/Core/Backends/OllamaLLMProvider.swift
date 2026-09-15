@@ -70,7 +70,7 @@ struct OllamaLLMProvider: LLMProvider {
         ]
 
         if let options = config.options {
-            body["options"] = mapToOllamaOptions(options)
+            body["options"] = Self.mapToOllamaOptions(options)
         }
 
         // Ollama supports tools natively as well
@@ -140,7 +140,7 @@ struct OllamaLLMProvider: LLMProvider {
         }
 
         if let options = config.options {
-            body["options"] = mapToOllamaOptions(options)
+            body["options"] = Self.mapToOllamaOptions(options)
         }
 
         if let tools = tools, !tools.isEmpty {
@@ -352,7 +352,7 @@ struct OllamaLLMProvider: LLMProvider {
                     "stream": true
                 ]
                 if let options = self.config.options {
-                    body["options"] = self.mapToOllamaOptions(options)
+                    body["options"] = Self.mapToOllamaOptions(options)
                 }
                 // `tools` are ignored on the bot stream (strictly conversational, like
                 // the cloud providers) — tool-calling is the agent path.
@@ -389,7 +389,13 @@ struct OllamaLLMProvider: LLMProvider {
         )
     }
     
-    private func mapToOllamaOptions(_ options: [String: JSONValue]) -> [String: Any] {
+    /// Maps this app's option keys onto Ollama's `options` object.
+    ///
+    /// ⚠️ `static` so the mapping is testable without a live provider — the same reason
+    /// `DGLogger.shouldPersist` and `serializeToolParams` are pure statics. It uses no instance
+    /// state; all three `body["options"]` sites call through here, which is what makes the `stop`
+    /// rule below impossible to bypass.
+    static func mapToOllamaOptions(_ options: [String: JSONValue]) -> [String: Any] {
         var mapped: [String: Any] = [:]
         for (key, value) in options {
             let rawValue = value.rawValue
@@ -398,6 +404,43 @@ struct OllamaLLMProvider: LLMProvider {
             case "topP": mapped["top_p"] = rawValue
             case "topK": mapped["top_k"] = rawValue
             case "repeatPenalty": mapped["repeat_penalty"] = rawValue
+
+            case "stop":
+                // ⚠️ AN EMPTY STOP LIST IS OMITTED, NEVER FORWARDED. To Ollama an explicit
+                // `"stop": []` is not "no preference" — it is an empty stop list that REPLACES the
+                // ones the model's Modelfile declares, disabling them.
+                //
+                // Measured against Ollama 0.33.3 on 2026-09-13, using a model created
+                // `FROM gemma:7b` with `PARAMETER stop "FIVE"` and the prompt "count ONE..TEN":
+                //   • no `stop` key     → output stopped at FOUR  (9 tokens)  — Modelfile stop ACTIVE
+                //   • `"stop": []`      → output ran to TEN      (22 tokens)  — Modelfile stop GONE
+                //   • `"stop": ["SEVEN"]` → output stopped at SIX (13 tokens) — explicit list wins
+                //
+                // Every Ollama preset sets `stop: []` explicitly rather than leaving the optional
+                // nil (OllamaAdvancedConfig.swift:72, :82, :92, :130, :134, :138), and
+                // `AdvancedConfigEncoder.encode` blind-serialises whatever the config holds with no
+                // empty-filtering — so without this arm the default agent preset silently stripped
+                // the stop sequences of EVERY Ollama model on EVERY request.
+                //
+                // ⚠️ This is the guard the three cloud providers already have and this one lacked:
+                // `if let stops = stopSequences, !stops.isEmpty` at OpenAILLMProvider.swift:99,
+                // ClaudeLLMProvider.swift:111 and GeminiLLMProvider.swift:85. The rule was written
+                // three times and missed the fourth place; it belongs here for the same reason.
+                //
+                // ⚠️ Empty means "the user has no stop sequences of their own", NOT "strip the
+                // model's". Clearing the list in the Advanced panel removes the user's additions —
+                // it is not a request to disable what the model ships with.
+                //
+                // ⚠️ Only `stop` is treated this way. The empty-collection-overrides semantics was
+                // verified for this key and not assumed for the rest of Ollama's option surface.
+                //
+                // ⚠️ The `FULL REQUEST CONFIGURATION` log block prints `config.options` — the value
+                // BEFORE this mapping — so it will still show `"stop": []` on a default profile
+                // while the wire correctly carries no `stop` at all. That is not a discrepancy to
+                // "fix" by re-adding the key.
+                if let list = value.arrayValue, list.isEmpty { continue }
+                mapped["stop"] = rawValue
+
             default: mapped[key] = rawValue
             }
         }

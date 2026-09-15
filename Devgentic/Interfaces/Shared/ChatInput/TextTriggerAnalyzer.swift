@@ -11,9 +11,14 @@ import Foundation
 
 class TextTriggerAnalyzer {
     
-    enum TriggerType {
+    /// ⚠️ `CaseIterable` so `ComposerSuggestionKeyRoutingTests` can assert that every trigger type
+    /// has a keyboard-routing parameter. Adding a case here without adding one to
+    /// `ComposerSuggestionKeyRouting.anyPickerIsOpen` yields a picker the keyboard cannot reach —
+    /// which is exactly how `/` shipped deaf.
+    enum TriggerType: CaseIterable {
         case prompt // #
         case file   // @
+        case skill  // /
     }
     
     struct Result {
@@ -61,21 +66,35 @@ class TextTriggerAnalyzer {
             }
             
             // A. Check for Triggers
-            if scalar == "#" || scalar == "@" {
-                // Boundary Check: Must be start of line or preceded by whitespace
+            if scalar == "#" || scalar == "@" || scalar == "/" {
+                // ⚠️ `/` HAS A STRICTER BOUNDARY THAN `#` AND `@`, and it must keep it.
+                //
+                // Those two allow "start of line OR preceded by whitespace", which is right for
+                // them: `@file` and `#prompt` read as mentions mid-sentence. The same rule applied
+                // to `/` fires on ordinary prose and paths — `cd /usr`, `and/or`, `24/7`,
+                // `TODO: fix /etc/hosts` — popping a skill picker over someone's sentence.
+                //
+                // A slash command is the WHOLE message's intent, not a mention inside it, so it is
+                // only a trigger at offset 0 of the entire text. That is also what Claude Code does,
+                // and it makes the rule explainable in one line: it has to be the first thing typed.
                 let isStart = (i == 0)
                 var isPrecededByValid = isStart
-                
-                if !isStart {
+
+                if !isStart && scalar != "/" {
                     let prevChar = nsText.character(at: i - 1)
                     if let prevScalar = UnicodeScalar(prevChar),
                        (Character(prevScalar).isWhitespace || Character(prevScalar).isNewline) {
                         isPrecededByValid = true
                     }
                 }
-                
+
                 if isPrecededByValid {
-                    let type: TriggerType = (scalar == "#") ? .prompt : .file
+                    let type: TriggerType
+                    switch scalar {
+                    case "#": type = .prompt
+                    case "@": type = .file
+                    default:  type = .skill
+                    }
                     
                     // Range covers the symbol (#/@) up to the cursor
                     let matchLength = cursorLocation - i

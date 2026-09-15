@@ -25,6 +25,21 @@ struct LLMRetryStrategy: LLMRetryHandling {
     private let backoffStrategy: BackoffStrategy
     private let transport: TransportResiliencePolicy
 
+    /// The tool-call wire format this run's generator asks for, or nil on a transport-native flow.
+    ///
+    /// ⚠️ Exists ONLY to make the parse-failure corrective honest. It used to be absent, and the
+    /// single corrective string that resulted prescribed the `.nativeJSON` shape to every model:
+    /// "You MUST output a valid JSON response containing `reasoning` and `toolCalls`. No prose or
+    /// markdown fences (```json)." For 16 of the 18 dialects that is the wrong format, and for
+    /// `.deepseekV3JsonFence` and `.commandRAction` the fence prohibition is the exact inverse of
+    /// their requirement — both formats put the arguments INSIDE a ```json fence. A model that
+    /// complied with the alert produced output its own parser then rejected, so three compliant
+    /// retries spent the parse budget and aborted the run.
+    ///
+    /// Resolved once per run, because the dialect is: `AgentConnect.resolveCognitiveGenerator`
+    /// picks the generator at run start and it does not change across iterations.
+    private let dialect: ModelDialect?
+
     private(set) var consecutiveRetries = 0            // 429 throttles
     private(set) var consecutiveParseFailures = 0
     private(set) var consecutiveTransientFailures = 0  // 5xx + timeouts + connection drops
@@ -71,11 +86,13 @@ struct LLMRetryStrategy: LLMRetryHandling {
     init(
         maxConsecutiveParseFailures: Int = 3,
         backoffStrategy: BackoffStrategy = .exponential,
-        transport: TransportResiliencePolicy = ResolvedResiliencePolicy.resolved(for: .cloud).transport
+        transport: TransportResiliencePolicy = ResolvedResiliencePolicy.resolved(for: .cloud).transport,
+        dialect: ModelDialect? = nil
     ) {
         self.maxConsecutiveParseFailures = maxConsecutiveParseFailures
         self.backoffStrategy = backoffStrategy
         self.transport = transport
+        self.dialect = dialect
     }
 
     // MARK: - Error Handling
@@ -194,26 +211,60 @@ struct LLMRetryStrategy: LLMRetryHandling {
         let currentFailures = consecutiveParseFailures
         let maxFailures = maxConsecutiveParseFailures
         let errorType = String(describing: type(of: error))
+        // Named in the log because the corrective's CONTENT now depends on it: reading a field
+        // log, "which format were we telling the model to emit" is otherwise unanswerable, and
+        // `native` vs a dialect name is the difference between two entirely different alerts.
+        let dialectLabel = dialect?.rawValue ?? "native (no text dialect)"
 
         // ⚠️ The TYPE and the word UNCLASSIFIED are the point (WF-CC6). The previous line named
         // the event but not its consequence and never revealed that the error was unrecognised —
         // so an MLX model-slot race read in the logs exactly like a model emitting bad JSON, and
         // the misclassification was invisible from a field bundle. If this line names a type that
         // is plainly not a model-output fault, that type needs a typed arm above.
-        logger.error("Cognitive Generation Failed (\(currentFailures)/\(maxFailures)) — UNCLASSIFIED \(errorType): \(errorDesc). CONSEQUENCE: counted as a MODEL parse failure — a 'your last output failed validation' alert is injected into the model's context and telemetry records .parseExhausted. Both are wrong if the model's output was not the cause.")
+        logger.error("Cognitive Generation Failed (\(currentFailures)/\(maxFailures)) — UNCLASSIFIED \(errorType): \(errorDesc). dialect=\(dialectLabel). CONSEQUENCE: counted as a MODEL parse failure — a corrective alert naming that dialect's tool-call format is injected into the model's context and telemetry records .parseExhausted. Both are wrong if the model's output was not the cause.")
 
         if currentFailures >= maxFailures {
             logger.error("Maximum consecutive parse failures reached. Aborting execution.")
             return .abort(reason: "I'm having trouble processing this request right now — the model is returning responses I can't interpret. Please try rephrasing your request or switching to a different model.")
         }
 
-        let systemAlert = "Your last output failed validation (attempt \(currentFailures)/\(maxFailures)). You MUST output a valid JSON response containing `reasoning` and `toolCalls` (an array of tools). No prose or markdown fences (```json)."
-
         return .parseRetry(
-            systemAlert: systemAlert,
+            systemAlert: Self.correctiveAlert(
+                dialect: dialect,
+                attempt: currentFailures,
+                maxAttempts: maxFailures
+            ),
             attemptCount: currentFailures,
             maxAttempts: maxFailures
         )
+    }
+
+    /// Builds the corrective injected into the model's own context before the retry.
+    ///
+    /// ⚠️ `static` and pure so the text is testable without constructing a run, and so a
+    /// `mutating` caller cannot let `self` escape into it.
+    ///
+    /// Two shapes, because there are two honest things to say:
+    ///
+    ///   - **A known dialect** — name that dialect's format and nothing else. The one thing this
+    ///     must never do again is prescribe a format the run's own parser would reject; that is
+    ///     why the shape comes from `ModelDialect.formatReminder` (exhaustive, compiler-checked)
+    ///     rather than a literal here.
+    ///   - **No dialect (transport-native flow)** — say nothing about format at all. On
+    ///     Claude/OpenAI/Gemini/Ollama-native the tool call rides in the protocol, not in the
+    ///     text, so there is no format the model could emit differently; a format instruction
+    ///     would be noise the model cannot act on. Nil also covers "dialect unknown", where
+    ///     silence is the only honest option.
+    ///
+    /// Both name `final_answer`, matching `ParseFailureReason.modelCorrectiveAlert` — a model
+    /// that has finished but cannot express it in the expected shape needs the exit, not a
+    /// reformatting lesson.
+    static func correctiveAlert(dialect: ModelDialect?, attempt: Int, maxAttempts: Int) -> String {
+        let preamble = "Your last output could not be parsed (attempt \(attempt)/\(maxAttempts))."
+        guard let dialect else {
+            return "\(preamble) Emit your tool call using this provider's native tool-calling API, or call `final_answer` if you are finished."
+        }
+        return "\(preamble) This model's tool-call format is \(dialect.formatReminder). Emit exactly that shape, or call `final_answer` if you are finished."
     }
 
     mutating func resetParseFailures() {

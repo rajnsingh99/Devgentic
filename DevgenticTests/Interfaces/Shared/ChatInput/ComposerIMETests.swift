@@ -45,6 +45,9 @@ final class ComposerIMETests: XCTestCase {
             showFileSuggestions: .constant(false),
             fileSuggestionQuery: .constant(""),
             activeFileMentionTriggerRange: .constant(nil),
+            showSkillSuggestions: .constant(false),
+            skillSuggestionQuery: .constant(""),
+            activeSkillTriggerRange: .constant(nil),
             attributedTextInsertion: .constant(nil),
             onNavigateQueryHistory: onNavigateQueryHistory
         )

@@ -6,75 +6,25 @@
 //
 //  Created on 07/08/26.
 //
-//  Regression tests for the AgentSkillsSection cluster (register A11, A12).
+//  Regression test for register A12 — the `execute_shell` sourceId repair.
 //
-//  ⚠️ Both defects were PERMANENT from the user's side — a transient scan failure deleted skill
-//  folders that remounting did not bring back, and a mis-typed UUID literal produced an
-//  execute_shell entry no UI could remove. Neither was recoverable by hand, which is why the fixes
-//  include a data repair and not just a corrected write site.
+//  ⚠️ The defect was PERMANENT from the user's side: a mis-typed UUID literal produced an
+//  execute_shell entry no UI could remove. That is why the fix is a data repair in the profile-blob
+//  migration ladder and not just a corrected write site.
 //
 
 import XCTest
 @testable import devgentic
 
-// MARK: - A11: a failed rescan must not delete
-
-final class SkillFolderRescanRetentionTests: XCTestCase {
-
-    private func manifest(name: String, folderPath: String, enabled: Bool = true) -> SkillManifest {
-        SkillManifest(
-            id: UUID(),
-            name: name,
-            description: "d",
-            folderPath: folderPath,
-            resourceCount: 0,
-            hasScripts: false,
-            compatibility: nil,
-            isEnabled: enabled
-        )
-    }
-
-    /// The carry-forward rule: manifests are attributed to a root folder by their `folderPath`.
-    func testManifestsAreAttributedToTheirRootFolder() {
-        let all = [
-            manifest(name: "a", folderPath: "/Users/x/skills/alpha"),
-            manifest(name: "b", folderPath: "/Users/x/skills/beta"),
-            manifest(name: "c", folderPath: "/Users/x/other/gamma"),
-        ]
-        let carried = AgentSkillsSection.manifests(
-            in: all, under: URL(fileURLWithPath: "/Users/x/skills"))
-
-        XCTAssertEqual(carried.map(\.name), ["a", "b"])
-    }
-
-    /// ⚠️ Without the trailing separator, `/Users/x/skills` also claims `/Users/x/skills_backup`,
-    /// pulling an unrelated folder's skills into the one that failed to scan.
-    func testASiblingFolderWithASharedPrefixIsNotClaimed() {
-        let all = [
-            manifest(name: "mine", folderPath: "/Users/x/skills/alpha"),
-            manifest(name: "theirs", folderPath: "/Users/x/skills_backup/alpha"),
-        ]
-        let carried = AgentSkillsSection.manifests(
-            in: all, under: URL(fileURLWithPath: "/Users/x/skills"))
-
-        XCTAssertEqual(carried.map(\.name), ["mine"])
-    }
-
-    func testTrailingSlashesAndRelativeSegmentsAreNormalized() {
-        let all = [manifest(name: "a", folderPath: "/Users/x/skills/sub/../alpha")]
-
-        XCTAssertEqual(
-            AgentSkillsSection.manifests(in: all, under: URL(fileURLWithPath: "/Users/x/skills/")).count, 1)
-        XCTAssertEqual(
-            AgentSkillsSection.manifests(in: all, under: URL(fileURLWithPath: "/Users/x/skills")).count, 1)
-    }
-
-    func testAnUnrelatedFolderCarriesNothing() {
-        let all = [manifest(name: "a", folderPath: "/Users/x/skills/alpha")]
-        XCTAssertTrue(AgentSkillsSection.manifests(
-            in: all, under: URL(fileURLWithPath: "/Volumes/External/skills")).isEmpty)
-    }
-}
+// ⚠️ A11 (a failed rescan must not delete skill folders) WAS TESTED HERE AND IS GONE (V6).
+//
+// Not because it stopped mattering — it was a permanent, unrecoverable data loss — but because the
+// mechanism cannot occur any more. It required a database index over folders that a scan could
+// disagree with; Devgentic owns skill content now, nothing rescans, and there is no folder whose
+// absence could delete anything. `AgentSkillsSection.manifestsAttributed(...)`, the function those
+// tests pinned, went with the registry.
+//
+// The surviving half below is unrelated to skills storage and still live.
 
 // MARK: - A12: repairing execute_shell records already on disk
 

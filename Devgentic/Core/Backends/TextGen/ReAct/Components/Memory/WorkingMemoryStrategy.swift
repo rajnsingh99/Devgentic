@@ -197,6 +197,7 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
         // codebase_map) inflate the estimate to full-render size for every duplicate
         // and trigger false memory-pressure alerts while actual compile output stays small.
         var seenObsKeys: Set<String> = []
+        var alertMessages: [String] = []
 
         for entry in entries {
             switch entry {
@@ -228,9 +229,26 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
                 }
                 estimatedSize += separatorLen
             case .systemAlert(let msg):
-                estimatedSize += msg.count + 20 // "[SYSTEM ALERT] " prefix
-                estimatedSize += separatorLen
+                // ⚠️ NOT sized here. Collected and sized after the loop through the same
+                // `renderableAlerts` the compile path uses — see below.
+                alertMessages.append(msg)
             }
+        }
+
+        // ⚠️ Alerts are sized from what will actually RENDER, not from what was recorded.
+        // This arm previously added every stored alert's bytes while `compileForPrompt` emitted at
+        // most `maxSystemAlerts` of them — so a run that recorded 11 alerts charged the budget for
+        // 11 and rendered 3. That phantom weight is what drove a real 2026-09-13 run to report
+        // "176% of scratchpad budget used": the estimate crossed 1.0, the executor's pressure
+        // branch recorded ANOTHER alert, and that alert's bytes pushed the estimate higher still.
+        // A self-reinforcing loop, powered entirely by lines the model never saw.
+        //
+        // This is the same obligation the G10 comment above states for observations, on the axis it
+        // was never applied to. Sharing `renderableAlerts` with the compile path is what keeps the
+        // two from drifting again.
+        for rendered in Self.renderableAlerts(alertMessages, cap: config.maxSystemAlerts) {
+            estimatedSize += rendered.count + 20 // "[SYSTEM ALERT] " prefix
+            estimatedSize += separatorLen
         }
 
         return Double(estimatedSize) / Double(config.totalBudgetChars)
@@ -302,6 +320,57 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
         case reasoning(ReasoningRecord)
     }
 
+    /// The alert lines the prompt will actually carry: byte-identical alerts collapsed to one,
+    /// then capped to the most recent `cap`.
+    ///
+    /// ⚠️ ONE definition, called by BOTH `compileForPrompt` and `budgetUtilization`. That is not
+    /// tidiness — `:195-198` records that G10's observation dedup had to be mirrored into the
+    /// estimator or it "trigger[ed] false memory-pressure alerts while actual compile output stays
+    /// small". The alert arm had never mirrored even the existing cap, so a 14-iteration run
+    /// counted ~11 alerts of phantom size against a budget that renders at most 3. Sharing the
+    /// function makes that class of drift unrepresentable rather than merely discouraged.
+    ///
+    /// ⚠️ **Keep the LAST occurrence, and dedupe BEFORE the cap.** Both halves are load-bearing:
+    ///   • Last, because alerts render at the very end of the prompt in insertion order, so a
+    ///     re-raised alert must reclaim its recency slot rather than stay pinned behind staler
+    ///     ones. The forward-iterating `Set` idiom keeps the FIRST occurrence, looks identical,
+    ///     and silently drops the newest alert on a `[X, B, C, D, X]` shape.
+    ///   • Before, because capping first spends slots on repeats: `[A, P, P, P, M]` with cap 3
+    ///     yields `[P, M]` (2 distinct, `A` lost) if capped first, and `[A, P, M]` (3 distinct)
+    ///     if deduped first. Same slots, never fewer distinct alerts.
+    ///
+    /// ⚠️ **The repeat COUNT is preserved, never dropped.** Both other collapses in this file keep
+    /// their evidence — `failed \(count)x` at :400 and `IDENTICAL TO Step \(firstSeen)` at :404 —
+    /// and an alert is the one channel carrying escalation ("this has now failed three times").
+    /// Rendering `(repeated Nx)` makes the collapse losslessly compressive: it carries exactly what
+    /// the duplicate lines carried, in fewer bytes. Without it this would be the first lossy
+    /// collapse in the file, and it would flatten two real signals — the skip/fallback alerts,
+    /// where the repeat IS the message, and denial alerts, which name the tool but not the
+    /// arguments (`ReActAgentExecutor.swift:1040`) and so are byte-identical across genuinely
+    /// different user decisions.
+    ///
+    /// ⚠️ Exact byte match only — no trimming, no casefolding. `unknownToolName` echoes the model's
+    /// attempted spelling, so normalising would merge two different hallucinated names; matching a
+    /// payload by shape rather than identity is this codebase's recidivist defect.
+    static func renderableAlerts(_ all: [String], cap: Int) -> [String] {
+        guard cap > 0, !all.isEmpty else { return [] }
+
+        var occurrences: [String: Int] = [:]
+        for alert in all { occurrences[alert, default: 0] += 1 }
+
+        // Walk backwards so the FIRST thing seen is the LAST occurrence.
+        var seen: Set<String> = []
+        var newestFirst: [String] = []
+        for alert in all.reversed() where seen.insert(alert).inserted {
+            newestFirst.append(alert)
+        }
+
+        return newestFirst.prefix(cap).reversed().map { alert in
+            let count = occurrences[alert] ?? 1
+            return count > 1 ? "\(alert) (repeated \(count)x)" : alert
+        }
+    }
+
     func compileForPrompt() -> String {
         guard !entries.isEmpty else { return "No actions taken yet." }
 
@@ -322,8 +391,10 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
             }
         }
 
-        // Step 2: Cap system alerts to most recent N.
-        let recentAlerts = Array(allAlerts.suffix(config.maxSystemAlerts))
+        // Step 2: Collapse byte-identical alerts (keeping the most recent occurrence and its
+        // repeat count), then cap to the most recent N. See `renderableAlerts` for why the order
+        // of those two operations is load-bearing.
+        let recentAlerts = Self.renderableAlerts(allAlerts, cap: config.maxSystemAlerts)
 
         // Step 3: Partition step entries into "old" (compressed) and "recent" (full fidelity).
         // Reasoning and observations share the window — a step's reasoning + its observations
@@ -485,18 +556,31 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
         }
 
         // Step 6: Assemble final output.
-        // After eviction, the separator between old and recent may need to be re-evaluated.
-        // If all old lines were evicted, drop the "--- Recent observations ---" separator
-        // since there's no compressed section to separate from.
+        //
+        // ⚠️ NO separator re-evaluation here, and that is load-bearing rather than an omission.
+        // This used to branch on `allParts.isEmpty` and strip "--- Recent observations ---",
+        // under the rationale "all old lines were evicted, so there's no compressed section to
+        // separate from". Both halves of that were wrong:
+        //
+        //   1. The separator can never reach that branch. It is appended to `protectedLines` only
+        //      when `!oldEntries.isEmpty && !recentEntries.isEmpty` (Step 3), and a non-empty
+        //      `oldEntries` always yields at least one line in `oldLines` — so whenever the
+        //      separator exists, `allParts` is non-empty and the branch is not taken. The branch
+        //      DID run often (any run shorter than the full-fidelity window, where no separator was
+        //      ever added), so the filter executed and removed nothing, every time.
+        //   2. Even after a total eviction the separator is still CORRECT, because eviction does
+        //      not empty the compressed section — it replaces it with the
+        //      `[SYSTEM: N earlier observation(s) evicted…]` marker, which `oldLines.insert(at: 0)`
+        //      puts exactly where the old lines were. The separator then separates that marker from
+        //      the recent block, which is what a reader needs.
+        //
+        // Verified before removal: an `assert` placed inside the branch, asserting the filter
+        // removed nothing, survived 1,547 Backends + Integration tests without tripping.
+        // `testSeparator_AbsentWhenAllRecent` covers the short-run path this branch used to take,
+        // and `testEviction_MarkerReplacesTheOldBlockAndRecentSurvives` covers the total-eviction
+        // path it never took.
         var allParts: [String] = oldLines.map(\.line)
-
-        if allParts.isEmpty {
-            // All old lines evicted — skip the separator if it was the first protected line.
-            let filteredProtected = protectedLines.filter { $0 != "--- Recent observations ---" }
-            allParts.append(contentsOf: filteredProtected)
-        } else {
-            allParts.append(contentsOf: protectedLines)
-        }
+        allParts.append(contentsOf: protectedLines)
 
         return allParts.joined(separator: Self.lineSeparator)
     }

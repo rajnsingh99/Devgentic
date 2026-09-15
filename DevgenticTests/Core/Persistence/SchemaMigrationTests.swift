@@ -70,6 +70,17 @@ final class SchemaMigrationTests: XCTestCase {
             "DownloadRecord",
             "WorkflowLayoutSD",
             "WorkflowRunRecordSD",
+            // The skill LIBRARY, added in V6 (2026-09-14). Devgentic owns skill content: a skill
+            // is an opaque id, a version is an immutable complete snapshot, a file is bytes.
+            // Deliberately NOT related to BackendProfile — a profile references a skill BY VALUE,
+            // one direction only, which is what keeps V1/V2/V3 free of frozen copies.
+            "SkillSD",
+            "SkillVersionSD",
+            "SkillFileSD",
+            // SkillSourceSD / SkillManifestSD retired in V6 (2026-09-14). They were an INDEX over
+            // folders on disk, which meant two sources of truth and the entire reconciliation
+            // apparatus that came with it. Their live classes REMAIN in the codebase because V5
+            // still lists them — deleting those classes would leave V5 undefinable.
             // CodeViewerSessionSD retired 2026-08-04 — see the retirement test below.
         ]
 
@@ -83,7 +94,7 @@ final class SchemaMigrationTests: XCTestCase {
             Removed: \(expected.subtracting(actual).sorted())
             """
         )
-        XCTAssertEqual(DevgenticSchema.models.count, 12, "Entity count drifted from the documented 12.")
+        XCTAssertEqual(DevgenticSchema.models.count, 15, "Entity count drifted from the documented 15 (12 through V3, +3 for the V6 skill library; V4/V5's 2 registry entities were retired in V6).")
     }
 
     /// The `Schema` the app builds must equal the one built from the extracted model list.
@@ -92,7 +103,7 @@ final class SchemaMigrationTests: XCTestCase {
         // defaults to (1,0,0), so the comparison must supply the version explicitly.
         XCTAssertEqual(DevgenticSchema.schema, Schema(DevgenticSchema.models, version: DevgenticSchema.currentVersion.versionIdentifier))
         XCTAssertEqual(DevgenticSchema.schema.version, DevgenticSchema.currentVersion.versionIdentifier,
-                       "Schema version drifted from the declared current version (V2 as of 2026-08-22).")
+                       "Schema version drifted from the declared current version (V5 as of 2026-09-14).")
     }
 
     // MARK: - G67: the OS-side collection-storage regression
@@ -270,6 +281,13 @@ final class SchemaMigrationTests: XCTestCase {
         )
     }
 
+    // ⚠️⚠️ `testV4NestedModelsRenderExactlyTheV4Baseline` WAS DELETED WITH SCHEMA V4 (2026-09-15).
+    // It pinned V4's frozen nested copies against a recorded baseline — a guard that mattered only
+    // while V4 existed. V4 and V5 never shipped (the last release is at V3) and were removed
+    // outright rather than frozen forever, taking the copies, the baselines and this guard with
+    // them. The V1 twin below STAYS: V1 is a version real stores were written at.
+
+
     func testVersionedSchemaIsHashIdenticalToUnversioned() {
         let unversioned = Schema(DevgenticSchemaV1.models)
         let versioned = Schema(versionedSchema: DevgenticSchemaV1.self)
@@ -430,7 +448,7 @@ final class SchemaMigrationTests: XCTestCase {
         let current = DevgenticSchema.structuralDescriptor(for: DevgenticSchema.schema)
 
         if ProcessInfo.processInfo.environment["DEVGENTIC_WRITE_SCHEMA_BASELINE"] != nil {
-            // Regeneration escape hatch. Prints the descriptor for pasting into SchemaBaselineV3.swift.
+            // Regeneration escape hatch. Prints the descriptor for pasting into SchemaBaselineV6.swift.
             print("=== BEGIN SCHEMA DESCRIPTOR ===\n\(current)\n=== END SCHEMA DESCRIPTOR ===")
             // ⚠️ SKIP, not `return`. A bare return reports this test as PASSED — so the run that
             // regenerates the baseline also announces that the schema matches it, which is the one
@@ -439,23 +457,23 @@ final class SchemaMigrationTests: XCTestCase {
             // `XCTSkip` makes the suite say "not checked" instead of "checked and fine".
             throw XCTSkip(
                 "Baseline regeneration mode — the drift check did NOT run. Paste the descriptor above "
-                + "into SchemaBaselineV3.swift, then re-run WITHOUT DEVGENTIC_WRITE_SCHEMA_BASELINE "
+                + "into SchemaBaselineV6.swift, then re-run WITHOUT TEST_RUNNER_DEVGENTIC_WRITE_SCHEMA_BASELINE "
                 + "to actually verify it."
             )
         }
 
-        guard !SchemaBaselineV3.descriptor.isEmpty else {
+        guard !SchemaBaselineV6.descriptor.isEmpty else {
             return XCTFail(
-                "SchemaBaselineV3.descriptor is empty. Regenerate it with:\n"
-                + "  DEVGENTIC_WRITE_SCHEMA_BASELINE=1 xcodebuild test-without-building "
+                "SchemaBaselineV6.descriptor is empty. Regenerate it with:\n"
+                + "  TEST_RUNNER_DEVGENTIC_WRITE_SCHEMA_BASELINE=1 xcodebuild test-without-building "
                 + "-only-testing:devgenticTests/SchemaMigrationTests/testSchemaStructureMatchesCheckedInBaseline"
             )
         }
 
-        guard current != SchemaBaselineV3.descriptor else { return }
+        guard current != SchemaBaselineV6.descriptor else { return }
 
         // Emit a line-level diff — a 13-entity descriptor is far too long to eyeball whole.
-        let baselineLines = SchemaBaselineV3.descriptor.components(separatedBy: "\n")
+        let baselineLines = SchemaBaselineV6.descriptor.components(separatedBy: "\n")
         let currentLines = current.components(separatedBy: "\n")
         let removed = Set(baselineLines).subtracting(currentLines).sorted()
         let added = Set(currentLines).subtracting(baselineLines).sorted()
@@ -854,6 +872,9 @@ final class SchemaMigrationTests: XCTestCase {
         if try context.fetch(FetchDescriptor<MCPToolDefinitionModel>()).isEmpty { empty.append("MCPToolDefinitionModel") }
         if try context.fetch(FetchDescriptor<WorkflowLayoutSD>()).isEmpty { empty.append("WorkflowLayoutSD") }
         if try context.fetch(FetchDescriptor<WorkflowRunRecordSD>()).isEmpty { empty.append("WorkflowRunRecordSD") }
+        if try context.fetch(FetchDescriptor<SkillSD>()).isEmpty { empty.append("SkillSD") }
+        if try context.fetch(FetchDescriptor<SkillVersionSD>()).isEmpty { empty.append("SkillVersionSD") }
+        if try context.fetch(FetchDescriptor<SkillFileSD>()).isEmpty { empty.append("SkillFileSD") }
 
         XCTAssertTrue(empty.isEmpty, """
             The all-entities fixture has NO ROWS for: \(empty.joined(separator: ", ")).
@@ -921,6 +942,33 @@ final class SchemaMigrationTests: XCTestCase {
                 nodeResults: [], finalOutput: "done", variables: [:], status: .completed,
                 duration: 1, error: nil
             )))
+
+            // V6 skill library. Inserted as the FULL CHAIN skill -> version -> file, not three
+            // orphans: both cascade relationships are part of the shape a migration has to carry,
+            // and a fixture with no edges would open cleanly even if they were broken.
+            //
+            // The file's bytes are deliberately NON-UTF-8. `content` is the schema's second
+            // `@Attribute(.externalStorage)` field, and binary is the case the V4/V5 loader silently
+            // dropped — a fixture holding only text would not exercise what changed.
+            let fixtureFile = SkillFileSD(
+                relativePath: "reference/fixture.bin",
+                content: Data([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]),
+                isExecutable: false
+            )
+            let fixtureVersion = SkillVersionSD(
+                note: "Fixture seed.",
+                skillDescription: "A skill that exists only to give these entities rows.",
+                allowedTools: ["Read", "Bash(git status:*)"],
+                body: "# fixture-skill\nDo the fixture thing.",
+                files: [fixtureFile]
+            )
+            let fixtureSkill = SkillSD(
+                name: "fixture-skill",
+                origin: .imported,
+                latestVersionID: fixtureVersion.id,
+                versions: [fixtureVersion]
+            )
+            context.insert(fixtureSkill)
 
             try context.save()
         }

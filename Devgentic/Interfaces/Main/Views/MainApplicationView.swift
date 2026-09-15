@@ -355,6 +355,8 @@ struct MainApplicationView: View {
             SettingsDetailContainerView(category: category)
         case .toolLibrary(let profileID):
             ToolLibraryContainerView(routeProfileID: profileID)
+        case .skillLibrary(let profileID, let openSkillID):
+            SkillLibraryContainerView(routeProfileID: profileID, openSkillID: openSkillID)
         case .addMCPServer:
             AddMCPServerContainerView(mode: .add)
         case .editMCPServer(let sourceID):

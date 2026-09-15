@@ -616,7 +616,18 @@ final class LLMRetryStrategyTests: XCTestCase {
         }
         XCTAssertEqual(attempt, 1)
         XCTAssertEqual(strategy.consecutiveParseFailures, 1)
-        XCTAssertTrue(alert.contains("reasoning"), "the corrective alert is still correct HERE: \(alert)")
+
+        // ⚠️ This line used to read `XCTAssertTrue(alert.contains("reasoning"), "the corrective
+        // alert is still correct HERE")`. It was not correct here — it was asserting the defect.
+        // This strategy was built with no dialect, which is the "unknown / transport-native" case,
+        // and the alert it produced prescribed the `.nativeJSON` shape (`reasoning` + `toolCalls`)
+        // to whatever model happened to be running. The assertion pinned that prescription in
+        // place, so the fix had to delete it. What the negative control is FOR — an error with no
+        // typed arm still charges the parse budget — is asserted above and is untouched.
+        XCTAssertFalse(alert.contains("toolCalls"),
+                       "with no dialect the corrective must not prescribe one dialect's shape: \(alert)")
+        XCTAssertTrue(alert.contains("final_answer"),
+                      "the corrective must always leave the model an exit: \(alert)")
     }
 
     // MARK: - Empty response: NOT a parse failure

@@ -164,6 +164,13 @@ final class WindowedLinearMemoryTests: XCTestCase {
 
     // MARK: - Old/Recent Split Tests
 
+    /// ⚠️ REWRITTEN 2026-09-13. This asserted `compiled.contains("(id: call_4)")` and had been RED
+    /// against committed code: the prompt render deliberately stopped emitting `(id: <UUID>)`
+    /// (WorkingMemoryStrategy.swift:423 — small-capacity Q4 3B/8B models parrot the UUID into
+    /// subsequent tool-call content, polluting `write_file` args; the id stays in memory for log
+    /// correlation only). The test's NAME is about full fidelity, so it now asserts full fidelity:
+    /// a recent entry renders its result verbatim on its own line, which is the property the window
+    /// exists to provide.
     func testFullFidelityWindow_RecentEntriesRenderedFully() {
         var memory = makeMemory(fullFidelityWindow: 2)
         // Record 5 observations — last 2 should be full fidelity
@@ -172,9 +179,16 @@ final class WindowedLinearMemoryTests: XCTestCase {
         }
 
         let compiled = memory.compileForPrompt()
-        // Recent entries should have full format with tool call ID
-        XCTAssertTrue(compiled.contains("(id: call_4)"), "Step 4 should be in recent window with full ID")
-        XCTAssertTrue(compiled.contains("(id: call_5)"), "Step 5 should be in recent window with full ID")
+
+        // Recent format is "- [Step N] <signature>:\n<full result>" — the colon-newline is what
+        // distinguishes it from the compressed "→" one-liner used for old entries.
+        XCTAssertTrue(compiled.contains("- [Step 4] tool_4:\nResult for step 4"),
+                      "Step 4 must render at full fidelity. Got:\n\(compiled)")
+        XCTAssertTrue(compiled.contains("- [Step 5] tool_5:\nResult for step 5"),
+                      "Step 5 must render at full fidelity. Got:\n\(compiled)")
+        // …and the entries outside the window must NOT.
+        XCTAssertFalse(compiled.contains("- [Step 3] tool_3:\n"),
+                       "Step 3 is outside a 2-entry window and must be compressed")
     }
 
     func testOldEntries_CompressedToOneLiner() {
@@ -186,7 +200,29 @@ final class WindowedLinearMemoryTests: XCTestCase {
         let compiled = memory.compileForPrompt()
         // Old entries should use compressed format with → arrow
         XCTAssertTrue(compiled.contains("[Step 1] tool_1 \u{2192}"), "Old entries should be compressed one-liners")
-        XCTAssertFalse(compiled.contains("(id: call_1)"), "Old entries should NOT have full tool call ID")
+        // ⚠️ The second assertion here used to be `XCTAssertFalse(compiled.contains("(id: call_1)"))`,
+        // which became VACUOUS when the render stopped emitting ids at all — it could no longer fail
+        // for any input. Replaced with the distinction that is actually load-bearing: an old entry
+        // must not use the recent entries' colon-newline full-fidelity form.
+        XCTAssertFalse(compiled.contains("- [Step 1] tool_1:\n"),
+                       "an old entry must be compressed, not rendered at full fidelity")
+    }
+
+    /// ⚠️ NEW. Pins the decision that broke three tests in this file, and which nothing asserted:
+    /// the compiled PROMPT never carries a `toolCallId`. The reason is behavioural, not cosmetic —
+    /// small-capacity models copy the UUID into later tool arguments — so a well-meaning "restore
+    /// the id for traceability" edit needs to fail here rather than in the field.
+    func testToolCallIdsAreNeverSurfacedToTheModel() {
+        var memory = makeMemory(fullFidelityWindow: 2)
+        for i in 1...5 {
+            memory.recordObservation(stepId: i, toolCallId: "call_UUID_\(i)", toolName: "tool_\(i)", params: "", result: "Result \(i)", artifacts: [])
+        }
+
+        let compiled = memory.compileForPrompt()
+        XCTAssertFalse(compiled.contains("call_UUID_"),
+                       "tool call ids must stay in memory for log correlation and never reach the "
+                       + "prompt — models parrot them into tool arguments. Got:\n\(compiled)")
+        XCTAssertFalse(compiled.contains("(id:"), "no id form may reach the prompt")
     }
 
     func testSeparator_PresentWhenBothOldAndRecentExist() {
@@ -222,6 +258,13 @@ final class WindowedLinearMemoryTests: XCTestCase {
         XCTAssertTrue(compiled.contains("evicted"), "Eviction marker should be present")
     }
 
+    /// ⚠️ REWRITTEN 2026-09-13. Asserted `contains("(id: c7)")`, a render detail the prompt
+    /// deliberately no longer emits, so it had been RED while the rule it is named for went
+    /// unprotected. The rule itself is structural: eviction drains `oldLines` only, and the
+    /// full-fidelity window lives in `protectedLines`, which the eviction loop never touches
+    /// (WorkingMemoryStrategy.swift:472-485). Asserting the RESULT CONTENT is what catches a
+    /// regression — if the most recent tool results were ever evicted the agent would "forget"
+    /// what it just learned, and that is invisible in an id check.
     func testEviction_NeverEvictsRecentObservations() {
         var memory = makeMemory(totalBudget: 200, perEntryCap: 80, fullFidelityWindow: 2)
         for i in 1...8 {
@@ -229,8 +272,13 @@ final class WindowedLinearMemoryTests: XCTestCase {
         }
 
         let compiled = memory.compileForPrompt()
-        // Last 2 (fullFidelityWindow) should always survive
-        XCTAssertTrue(compiled.contains("(id: c7)") || compiled.contains("(id: c8)"), "Recent observations should survive eviction")
+
+        XCTAssertTrue(compiled.contains("evicted"), "the fixture must actually trigger eviction")
+        // Both window entries survive, with their results intact and at full fidelity.
+        XCTAssertTrue(compiled.contains("- [Step 7] t7:\nR7 data"),
+                      "the second-newest observation was lost to eviction. Got:\n\(compiled)")
+        XCTAssertTrue(compiled.contains("- [Step 8] t8:\nR8 data"),
+                      "the newest observation was lost to eviction. Got:\n\(compiled)")
     }
 
     func testEviction_MarkerIncludesCount() {
@@ -244,18 +292,56 @@ final class WindowedLinearMemoryTests: XCTestCase {
         XCTAssertTrue(compiled.contains("earlier observation(s) evicted for memory efficiency"))
     }
 
-    func testEviction_SeparatorRemovedWhenAllOldEvicted() {
-        // Budget so tiny that ALL old entries are evicted, leaving only recent + eviction marker
+    /// ⚠️ RENAMED AND REWRITTEN 2026-09-13. It was called
+    /// `testEviction_SeparatorRemovedWhenAllOldEvicted` and asserted `contains("(id: c5)")` — so it
+    /// was red for a render detail, AND its name described behaviour that cannot occur.
+    ///
+    /// ⚠️ The separator is NOT removed when every old entry is evicted, and verifying that was the
+    /// point of rewriting rather than patching. `compileForPrompt` drops the separator only when
+    /// `allParts.isEmpty` (WorkingMemoryStrategy.swift:494-498), but the eviction branch INSERTS the
+    /// `[SYSTEM: N earlier observation(s) evicted…]` marker into `oldLines` before that check, so
+    /// after any eviction `allParts` holds at least the marker and the branch is unreachable.
+    /// Confirmed by rendering the old test's exact fixture. That is also the correct OUTPUT — the
+    /// marker occupies the compressed section, so a separator between it and the recent block is
+    /// meaningful — it is only the old test's name that was wrong.
+    func testEviction_MarkerReplacesTheOldBlockAndRecentSurvives() {
+        // Budget so tiny that ALL old entries are evicted, leaving marker + recent.
         var memory = makeMemory(totalBudget: 100, perEntryCap: 50, fullFidelityWindow: 1)
+        let payload = String(repeating: "y", count: 30)
         for i in 1...5 {
-            memory.recordObservation(stepId: i, toolCallId: "c\(i)", toolName: "t\(i)", params: "", result: String(repeating: "y", count: 30), artifacts: [])
+            memory.recordObservation(stepId: i, toolCallId: "c\(i)", toolName: "t\(i)", params: "", result: payload, artifacts: [])
         }
 
         let compiled = memory.compileForPrompt()
-        // Verify the eviction marker is present (eviction definitely happened)
-        XCTAssertTrue(compiled.contains("evicted"), "Eviction should have triggered with tiny budget")
-        // The most recent observation (fullFidelityWindow=1) should always survive
-        XCTAssertTrue(compiled.contains("(id: c5)"), "Most recent observation must survive eviction")
+
+        XCTAssertTrue(compiled.contains("earlier observation(s) evicted for memory efficiency"),
+                      "eviction must be announced, not silent. Got:\n\(compiled)")
+        // Every old entry is gone — only the marker stands in for them.
+        XCTAssertFalse(compiled.contains("- [Step 1] t1"), "step 1 should have been evicted")
+        XCTAssertFalse(compiled.contains("- [Step 4] t4"), "step 4 should have been evicted")
+        // The window entry survives with its content.
+        XCTAssertTrue(compiled.contains("- [Step 5] t5:\n\(payload)"),
+                      "the newest observation must survive any budget pressure. Got:\n\(compiled)")
+        // The separator still separates the marker from the recent block.
+        XCTAssertTrue(compiled.contains("--- Recent observations ---"),
+                      "the marker occupies the compressed section, so the separator is still correct")
+    }
+
+    /// ⚠️ NEW. System alerts share `protectedLines` with the full-fidelity window, so they are
+    /// un-evictable by the same mechanism — but nothing asserted it. An alert silently dropped under
+    /// budget pressure is the corrective-alert path failing exactly when the run is in trouble.
+    func testEviction_NeverEvictsSystemAlerts() {
+        var memory = makeMemory(totalBudget: 100, perEntryCap: 50, fullFidelityWindow: 1)
+        for i in 1...5 {
+            memory.recordObservation(stepId: i, toolCallId: "c\(i)", toolName: "t\(i)", params: "", result: String(repeating: "z", count: 30), artifacts: [])
+        }
+        memory.recordSystemAlert(msg: "CANARY_ALERT_TEXT")
+
+        let compiled = memory.compileForPrompt()
+        XCTAssertTrue(compiled.contains("evicted"), "the fixture must actually trigger eviction")
+        XCTAssertTrue(compiled.contains("CANARY_ALERT_TEXT"),
+                      "a system alert must survive eviction — it is how the model is told to "
+                      + "course-correct. Got:\n\(compiled)")
     }
 
     // MARK: - System Alert Cap Tests

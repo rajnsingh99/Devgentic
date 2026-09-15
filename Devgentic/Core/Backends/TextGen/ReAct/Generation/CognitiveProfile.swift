@@ -157,6 +157,103 @@ enum ModelDialect: String, Codable, CaseIterable, Identifiable, Hashable {
     var id: String { rawValue }
 }
 
+// MARK: - Corrective Format Reminder
+
+extension ModelDialect {
+
+    /// One sentence naming THIS dialect's tool-call wire shape, for a corrective alert injected
+    /// into the model's own context after a parse failure.
+    ///
+    /// ⚠️ WHY THIS EXISTS. `LLMRetryStrategy` had exactly one corrective string, and the file had
+    /// no reference to `dialect` anywhere in it:
+    ///
+    ///   "You MUST output a valid JSON response containing `reasoning` and `toolCalls`
+    ///    (an array of tools). No prose or markdown fences (```json)."
+    ///
+    /// That is the `.nativeJSON` / `.heuristicJson` shape. For the other 16 dialects it instructed
+    /// the model to abandon the format it was trained on — and that its OWN parser is the only one
+    /// that accepts — for one that parser rejects. A model that COMPLIED failed again on the next
+    /// pass, so three compliant retries aborted the run on the parse cap. The corrective was
+    /// actively steering the model away from the only output we could read.
+    ///
+    /// ⚠️ These are SHAPE statements, not instructions. The forward-facing twin is
+    /// `NativeToolTemplateGenerator`'s per-dialect `triggerSuffix` ("Respond with …"), appended to
+    /// every request; this one is the after-the-fact reminder ("this model's format is …"). They
+    /// describe the same wire format from opposite ends and MUST move together — if a dialect's
+    /// shape is corrected in one, correct it in the other. They are deliberately not merged:
+    /// `triggerSuffix` is tuned prompt reinforcement carried on the generator instance and covers
+    /// only the 14 chat-template dialects, while this property is intrinsic to the format and must
+    /// answer for all of them.
+    ///
+    /// ⚠️ Exhaustive switch, no `default:` — the same contract `ParserFactory.createParser(for:)`
+    /// holds. A new dialect must BREAK THIS BUILD rather than silently inherit another family's
+    /// shape, which is the defect this property exists to remove.
+    var formatReminder: String {
+        switch self {
+        case .nativeJSON, .heuristicJson:
+            return #"a single JSON object: {"reasoning": "...", "toolCalls": [{"name": "...", "arguments": {...}}]} — no prose, no markdown fences"#
+        case .mistralXML:
+            return #"<tool_call>{"name": "...", "arguments": {...}}</tool_call>"#
+        case .reactMarkdown:
+            return #"Thought: ... then Action: <tool_name> and Action Input: {"key": "value"} on their own lines"#
+        case .qwenHermesToolCall, .granite4ToolCall:
+            return #"one or more <tool_call>{"name": "...", "arguments": {...}}</tool_call> blocks, "name" before "arguments""#
+        case .llama3JsonSingle:
+            return #"a SINGLE JSON object {"name": "...", "parameters": {...}} — the key is "parameters", not "arguments", and only one call per response"#
+        case .mistralV3Array:
+            return #"[TOOL_CALLS] followed by a JSON array: [{"name": "...", "arguments": {...}}]"#
+        case .mistralV11Flat:
+            return #"[TOOL_CALLS]<tool_name>[ARGS]{"key": "value"} — the name sits between the two markers, not inside JSON"#
+        case .phiFunctoolsBracket:
+            return #"functools[{"name": "...", "arguments": {...}}]"#
+        case .deepseekV3JsonFence:
+            return "<｜tool▁call▁begin｜>function<｜tool▁sep｜>tool_name then the arguments in a ```json fence, closed by <｜tool▁call▁end｜>"
+        case .deepseekV31Flat:
+            return #"<｜tool▁call▁begin｜>tool_name<｜tool▁sep｜>{"key": "value"}<｜tool▁call▁end｜> — bare JSON, no code fence"#
+        case .deepseekV32Dsml:
+            return #"<｜DSML｜function_calls><｜DSML｜invoke name="tool_name"><｜DSML｜parameter name="key" string="true">value</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜function_calls>"#
+        case .pythonicBracketList:
+            return #"a Python list of calls: [tool_name(key="value", count=42)] — Python literal syntax (True/False/None), not JSON"#
+        case .graniteLegacyArray:
+            return #"<tool_call>[{"name": "...", "arguments": {...}}]</tool_call> — a JSON ARRAY inside the wrapper"#
+        case .commandRAction:
+            return #"Action: ```json followed by [{"tool_name": "...", "parameters": {...}}] — the keys are "tool_name" and "parameters""#
+        case .commandR7BAction:
+            return #"<|START_ACTION|>[{"tool_call_id": "0", "tool_name": "...", "parameters": {...}}]<|END_ACTION|>"#
+        case .qwen3CoderDeepXml:
+            return "<tool_call><function=tool_name><parameter=key>value</parameter></function></tool_call>"
+        }
+    }
+
+    /// Whether this dialect carries its tool ARGUMENTS as a JSON payload.
+    ///
+    /// ⚠️ Exists for exactly one caller: `ParseFailureReason.modelCorrectiveAlert`'s
+    /// `.malformedJSON` arm, which offers JSON syntax advice ("escape newlines with \\n, use
+    /// double quotes, strict JSON"). That advice is correct and genuinely useful for the fifteen
+    /// dialects whose arguments ARE JSON — malformed argument JSON is the single most common
+    /// parse failure — and simply wrong for the three where they are not: a `.pythonicBracketList`
+    /// model is supposed to emit `True`/`False`/`None` and may quote with `'`, and the two
+    /// XML-parameter dialects carry argument values as element text with no JSON syntax at all.
+    ///
+    /// ⚠️ A separate exhaustive switch rather than a substring test on `formatReminder`, because
+    /// deriving a structural fact by matching English out of a display string is this codebase's
+    /// recidivist defect. A new dialect must answer this question rather than inherit an answer.
+    ///
+    /// Note the wrapper's own syntax is irrelevant here — `.mistralV11Flat` puts a bare name
+    /// between markers but its `[ARGS]` payload is JSON, so it is `true`.
+    var argumentsAreJSON: Bool {
+        switch self {
+        case .nativeJSON, .heuristicJson, .mistralXML, .reactMarkdown, .qwenHermesToolCall,
+             .llama3JsonSingle, .mistralV3Array, .mistralV11Flat, .phiFunctoolsBracket,
+             .deepseekV3JsonFence, .deepseekV31Flat, .graniteLegacyArray, .granite4ToolCall,
+             .commandRAction, .commandR7BAction:
+            return true
+        case .pythonicBracketList, .qwen3CoderDeepXml, .deepseekV32Dsml:
+            return false
+        }
+    }
+}
+
 // MARK: - Chat Template Family
 
 /// Identifies the chat template format a model was trained on.

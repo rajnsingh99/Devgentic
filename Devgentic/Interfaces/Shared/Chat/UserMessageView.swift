@@ -253,59 +253,6 @@ struct UserMessageView: View {
 
 // MARK: - Shape & Style
 
-struct UserBubbleShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        let cornerRadius: CGFloat = 16
-        var path = Path()
-
-        // Start just after the top-left corner radius
-        path.move(to: CGPoint(x: rect.minX + cornerRadius, y: rect.minY))
-        
-        // Top-right corner (Slightly sharper to indicate direction, but rounded for modern look)
-        path.addLine(to: CGPoint(x: rect.maxX - 4, y: rect.minY))
-        path.addArc(
-            center: CGPoint(x: rect.maxX - 4, y: rect.minY + 4),
-            radius: 4,
-            startAngle: Angle(degrees: -90),
-            endAngle: Angle(degrees: 0),
-            clockwise: false
-        )
-
-        // Bottom-right corner
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - cornerRadius))
-        path.addArc(
-            center: CGPoint(x: rect.maxX - cornerRadius, y: rect.maxY - cornerRadius),
-            radius: cornerRadius,
-            startAngle: Angle(degrees: 0),
-            endAngle: Angle(degrees: 90),
-            clockwise: false
-        )
-
-        // Bottom-left corner
-        path.addLine(to: CGPoint(x: rect.minX + cornerRadius, y: rect.maxY))
-        path.addArc(
-            center: CGPoint(x: rect.minX + cornerRadius, y: rect.maxY - cornerRadius),
-            radius: cornerRadius,
-            startAngle: Angle(degrees: 90),
-            endAngle: Angle(degrees: 180),
-            clockwise: false
-        )
-        
-        // Top-left corner
-        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + cornerRadius))
-        path.addArc(
-            center: CGPoint(x: rect.minX + cornerRadius, y: rect.minY + cornerRadius),
-            radius: cornerRadius,
-            startAngle: Angle(degrees: 180),
-            endAngle: Angle(degrees: 270),
-            clockwise: false
-        )
-        
-        path.closeSubpath()
-        return path
-    }
-}
-
 struct UserBubbleModifier: ViewModifier {
     @Environment(\.surfaceStyle) private var surfaceStyle
     @Environment(\.appTheme) private var theme

@@ -85,7 +85,20 @@ struct AgentConfig: Codable, Hashable, Sendable {
     var historyStrategy: HistoryStrategy?
 
     // Skills
+    /// ⚠️ LEGACY, read-only after v8. Retained for the dual-read window so a profile that has not
+    /// been re-saved — or a store opened by an older build — still resolves its skills. Delete no
+    /// earlier than the release AFTER the one that ships v8.
     var skillConfig: SkillFolderConfig?
+
+    /// Registry references. Supersedes `skillConfig` — see `SkillSelection` for why a reference
+    /// rather than a copy.
+    ///
+    /// ⚠️ OPTIONAL, and that is mandatory rather than stylistic. A non-optional stored property on
+    /// a `Codable` type throws `keyNotFound` on every already-persisted blob, and that throw escapes
+    /// the `decodeIfPresent` at the ProfileDetails call site and fails the WHOLE decode — the
+    /// profile is then shown as unreadable. `nil` means "predates the cut-over, read `skillConfig`";
+    /// an empty array means "migrated, and links nothing".
+    var skillSelections: [SkillSelection]?
 
     // Code mode metadata (not persisted for agent profiles — only set on ephemeral Code profiles)
     var projectPath: String?
@@ -103,6 +116,7 @@ struct AgentConfig: Codable, Hashable, Sendable {
          capabilities: AgentCapabilities = AgentCapabilities(),
          historyStrategy: HistoryStrategy? = nil,
          skillConfig: SkillFolderConfig? = nil,
+         skillSelections: [SkillSelection]? = nil,
          projectPath: String? = nil) {
         self.llmConfig = llmConfig
         self.tools = tools
@@ -117,6 +131,7 @@ struct AgentConfig: Codable, Hashable, Sendable {
         self.capabilities = capabilities
         self.historyStrategy = historyStrategy
         self.skillConfig = skillConfig
+        self.skillSelections = skillSelections
         self.projectPath = projectPath
     }
 }
@@ -537,8 +552,10 @@ enum ProfileSchemaVersion: Int, Codable, Sendable {
     case v5 = 5  // Skills support (SkillFolderConfig on AgentConfig)
     case v6 = 6  // Workflow execution config (WorkflowConfig expansion)
     case v7 = 7  // Repairs execute_shell tools stamped with a random sourceId
+    case v8 = 8  // Skills become registry references (skillConfig.manifests → skillSelections)
+    case v9 = 9  // Skills become LIBRARY references (folderPath → skillID, + pinnedVersionID)
 
-    static let current: ProfileSchemaVersion = .v7
+    static let current: ProfileSchemaVersion = .v9
 }
 
 /// Chains versioned transforms to migrate ProfileDetails JSON from older schemas to current.
@@ -616,6 +633,12 @@ enum ProfileMigrator {
         }
         if storedVersion < 7 {
             json = migrateToV7(json)
+        }
+        if storedVersion < 8 {
+            json = migrateToV8(json)
+        }
+        if storedVersion < 9 {
+            json = migrateToV9(json)
         }
 
         guard let migrated = try? JSONSerialization.data(withJSONObject: json) else {
@@ -768,10 +791,108 @@ enum ProfileMigrator {
         return result
     }
 
+    /// v7 → v8: Skills become registry references.
+    ///
+    /// Derives `skillSelections` from the manifest copies already in `skillConfig`, so a profile
+    /// that has never been re-saved still resolves its skills through the registry path.
+    ///
+    /// ⚠️ PURE, IDEMPOTENT, TOTAL — all three are required, not aspirational. `migrateIfNeeded`
+    /// has no `ModelContext`, no service access and no `async`; it runs on the READ path inside
+    /// `BackendProfileSD.decodeDetails`, on EVERY decode, and its result is NEVER written back. So:
+    ///
+    ///   - **Pure**: it cannot reach storage and must not try. Bringing the FOLDERS into the
+    ///     library is a separate launch-time pass (`SkillLibraryImportSweep`), which is why this
+    ///     step only needs what is already in the blob — `folderPath`, `name` and `isEnabled` are
+    ///     all present on every persisted `SkillManifest`.
+    ///   - **Idempotent**: it runs again on every single decode of the same bytes, so it must not
+    ///     compound. The `skillSelections == nil` guard is what makes a second pass a no-op.
+    ///   - **Total**: a malformed or partial `skillConfig` must yield a stamped blob, never a throw
+    ///     or a crash. Every read below is optional-chained for that reason; the worst outcome is
+    ///     an empty selection list, which the dual-read then covers from `skillConfig` anyway.
+    private static func migrateToV8(_ json: [String: Any]) -> [String: Any] {
+        var result = json
+        result["schemaVersion"] = 8
+
+        // Already migrated (or deliberately emptied) — leave it exactly as it is.
+        guard result["skillSelections"] == nil else { return result }
+
+        guard let skillConfig = result["skillConfig"] as? [String: Any],
+              let manifests = skillConfig["manifests"] as? [[String: Any]] else {
+            return result
+        }
+
+        let selections: [[String: Any]] = manifests.compactMap { manifest in
+            guard let folderPath = manifest["folderPath"] as? String,
+                  let name = manifest["name"] as? String else { return nil }
+            // `isEnabled` has been non-optional on SkillManifest since it shipped, but a blob
+            // written by a build that predates it would omit the key. Defaulting to true matches
+            // `SkillFolderScanner`, which hardcodes `isEnabled: true` on every freshly parsed skill.
+            let isEnabled = (manifest["isEnabled"] as? Bool) ?? true
+            return ["folderPath": folderPath, "name": name, "isEnabled": isEnabled]
+        }
+
+        result["skillSelections"] = selections
+        return result
+    }
+
+    /// v8 → v9: a selection stops addressing a FOLDER and starts addressing a library skill.
+    ///
+    /// Schema V6 retired the folder-indexed registry; a skill is now an opaque `skill_…` in the
+    /// library and its bytes live in the store. A v8 selection holds `folderPath`, which after V6
+    /// names nothing.
+    ///
+    /// ⚠️ **THIS STEP CANNOT RESOLVE THE ID, AND MUST NOT TRY.** `migrateIfNeeded` runs on the READ
+    /// path of every decode and is required to be pure, idempotent and total — no I/O, no store
+    /// lookups, no ordering assumptions. Mapping a folder to a skill needs the library, which needs
+    /// a container, which is exactly what a decode must not reach for. So this step only RESHAPES:
+    /// `folderPath` becomes `legacyFolderPath`, and `skillID` is left absent.
+    ///
+    /// The launch sweep does the re-link, because it is the one place that knows both halves — it
+    /// ingests each captured pre-V6 folder and therefore learns `folderPath → skillID`. Until it
+    /// runs, such a selection reports as awaiting re-link and is named in the UI rather than
+    /// silently dropped.
+    ///
+    /// - **Pure**: reads and writes `json` only.
+    /// - **Idempotent**: a selection that already carries `skillID` or `legacyFolderPath` is left
+    ///   exactly as it is, so running this twice changes nothing.
+    /// - **Total**: a malformed entry yields a stamped blob, never a throw. An entry with neither a
+    ///   usable `folderPath` nor a `skillID` is DROPPED rather than carried as an address-less row —
+    ///   it could never resolve or be re-linked, and a permanently unresolvable row in the UI is
+    ///   worse than one fewer link.
+    private static func migrateToV9(_ json: [String: Any]) -> [String: Any] {
+        var result = json
+        result["schemaVersion"] = 9
+
+        guard let selections = result["skillSelections"] as? [[String: Any]] else { return result }
+
+        let reshaped: [[String: Any]] = selections.compactMap { selection in
+            // Already v9-shaped (or already re-linked) — leave it untouched.
+            if selection["skillID"] != nil || selection["legacyFolderPath"] != nil { return selection }
+
+            guard let folderPath = selection["folderPath"] as? String, !folderPath.isEmpty else {
+                return nil
+            }
+            var moved = selection
+            moved.removeValue(forKey: "folderPath")
+            moved["legacyFolderPath"] = folderPath
+            // `name` has been non-optional on SkillSelection since it shipped, but a blob written
+            // by a build that predates it would omit the key. The folder's last component is the
+            // best available label and is what the old scanner required the name to equal anyway.
+            if moved["name"] == nil {
+                moved["name"] = (folderPath as NSString).lastPathComponent
+            }
+            if moved["isEnabled"] == nil { moved["isEnabled"] = true }
+            return moved
+        }
+
+        result["skillSelections"] = reshaped
+        return result
+    }
+
     /// v6 → v7: Repairs `execute_shell` tools stamped with a random `sourceId`.
     ///
     /// ⚠️ A DATA repair, not a shape change — the only such step in this ladder, and deliberately
-    /// so. `AgentSkillsSection` auto-added `execute_shell` with
+    /// so. The profile's old skills card auto-added `execute_shell` with
     /// `UUID(uuidString: "00000000-SKIL-AUTO-SHEL-000000000000") ?? UUID()`; that literal is not
     /// valid hex, so the parse failed on every call and each import minted a fresh random id.
     /// Tool dispatch and the Tool Library both key off `sourceId == ToolSource.builtInSourceID`,
@@ -855,7 +976,7 @@ enum ProfileDetails: Codable, Hashable, Sendable {
         case architecture // legacy — read for migration, never written
         case tools, description, knowledgeSources
         case maxIterations, executionTimeout, retryPolicy, errorRecovery, resilienceOverrides
-        case capabilities, historyStrategy, skillConfig
+        case capabilities, historyStrategy, skillConfig, skillSelections
         // Workflow-specific
         case agentProfileIDs
         case defaultNodeTimeout, defaultFailurePolicy, defaultMaxRetries
@@ -916,6 +1037,10 @@ enum ProfileDetails: Codable, Hashable, Sendable {
 
             let historyStrategy = try container.decodeIfPresent(HistoryStrategy.self, forKey: .historyStrategy)
             let skillConfig = try container.decodeIfPresent(SkillFolderConfig.self, forKey: .skillConfig)
+            // ⚠️ `decodeIfPresent`, never `decode`. Absent means "predates v8" — the overwhelmingly
+            // common case on the first launch after the update — and a throw here fails the ENTIRE
+            // ProfileDetails decode, marking the profile unreadable.
+            let skillSelections = try container.decodeIfPresent([SkillSelection].self, forKey: .skillSelections)
 
             self = .agent(AgentConfig(
                 llmConfig: llmConfig,
@@ -930,7 +1055,8 @@ enum ProfileDetails: Codable, Hashable, Sendable {
                 resilienceOverrides: resilienceOverrides,
                 capabilities: capabilities,
                 historyStrategy: historyStrategy,
-                skillConfig: skillConfig
+                skillConfig: skillConfig,
+                skillSelections: skillSelections
             ))
 
         case .workflow:
@@ -976,6 +1102,10 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             let capabilities = (try? container.decode(AgentCapabilities.self, forKey: .capabilities)) ?? AgentCapabilities()
             let historyStrategy = try container.decodeIfPresent(HistoryStrategy.self, forKey: .historyStrategy)
             let skillConfig = try container.decodeIfPresent(SkillFolderConfig.self, forKey: .skillConfig)
+            // ⚠️ `decodeIfPresent`, never `decode`. Absent means "predates v8" — the overwhelmingly
+            // common case on the first launch after the update — and a throw here fails the ENTIRE
+            // ProfileDetails decode, marking the profile unreadable.
+            let skillSelections = try container.decodeIfPresent([SkillSelection].self, forKey: .skillSelections)
             let projectPath = try container.decodeIfPresent(String.self, forKey: .projectPath)
             self = .code(AgentConfig(
                 llmConfig: llmConfig,
@@ -991,6 +1121,7 @@ enum ProfileDetails: Codable, Hashable, Sendable {
                 capabilities: capabilities,
                 historyStrategy: historyStrategy,
                 skillConfig: skillConfig,
+                skillSelections: skillSelections,
                 projectPath: projectPath
             ))
         }
@@ -1027,6 +1158,7 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             try container.encode(config.capabilities, forKey: .capabilities)
             try container.encodeIfPresent(config.historyStrategy, forKey: .historyStrategy)
             try container.encodeIfPresent(config.skillConfig, forKey: .skillConfig)
+            try container.encodeIfPresent(config.skillSelections, forKey: .skillSelections)
 
         case .workflow(let config):
             try container.encode(ProfileType.workflow, forKey: .profileType)
@@ -1081,6 +1213,7 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             try container.encode(config.capabilities, forKey: .capabilities)
             try container.encodeIfPresent(config.historyStrategy, forKey: .historyStrategy)
             try container.encodeIfPresent(config.skillConfig, forKey: .skillConfig)
+            try container.encodeIfPresent(config.skillSelections, forKey: .skillSelections)
             try container.encodeIfPresent(config.projectPath, forKey: .projectPath)
         }
     }

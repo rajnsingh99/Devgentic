@@ -9,40 +9,6 @@
 
 import SwiftUI
 
-struct OllamaModelStoreView: View {
-    @State private var viewModel = OllamaModelStoreViewModel()
-    @Environment(\.dismiss) var dismiss
-    @Environment(\.appTheme) private var theme
-
-    var body: some View {
-        VStack(spacing: 0) {
-            OllamaModelStoreContent(viewModel: viewModel)
-
-            Divider().foregroundColor(theme.dividerColor)
-
-            // MARK: - Bottom Action Bar (sheet-only)
-            HStack {
-                Text("\(viewModel.displayedModels.count) Models Available")
-                    .font(theme.fontCaption)
-                    .foregroundColor(theme.secondaryText)
-
-                Spacer()
-
-                Button("Done") {
-                    dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .keyboardShortcut(.defaultAction)
-            }
-            .padding()
-            .background(theme.secondaryBackground)
-        }
-        // Strict outer frame. Because of the GeometryReader inside, this will be strictly respected.
-        .frame(width: 750, height: 650)
-    }
-}
-
 // MARK: - Reusable Content (shared between sheet and inline container)
 
 struct OllamaModelStoreContent: View {

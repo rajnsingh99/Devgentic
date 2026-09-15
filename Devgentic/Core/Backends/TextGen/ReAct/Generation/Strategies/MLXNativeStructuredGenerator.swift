@@ -17,6 +17,10 @@ private let logLLMOps = DGLogger(category: "LLMOps")
 /// This version enforces a modern JSON schema via prompting and uses the heuristic parser
 /// to handle parallel tool calls reliably.
 struct MLXNativeStructuredGenerator: CognitiveGenerator {
+
+    /// The one value this generator both declares and parses with.
+    private static let dialect: ModelDialect = .heuristicJson
+    var expectedDialect: ModelDialect? { Self.dialect }
     let toolAdapter: ToolSchemaAdapter
 
     let dialectRules: String? = """
@@ -78,7 +82,7 @@ struct MLXNativeStructuredGenerator: CognitiveGenerator {
         }
 
         let pipeline = CognitiveParsePipeline(
-            expectedDialect: .heuristicJson,
+            expectedDialect: Self.dialect,
             modelId: model.modelName,
             iteration: iteration,
             knownToolNames: Set(context.availableTools.map(\.name)),

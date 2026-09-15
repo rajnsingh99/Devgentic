@@ -112,6 +112,17 @@ protocol CognitiveGenerator: Sendable {
     /// Native generators return nil (tools are sent via API, not embedded in prompt).
     var dialectRules: String? { get }
 
+    /// The tool-call wire format THIS generator asks the model for, and parses back.
+    ///
+    /// nil for transport-native flows (`NativeStructuredGenerator`): Claude/OpenAI/Gemini and
+    /// Ollama-with-tools carry tool calls in the protocol itself, so there is no text dialect the
+    /// model could be told to emit — a format instruction there is noise at best.
+    ///
+    /// ⚠️ A prompted generator MUST pass this same value to its `CognitiveParsePipeline`, so the
+    /// format we ask for and the format we parse are one value rather than two that can drift.
+    /// `CognitiveGeneratorRoutingTests.testDeclaredDialectIsTheOneTheGeneratorParsesWith` pins it.
+    var expectedDialect: ModelDialect? { get }
+
     /// Compiles the raw execution state into a provider-specific message array.
     func compileMessages(from context: SemanticContext) -> [[String: String]]
 
@@ -137,6 +148,9 @@ protocol CognitiveGenerator: Sendable {
 extension CognitiveGenerator {
     /// Default: no dialect rules (native generators).
     var dialectRules: String? { nil }
+
+    /// Default: no text dialect (native generators — see the protocol requirement).
+    var expectedDialect: ModelDialect? { nil }
 
     /// Default wrapping: XML tags (suitable for frontier models and XML dialect).
     var promptWrapping: PromptWrapping { .xml }
@@ -458,9 +472,17 @@ enum PromptBuilder {
         }
 
         // Layer 9: CAPABILITIES — Skill discovery
-        if let skills = context.skillManifests, !skills.isEmpty {
-            let skillBody = "You have access to specialized skills. When a task matches a skill's description,\nuse the `load_skill` tool to load its full instructions before proceeding.\n" + skills.map { "- \($0.name): \($0.description)" }.joined(separator: "\n")
-            systemContent += "\n\n" + wrapping.section("available_skills", content: skillBody)
+        //
+        // ⚠️ Never interpolate a manifest field here. `name` and `description` are disk-derived
+        // and frequently third-party (an imported zip, a cloned repo), and `wrapping.section`
+        // escapes nothing — so a raw `- \(name): \(description)` let a description carrying
+        // `</available_skills>` forge the boundary. `SkillDiscoveryRendering` owns the
+        // collapse/cap/escape contract; its file header explains the ordering.
+        let skillBody = context.skillManifests.flatMap {
+            SkillDiscoveryRendering.discoveryBody(for: $0, wrapping: wrapping)
+        }
+        if let skillBody {
+            systemContent += "\n\n" + wrapping.section(SkillDiscoveryRendering.sectionTag, content: skillBody)
         }
 
         // Layer 10-11: GUARDRAILS — Negative constraints + hallucinated tools
@@ -503,6 +525,10 @@ enum PromptBuilder {
             ("episodic", layerConfig.includeEpisodicMemory ? (context.recentHistory ?? "").count : 0),
             ("user_profile", layerConfig.includeUserProfile ? (context.userProfile ?? "").count : 0),
             ("attachments", includeAttachmentContext ? (context.attachmentContext ?? "").count : 0),
+            // The skills layer was absent from this list since it shipped, so the one diagnostic
+            // built to answer "what did the model actually read?" was blind to it — a profile
+            // carrying fifty skills looked identical to one carrying none.
+            ("available_skills", skillBody?.count ?? 0),
             ("security_note", context.workflowContext != nil ? 1 : 0)
         ]
         let rendered = layerSizes.filter { $0.1 > 0 }.map { "\($0.0)=\($0.1)" }.joined(separator: " ")
@@ -529,7 +555,11 @@ enum PromptBuilder {
                 ("retrieval", grounding),
                 ("episodic", layerConfig.includeEpisodicMemory ? (context.recentHistory ?? "") : ""),
                 ("user_profile", layerConfig.includeUserProfile ? (context.userProfile ?? "") : ""),
-                ("attachments", includeAttachmentContext ? (context.attachmentContext ?? "") : "")
+                ("attachments", includeAttachmentContext ? (context.attachmentContext ?? "") : ""),
+                // Records the SANITIZED body — what the model read, not what was on disk. A
+                // Run Report showing the raw description would hide the very rewrite that made
+                // the prompt safe, and the escape is logged separately with its consequence.
+                ("available_skills", skillBody ?? "")
             ]
             let at = Date() // captured BEFORE the hop (invariant 74's companion rule)
             Task {

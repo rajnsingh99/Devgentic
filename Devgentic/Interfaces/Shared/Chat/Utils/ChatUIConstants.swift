@@ -49,6 +49,17 @@ enum ChatUIConstants {
     /// conversation stays navigable.
     static let codeBlockMaxHeight: CGFloat = 420
 
+    /// Tallest the expanded agent execution timeline grows before it scrolls internally.
+    /// Keeps an agent run with many steps or tool calls from pushing the final response
+    /// and subsequent messages far down the chat viewport.
+    static let agentTimelineMaxHeight: CGFloat = 300
+
+    /// Proportional max height for the expanded timeline given the user's `chatFontSize`.
+    /// Preserves roughly 5–7 visible steps regardless of whether the user sets font size to 12 or 22.
+    nonisolated static func agentTimelineMaxHeight(forChatFontSize chatFontSize: CGFloat) -> CGFloat {
+        max(240, min(500, 300 * (chatFontSize / 15.0)))
+    }
+
     /// Base point size for code. Scales with `chatFontSize` at the call site; this is the
     /// value used when no chat size is available.
     static let defaultCodeFontSize: CGFloat = 12

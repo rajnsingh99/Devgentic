@@ -116,7 +116,14 @@ final class StoreOpenDiagnosticsTests: XCTestCase {
         }
         XCTAssertTrue(missingFromCode.contains("CodeViewerSessionSD"),
                       "The retired entity must be named. Got missingFromCode=\(missingFromCode)")
-        XCTAssertTrue(addedInCode.isEmpty, "Nothing was added; got \(addedInCode)")
+        // ⚠️ NO LONGER ASSERTS `addedInCode.isEmpty`, and that assertion was the bug. It was written
+        // when the fixture's entity set differed from today's by exactly the one RETIRED entity, so
+        // "nothing added" happened to hold — an incidental fact about the schema's size, not a
+        // property of the diagnosis. Schema V6 added the three skill-library entities and this went
+        // red without anything being wrong. What the test is actually for is that a retired entity
+        // is NAMED, which the assertions around this one check.
+        XCTAssertFalse(addedInCode.contains("CodeViewerSessionSD"),
+                       "the retired entity belongs in missingFromCode, never in addedInCode")
         XCTAssertTrue(diagnosis.summary.contains("CodeViewerSessionSD"),
                       "The human-readable summary must name it too: \(diagnosis.summary)")
     }
@@ -152,8 +159,17 @@ final class StoreOpenDiagnosticsTests: XCTestCase {
             throw XCTSkip("No checked-in pre-V1 legacy fixture found "
                           + "(\(SchemaMigrationTests.legacyFixtureBaseName).store).")
         }
-        // The legacy fixture's own entity set = today's entities plus the retired one.
+        // The legacy fixture's own entity set = today's entities, MINUS everything added since it
+        // was recorded, PLUS the retired one.
+        //
+        // ⚠️ The subtraction is the part that was missing. This read "today's entities plus the
+        // retired one", which silently stopped being true the moment V6 added the skill library —
+        // the sets then differed and the diagnosis correctly reported `entitySetChanged`, failing a
+        // test that meant to exercise the equal-sets case. Anything added to the schema after this
+        // fixture was recorded belongs here.
+        let addedAfterTheFixtureWasRecorded: Set<String> = ["SkillSD", "SkillVersionSD", "SkillFileSD"]
         var storedEntities = Set(DevgenticSchema.schema.entities.map(\.name))
+            .subtracting(addedAfterTheFixtureWasRecorded)
         storedEntities.insert("CodeViewerSessionSD")
 
         XCTAssertEqual(

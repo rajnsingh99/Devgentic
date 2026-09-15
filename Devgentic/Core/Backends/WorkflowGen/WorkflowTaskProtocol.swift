@@ -14,54 +14,6 @@ import Foundation
 
 // MARK: - Task Envelope (Orchestrator → Node)
 
-/// The payload sent from the WorkflowExecutor to an inner node's executor.
-/// Contains the original query, upstream results, and execution constraints.
-struct WorkflowTaskEnvelope: Sendable {
-    /// Unique identifier for this task execution.
-    let taskID: UUID
-
-    /// The canvas node this task maps to.
-    let nodeID: UUID
-
-    /// The BackendProfileModel being executed at this node.
-    let sourceProfileID: UUID
-
-    /// The original user query (or a rewritten sub-query for downstream nodes).
-    let query: String
-
-    /// Results from all direct upstream nodes (injected as context).
-    let upstreamContext: [NodeResultEnvelope]
-
-    /// Execution constraints (timeouts, iteration caps).
-    let constraints: ExecutionConstraints
-
-    /// The downstream model's supported modalities (for context compilation).
-    let targetModalities: SupportedModalities
-
-    /// Extracted content from user-attached files (available to every node).
-    let fileContext: String?
-
-    init(
-        taskID: UUID = UUID(),
-        nodeID: UUID,
-        sourceProfileID: UUID,
-        query: String,
-        upstreamContext: [NodeResultEnvelope] = [],
-        constraints: ExecutionConstraints = .default,
-        targetModalities: SupportedModalities = .textOnly,
-        fileContext: String? = nil
-    ) {
-        self.taskID = taskID
-        self.nodeID = nodeID
-        self.sourceProfileID = sourceProfileID
-        self.query = query
-        self.upstreamContext = upstreamContext
-        self.constraints = constraints
-        self.targetModalities = targetModalities
-        self.fileContext = fileContext
-    }
-}
-
 // MARK: - Result Envelope (Node → Orchestrator)
 
 /// The result returned from an inner node's executor back to the WorkflowExecutor.

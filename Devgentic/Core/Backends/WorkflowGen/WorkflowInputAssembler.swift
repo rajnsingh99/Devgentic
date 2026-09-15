@@ -134,7 +134,16 @@ enum WorkflowInputAssembler {
     /// `Workflow_Production_Readiness.md`'s security-scoping note), and escaping angle brackets
     /// there would corrupt a legitimate `<T>` in a task description or a pasted code snippet for
     /// no one this fix is meant to defend against. Call this ONLY at a boundary where the content
-    /// can plausibly be upstream node output or third-party (ChatOps) input.
+    /// can plausibly be upstream node output, third-party (ChatOps) input, or content the user
+    /// INSTALLED rather than wrote.
+    ///
+    /// ⚠️ That last category is why the caller list is no longer workflow-only.
+    /// `<available_skills>` renders a skill's `name` and `description` straight off disk, and a
+    /// skill folder routinely arrives as a zip or a cloned repo — so "the user put it there" is
+    /// not the same claim as "the user wrote it", and the local-trust exemption above does not
+    /// reach it. See `SkillDiscoveryRendering`, which owns that call and adds the newline
+    /// collapse this function deliberately does not do (markdown wrapping has no closing tag to
+    /// escape, but it does have headings to forge).
     /// Escapes a payload for embedding in `section` ONLY when it could actually forge the
     /// section's boundary (register EIO-4).
     ///

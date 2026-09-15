@@ -65,6 +65,16 @@ struct ChatInputAreaView: View {
     /// attachment changes — never per keystroke — so it stays cheap on long transcripts.
     @State private var contextUsage: ContextWindowUsage?
 
+    /// The skills a `/` command can reach on the selected profile.
+    ///
+    /// ⚠️ Read by BOTH the picker's filter and the send-path rewrite, so the two cannot drift. They
+    /// previously computed this separately and disagreed: the picker offered the whole library and
+    /// the rewrite accepted only linked names, so an offered-but-unlinked skill sent raw `/name`
+    /// text to the model.
+    private var reachableSkillNames: Set<String> {
+        SkillCommandReachability.reachableNames(in: selectedProfile?.details)
+    }
+
     // MARK: - Layout Constants
     private var textEditorMinHeight: CGFloat {
         max(44, themeManager.chatFontSize + 24)
@@ -157,6 +167,23 @@ struct ChatInputAreaView: View {
                 .padding(.bottom, 6)
             }
             
+            // SKILL COMMANDS (Driven by VM State)
+            // ⚠️ Gated on the profile KIND as well as the trigger. A bot or imageGen run registers
+            // no `load_skill`, so offering a skill picker there promises something the run cannot
+            // do — distinct from an agent with nothing linked yet, which still gets the picker and
+            // an empty state telling it how to link one.
+            if inputViewModel.skillSuggestionState.isShowing,
+               SkillCommandReachability.pickerApplies(to: selectedProfile?.details) {
+                SkillCommandSuggestionView(
+                    items: inputViewModel.skillSuggestionState.filteredItems,
+                    query: inputViewModel.skillSuggestionState.query,
+                    selectedItemID: $inputViewModel.skillSuggestionState.selectedID,
+                    onSelect: { inputViewModel.selectSkillCommand($0) }
+                )
+                .padding(.horizontal, 15)
+                .padding(.bottom, 6)
+            }
+
             // FILE SUGGESTIONS (Driven by VM State)
             if inputViewModel.fileSuggestionState.isShowing {
                 FileSuggestionView(
@@ -446,6 +473,10 @@ struct ChatInputAreaView: View {
                 showFileSuggestions: $inputViewModel.fileSuggestionState.isShowing,
                 fileSuggestionQuery: $inputViewModel.fileSuggestionState.query,
                 activeFileMentionTriggerRange: $inputViewModel.fileSuggestionState.triggerRange,
+
+                showSkillSuggestions: $inputViewModel.skillSuggestionState.isShowing,
+                skillSuggestionQuery: $inputViewModel.skillSuggestionState.query,
+                activeSkillTriggerRange: $inputViewModel.skillSuggestionState.triggerRange,
                 
                 attributedTextInsertion: $inputViewModel.attributedTextInsertionRequest,
                 
@@ -459,6 +490,8 @@ struct ChatInputAreaView: View {
                         inputViewModel.navigateSuggestions(direction: direction, type: .prompt)
                     } else if inputViewModel.fileSuggestionState.isShowing {
                         inputViewModel.navigateSuggestions(direction: direction, type: .file)
+                    } else if inputViewModel.skillSuggestionState.isShowing {
+                        inputViewModel.navigateSuggestions(direction: direction, type: .skill)
                     }
                 },
                 onConfirmSuggestion: confirmSuggestionSelection,
@@ -473,6 +506,17 @@ struct ChatInputAreaView: View {
                 },
                 onTextManuallyChanged: {
                     inputViewModel.resetQueryHistoryIndex()
+                },
+                onTriggerStateChanged: {
+                    // ⚠️ Filtered HERE rather than on a debounce like `#`/`@`. Those search a
+                    // service; this reads an in-memory library of tens of rows, so a debounce would
+                    // only add latency between a keystroke and the list narrowing.
+                    //
+                    // ⚠️⚠️ And filtered from `onTriggerStateChanged`, NOT `onTextManuallyChanged`.
+                    // The latter runs before trigger analysis, so this read a query one keystroke
+                    // stale and saw `isShowing == false` on the very first `/` — which made a full
+                    // library render as "No skills in the library yet".
+                    inputViewModel.refreshSkillSuggestions(reachableNames: reachableSkillNames)
                 }
             )
             .frame(minHeight: textEditorMinHeight, maxHeight: textEditorMaxHeight)
@@ -716,12 +760,39 @@ struct ChatInputAreaView: View {
 
         switch backendConfiguration.resolveRequestConfig() {
         case .success(let config):
-            onSendMessage(attributedString, config)
+            onSendMessage(expandSkillCommand(in: attributedString), config)
             inputViewModel.userInput = ""
 
         case .failure(let reason):
             handleUnsendableProfile(reason)
         }
+    }
+
+    /// Rewrites a leading `/skill-name` into the directive actually sent.
+    ///
+    /// ⚠️ A DIRECTIVE, not an invocation — see `SkillCommandParser`. The model is told to use the
+    /// skill and still calls `load_skill` itself. Nothing here pre-loads a body or forces a choice.
+    ///
+    /// ⚠️ ONLY for agent profiles, and only for a name the profile can actually reach. A command
+    /// naming an unlinked or misspelled skill is left EXACTLY as typed: sending an instruction the
+    /// model cannot follow would make it apologise for a skill it never had, and the typo would be
+    /// hidden from the one person able to fix it.
+    private func expandSkillCommand(in attributed: NSAttributedString) -> NSAttributedString {
+        guard let command = SkillCommandParser.parse(attributed.string) else { return attributed }
+
+        guard let profile = selectedProfile else { return attributed }
+
+        // ⚠️ The SAME set the picker was filtered by — see `SkillCommandReachability`. Computing it
+        // here independently is exactly how the two came to disagree.
+        let rendered = SkillCommandParser.render(command, availableNames: reachableSkillNames)
+        guard rendered != attributed.string else { return attributed }
+
+        logger.log("[SKILLS] Expanded /\(command.skillName) into a directive for '\(profile.displayName)'.")
+        // ⚠️ Rebuilt with the ORIGINAL's attributes at index 0 rather than plain text: the composer
+        // hands this string to the send path with typing attributes attached, and dropping them
+        // changes how the message renders in the transcript.
+        let attributes = attributed.length > 0 ? attributed.attributes(at: 0, effectiveRange: nil) : [:]
+        return NSAttributedString(string: rendered, attributes: attributes)
     }
 
     /// Turns a resolution failure into something the user can act on. Every arm leaves the typed
@@ -882,6 +953,11 @@ struct ChatInputAreaView: View {
             guard let selectedID = inputViewModel.promptSuggestionState.selectedID,
                   let selectedPrompt = inputViewModel.promptSuggestionState.filteredItems.first(where: { $0.id == selectedID }) else { return }
             inputViewModel.selectPrompt(selectedPrompt)
+        }
+        else if inputViewModel.skillSuggestionState.isShowing {
+            guard let selectedID = inputViewModel.skillSuggestionState.selectedID,
+                  let selected = inputViewModel.skillSuggestionState.filteredItems.first(where: { $0.id == selectedID }) else { return }
+            inputViewModel.selectSkillCommand(selected)
         }
     }
 

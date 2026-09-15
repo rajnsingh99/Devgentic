@@ -68,6 +68,27 @@ struct DevgenticApp: App {
             Task { @MainActor in
                 DownloadHistoryStore.shared.configureContainer(container)
 
+                let startupLoggerForSkills = DGLogger(category: "DevgenticApp")
+
+                // ⚠️ THE V4 ADOPTION SWEEP IS GONE (V6). It copied skills out of profile blobs
+                // into the folder registry, and both of those are retired: the registry entities no
+                // longer exist in the schema, and a profile's legacy `skillConfig` is read-only
+                // history that `SkillResolution` still falls back to. What replaces it is
+                // `SkillLibraryImportSweep` below, which imports content rather than indexing paths.
+
+                // Configures the store and, outside the test host, finishes the V3→V6 skills
+                // upgrade by recovering each profile's pre-V6 folder links and ingesting them.
+                //
+                // ⚠️ OUTSIDE the launch-sweep gate below, deliberately: that gate defers on
+                // `.deferSchemaChanged`, which is precisely the launch this must run on — the first
+                // one after the schema changed, and the one on which the user's whole Skills
+                // library would otherwise appear empty.
+                //
+                // ⚠️ The ORDER and the PRESENCE of these two steps have each broken in production.
+                // Both are asserted in `SkillLaunchSequenceTests`; the sequence lives in
+                // `SkillLaunchSequence` so that they can be.
+                SkillLaunchSequence.run(container: container, logger: startupLoggerForSkills)
+
                 // Everything below MUTATES OR DELETES rows, so it runs only when the schema is
                 // unchanged since the last clean open. A lightweight migration can succeed
                 // STRUCTURALLY while dropping a renamed column's data or defaulting a new

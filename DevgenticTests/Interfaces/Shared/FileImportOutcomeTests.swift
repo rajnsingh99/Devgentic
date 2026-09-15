@@ -176,15 +176,6 @@ final class KnowledgeSourceImportTests: XCTestCase {
 
 final class DuplicateSkillReportingTests: XCTestCase {
 
-    /// The duplicate case rides the `skipped` list the UI already renders, so the fix needed no new
-    /// surface — but the text has to say which copy survived, since that is the actual question.
-    func testTheDuplicateSkipReasonNamesTheFolderThatWon() {
-        let entry = SkippedSkillEntry(
-            directoryName: "code-review",
-            reason: .duplicateName(keptFrom: "team-skills"))
-
-        XCTAssertTrue(entry.reason.displayText.contains("team-skills"))
-    }
 
     /// The pre-existing reasons must be untouched — they share one disclosure list with the new one.
     func testExistingSkipReasonsStillRender() {
@@ -193,15 +184,22 @@ final class DuplicateSkillReportingTests: XCTestCase {
                        "bad frontmatter")
     }
 
-    /// A skipped duplicate has to count toward the "N skipped" label, or it is reported nowhere.
-    func testASkippedDuplicateCountsInTheScanSummary() {
-        let result = SkillScanResult(
-            manifests: [],
-            skipped: [SkippedSkillEntry(directoryName: "code-review",
-                                        reason: .duplicateName(keptFrom: "team-skills"))],
-            totalSubdirectories: 1)
+    /// ⚠️ REWRITTEN. This asserted that a duplicate-name skip appeared in `SkillScanResult.summary`
+    /// — a string that no longer exists, because nothing renders it and `.duplicateName` is no
+    /// longer produced at all.
+    ///
+    /// The BEHAVIOUR it protected is alive and stronger: a colliding name used to be resolved FOR
+    /// the user and reported as "1 skipped", and is now a choice they make. Pinned where it lives,
+    /// in `SkillImportPlanTests`; asserted here so the link between the old rule and the new one is
+    /// not lost.
+    func testANameCollisionIsNowAUserChoiceRatherThanASilentSkip() {
+        let existing = [(id: "skill_a", name: "code-review", displayName: "Code Review", versionCount: 2)]
+        let collision = SkillImportPlan.collision(for: "code-review", existing: existing)
 
-        XCTAssertEqual(result.skippedCount, 1)
-        XCTAssertTrue(result.summary.contains("1 skipped"))
+        XCTAssertEqual(collision, .one(skillID: "skill_a", displayName: "Code Review", versionCount: 2))
+        XCTAssertNotNil(SkillImportPlan.explanation(for: collision, skillName: "code-review"),
+                        "the user has to be told a name is already in use — silently keeping one copy is the old behaviour")
+        XCTAssertEqual(SkillImportPlan.defaultResolution(for: collision), .addVersion(skillID: "skill_a"),
+                       "and the preselected outcome updates the existing skill rather than adding an unreachable duplicate")
     }
 }

@@ -133,7 +133,7 @@ final class ToolRegistryDriftTests: XCTestCase {
 
     /// A test that reads an empty catalogue satisfies every assertion above while checking
     /// nothing — the failure mode that made the original source guard worth so little. The floor
-    /// is far below the real count (72) so ordinary tool removals do not trip it.
+    /// is far below the real count (73 as of 2026-09-15) so ordinary tool removals do not trip it.
     func testTheCatalogIsNotEmpty() {
         XCTAssertGreaterThan(NativeToolCatalog.entries.count, 40,
             "only \(NativeToolCatalog.entries.count) catalogue entries — the assertions above are "

@@ -23,6 +23,16 @@ enum MainViewDestination: Equatable, Hashable {
     /// profile. Only per-tool enablement writes to one, and that surface hides itself when
     /// there is nothing to write to.
     case toolLibrary(profileID: UUID?)
+    /// Profile is OPTIONAL for the same reason the Tool Library's is: the Skills tab is reachable
+    /// with no profile chosen (browsing the library, importing, creating), and only per-skill LINKING
+    /// writes to one — a surface that hides itself when there is nothing to write to.
+    /// `openSkillID` opens that skill's detail sheet on arrival.
+    ///
+    /// ⚠️ Carried ON THE ROUTE rather than through shared state because the sidebar row and the
+    /// library are different views with no other channel between them. Without it the row that
+    /// NAMES a skill could only navigate to the bare list, leaving the user to find the same skill
+    /// a second time.
+    case skillLibrary(profileID: UUID?, openSkillID: String?)
     case addMCPServer
     case editMCPServer(sourceID: UUID)
     case promptDetail(promptID: UUID)
@@ -41,6 +51,7 @@ enum MainViewDestination: Equatable, Hashable {
         case .profileDetail: return "Profile"
         case .settingsDetail(let category): return category.rawValue
         case .toolLibrary: return "Tool Library"
+        case .skillLibrary: return "Skills"
         case .addMCPServer: return "Add MCP Server"
         case .editMCPServer: return "Edit MCP Server"
         case .promptDetail: return "Prompt"
@@ -69,14 +80,45 @@ final class MainViewRouter {
 
     /// Push the current destination onto the stack and navigate to a new one.
     func navigate(to destination: MainViewDestination) {
+        // ⚠️ A repeat of where we already are REPLACES rather than pushes. Clicking three skills in
+        // the sidebar used to stack three identical library entries, so Back walked through the
+        // same screen three times before reaching whatever came before it.
+        guard destination != activeDestination else {
+            activeDestination = destination
+            announceArrival(at: destination)
+            return
+        }
         navigationStack.append(activeDestination)
         activeDestination = destination
 
         // The Tool Library's navigation lives in the sidebar pane, so entering it with the
         // pane hidden (⌘B) would leave no way to change category or pick a server. Ask for
         // the pane; the shell honours it.
+        // Same for the Skills library — the skill list lives in the pane, so arriving with the
+        // pane hidden leaves no way to add, create or delete a skill.
         if case .toolLibrary = destination {
             NotificationCenter.default.post(name: .requestSidebarVisible, object: nil)
+        }
+        if case .skillLibrary = destination {
+            NotificationCenter.default.post(name: .requestSidebarVisible, object: nil)
+            // ⚠️ Revealing the pane is not enough — it shows whichever tab was last selected. The
+            // library's empty state points at the Skills sidebar to add one, so arriving
+            // from the profile editor's "Manage Skills" button with Conversations selected
+            // instructed an action that was nowhere on screen. Selecting the tab is what makes the
+            // instruction true. Written through the same @AppStorage key the menu command uses
+            // (SidebarTab.storageKey), because that is the one the container reads.
+            UserDefaults.standard.set(SidebarTab.skills.rawValue, forKey: SidebarTab.storageKey)
+        }
+    }
+
+    /// The pane/tab side effects of arriving somewhere, shared by the push and replace paths.
+    private func announceArrival(at destination: MainViewDestination) {
+        if case .toolLibrary = destination {
+            NotificationCenter.default.post(name: .requestSidebarVisible, object: nil)
+        }
+        if case .skillLibrary = destination {
+            NotificationCenter.default.post(name: .requestSidebarVisible, object: nil)
+            UserDefaults.standard.set(SidebarTab.skills.rawValue, forKey: SidebarTab.storageKey)
         }
     }
 
@@ -154,6 +196,11 @@ final class MainViewRouter {
     }
 
     /// Navigate to the download manager, clearing any existing non-chat stack first.
+    ///
+    /// ⚠️ Called from `DownloadSidebarView`'s header. It had NO caller until 2026-09-15, which made
+    /// `DownloadManagerContainerView` unreachable — `MainApplicationView` rendered it for
+    /// `.downloadManager` and nothing could ever set that destination. The sidebar already held
+    /// `@Environment(MainViewRouter.self)` for the call that was never written.
     func navigateToDownloadManager() {
         navigationStack.removeAll()
         navigationStack.append(.chat)

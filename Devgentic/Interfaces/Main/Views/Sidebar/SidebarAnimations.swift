@@ -9,36 +9,6 @@
 
 import SwiftUI
 
-// MARK: - Scale Button Style
-/// A button style that provides a subtle press-down scale effect.
-struct ScaleButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed ? 0.92 : 1.0)
-            .animation(.spring(response: 0.2, dampingFraction: 0.6), value: configuration.isPressed)
-    }
-}
-
-// MARK: - Pulse Animation Modifier
-/// Applies a repeating glow-pulse shadow effect, ideal for CTA buttons.
-struct PulseAnimationModifier: ViewModifier {
-    @State private var isPulsing = false
-    @Environment(\.appTheme) private var theme
-
-    func body(content: Content) -> some View {
-        content
-            .shadow(
-                color: theme.accentColor.opacity(isPulsing ? 0.3 : 0.0),
-                radius: isPulsing ? 12 : 4, x: 0, y: 0
-            )
-            .onAppear {
-                withAnimation(.easeInOut(duration: 1.8).repeatForever(autoreverses: true)) {
-                    isPulsing = true
-                }
-            }
-    }
-}
-
 // MARK: - Streaming Pulse Indicator
 /// An animated pulsing dot indicating an active streaming conversation.
 struct StreamingPulseIndicator: View {

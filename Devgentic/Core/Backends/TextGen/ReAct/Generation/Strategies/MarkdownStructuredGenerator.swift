@@ -26,6 +26,10 @@ private let logLLMOps = DGLogger(category: "LLMOps")
 ///   Action: <tool_name>
 ///   Action Input: <json_args>
 struct MarkdownStructuredGenerator: CognitiveGenerator {
+
+    /// The one value this generator both declares and parses with.
+    private static let dialect: ModelDialect = .reactMarkdown
+    var expectedDialect: ModelDialect? { Self.dialect }
     let toolAdapter: ToolSchemaAdapter
 
     let dialectRules: String? = """
@@ -89,7 +93,7 @@ struct MarkdownStructuredGenerator: CognitiveGenerator {
         }
 
         let pipeline = CognitiveParsePipeline(
-            expectedDialect: .reactMarkdown,
+            expectedDialect: Self.dialect,
             modelId: model.modelName,
             iteration: iteration,
             knownToolNames: Set(context.availableTools.map(\.name)),

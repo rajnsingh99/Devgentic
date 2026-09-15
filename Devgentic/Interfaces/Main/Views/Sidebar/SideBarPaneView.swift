@@ -28,6 +28,7 @@ enum SidebarTab: String, CaseIterable, Identifiable, Codable {
     case scheduler        = "scheduler"
     case backendProfiles  = "backendProfiles"
     case tools            = "tools"
+    case skills           = "skills"
     case downloads        = "downloads"
     case settings         = "settings"
 
@@ -40,6 +41,7 @@ enum SidebarTab: String, CaseIterable, Identifiable, Codable {
         case .scheduler:       return "clock.badge"
         case .backendProfiles: return "cpu"
         case .tools:           return "wrench.and.screwdriver"
+        case .skills:          return "sparkles"
         case .downloads:       return "arrow.down.circle"
         case .settings:        return "gearshape"
         case .explorer:        return "folder"
@@ -53,6 +55,7 @@ enum SidebarTab: String, CaseIterable, Identifiable, Codable {
         case .scheduler:       return "Scheduler"
         case .backendProfiles: return "Profiles"
         case .tools:           return "Tools"
+        case .skills:          return "Skills"
         case .downloads:       return "Downloads"
         case .settings:        return "Settings"
         case .explorer:        return "Explorer"
@@ -91,6 +94,9 @@ struct SideBarPaneView: View {
                         .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 0.98)), removal: .opacity))
                 case .tools:
                     ToolNavigationPane(host: .toolsTab)
+                        .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 0.98)), removal: .opacity))
+                case .skills:
+                    SkillNavigationPane()
                         .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 0.98)), removal: .opacity))
                 case .downloads:
                     DownloadSidebarView()

@@ -319,6 +319,19 @@ struct AgentConfigDetailView: View {
             set: { newValue in
                 if case .agent(var config) = buffer.draft.details {
                     config.skillConfig = newValue
+                    // ⚠️ DELIBERATELY DOES NOT TOUCH `skillSelections` (changed 2026-09-14).
+                    //
+                    // This editor used to keep the two in lockstep, because during the v8 dual-read
+                    // window it was a WRITER of links and `SkillResolution` preferred selections.
+                    // Under V6 it is not a writer any more: a profile links skills in the Skills
+                    // library, and this card no longer imports folders. A selection now addresses
+                    // an opaque `skill_…` that this editor has no way to produce, so anything it
+                    // wrote here would be an address it invented.
+                    //
+                    // ⚠️ Do NOT reinstate a derive-from-skillConfig step. That is what once deleted
+                    // every library-made link the moment a user touched this card — silent,
+                    // persisted on the next Save, and invisible until an agent stopped seeing a
+                    // skill. The legacy blob is read-only history now; leave it alone.
                     buffer.draft.details = .agent(config)
                 }
             }
@@ -718,13 +731,63 @@ struct AgentConfigDetailView: View {
         }
     }
 
+    /// ⚠️ NO IMPORT HERE (V6). This card used to be the whole skills editor — add a folder,
+    /// rescan it, toggle each skill, remove them all — writing into the profile's own
+    /// `skillConfig` blob. That is gone: skills live in a global library, a profile stores a
+    /// REFERENCE, and linking happens where the library is. Five profiles using one skill was five
+    /// copies that could disagree about what its description said.
+    ///
+    /// What is left is the honest summary plus the way through.
     private var skillsSection: some View {
-        AgentSkillsSection(
-            skillConfig: skillConfigBinding,
-            tools: toolsBinding,
-            currentModelTier: currentModelTier,
-            theme: theme
-        )
+        SettingsCard(title: "Skills", icon: "sparkles", theme: theme) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(linkedSkillsSummary)
+                    .font(.system(size: 12))
+                    .foregroundStyle(theme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                // ⚠️ Named separately from "not found". A selection awaiting re-link points at a
+                // skill that probably still exists and the import sweep repairs it; telling the user
+                // to remove it would destroy a link that is about to fix itself.
+                if awaitingRelinkCount > 0 {
+                    Label("\(awaitingRelinkCount) skill\(awaitingRelinkCount == 1 ? "" : "s") carried over from before the skill library and will be re-linked automatically. Nothing to do.",
+                          systemImage: "clock.arrow.circlepath")
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack {
+                    Spacer()
+                    // Passing the profile PINS it there: arriving from a profile's own config is a
+                    // statement about which profile is being configured, so the library disables its
+                    // own picker rather than letting a different one be selected underneath.
+                    GlassActionButton(title: "Manage Skills", icon: "sparkles", isAccent: false) {
+                        router.navigate(to: .skillLibrary(profileID: editBuffer.draft.id, openSkillID: nil))
+                    }
+                }
+            }
+        }
+    }
+
+    private var linkedSelections: [SkillSelection] {
+        guard case .agent(let config) = editBuffer.draft.details else { return [] }
+        return config.skillSelections ?? []
+    }
+
+    private var awaitingRelinkCount: Int { linkedSelections.filter(\.isAwaitingRelink).count }
+
+    private var linkedSkillsSummary: String {
+        let enabled = linkedSelections.filter { $0.isEnabled && !$0.isAwaitingRelink }.count
+        guard !linkedSelections.isEmpty else {
+            return "No skills linked. Skills are sets of instructions this agent loads on demand when a task matches one of them."
+        }
+        let pinned = linkedSelections.filter { $0.pinnedVersionID != nil }.count
+        var summary = "\(enabled) skill\(enabled == 1 ? "" : "s") enabled of \(linkedSelections.count) linked."
+        if pinned > 0 {
+            summary += " \(pinned) pinned to a specific version, so an update to those skills will not reach this agent."
+        }
+        return summary
     }
 
     private var knowledgeSection: some View {
@@ -1120,111 +1183,3 @@ struct AgentConfigDetailView: View {
     }
 }
 
-// MARK: - Skill Manifest Row
-
-struct SkillManifestRow: View {
-    let manifest: SkillManifest
-    let theme: any Theme
-    var onToggleEnabled: (() -> Void)? = nil
-    @State private var isExpanded: Bool = false
-
-    var body: some View {
-        HStack(spacing: 8) {
-            // Enable/disable checkbox — Button prevents gesture conflict with row tap
-            Button { onToggleEnabled?() } label: {
-                Image(systemName: manifest.isEnabled ? "checkmark.circle.fill" : "circle")
-                    .foregroundColor(manifest.isEnabled ? .accentColor : theme.secondaryText)
-                    .font(theme.fontBody)
-            }
-            .buttonStyle(.plain)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(manifest.name)
-                    .font(theme.fontFootnote.weight(.semibold))
-                    .foregroundColor(manifest.isEnabled ? theme.primaryText : theme.secondaryText)
-                Text(manifest.description)
-                    .font(theme.fontCaption2)
-                    .foregroundColor(theme.secondaryText)
-                    .lineLimit(isExpanded ? nil : 2)
-                if let compat = manifest.compatibility {
-                    Text(compat)
-                        .font(theme.fontCaption2)
-                        .foregroundColor(.orange)
-                }
-            }
-            .opacity(manifest.isEnabled ? 1.0 : 0.6)
-            .contentShape(Rectangle())
-            .onTapGesture { isExpanded.toggle() }
-            Spacer()
-            if manifest.resourceCount > 0 {
-                Label("\(manifest.resourceCount)", systemImage: "doc.on.doc")
-                    .font(theme.fontCaption2)
-                    .foregroundColor(theme.secondaryText)
-            }
-            Text("~\(manifest.discoveryTokenCost) tok")
-                .font(theme.fontCaption2)
-                .foregroundColor(theme.secondaryText)
-        }
-        .padding(.vertical, 2)
-    }
-}
-
-// MARK: - Skill Action Button (with hover)
-
-struct SkillActionButton: View {
-    let label: String
-    let icon: String
-    var isDestructive: Bool = false
-    let theme: any Theme
-    let action: () -> Void
-
-    @State private var isHovered = false
-    @FocusState private var isFocused: Bool
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: icon)
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(isDestructive ? (isHovered ? .white : theme.errorColor) : theme.accentColor)
-                Text(label)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(isDestructive ? (isHovered ? .white : theme.errorColor) : theme.primaryText)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isHovered
-                        ? (isDestructive ? theme.errorColor : theme.surfaceOverlayStrong)
-                        : (isDestructive ? theme.errorColor.opacity(0.12) : theme.surfaceOverlay)
-                    )
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(
-                        isHovered
-                        ? (isDestructive ? theme.errorColor : theme.accentColor.opacity(0.45))
-                        : (isDestructive ? theme.errorColor.opacity(0.3) : theme.secondaryText.opacity(0.18)),
-                        lineWidth: 1
-                    )
-            )
-            .shadow(
-                color: isHovered ? (isDestructive ? theme.errorColor.opacity(0.2) : theme.accentColor.opacity(0.15)) : Color.black.opacity(0.08),
-                radius: isHovered ? 4 : 2,
-                x: 0,
-                y: 1
-            )
-            .scaleEffect(isHovered ? 1.03 : 1.0)
-        }
-        .buttonStyle(.plain)
-        .focusable()
-        .focused($isFocused)
-        .onHover { hovering in
-            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
-                isHovered = hovering
-            }
-        }
-        .accessibilityLabel(label)
-    }
-}

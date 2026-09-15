@@ -24,6 +24,10 @@ private let logLLMOps = DGLogger(category: "LLMOps")
 /// Mirrors `MLXNativeStructuredGenerator` in structure but uses XML dialect rules
 /// and routes parsing through the `MistralXMLParser` (via `.mistralXML` pipeline).
 struct XMLNativeStructuredGenerator: CognitiveGenerator {
+
+    /// The one value this generator both declares and parses with.
+    private static let dialect: ModelDialect = .mistralXML
+    var expectedDialect: ModelDialect? { Self.dialect }
     let toolAdapter: ToolSchemaAdapter
 
     let dialectRules: String? = """
@@ -88,7 +92,7 @@ struct XMLNativeStructuredGenerator: CognitiveGenerator {
         }
 
         let pipeline = CognitiveParsePipeline(
-            expectedDialect: .mistralXML,
+            expectedDialect: Self.dialect,
             modelId: model.modelName,
             iteration: iteration,
             knownToolNames: Set(context.availableTools.map(\.name)),

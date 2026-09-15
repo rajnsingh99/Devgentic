@@ -9,46 +9,6 @@
 
 import SwiftUI
 
-struct MLXModelStoreView: View {
-    let filterForTools: Bool
-    @State private var viewModel: MLXModelStoreViewModel
-    @Environment(\.dismiss) var dismiss
-    @Environment(\.appTheme) private var theme
-
-    init(filterForTools: Bool = false) {
-        self.filterForTools = filterForTools
-        _viewModel = State(wrappedValue: MLXModelStoreViewModel(filterForTools: filterForTools))
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            MLXModelStoreContent(viewModel: viewModel, filterForTools: filterForTools)
-
-            Divider().background(theme.dividerColor)
-
-            // Bottom Action Bar — matches Ollama sheet
-            HStack {
-                Text("\(viewModel.displayedModels.count) Models Available")
-                    .font(.caption)
-                    .foregroundColor(theme.secondaryText)
-
-                Spacer()
-
-                Button("Done") {
-                    dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .tint(theme.accentColor)
-                .keyboardShortcut(.defaultAction)
-            }
-            .padding()
-            .background(theme.secondaryBackground)
-        }
-        .frame(width: 750, height: 650)
-    }
-}
-
 // MARK: - Reusable Content (shared between sheet and inline container)
 
 struct MLXModelStoreContent: View {

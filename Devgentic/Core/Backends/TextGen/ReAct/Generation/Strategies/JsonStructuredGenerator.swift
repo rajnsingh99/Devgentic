@@ -19,6 +19,10 @@ struct JsonStructuredGenerator: CognitiveGenerator {
     let toolAdapter: ToolSchemaAdapter
     let dialect: ModelDialect
 
+    /// Declared from the SAME stored value this generator parses with (`parse` below),
+    /// so the asked-for format and the parsed-for format cannot drift apart.
+    var expectedDialect: ModelDialect? { dialect }
+
     let dialectRules: String? = """
     CRITICAL TERMINATION RULE:
     When you have fully answered the user's request OR cannot proceed further, you MUST

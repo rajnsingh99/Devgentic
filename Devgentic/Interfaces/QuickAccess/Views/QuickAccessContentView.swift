@@ -618,6 +618,12 @@ extension QuickAccessContentView {
                     showFileSuggestions: .constant(false),
                     fileSuggestionQuery: .constant(""),
                     activeFileMentionTriggerRange: .constant(nil),
+                    // ⚠️ `/` is Agent-profile only and QuickAccess has no profile context, so the
+                    // picker is off here — as `#` and `@` already are. A trigger that opened a
+                    // picker QuickAccess cannot act on would be worse than no trigger.
+                    showSkillSuggestions: .constant(false),
+                    skillSuggestionQuery: .constant(""),
+                    activeSkillTriggerRange: .constant(nil),
                     attributedTextInsertion: .constant(nil),
                     textViewRef: { tv in editorTextView = tv },
                     escapePassesThrough: true

@@ -21,6 +21,14 @@ struct StagedArchive {
     let contentRoot: URL
 }
 
+/// Typed failures from the generalised expansion, so callers that are not extracting a document
+/// can report something truthful. `expandZip` maps these back to `DocumentExtractionError`.
+enum ZipStagingError: Error {
+    case staging(Error)
+    case launch(Error)
+    case corrupt
+}
+
 enum ZipArchiveStaging {
 
     /// Expands the zip at `url` into a fresh private directory.
@@ -54,9 +62,34 @@ enum ZipArchiveStaging {
     ///
     /// - Note: bounds on how much may be written to disk are NOT applied here; `maxSize` caps the
     ///   extracted TEXT, not the archive. That gap is recorded in §6.
+    /// Document-extraction entry point. Unchanged behaviour: a private temp staging directory and
+    /// `DocumentExtractionError` on failure.
     static func expandZip(at url: URL, format: String) throws -> StagedArchive {
-        let workDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
+        do {
+            return try expand(at: url, into: FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString), label: format)
+        } catch let error as ZipStagingError {
+            switch error {
+            case .corrupt:
+                throw DocumentExtractionError.corruptedFile(url.path)
+            case .staging(let underlying), .launch(let underlying):
+                throw DocumentExtractionError.extractionFailed(format, underlying: underlying)
+            }
+        }
+    }
+
+    /// Generalised expansion: caller chooses the destination and gets a typed error.
+    ///
+    /// ⚠️ `workDirectory` is the CALLER'S to remove. `expandZip` documents a `defer`-delete because
+    /// a document extraction is transient; an INSTALL keeps what it extracted, so this variant makes
+    /// no such promise. Deleting it here would delete the thing being installed.
+    ///
+    /// ⚠️ This function performs NO content validation. It does not bound the extracted size, does
+    /// not refuse symlinks, and does not confine entry paths. Those are the installer's job, done
+    /// after extraction against the real tree — see `SkillPackageInstaller`. Anything that expands
+    /// an archive from an untrusted source and skips that step has a hole.
+    static func expand(at url: URL, into workDirectory: URL, label: String) throws -> StagedArchive {
+        let format = label
         let contentRoot = workDirectory.appendingPathComponent("content")
 
         do {
@@ -67,7 +100,7 @@ enum ZipArchiveStaging {
             )
         } catch {
             logger.error("[ZIPSTAGE] \(format) '\(url.lastPathComponent)': could not create a staging directory (\(error.localizedDescription)). Extraction abandoned.")
-            throw DocumentExtractionError.extractionFailed(format, underlying: error)
+            throw ZipStagingError.staging(error)
         }
 
         // The one name `unzip` is allowed to see. Fixed, and inside a directory named by UUID.
@@ -77,14 +110,21 @@ enum ZipArchiveStaging {
         } catch {
             try? FileManager.default.removeItem(at: workDirectory)
             logger.error("[ZIPSTAGE] \(format) '\(url.lastPathComponent)': could not stage the archive (\(error.localizedDescription)). Extraction abandoned rather than passing the real path to unzip.")
-            throw DocumentExtractionError.extractionFailed(format, underlying: error)
+            throw ZipStagingError.staging(error)
         }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
         process.arguments = ["-o", stagedArchive.path, "-d", contentRoot.path]
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        // ⚠️ stderr is CAPTURED, not discarded. unzip reports its own refusals here — `skipped
+        // "../" path component(s)`, `stripped absolute path spec` — which is the evidence that an
+        // archive tried to escape its destination. Sending it to /dev/null left only the exit
+        // status, so a hostile archive and a corrupt one produced the same message.
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
+        // Kept: an encrypted archive PROMPTS for a password, and a prompt on an inherited stdin
+        // waits forever. Reading EOF turns that into a reportable failure instead of a hang.
         process.standardInput = FileHandle.nullDevice
 
         do {
@@ -92,14 +132,24 @@ enum ZipArchiveStaging {
         } catch {
             try? FileManager.default.removeItem(at: workDirectory)
             logger.error("[ZIPSTAGE] \(format) '\(url.lastPathComponent)': unzip could not be launched (\(error.localizedDescription)). Extraction abandoned.")
-            throw DocumentExtractionError.extractionFailed(format, underlying: error)
+            throw ZipStagingError.launch(error)
         }
+        // ⚠️ READ BEFORE WAIT. Draining the pipe after `waitUntilExit()` is the ~64 KB deadlock
+        // this codebase already paid for once across 38 call sites; a verbose unzip on a large
+        // archive reaches that comfortably.
+        let stderrData = errorPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+
+        let stderrText = String(data: stderrData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !stderrText.isEmpty {
+            logger.notice("[ZIPSTAGE] \(format) '\(url.lastPathComponent)': unzip reported: \(stderrText). CONSEQUENCE: entries it names were altered or skipped by unzip itself — treat an archive that triggers path warnings as hostile, not merely malformed.")
+        }
 
         guard process.terminationStatus == 0 else {
             try? FileManager.default.removeItem(at: workDirectory)
-            logger.error("[ZIPSTAGE] \(format) '\(url.lastPathComponent)': unzip exited \(process.terminationStatus); treating the archive as corrupt. No content extracted.")
-            throw DocumentExtractionError.corruptedFile(url.path)
+            logger.error("[ZIPSTAGE] \(format) '\(url.lastPathComponent)': unzip exited \(process.terminationStatus)\(stderrText.isEmpty ? "" : " — \(stderrText)"); treating the archive as corrupt. No content extracted.")
+            throw ZipStagingError.corrupt
         }
 
         logger.debug("[ZIPSTAGE] \(format) '\(url.lastPathComponent)': expanded into a private staging directory")

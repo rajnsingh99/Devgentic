@@ -387,7 +387,7 @@ extension DevgenticSchemaV2 {
     }
 }
 
-// MARK: - V3 (current)
+// MARK: - V3
 
 /// V3, 2026-08-29 (workflow nodes own their configuration): adds TWO optional attributes to
 /// `BackendProfile` — `ownerWorkflowID: UUID?` and `ownerNodeID: UUID?` — marking a row as a
@@ -422,11 +422,78 @@ enum DevgenticSchemaV3: VersionedSchema {
     }
 }
 
+// MARK: - V4 and V5 (deleted, 2026-09-15)
+//
+// ⚠️⚠️ THEY NEVER SHIPPED, SO THEY WERE DELETED RATHER THAN FROZEN. The last released build is at
+// V3; V4 (a folder INDEX: SkillSourceSD + SkillManifestSD) and V5 (one added attribute) existed
+// only in this working tree. Keeping them would have meant maintaining two dead schema versions,
+// their frozen nested copies, a tombstone file whose sole job was making V5 definable, and a
+// `.custom` migration stage that read a table no real store has — forever, since a published
+// version can never be removed.
+//
+// Verified before deleting, against COPIES of real stores (see
+// `StoreCollapseMigrationCheckTests`): a store already at V6 opens with V4/V5 absent, and a real
+// V3 store migrates straight to V6 with all 9 profiles and every configuration blob intact. The
+// negative control in that file — a plan omitting V3 throws `loadIssueModelContainer` — is what
+// makes those results mean something.
+//
+// ⚠️ V3 CANNOT go the same way. Real stores are stamped at it.
+
+// MARK: - V6 (current)
+
+/// V6, 2026-09-14 (the skill library owns its content).
+///
+/// **RETIRES** `SkillSourceSD` and `SkillManifestSD`. **ADDS** `SkillSD`, `SkillVersionSD`,
+/// `SkillFileSD`. Net 15 entities.
+///
+/// V4/V5 stored an INDEX and pointed at folders on disk. That meant two sources of truth, and the
+/// whole reconciliation apparatus — tombstoning, staleness with an mtime tolerance, a filesystem
+/// watcher, security-scoped bookmarks — existed only to manage their disagreement. V6 stores the
+/// content, so nothing dangles and none of that is needed. The model mirrors Anthropic's Skills
+/// API: opaque ids, immutable complete-snapshot versions, a `latest` pointer. See `SkillLibrarySD`.
+///
+/// ⚠️ **NO FROZEN COPIES ARE NEEDED FOR THIS STEP, and the reason is worth stating** because the
+/// V4→V5 lesson trains the opposite reflex. Rule 5b fires when two versions RENDER the same shape.
+/// V6 does not evolve the retired entities — it drops them. Their live classes stay in
+/// `SkillRegistrySD.swift`, unlisted here but still listed by V5, so V5 keeps rendering exactly what
+/// it recorded. That is precisely why those classes must NOT be deleted from the codebase while V5
+/// remains in `schemas`: they are V5's definition and the migration's read path.
+///
+/// ⚠️ Entity retirement is lightweight-safe and proven against a real store that contained rows —
+/// `SchemaMigrationTests.testRetiredCodeViewerEntityDropsWithoutLosingConversations`. Adding
+/// unrelated entities is likewise in the safe set. The stage below is nevertheless `.custom`, for a
+/// reason that has nothing to do with the shape change: see it.
+enum DevgenticSchemaV6: VersionedSchema {
+
+    static var versionIdentifier: Schema.Version { Schema.Version(6, 0, 0) }
+
+    static var models: [any PersistentModel.Type] {
+        [
+            devgentic.BackendProfile.self,
+            MCPToolItem.self,
+            MCPToolDefinitionModel.self,
+            PromptModel.self,
+            ScheduledTaskModel.self,
+            devgentic.ConversationSD.self,
+            devgentic.ChatMessageSD.self,
+            devgentic.AttachedTextFileSD.self,
+            devgentic.AttachedImageFileSD.self,
+            DownloadRecord.self,
+            WorkflowLayoutSD.self,
+            devgentic.WorkflowRunRecordSD.self,
+            // The library replaces SkillSourceSD + SkillManifestSD, which are deliberately absent.
+            devgentic.SkillSD.self,
+            devgentic.SkillVersionSD.self,
+            devgentic.SkillFileSD.self,
+        ]
+    }
+}
+
 // MARK: - Migration plan
 
 /// The store's migration plan.
 ///
-/// ⚠️ THREE versions and TWO stages as of 2026-08-29 (V1 → V2 → V3). Staged migration IS engaged,
+/// ⚠️ FIVE versions and FOUR stages as of 2026-09-14 (V1 → V2 → V3 → V4 → V5). Staged migration IS engaged,
 /// and this comment previously claimed the opposite — that `stages` was empty and the plan behaved
 /// "identically to `migrationPlan: nil`". It was true when written, with one declared version, and
 /// was left behind by both the V2 and V3 changes. Whether staged migration engages is exactly what
@@ -442,7 +509,7 @@ enum DevgenticMigrationPlan: SchemaMigrationPlan {
 
     /// ⚠️ ASCENDING version order is load-bearing. See the V2 procedure in this file's header.
     static var schemas: [any VersionedSchema.Type] {
-        [DevgenticSchemaV1.self, DevgenticSchemaV2.self, DevgenticSchemaV3.self]
+        [DevgenticSchemaV1.self, DevgenticSchemaV2.self, DevgenticSchemaV3.self, DevgenticSchemaV6.self]
     }
 
     static var stages: [MigrationStage] {
@@ -453,7 +520,27 @@ enum DevgenticMigrationPlan: SchemaMigrationPlan {
             .lightweight(fromVersion: DevgenticSchemaV1.self, toVersion: DevgenticSchemaV2.self),
             // Additive optional attributes (BackendProfile.ownerWorkflowID / .ownerNodeID) —
             // the same canonical lightweight case.
-            .lightweight(fromVersion: DevgenticSchemaV2.self, toVersion: DevgenticSchemaV3.self)
+            .lightweight(fromVersion: DevgenticSchemaV2.self, toVersion: DevgenticSchemaV3.self),
+            // ⚠️⚠️ V3 → V6 DIRECTLY, and it is `.lightweight` because there is nothing left for a
+            // hook to do. The V5→V6 stage used to be this plan's only `.custom` one: it ran
+            // `willMigrate` purely to read folder paths out of `SkillManifestSD` before that table
+            // was retired. **That capture never once fired in the field** — the registry only ever
+            // existed in a development build, so on every real store the table was empty and the
+            // launch sweep, which was sourced from it, silently discarded the user's skills.
+            //
+            // The addresses were in the profile blobs the whole time. `SkillLibraryImportSweep`
+            // now recovers them from there (`harvestLegacyFolders`), which needs no migration hook,
+            // no side file and no window during the upgrade — and is proven end to end against a
+            // real V3 store in `SyntheticSkillsStoreMigrationTests`.
+            //
+            // ⚠️ Adding three entities and retiring none (V3 never had the registry) is in the
+            // lightweight safe set: existing rows are untouched and the new tables start empty.
+            //
+            // ⚠️ This makes the chain ALL-LIGHTWEIGHT again, so SwiftData may skip intermediates
+            // and attempt V1→V6 directly — the hazard this file's header warns about. Harmless
+            // ONLY because no stage carries logic any more. Re-read that warning before adding a
+            // `.custom` stage back.
+            .lightweight(fromVersion: DevgenticSchemaV3.self, toVersion: DevgenticSchemaV6.self)
         ]
     }
 }

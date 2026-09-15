@@ -205,14 +205,6 @@ final class SkillFolderScannerTests: XCTestCase {
         XCTAssertEqual(manifests.first!.resourceCount, 2)
     }
 
-    func testManifest_discoveryTokenCost() throws {
-        try createSkill(name: "test-skill", description: "A short description.")
-
-        let manifests = try SkillFolderScanner.scan(rootFolder: tempDir)
-        let manifest = manifests.first!
-        let expectedCost = (manifest.name.count + manifest.description.count) / 4
-        XCTAssertEqual(manifest.discoveryTokenCost, expectedCost)
-    }
 
     // MARK: - Load Full Package
 
@@ -255,14 +247,23 @@ final class SkillFolderScannerTests: XCTestCase {
         XCTAssertTrue(manifests.isEmpty, "Consecutive hyphens should be rejected")
     }
 
-    func testNameValidation_mismatchWithDirectoryRejected() throws {
+    /// ⚠️ FLIPPED 2026-09-14 — this used to assert the mismatch was REJECTED.
+    ///
+    /// The agentskills.io "name must equal its folder name" rule was dropped. It earned its keep
+    /// while a folder path was the skill's identity; under the V6 library identity is an opaque
+    /// `skill_…` and the folder is discarded at ingest, so the rule only refused packages that
+    /// Anthropic's own Skills API accepts (SKILL.md need sit only at the root or a top-level
+    /// folder). The SHAPE check is untouched and is the one carrying the security weight — see
+    /// `testNameValidation_*` above, which still reject traversal, uppercase and stray punctuation.
+    func testNameValidation_mismatchWithDirectoryIsNowAccepted() throws {
         let skillDir = tempDir.appendingPathComponent("dir-name")
         try FileManager.default.createDirectory(at: skillDir, withIntermediateDirectories: true)
         let content = "---\nname: different-name\ndescription: Mismatched.\n---"
         try content.write(to: skillDir.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
 
         let manifests = try SkillFolderScanner.scan(rootFolder: tempDir)
-        XCTAssertTrue(manifests.isEmpty, "Name must match directory name")
+        XCTAssertEqual(manifests.map(\.name), ["different-name"],
+                       "the frontmatter names the skill; the directory is only where it happened to live")
     }
 }
 
