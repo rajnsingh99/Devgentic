@@ -66,6 +66,9 @@ struct AppSettings {
     static let chatFontSizeKey = "chatFontSize"
     static let chatLineSpacingKey = "chatLineSpacing"
 
+    // Chat & Execution Timeline
+    static let showTimelineThoughtsKey = "showTimelineThoughts"
+
     // Jarvis — the voice HUD.
     // ⚠️ Key VALUES must stay free of "key"/"token"/"secret"/"auth"/"path": `BundleExporter`'s
     // allowlist is asserted by `ObservabilityHygieneTests.testAllowlistContainsNothingSecretShaped`,

@@ -275,7 +275,7 @@ struct ImageGenConfigDetailView: View {
                 .foregroundColor(.orange) // ImageGen specific color
 
             VStack(alignment: .leading) {
-                TextField("Profile Name", text: profile.displayName)
+                TextField("", text: profile.displayName, prompt: Text("Profile Name").foregroundColor(theme.placeholderText))
                     .font(theme.fontTitle2)
                     .fontWeight(.bold)
                     .textFieldStyle(.plain)
@@ -463,17 +463,29 @@ struct ImageGenConfigDetailView: View {
                         .foregroundColor(theme.secondaryText)
                 }
 
-                TextEditor(text: negativePromptBinding)
-                    .font(theme.fontBody)
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
-                    .frame(minHeight: 80, maxHeight: 160)
-                    .background(theme.secondaryBackground)
-                    .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: theme.cornerRadiusMedium)
-                            .stroke(theme.dividerColor, lineWidth: 1)
-                    )
+                ZStack(alignment: .topLeading) {
+                    if negativePromptBinding.wrappedValue.isEmpty {
+                        Text("e.g. Blurry, low quality, distorted, extra limbs, bad anatomy...")
+                            .font(theme.fontFootnote)
+                            .foregroundStyle(theme.placeholderText)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 12)
+                            .allowsHitTesting(false)
+                    }
+
+                    TextEditor(text: negativePromptBinding)
+                        .font(theme.fontFootnote)
+                        .foregroundStyle(theme.primaryText)
+                        .scrollContentBackground(.hidden)
+                        .padding(8)
+                        .frame(minHeight: 80, maxHeight: 160)
+                }
+                .background(theme.secondaryBackground)
+                .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
+                .overlay(
+                    RoundedRectangle(cornerRadius: theme.cornerRadiusMedium)
+                        .stroke(theme.dividerColor, lineWidth: 1)
+                )
 
                 let npCount = negativePromptBinding.wrappedValue.count
                 if npCount > 0 {
@@ -600,8 +612,9 @@ struct ImageGenConfigDetailView: View {
                 IslandPillButton(
                     title: "Save",
                     style: .primary,
+                    help: "Save profile changes (⌘S)",
                     accessibilityLabel: "Save profile changes",
-                    keyboardShortcut: .defaultAction
+                    keyboardShortcut: KeyboardShortcut("s", modifiers: .command)
                 ) {
                     do {
                         // ⚠️ Register A34: advisories are RETURNED now, not just logged. The

@@ -168,7 +168,13 @@ struct APIKeyInputPopup: View {
     
     private func handleButtonAction() {
         if case .valid = inputViewModel.validationState {
-            mainViewModel.saveAndEnableWebSearch(apiKey: inputViewModel.apiKeyInput)
+            guard mainViewModel.saveAndEnableWebSearch(apiKey: inputViewModel.apiKeyInput) else {
+                // Register KC-2: the key was verified but could not be stored in the Keychain.
+                // Dismissing here would report a success that did not happen and leave the user
+                // with a disabled feature and no idea why. The key is NOT written anywhere else.
+                inputViewModel.validationState = .invalid(String(localized: "The key was verified but could not be saved to your Keychain. Unlock your login keychain (or allow Devgentic access if macOS asked) and try again."))
+                return
+            }
             inputViewModel.resetAPIKeyPopupState()
             dismiss()
         } else {

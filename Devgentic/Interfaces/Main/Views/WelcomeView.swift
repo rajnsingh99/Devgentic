@@ -16,6 +16,7 @@ struct WelcomeView: View {
     @Environment(MainApplicationViewModel.self) private var viewModel
     @Environment(MainViewRouter.self) private var router
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.openWindow) private var openWindow
 
     @State private var didNotifyWidgets = false
     @State private var showContent = false
@@ -306,9 +307,33 @@ struct WelcomeView: View {
     // MARK: - Keyboard Hints
 
     private var keyboardHints: some View {
-        HStack(spacing: 20) {
+        HStack(spacing: 16) {
             KeyHint(keys: ["⌘", "B"], label: "Sidebar", theme: theme)
             KeyHint(keys: ["⇧", "⌘", "V"], label: "Voice", theme: theme)
+
+            Text("•")
+                .font(.caption2)
+                .foregroundColor(theme.tertiaryText.opacity(0.5))
+
+            Button {
+                openWindow(id: "shortcuts-window")
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "command")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("All Shortcuts")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .foregroundColor(theme.accentColor)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(theme.accentColor.opacity(0.1))
+                )
+            }
+            .buttonStyle(.plain)
+            .help("View all keyboard shortcuts (⌘/)")
         }
         .padding(.vertical, 8)
     }

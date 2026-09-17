@@ -36,7 +36,7 @@ struct SkillCommandSuggestionView: View {
             // library with nothing linkable; silently showing nothing reads as the trigger being
             // broken, which is the complaint that started this feature.
             HStack(spacing: 6) {
-                Image(systemName: "sparkles")
+                Image(systemName: "puzzlepiece")
                     .font(.system(size: 11))
                     .foregroundStyle(theme.secondaryText)
                 // ⚠️ "Linked to this agent", not "in the library". The picker is scoped to what
@@ -90,7 +90,7 @@ struct SkillCommandSuggestionView: View {
     private func row(_ item: SkillCommandItem) -> some View {
         let isActive = selectedItemID == item.id || hoveredItemID == item.id
         return HStack(spacing: 8) {
-            Image(systemName: "sparkles")
+            Image(systemName: "puzzlepiece")
                 .font(.system(size: 12))
                 .foregroundStyle(isActive ? Color.accentColor : theme.secondaryText)
                 .frame(width: 20)

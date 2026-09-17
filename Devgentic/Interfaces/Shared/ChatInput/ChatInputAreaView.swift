@@ -229,6 +229,9 @@ struct ChatInputAreaView: View {
         .onDisappear {
             inputViewModel.handleComposerDismantled()
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("openFilePicker"))) { _ in
+            openFilePicker()
+        }
         // MARK: - File Drop Zone (P1)
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             handleFileDrop(providers)

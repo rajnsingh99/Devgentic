@@ -841,4 +841,133 @@ final class SnapshotToolContractDriftTests: XCTestCase {
         XCTAssertTrue(SnapshotToolContract.postSnapshot.isSubset(of: SnapshotToolContract.preSnapshot),
                       "a post-snapshot without a pre-snapshot cannot produce a diff")
     }
+
+    // MARK: - [CR52/CR59] The fourth leg — live Code Viewer tabs
+
+    /// ⚠️ THE LEG THAT WAS MISSING. The two guards above bind `preSnapshot` ↔ `chipEligibleTools`
+    /// in both directions. `AgentLiveWriteEvent.liveWriteToolNames` — the set that decides whether
+    /// a write gets a LIVE tab at all — was bound to nothing, and `create_file` was absent from it
+    /// while present in all three siblings, from the day the set was introduced.
+    ///
+    /// ⚠️ The invariant is DERIVED, not restated. Asserting the four names as a literal would just
+    /// repeat the line it guards and would have passed on the day the omission shipped — the
+    /// "drift tests from the invariant, not the implementation" trap. A live tab shows the PROPOSED
+    /// FILE, so it exists exactly for the mutating tools whose params already carry the full
+    /// post-state: `preSnapshot − postSnapshot`. That is verbatim what `AgentLiveWriteEvent`'s own
+    /// doc declares ("FULL-CONTENT writers only"), and `testOnlyTheEditFamilyTakesAPostSnapshot`
+    /// above is what keeps the subtraction meaningful.
+    ///
+    /// ⚠️ `read_file` is NOT subtracted here, unlike the chip leg. It is chip-eligible but is not
+    /// in `preSnapshot` at all — it mutates nothing — so the subtraction already excludes it.
+    /// Mutation that must kill this: remove `"create_file"` from `liveWriteToolNames`.
+    func testEveryFullContentWriterGetsALiveTab() {
+        let fullContentWriters = SnapshotToolContract.preSnapshot
+            .subtracting(SnapshotToolContract.postSnapshot)
+        let missing = fullContentWriters.subtracting(AgentLiveWriteEvent.liveWriteToolNames)
+        XCTAssertTrue(missing.isEmpty,
+                      "these carry the whole file in their params but open no live tab, so the write happens with no viewer, no pill and no banner: \(missing.sorted())")
+    }
+
+    /// …and the reverse: a live tab for a tool the executor never snapshots has no baseline, so its
+    /// rejected state could never be reconciled and ⌘S on it would be refused as drift forever.
+    /// Mutation that must kill this: add a name to `liveWriteToolNames` that is not in `preSnapshot`
+    /// (e.g. `"read_file"`, or an edit-family name).
+    func testEveryLiveTabToolIsAFullContentWriterTheExecutorSnapshots() {
+        let fullContentWriters = SnapshotToolContract.preSnapshot
+            .subtracting(SnapshotToolContract.postSnapshot)
+        let unbacked = AgentLiveWriteEvent.liveWriteToolNames.subtracting(fullContentWriters)
+        XCTAssertTrue(unbacked.isEmpty,
+                      "these open a live tab with no pre-write snapshot behind it, or carry only find/replace params: \(unbacked.sorted())")
+    }
+}
+
+// MARK: - Thoughts & Reasoning Visibility Toggle Tests
+
+final class TimelineThoughtsToggleTests: XCTestCase {
+
+    func testAppSettingKeyConstant() {
+        XCTAssertEqual(AppSettings.showTimelineThoughtsKey, "showTimelineThoughts")
+    }
+
+    func testFilterVisibleNodesWhenThoughtsShown() {
+        let t1 = TimelineNode.thought(id: UUID(), text: "Step 1 — Thinking")
+        let a1 = TimelineNode.action(.toolExecution(ToolExecutionData(id: UUID(), name: "read_file", params: "{}", output: "ok", isSuccess: true, isExecuting: false)))
+        let nodes: [TimelineNode] = [t1, a1]
+
+        let visible = AgentTimelineView.filterVisibleNodes(nodes, showThoughts: true)
+        XCTAssertEqual(visible.count, 2)
+    }
+
+    func testFilterVisibleNodesWhenThoughtsHidden() {
+        let t1 = TimelineNode.thought(id: UUID(), text: "Step 1 — Thinking")
+        let a1 = TimelineNode.action(.toolExecution(ToolExecutionData(id: UUID(), name: "read_file", params: "{}", output: "ok", isSuccess: true, isExecuting: false)))
+        let t2 = TimelineNode.thought(id: UUID(), text: "Step 2 — Thinking again")
+        let nodes: [TimelineNode] = [t1, a1, t2]
+
+        let visible = AgentTimelineView.filterVisibleNodes(nodes, showThoughts: false)
+        XCTAssertEqual(visible.count, 1)
+        if case .action = visible[0] {
+            // expected
+        } else {
+            XCTFail("Expected tool action node to remain")
+        }
+    }
+
+    func testFilterVisibleNodesFallbackWhenOnlyThoughts() {
+        let t1 = TimelineNode.thought(id: UUID(), text: "Thinking 1")
+        let t2 = TimelineNode.thought(id: UUID(), text: "Thinking 2")
+        let nodes: [TimelineNode] = [t1, t2]
+
+        // When only thoughts exist, do not return an empty list: keep thoughts visible as fallback.
+        let visible = AgentTimelineView.filterVisibleNodes(nodes, showThoughts: false)
+        XCTAssertEqual(visible.count, 2)
+    }
+
+    func testSummaryTitleWhenThoughtsHidden() {
+        let summary: (status: AgentTimelineView.TimelineSummaryStatus, failedTools: Int, toolCount: Int) = (.succeeded, 0, 3)
+        let title = AgentTimelineView.summaryTitle(
+            nodesCount: 8,
+            summary: summary,
+            terminalOutcome: .completed,
+            isStreaming: false,
+            showThoughts: false
+        )
+        XCTAssertEqual(title, "Executed 3 tools")
+    }
+
+    func testSummaryTitleWhenThoughtsShown() {
+        let summary: (status: AgentTimelineView.TimelineSummaryStatus, failedTools: Int, toolCount: Int) = (.succeeded, 0, 3)
+        let title = AgentTimelineView.summaryTitle(
+            nodesCount: 8,
+            summary: summary,
+            terminalOutcome: .completed,
+            isStreaming: false,
+            showThoughts: true
+        )
+        XCTAssertEqual(title, "Executed 8 steps (3 tools)")
+    }
+
+    func testSummaryTitleWithFailedToolsWhenThoughtsHidden() {
+        let summary: (status: AgentTimelineView.TimelineSummaryStatus, failedTools: Int, toolCount: Int) = (.degraded, 1, 3)
+        let title = AgentTimelineView.summaryTitle(
+            nodesCount: 8,
+            summary: summary,
+            terminalOutcome: .completed,
+            isStreaming: false,
+            showThoughts: false
+        )
+        XCTAssertEqual(title, "Executed 3 tools · 1 failed")
+    }
+
+    func testSummaryTitleZeroToolsFallsBackToThoughtSteps() {
+        let summary: (status: AgentTimelineView.TimelineSummaryStatus, failedTools: Int, toolCount: Int) = (.succeeded, 0, 0)
+        let title = AgentTimelineView.summaryTitle(
+            nodesCount: 2,
+            summary: summary,
+            terminalOutcome: .completed,
+            isStreaming: false,
+            showThoughts: false
+        )
+        XCTAssertEqual(title, "Thought for 2 steps")
+    }
 }

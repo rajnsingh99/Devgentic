@@ -260,6 +260,7 @@ struct ConversationSidebarRow: View {
 
 struct ConversationSidebarView: View {
     @Environment(MainApplicationViewModel.self) var viewModel
+    @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
     // MARK: - Data Fetching
@@ -420,6 +421,18 @@ struct ConversationSidebarView: View {
         }
         .onAppear {
             isPinnedExpanded = UserDefaults.standard.object(forKey: "sidebarPinnedExpanded_v2") as? Bool ?? true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .selectNextConversation)) { _ in
+            selectNextConversation()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .selectPreviousConversation)) { _ in
+            selectPreviousConversation()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .renameActiveConversation)) { _ in
+            initiateRenameForActiveConversation()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .deleteActiveConversation)) { _ in
+            initiateDeleteForActiveConversation()
         }
     }
 
@@ -666,21 +679,75 @@ struct ConversationSidebarView: View {
         .padding(.bottom, 10)
     }
 
+    // MARK: - Visible Conversations for Sequential Navigation
+
+    private var visibleConversationsList: [ConversationSD] {
+        let p = partitioned
+        if selectedFilter == .pinned {
+            return p.pinned
+        }
+        return p.pinned + p.dateSections.flatMap(\.conversations)
+    }
+
     /// Flattens the current partition (pinned + all date sections) into a
     /// set of IDs for Select-All semantics. Honors the filter chip — when
     /// `.pinned` is selected only pinned rows are visible, so only pinned
     /// IDs go into the set.
     private var visibleConversationIDs: Set<UUID> {
-        let p = partitioned
-        var ids = Set(p.pinned.map(\.id))
-        if selectedFilter == .all {
-            for section in p.dateSections {
-                for convo in section.conversations {
-                    ids.insert(convo.id)
-                }
+        Set(visibleConversationsList.map(\.id))
+    }
+
+    // MARK: - Keyboard Navigation & Actions
+
+    private func selectNextConversation() {
+        let list = visibleConversationsList
+        guard !list.isEmpty else { return }
+        guard let currentID = viewModel.selectedConversationID,
+              let currentIndex = list.firstIndex(where: { $0.id == currentID }) else {
+            selectConversation(list[0])
+            return
+        }
+        let nextIndex = min(currentIndex + 1, list.count - 1)
+        selectConversation(list[nextIndex])
+    }
+
+    private func selectPreviousConversation() {
+        let list = visibleConversationsList
+        guard !list.isEmpty else { return }
+        guard let currentID = viewModel.selectedConversationID,
+              let currentIndex = list.firstIndex(where: { $0.id == currentID }) else {
+            selectConversation(list[0])
+            return
+        }
+        let prevIndex = max(currentIndex - 1, 0)
+        selectConversation(list[prevIndex])
+    }
+
+    private func selectConversation(_ conversation: ConversationSD) {
+        viewModel.workflowEditGuard.attempt {
+            viewModel.selectedConversationID = conversation.id
+            if !router.isShowingChat {
+                router.returnToChat()
             }
         }
-        return ids
+    }
+
+    private func initiateRenameForActiveConversation() {
+        guard let currentID = viewModel.selectedConversationID,
+              let conversation = conversations.first(where: { $0.id == currentID }) else { return }
+        self.editableConversationName = conversation.displayTitle
+        self.renamingConversationID = conversation.id
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(100))
+            self.isRenameFieldFocused = true
+        }
+    }
+
+    private func initiateDeleteForActiveConversation() {
+        guard let currentID = viewModel.selectedConversationID,
+              let conversation = conversations.first(where: { $0.id == currentID }) else { return }
+        self.conversationToDelete = conversation
+        self.showingDeleteAlert = true
     }
 
     private func toggleSelectAllVisible() {

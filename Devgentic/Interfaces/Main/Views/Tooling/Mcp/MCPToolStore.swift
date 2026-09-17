@@ -53,7 +53,15 @@ final class MCPToolStore {
     func configureContainer(_ container: ModelContainer, migrateLegacySecrets: Bool) {
         self.modelContainer = container
         if migrateLegacySecrets {
-            migrateLegacySecretsIfNeeded()
+            // ⚠️ REFUSED under XCTest. The test host is the real app on the real store, but its
+            // Keychain is an in-memory stand-in (`TestHostKeychain`, registers KC-54/55) — a
+            // "successful" secret write here proves nothing, and the blob rewrite that follows it
+            // would strip real secrets into a store that vanishes with the process. Same class as
+            // `BackendProfileStore.migrateAPIKeysToKeychain`; the flag stays unset, so the app's own
+            // next launch runs it normally.
+            if TestHost.permits("migrate legacy MCP secrets out of the config blobs into the Keychain", logger: logger) {
+                migrateLegacySecretsIfNeeded()
+            }
         } else {
             logger.notice(
                 "[STARTUP] MCP legacy-secrets migration DEFERRED — the launch sweep is not running "
@@ -94,7 +102,11 @@ final class MCPToolStore {
     /// newly-generated source ID, never inline. Returns the new source ID so
     /// callers (e.g. the form) can clean up any temp-ID Keychain entries.
     @discardableResult
+    /// - Parameter id: the new source's identity. Caller-supplied (defaulting to a fresh UUID) so a
+    ///   credential that must be written BEFORE the row exists — the OAuth bundle, register KC-5 —
+    ///   can be keyed on the final identity. See `MCPServerAddFlow`.
     func addTool(
+        id newID: UUID = UUID(),
         serverName: String,
         serverDefinition: ServerDefinition,
         secrets: MCPRuntimeSecrets,
@@ -103,10 +115,9 @@ final class MCPToolStore {
         guard let context = requireContext(
             "addTool(serverName: \(serverName))",
             consequence: "the new MCP server was NOT saved and no Keychain secrets were written; the "
-                + "form will look as though it succeeded."
+                + "form is told the add failed."
         ) else { return nil }
 
-        let newID = UUID()
         let item = MCPToolItem(
             id: newID,
             serverName: serverName,
@@ -254,7 +265,14 @@ final class MCPToolStore {
             }
 
             // Replace secrets atomically: purge removed env keys, then write
-            // the new set. Auth scopes are always overwritten.
+            // the new set. Auth scopes are reconciled by `persistSecrets`.
+            //
+            // ⚠️ `delete`, NOT `clear`, and that is correct here — do not "fix" it. The KC-1 hazard
+            // is a secret being destroyed because its VALUE could not be read; these keys come from
+            // the blob (`previousEnvKeys` vs the form's `envKeys`), never from the Keychain, so an
+            // unreadable Keychain cannot fabricate a removal. Reaching this line means the user
+            // genuinely deleted the row from the form, and a guarded `clear` would refuse that
+            // legitimate removal during an outage and silently keep a secret they asked to drop.
             let newEnvKeys = Set(serverDefinition.envKeys ?? [])
             let removedEnvKeys = previousEnvKeys.subtracting(newEnvKeys)
             for key in removedEnvKeys {
@@ -376,43 +394,64 @@ final class MCPToolStore {
     /// The OAuth *bundle* is owned by the container layer (`AddMCPServerContainerView.handleAdd/Update`)
     /// since it requires a richer Codable shape than this method handles —
     /// we just clear it on scheme transitions away from oauth.
-    private func persistSecrets(
+    /// ⚠️ TEST SEAM (registers KC-1 / KC-17): deliberately not `private`. This function touches no
+    /// `ModelContext` — only `MCPSecretStore` — so a test can drive it directly with an injected
+    /// Keychain and prove the WIRING, not just the policy. That distinction is load-bearing here:
+    /// `MCPSecretStore.clear` refusing to delete an unreadable secret is worth nothing if this
+    /// function calls `delete` instead, and a test of `clear` alone cannot catch that.
+    func persistSecrets(
         _ secrets: MCPRuntimeSecrets,
         definition: ServerDefinition,
         sourceID: UUID
     ) {
-        // Env values
+        // Env values. An empty value routes through `MCPSecretStore.clear`, so a value the form
+        // could not read comes back as "" and is REFUSED rather than deleted.
         for (key, value) in secrets.env {
             MCPSecretStore.shared.store(value, for: .envValue(key: key), sourceID: sourceID)
         }
 
-        // Wipe every auth scope first. The single "right" scope gets re-written
-        // below when the scheme requires it.
-        MCPSecretStore.shared.delete(scope: .bearerToken, sourceID: sourceID)
-        MCPSecretStore.shared.delete(scope: .apiKeyHeaderValue, sourceID: sourceID)
+        // ⚠️⚠️ RECONCILE TO A TARGET — DO NOT WIPE FIRST. This used to delete `.bearerToken` and
+        // `.apiKeyHeaderValue` unconditionally and only THEN hit
+        // `guard let header = secrets.authorizationHeader else { return }`. So any save that failed
+        // to materialise a header — which is every save where the Keychain could not be read, since
+        // the form hydrates the field with `?? ""` and `buildRuntimeSecrets` only sets a header for
+        // a non-empty secret — destroyed the stored credential on its way to an early return. The
+        // user renamed a server and lost its token. Registers KC-1 and KC-17.
+        //
+        // Deciding the target state first makes the early return impossible: the scope that should
+        // hold the secret is never cleared on the way to writing it.
+        let target: (scope: MCPSecretScope, value: String)? = {
+            guard let header = secrets.authorizationHeader else { return nil }
+            switch definition.auth {
+            case .bearer:
+                // Strip the "Bearer " prefix the runtime carries — Keychain stores the raw token
+                // only, so it can be reused if the scheme changes.
+                let token = header.value.hasPrefix("Bearer ")
+                    ? String(header.value.dropFirst("Bearer ".count))
+                    : header.value
+                return (.bearerToken, token)
+            case .apiKeyHeader:
+                return (.apiKeyHeaderValue, header.value)
+            case .none, .oauth:
+                // `.oauth`'s bundle is owned by the container layer; `.none` stores nothing.
+                return nil
+            }
+        }()
+
+        // Clear every auth scope that is NOT the target, so a scheme change leaves no orphan.
+        // ⚠️ `clear`, never `delete`: an unreadable secret is kept, not destroyed.
+        for scope in [MCPSecretScope.bearerToken, .apiKeyHeaderValue] where scope != target?.scope {
+            MCPSecretStore.shared.clear(scope: scope, sourceID: sourceID)
+        }
         if case .oauth = definition.auth {
             // Keep the oauth bundle — container layer manages it.
         } else {
-            MCPSecretStore.shared.delete(scope: .oauthBundle, sourceID: sourceID)
+            MCPSecretStore.shared.clear(scope: .oauthBundle, sourceID: sourceID)
         }
 
-        guard let header = secrets.authorizationHeader else { return }
-
-        switch definition.auth {
-        case .none:
-            break
-        case .bearer:
-            // Strip the "Bearer " prefix the runtime carries — Keychain stores
-            // the raw token only, so it can be reused if the scheme changes.
-            let token = header.value.hasPrefix("Bearer ")
-                ? String(header.value.dropFirst("Bearer ".count))
-                : header.value
-            MCPSecretStore.shared.store(token, for: .bearerToken, sourceID: sourceID)
-        case .apiKeyHeader:
-            MCPSecretStore.shared.store(header.value, for: .apiKeyHeaderValue, sourceID: sourceID)
-        case .oauth:
-            // Bundle persistence happens in the container layer.
-            break
+        // Write the target last, so nothing above can have removed what we are about to store.
+        if let target {
+            MCPSecretStore.shared.store(target.value, for: target.scope, sourceID: sourceID)
         }
     }
 
@@ -454,11 +493,16 @@ final class MCPToolStore {
     /// inline `env` / `authentication` payloads), lift the secret material
     /// into Keychain, and re-encode the blob in the new shape. Idempotent —
     /// keyed by a UserDefaults flag so it never runs twice.
-    private func migrateLegacySecretsIfNeeded() {
+    /// ⚠️ TEST SEAM: `defaults` is injectable and this is not `private`, mirroring
+    /// `ProviderKeyStore.purgeLegacyPlaintextKeys(defaults:)`. The one-shot flag lives in
+    /// `UserDefaults`, so without this a test could neither run the migration (the flag is already
+    /// set on any machine that has launched the app) nor avoid writing to the developer's real
+    /// preferences domain to clear it. Production always uses `.standard`.
+    func migrateLegacySecretsIfNeeded(defaults: UserDefaults = .standard) {
         guard let context = requireContext("migrateLegacySecretsIfNeeded", consequence: "the one-shot legacy-secrets migration did not run; inline secrets stay in plaintext on disk and it retries next launch.") else { return }
 
         let migrationKey = "mcp.secrets.migrated.v1"
-        if UserDefaults.standard.bool(forKey: migrationKey) {
+        if defaults.bool(forKey: migrationKey) {
             return
         }
 
@@ -480,11 +524,35 @@ final class MCPToolStore {
                 let hasLegacyAuth = !(legacy.authentication?.isEmpty ?? true)
                 guard hasLegacyEnv || hasLegacyAuth else { continue }
 
+                // ⚠️⚠️ EVERY `store` RESULT IS LOAD-BEARING HERE — register KC-6. These returns used
+                // to be discarded, and execution fell through to the blob rewrite below, which
+                // replaces the legacy shape with one that carries only env KEY NAMES and no secret
+                // material. So a Keychain write that failed left the secret in NEITHER place: gone
+                // from the blob, never written to the Keychain, unrecoverable.
+                //
+                // And this is not a rare path. It runs unattended at launch over every source, and
+                // the launch most likely to fail is the FIRST ONE AFTER AN UPDATE — precisely when
+                // a re-signed binary makes macOS re-prompt for Keychain access and an unattended
+                // login-item launch has nobody there to answer it.
+                //
+                // The rule the encode failure below already follows: do not count it as migrated if
+                // it did not persist. This applies it to the Keychain half too.
+                var secretsPersisted = true
+
                 // Lift env values into Keychain.
                 var envKeys: [String] = []
                 if let env = legacy.env {
                     for (k, v) in env where !v.isEmpty {
-                        MCPSecretStore.shared.store(v, for: .envValue(key: k), sourceID: item.id)
+                        if !MCPSecretStore.shared.store(v, for: .envValue(key: k), sourceID: item.id) {
+                            secretsPersisted = false
+                            logger.error(
+                                "[MCP-SECRETS] Legacy migration could not write env value '\(k)' for "
+                                + "MCP source '\(item.serverName)' (id \(item.id)) to the Keychain. "
+                                + "CONSEQUENCE: this source's blob is NOT rewritten, so the secret "
+                                + "stays readable in its legacy inline form and the migration is "
+                                + "retried on the next launch."
+                            )
+                        }
                         envKeys.append(k)
                     }
                 }
@@ -493,8 +561,26 @@ final class MCPToolStore {
                 // wrote) into Keychain and set scheme to `.bearer`.
                 var auth: MCPAuthenticationScheme = .none
                 if let token = legacy.authentication?["token"], !token.isEmpty {
-                    MCPSecretStore.shared.store(token, for: .bearerToken, sourceID: item.id)
-                    auth = .bearer
+                    if MCPSecretStore.shared.store(token, for: .bearerToken, sourceID: item.id) {
+                        auth = .bearer
+                    } else {
+                        secretsPersisted = false
+                        logger.error(
+                            "[MCP-SECRETS] Legacy migration could not write the bearer token for MCP "
+                            + "source '\(item.serverName)' (id \(item.id)) to the Keychain. "
+                            + "CONSEQUENCE: this source's blob is NOT rewritten, so the token stays "
+                            + "in its legacy inline form and the server keeps working; the migration "
+                            + "is retried on the next launch."
+                        )
+                    }
+                }
+
+                // ⚠️ Bail BEFORE the rewrite. The blob is the only remaining copy of any secret
+                // whose Keychain write failed, so leaving it byte-intact is what makes this
+                // recoverable. `migrationFailures` keeps the one-shot flag unset so it retries.
+                guard secretsPersisted else {
+                    migrationFailures += 1
+                    continue
                 }
 
                 let migrated = ServerDefinition(
@@ -532,7 +618,7 @@ final class MCPToolStore {
             // failures outstanding would strand those sources at their legacy shape forever, with
             // their secrets already moved to the Keychain and nothing left to retry the move.
             if migrationFailures == 0 {
-                UserDefaults.standard.set(true, forKey: migrationKey)
+                defaults.set(true, forKey: migrationKey)
             } else {
                 logger.error(
                     "[PERSISTENCE] Legacy-secrets migration INCOMPLETE — \(migratedCount) source(s) "

@@ -18,6 +18,7 @@ struct AgentTimelineView: View {
 
     @Environment(\.appTheme) private var theme
     @AppStorage(AppSettings.chatFontSizeKey) private var chatFontSize: Double = 15.0
+    @AppStorage(AppSettings.showTimelineThoughtsKey) private var showThoughts: Bool = false
 
     /// Optional text of the final content shown below the timeline. Used to
     /// deduplicate narrative events that would otherwise repeat the same text.
@@ -173,57 +174,105 @@ struct AgentTimelineView: View {
             isStreaming: isStreaming,
             finalContentText: finalContentText
         )
+        let hasThoughts = nodes.contains {
+            if case .thought = $0 { return true }
+            return false
+        }
+        let visibleNodes = Self.filterVisibleNodes(nodes, showThoughts: showThoughts)
         let showFooter = streamingContext?.shouldDisplay ?? false
         // [tc-7] Read ONCE — see the `summary` property. Both the glyph, the tint and the title
         // (which `body` needs twice: the visible `Text` and the `.accessibilityLabel`) come from
         // these two locals.
         let summaryValue = summary
-        let titleText = summaryTitle(nodesCount: nodes.count, summary: summaryValue)
+        let titleText = summaryTitle(nodesCount: nodes.count, summary: summaryValue, showThoughts: showThoughts)
         if !nodes.isEmpty || showFooter {
             VStack(alignment: .leading, spacing: 6) {
-                // Summary Header (collapsible toggle)
-                Button {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.75)) {
-                        isTimelineExpanded.toggle()
-                        userToggled = true
+                // Summary Header (collapsible toggle + thoughts toggle)
+                HStack(spacing: 6) {
+                    // Left area: status icon + summary title (click to expand/collapse timeline)
+                    Button {
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.75)) {
+                            isTimelineExpanded.toggle()
+                            userToggled = true
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: isStreaming ? "sparkles" : summaryValue.status.glyph)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(isStreaming ? theme.accentColor : summaryTint(for: summaryValue.status))
+
+                            Text(titleText)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(theme.secondaryText)
+
+                            Spacer(minLength: 0)
+                        }
+                        .contentShape(Rectangle())
                     }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: isStreaming ? "sparkles" : summaryValue.status.glyph)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(isStreaming ? theme.accentColor : summaryTint(for: summaryValue.status))
+                    .buttonStyle(.plain)
+                    .help(isTimelineExpanded ? String(localized: "Collapse execution log") : String(localized: "Expand execution log"))
+                    .accessibilityLabel(
+                        "\(titleText). "
+                        + (isTimelineExpanded ? String(localized: "Collapse execution log") : String(localized: "Expand execution log"))
+                    )
 
-                        Text(titleText)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(theme.secondaryText)
+                    // Inline Thoughts toggle pill (only rendered when there are thoughts in the timeline)
+                    if hasThoughts {
+                        Button {
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                                showThoughts.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 9.5, weight: .medium))
+                                Text(showThoughts ? String(localized: "Thoughts: On") : String(localized: "Thoughts: Off"))
+                                    .font(.system(size: 10, weight: .medium))
+                            }
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(
+                                Capsule()
+                                    .fill(showThoughts ? theme.accentColor.opacity(0.16) : theme.surfaceOverlay.opacity(0.8))
+                            )
+                            .overlay(
+                                Capsule()
+                                    .stroke(showThoughts ? theme.accentColor.opacity(0.4) : theme.surfaceOverlayStrong, lineWidth: 0.5)
+                            )
+                            .foregroundColor(showThoughts ? theme.accentColor : theme.tertiaryText)
+                        }
+                        .buttonStyle(.plain)
+                        .help(showThoughts ? String(localized: "Hide agent reasoning & thoughts") : String(localized: "Show agent reasoning & thoughts"))
+                        .accessibilityLabel(showThoughts ? String(localized: "Hide agent reasoning and thoughts") : String(localized: "Show agent reasoning and thoughts"))
+                    }
 
-                        Spacer(minLength: 0)
-
+                    // Chevron expand/collapse trigger
+                    Button {
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.75)) {
+                            isTimelineExpanded.toggle()
+                            userToggled = true
+                        }
+                    } label: {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 10, weight: .bold))
                             .foregroundColor(theme.secondaryText.opacity(0.6))
                             .rotationEffect(.degrees(isTimelineExpanded ? 90 : 0))
+                            .padding(.horizontal, 2)
+                            .contentShape(Rectangle())
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(theme.surfaceOverlay.opacity(0.5))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
-                    )
+                    .buttonStyle(.plain)
+                    .help(isTimelineExpanded ? String(localized: "Collapse execution log") : String(localized: "Expand execution log"))
+                    .accessibilityLabel(isTimelineExpanded ? String(localized: "Collapse execution log") : String(localized: "Expand execution log"))
                 }
-                .buttonStyle(.plain)
-                .help(isTimelineExpanded ? String(localized: "Collapse execution log") : String(localized: "Expand execution log"))
-                // The label must carry the SUMMARY too. `.accessibilityLabel` on the button
-                // replaces its computed label, so the title Text above was invisible to
-                // VoiceOver — meaning the "3 failed" this fix adds would have reached sighted
-                // users only.
-                .accessibilityLabel(
-                    "\(titleText). "
-                    + (isTimelineExpanded ? String(localized: "Collapse execution log") : String(localized: "Expand execution log"))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(theme.surfaceOverlay.opacity(0.5))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
                 )
 
                 // Expanded Nodes Content
@@ -234,7 +283,7 @@ struct AgentTimelineView: View {
                         ScrollViewReader { proxy in
                             ScrollView(.vertical, showsIndicators: true) {
                                 VStack(alignment: .leading, spacing: 8) {
-                                    ForEach(nodes) { node in
+                                    ForEach(visibleNodes) { node in
                                         TimelineNodeGroupView(
                                             node: node,
                                             compactReasoning: compactReasoning,
@@ -260,7 +309,7 @@ struct AgentTimelineView: View {
                                     timelineContentHeight = newHeight
                                 }
                             }
-                            .frame(height: timelineContentHeight > 0 ? min(timelineContentHeight, timelineMaxHeight) : initialEstimatedHeight(for: nodes.count))
+                            .frame(height: timelineContentHeight > 0 ? min(timelineContentHeight, timelineMaxHeight) : initialEstimatedHeight(for: visibleNodes.count))
                             .frame(maxHeight: timelineMaxHeight)
                             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                             .onChange(of: revision) { _, _ in
@@ -268,7 +317,7 @@ struct AgentTimelineView: View {
                                     withAnimation(.easeOut(duration: 0.2)) {
                                         if let ctx = streamingContext, ctx.shouldDisplay {
                                             proxy.scrollTo("streaming_footer", anchor: .bottom)
-                                        } else if let lastID = nodes.last?.id {
+                                        } else if let lastID = visibleNodes.last?.id {
                                             proxy.scrollTo(lastID, anchor: .bottom)
                                         }
                                     }
@@ -279,7 +328,7 @@ struct AgentTimelineView: View {
                         .transition(.opacity.combined(with: .move(edge: .top)))
                     } else {
                         VStack(alignment: .leading, spacing: 8) {
-                            ForEach(nodes) { node in
+                            ForEach(visibleNodes) { node in
                                 TimelineNodeGroupView(
                                     node: node,
                                     compactReasoning: compactReasoning,
@@ -471,11 +520,38 @@ struct AgentTimelineView: View {
         }
     }
 
-    /// [tc-7] Takes the ALREADY-COMPUTED summary. It used to read the `summary` property (one
-    /// full flatten) and then run a second flatten of its own just to count tools — and `body`
-    /// called it twice, for the `Text` and the `.accessibilityLabel`.
     private func summaryTitle(nodesCount: Int,
-                              summary: (status: TimelineSummaryStatus, failedTools: Int, toolCount: Int)) -> String {
+                              summary: (status: TimelineSummaryStatus, failedTools: Int, toolCount: Int),
+                              showThoughts: Bool = true) -> String {
+        Self.summaryTitle(
+            nodesCount: nodesCount,
+            summary: summary,
+            terminalOutcome: terminalOutcome,
+            isStreaming: isStreaming,
+            showThoughts: showThoughts
+        )
+    }
+
+    /// Pure, unit-testable filtering of timeline nodes according to the user's thought-visibility preference.
+    static func filterVisibleNodes(_ nodes: [TimelineNode], showThoughts: Bool) -> [TimelineNode] {
+        if showThoughts { return nodes }
+        let filtered = nodes.filter {
+            if case .thought = $0 { return false }
+            return true
+        }
+        // If there are no tool/action nodes (pure narrative run), keep thoughts visible
+        // so the expanded timeline doesn't become an empty container.
+        return filtered.isEmpty ? nodes : filtered
+    }
+
+    /// [tc-7] Takes the ALREADY-COMPUTED summary.
+    static func summaryTitle(
+        nodesCount: Int,
+        summary: (status: TimelineSummaryStatus, failedTools: Int, toolCount: Int),
+        terminalOutcome: ExecutionOutcome? = nil,
+        isStreaming: Bool = false,
+        showThoughts: Bool = true
+    ) -> String {
         if isStreaming {
             return String(localized: "Agent is thinking & executing… (\(nodesCount) step\(nodesCount == 1 ? "" : "s"))")
         }
@@ -503,36 +579,32 @@ struct AgentTimelineView: View {
         }
 
         let tools = "\(toolCount) tool\(toolCount == 1 ? "" : "s")"
+        let executionDescriptor = showThoughts ? "\(steps) (\(tools))" : "\(tools)"
 
         switch status {
         case .succeeded:
-            return String(localized: "Executed \(steps) (\(tools))")
+            return String(localized: "Executed \(executionDescriptor)")
         case .degraded:
-            // [CF-46] A degraded TERMINAL outcome (iteration budget, circuit breaker) normally
-            // leaves `failed == 0` — the LOOP ended, no tool did — so "· 0 failed" would be both
-            // noise and wrong about what went wrong. Say what actually happened instead.
+            let descriptor = showThoughts ? "\(steps) (\(tools)" : "\(tools)"
             if terminalOutcome == .failed {
                 return failed > 0
-                    ? String(localized: "Ended early after \(steps) (\(tools) · \(failed) failed)")
-                    : String(localized: "Ended early after \(steps) (\(tools))")
+                    ? String(localized: "Ended early after \(descriptor) · \(failed) failed)")
+                    : String(localized: "Ended early after \(descriptor))")
             }
-            // ⚠️ `.completedWithWarnings` is NOT an early end — the run reached its own end and
-            // carried an unrecovered tool failure out with it, which is the COMMON degraded case.
-            // Grouping it under "Ended early" told the user their answer had been cut short when
-            // it had not.
             if terminalOutcome == .completedWithWarnings {
                 return failed > 0
-                    ? String(localized: "Completed with warnings after \(steps) (\(tools) · \(failed) failed)")
-                    : String(localized: "Completed with warnings after \(steps) (\(tools))")
+                    ? String(localized: "Completed with warnings after \(descriptor) · \(failed) failed)")
+                    : String(localized: "Completed with warnings after \(descriptor))")
             }
-            return String(localized: "Executed \(steps) (\(tools) · \(failed) failed)")
-        case .cancelled:
             return failed > 0
-                ? String(localized: "Stopped after \(steps) (\(tools) · \(failed) failed)")
-                : String(localized: "Stopped after \(steps) (\(tools))")
+                ? String(localized: "Executed \(executionDescriptor) · \(failed) failed")
+                : String(localized: "Executed \(executionDescriptor)")
+        case .cancelled:
+            let descriptor = showThoughts ? "\(steps) (\(tools)" : "\(tools)"
+            return failed > 0
+                ? String(localized: "Stopped after \(descriptor) · \(failed) failed)")
+                : String(localized: "Stopped after \(descriptor))")
         case .interrupted:
-            // Handled above, before the zero-tool early return. Kept exhaustive rather than
-            // `default:` so a future status cannot slip through unconsidered.
             return String(localized: "Interrupted after \(steps) (\(tools))")
         }
     }
@@ -2217,20 +2289,40 @@ enum ToolArgFormatter {
         // Fallback for a tool with no case above — a third-party MCP tool, or one added to the
         // catalogue without a row here.
         //
-        // ⚠️ Two properties this must have, both learned from the split tools falling through:
+        // ⚠️ THREE properties this must have. The first two were learned from the split tools
+        // falling through; the third from [CR25].
         //  1. DETERMINISTIC. `for (_, v) in dict` iterates a bridged dictionary in an order that
         //     is per-instance, so the SAME stored row could label differently between launches.
         //     Sorted keys make the label a function of the params alone.
         //  2. NEVER a payload. `content`/`old_string`/`new_string` carry whole files and code
         //     fragments; surfacing one puts source into a 40-char chip and into the Markdown
         //     export. An identifying value or nothing is the right choice — a row with no label
-        //     still renders its verb and object.
+        //     still renders its verb and object. ⚠️ The empty label is the DECISION here, not a
+        //     gap in it: `testAnUnknownToolWithOnlyPayloadParamsLabelsNothing` asserts it in so
+        //     many words. If some tool genuinely needs identity, widen `identifyingParamKeys` —
+        //     never relax this set.
+        //  3. [CR25] NEVER a credential. Property 2 one step further, and the reason is the
+        //     EXPORT: `ConversationExporter.toolRowLine` calls this function and has no redaction
+        //     pass of its own, so for the one surface here that the user hands to someone else,
+        //     this is the last thing standing between a param value and a third party. Two
+        //     carriers are closed — a secret-NAMED key (skipped outright) and a URL's
+        //     query/fragment/userinfo (`webURLLabel` rebuilds from host and path only). Note that
+        //     property 1 is what made the second one necessary: sorting is a TOTAL order, so
+        //     `api_key` beat `topic` every single time rather than merely sometimes.
         if let identifying = firstString(dict, keys: identifyingParamKeys) {
+            if let web = webURLLabel(identifying) { return web }
             return pathShaped(identifying) ? basename(identifying) : truncate(identifying, 40)
         }
-        for key in dict.keys.sorted() where !payloadParamKeys.contains(key) {
+        for key in dict.keys.sorted()
+        where !payloadParamKeys.contains(key) && !isSecretParamName(key) {
             if let s = dict[key] as? String, !s.isEmpty {
-                return truncate(s, 40)
+                // ⚠️ [CR25] `webURLLabel` HERE TOO, not only on the identifying branch above.
+                // `http_request` DECLARES `url`, but its decoder also accepts `endpoint`/`uri`/
+                // `address` (NetworkTools.swift:115) and a third-party tool may name its URL
+                // parameter anything at all — `webhook`, `callback`, `href`. Those values reach
+                // the sweep, where `truncate(s, 40)` would carry 40 characters of query string
+                // into the export. A URL is a URL wherever it is found.
+                return webURLLabel(s) ?? truncate(s, 40)
             }
             if let n = dict[key] as? NSNumber {
                 return n.stringValue
@@ -2240,20 +2332,130 @@ enum ToolArgFormatter {
     }
 
     /// Keys that identify WHAT a tool acted on, tried in order before anything else.
+    ///
+    /// ⚠️ [CR25] `endpoint`/`uri`/`address` are here because `http_request`'s DECLARED schema says
+    /// `url` while its `Decodable` accepts all four (NetworkTools.swift:115). Without them a model
+    /// that emitted `endpoint` fell to the sorted sweep, where `method` outranks it alphabetically
+    /// — so the row named the VERB ("GET") instead of the host it called.
+    ///
+    /// ⚠️ Nothing in this list may be a credential name. This branch runs BEFORE the sweep and
+    /// deliberately does NOT consult `isSecretParamName` (that check would then run on every row
+    /// render for a list that is a fixed literal right here). The disjointness is therefore held
+    /// by a test — `testNeitherKeyListMayCarryACredentialName` — and not by code on the render path.
     private static let identifyingParamKeys = [
-        "file_path", "path", "query", "pattern", "command", "cmd", "url",
+        "file_path", "path", "query", "pattern", "command", "cmd",
+        "url", "endpoint", "uri", "address",
         "symbol", "name", "directory", "dir", "action"
     ]
 
     /// Keys whose values are CONTENT rather than identity — never a chip label.
+    ///
+    /// ⚠️ [CR25] `headers`: `NetworkTools` decodes `http_request`'s headers as an object OR as a
+    /// JSON STRING, deliberately, because models emit both (:136-147). In the object form the
+    /// sweep skips it anyway — `dict[key] as? String` fails on a bridged `NSDictionary`. In the
+    /// string form that cast SUCCEEDS, and the label became `{"Authorization":"Bearer sk-…`. A
+    /// header blob is never identity, so refusing it costs a row nothing.
+    ///
+    /// ⚠️ [CR25] `script`/`applescript`/`appleScript`/`sourceCode`: `run_applescript`
+    /// (NativeSystemTools.swift:183) has no case in the switch above, so its `script` param
+    /// reached the sweep and put 40 characters of raw AppleScript into the chip and the export —
+    /// the language whose ordinary idiom is `do shell script "…" password "…"`. This set is read
+    /// ONLY by the sweep, so `run_shell`/`execute_shell` are unaffected: they read `script`
+    /// through their own `case` and never consult it.
     private static let payloadParamKeys: Set<String> = [
         "content", "old_string", "new_string", "text", "body", "answer",
-        "data", "source", "code", "edits"
+        "data", "source", "code", "edits",
+        "script", "applescript", "appleScript", "sourceCode", "headers"
     ]
+
+    /// [CR25] Param names whose VALUE is a credential. The sorted sweep skips them outright.
+    ///
+    /// ⚠️ DERIVED from `TelemetrySanitizer.standardSecretKeysForEgress`, never hand-typed here.
+    /// That list's own doc says it is the single place to add a secret key — "Adding a key here
+    /// strengthens both" — and a second copy of the same strings inside a view file is exactly the
+    /// drift this project keeps writing drift tests to punish.
+    ///
+    /// Matched by NORMALIZED CONTAINS (lowercased, with `_`, `-` and `.` stripped) rather than by
+    /// equality, because a third-party MCP schema will not spell it the canonical way: this is
+    /// what catches `x-api-key`, `X_API_KEY`, `openaiApiKey`, `githubToken`. The false positives
+    /// are real and ACCEPTED rather than worked around — `author` and `authority` contain `auth`,
+    /// `tokenizer` contains `token` — because the sweep is a last resort that is already permitted
+    /// to return "" (property 2). A dropped label is the safe side of this trade; a surfaced
+    /// credential is not. If a real tool trips it, add that key to `identifyingParamKeys`, which
+    /// runs first — do not weaken the token rule.
+    ///
+    /// ⚠️ This is still a rule about the NAME. It never inspects the value: no entropy test, no
+    /// "looks like a key" regex. See `webURLLabel` for why that line is drawn where it is.
+    private static let secretParamNameTokens: Set<String> = Set(
+        TelemetrySanitizer.standardSecretKeysForEgress.map { ToolArgFormatter.normalizedParamName($0) }
+    )
+
+    private static func normalizedParamName(_ key: String) -> String {
+        key.lowercased().filter { $0 != "_" && $0 != "-" && $0 != "." }
+    }
+
+    private static func isSecretParamName(_ key: String) -> Bool {
+        let normalized = normalizedParamName(key)
+        return secretParamNameTokens.contains { normalized.contains($0) }
+    }
+
+    /// [CR25] Test-only reflections of the two key lists and the secret rule, so
+    /// `TimelineLabelCredentialTests` can assert the disjointness the render path does not check.
+    static var identifyingParamKeysForTesting: [String] { identifyingParamKeys }
+    static var payloadParamKeysForTesting: Set<String> { payloadParamKeys }
+    static func isSecretParamNameForTesting(_ key: String) -> Bool { isSecretParamName(key) }
 
     /// A value worth reducing to its last path component.
     private static func pathShaped(_ value: String) -> Bool {
         value.contains("/") && !value.contains(" ")
+    }
+
+    /// [CR25] An absolute URL reduced to `host[:port]/…/lastSegment`, or nil if the value is not
+    /// one. Three defects in a single branch, all downstream of `pathShaped` being TRUE of every
+    /// URL (it contains `/` and no space) and `basename` being the one branch with NO length cap:
+    ///
+    ///  • The HOST was thrown away. `https://api.github.com/repos/x/y/issues` labelled `issues`,
+    ///    so neither the chip nor the exported Markdown said which machine was contacted. For an
+    ///    `http_request` row the host is the most load-bearing fact there is — a call to
+    ///    `evil.example.com/steal` exported as `steal`, which is worse than no label at all
+    ///    because it reads as though it had told you something.
+    ///  • The QUERY STRING survived verbatim and uncapped:
+    ///    `…/weather?appid=SECRET&q=London` labelled `weather?appid=SECRET&q=London`, and
+    ///    `ConversationExporter.inlineArgument` wrapped that in backticks in a file the user hands
+    ///    to someone else. Its 80-char bound never fired — the string is 32. Nothing downstream
+    ///    catches it either: `RemoteEgressSanitizer.credentialsOnly` matches known token prefixes,
+    ///    `Bearer`, `user:pass@`, quoted JSON keys and `KEY=value` env assignments, and `appid=`
+    ///    is none of those ("APPID" does not contain "API").
+    ///  • `user:pass@host` basic-auth rode along inside the same string.
+    ///
+    /// ⚠️ THIS PARSES; IT DOES NOT PATTERN-MATCH — and that distinction is the standing project
+    /// rule "key off the argument NAME, never the SHAPE". `pathShaped`'s slash heuristic IS a
+    /// shape rule, and it is what produced all three defects above. The NAME still decides WHICH
+    /// value is surfaced (`identifyingParamKeys`, `payloadParamKeys`, `isSecretParamName`); this
+    /// decides only how to SHORTEN a value already chosen, and it decides against a DECLARED
+    /// GRAMMAR — a scheme plus a non-empty authority — which either matches or does not.
+    ///
+    /// ⚠️ ANY SCHEME WITH A HOST, not an http(s) allowlist. `TelemetrySanitizer`'s own
+    /// `sanitizeURLCredentials` was widened for exactly this reason: `postgres://`, `mongodb://`,
+    /// `redis://`, `s3://` are precisely the URIs a `.env` is full of and an agent quotes back.
+    /// Requiring a non-empty HOST is what keeps the grammar honest — a Windows path `C:/x/y.txt`
+    /// parses with scheme `C` and host nil, `mailto:` and `todo:` have no host either, and a POSIX
+    /// path has no scheme. All four return nil here and are still basenamed exactly as before.
+    ///
+    /// ⚠️ The label is built from `host`, `port` and `path` ONLY. Nothing below reads `query`,
+    /// `fragment`, `user`, `password` or `absoluteString`, so no credential can reach a label by
+    /// any route this function later grows. That is a stronger guarantee than nil-ing those fields
+    /// on a `var components` and serializing it — do not "simplify" it back to that.
+    private static func webURLLabel(_ value: String) -> String? {
+        guard let components = URLComponents(string: value),
+              components.scheme != nil,
+              let host = components.host, !host.isEmpty
+        else { return nil }
+
+        let authority = components.port.map { "\(host):\($0)" } ?? host
+        let segments = components.path.split(separator: "/")
+        guard let last = segments.last else { return truncate(authority, 40) }
+        return truncate(segments.count > 1 ? "\(authority)/…/\(last)" : "\(authority)/\(last)", 40)
     }
 
     // MARK: - Tables

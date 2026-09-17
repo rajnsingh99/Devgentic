@@ -281,10 +281,11 @@ final class ProviderKeyStorageTests: XCTestCase {
         XCTAssertNil(defaults.string(forKey: "gemini_api_key"))
     }
 
-    /// ⚠️ THE GUARD THAT MATTERS. `webSearchAPIKey` is also a cleartext credential in
-    /// UserDefaults, but unlike the Gemini one it has a live reader — purging it would silently
-    /// disable web search. The purge list is membership-by-"has no reader", not by "looks like a
-    /// secret", and this pins that distinction so a later addition cannot quietly break a feature.
+    /// ⚠️ THE GUARD THAT MATTERS. `webSearchAPIKey` was a cleartext credential in UserDefaults
+    /// with a live reader; it now has a Keychain home (`WebSearchKeyStore`, register KC-2) and the
+    /// store's own migration removes the plaintext ONLY after the Keychain write succeeded. This
+    /// purge runs earlier in launch than that migration, so an unconditional delete here would
+    /// race it and disable web search. Same pin, new reason.
     func testThePurgeLeavesCredentialsThatAreStillReadBack() {
         let defaults = makeDefaults()
         defaults.set("still-in-use", forKey: "webSearchAPIKey")

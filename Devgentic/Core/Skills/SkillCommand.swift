@@ -28,6 +28,9 @@
 //
 
 import Foundation
+import OSLog
+
+private let logger = DGLogger(category: "SkillCommand")
 
 /// A `/skill-name …` command recognised at the very start of a message.
 struct SkillCommand: Equatable, Sendable {
@@ -114,6 +117,9 @@ enum SkillCommandParser {
     /// mismatched skill produces confidently wrong work.
     static func render(_ command: SkillCommand, availableNames: Set<String>) -> String {
         guard availableNames.contains(command.skillName) else {
+            // ⚠️ Logged because the user SEES their text left alone and cannot tell whether the
+            // picker misfired or the skill genuinely is not reachable from this profile.
+            logger.notice("[SKILL_COMMAND] '/\(command.skillName)' names a skill this profile cannot reach (reachable: \(availableNames.sorted().joined(separator: ", ").isEmpty ? "none" : availableNames.sorted().joined(separator: ", "))). CONSEQUENCE: the message is sent EXACTLY as typed, with no directive added — the model gets a literal slash-word, which is what makes a typo visible to the person best placed to notice it.")
             // ⚠️ UNKNOWN SKILL: left EXACTLY as typed. Rewriting text that names a skill this
             // profile cannot reach would send an instruction the model cannot follow, and hide the
             // typo from the person best placed to notice it.
@@ -122,6 +128,7 @@ enum SkillCommandParser {
                 : "/\(command.skillName) \(command.arguments)"
         }
 
+        logger.notice("[SKILL_COMMAND] '/\(command.skillName)' rewritten into a directive (arguments: \(command.arguments.count) chars). CONSEQUENCE: the model is ASKED to use the skill, not forced — it may still judge it irrelevant and skip it, so a run that ignores the skill is not necessarily a routing bug.")
         let directive = "Use the \(command.skillName) skill for this request, if it applies. Load it with load_skill first."
         return command.arguments.isEmpty ? directive : "\(directive)\n\n\(command.arguments)"
     }

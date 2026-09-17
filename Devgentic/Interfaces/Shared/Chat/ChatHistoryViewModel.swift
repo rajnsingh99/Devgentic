@@ -1871,12 +1871,29 @@ final class ChatHistoryViewModel {
     }
     
     private func findMessageWithSourceFile(named fileName: String) -> ChatMessage? {
-        for message in currentChatMessages {
-            if message.sender == .user {
-                if let files = message.attachedTextFiles, files.contains(where: { $0.name == fileName }) {
-                    return message
-                }
+        // ⚠️ [CR55] AMBIGUITY FAILS CLOSED. This resolves by BARE NAME, and `FileSystemItem.id` is
+        // the URL, so the attach path happily accepts `web/app/page.tsx` and `docs/app/page.tsx`
+        // together — two `AttachedTextFile`s both named "page.tsx". Taking the first match then
+        // stamps `sourceFileID` for the wrong file, `canSaveAndClose` flips true, and
+        // `performApplyChanges` writes one file's content over the other's URL. The drift guard
+        // cannot catch it: it compares that file's own baseline against its own disk, which match.
+        // The tab header shows "page.tsx" either way, so nothing on screen reveals the swap.
+        //
+        // A missing badge is a cost the user can see and work around; a silent overwrite is not.
+        let matches = currentChatMessages
+            .filter { $0.sender == .user }
+            .flatMap { message in
+                (message.attachedTextFiles ?? [])
+                    .filter { $0.name == fileName }
+                    .map { (message: message, file: $0) }
             }
+        if matches.count > 1 {
+            let paths = matches.map { $0.file.url.path }.joined(separator: ", ")
+            logger.warning("[CodeViewer] '\(fileName)' names \(matches.count) different attached files in this conversation (\(paths)) — refusing to link the snippet to any of them. CONSEQUENCE: the tab keeps the name as its title but stays unlinked, so there is no diff and no Apply Changes; linking would have picked one by attachment order and could overwrite the wrong file.")
+            return nil
+        }
+        if let single = matches.first {
+            return single.message
         }
         // Info, not warning — see the caller: an unmatched name is the normal outcome for
         // model-generated code, and the caller states the consequence.

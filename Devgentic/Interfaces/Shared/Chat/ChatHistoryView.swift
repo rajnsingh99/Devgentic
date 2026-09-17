@@ -506,15 +506,20 @@ struct ChatHistoryView: View {
                     speechService.stop()
                 }
             }
-            // MARK: - Cmd+F Keyboard Shortcut
-            .background {
-                Button(action: {
-                    withAnimation(motionSafe(.easeInOut(duration: 0.2))) {
-                        searchViewModel.toggleSearch()
-                    }
-                }) { EmptyView() }
-                .hidden()
-                .keyboardShortcut("f", modifiers: .command)
+            .onReceive(NotificationCenter.default.publisher(for: .findInChat)) { _ in
+                withAnimation(motionSafe(.easeInOut(duration: 0.2))) {
+                    searchViewModel.toggleSearch()
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .findNextInChat)) { _ in
+                if searchViewModel.isSearchActive {
+                    searchViewModel.nextMatch()
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .findPreviousInChat)) { _ in
+                if searchViewModel.isSearchActive {
+                    searchViewModel.previousMatch()
+                }
             }
             // MARK: - Speech Playback Keyboard Shortcuts
             //

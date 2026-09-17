@@ -681,7 +681,10 @@ final class MainApplicationViewModel {
         settingsCoordinator.toggleWebSearch()
     }
 
-    func saveAndEnableWebSearch(apiKey: String) {
+    /// - Returns: false when the key could not be stored in the Keychain (register KC-2); the
+    ///   feature is then left disabled and the caller must say so.
+    @discardableResult
+    func saveAndEnableWebSearch(apiKey: String) -> Bool {
         settingsCoordinator.saveAndEnableWebSearch(apiKey: apiKey)
     }
 

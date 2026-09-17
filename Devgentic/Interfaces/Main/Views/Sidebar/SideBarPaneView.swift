@@ -41,7 +41,7 @@ enum SidebarTab: String, CaseIterable, Identifiable, Codable {
         case .scheduler:       return "clock.badge"
         case .backendProfiles: return "cpu"
         case .tools:           return "wrench.and.screwdriver"
-        case .skills:          return "sparkles"
+        case .skills:          return "puzzlepiece"
         case .downloads:       return "arrow.down.circle"
         case .settings:        return "gearshape"
         case .explorer:        return "folder"

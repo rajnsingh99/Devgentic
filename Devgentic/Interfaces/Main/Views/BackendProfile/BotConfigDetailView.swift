@@ -296,7 +296,7 @@ struct BotConfigDetailView: View {
             }
 
             VStack(alignment: .leading) {
-                TextField("Bot Name", text: profile.displayName)
+                TextField("", text: profile.displayName, prompt: Text("Bot Name").foregroundColor(theme.placeholderText))
                     .font(theme.fontTitle2)
                     .fontWeight(.bold)
                     .textFieldStyle(.plain)
@@ -378,7 +378,7 @@ struct BotConfigDetailView: View {
                     if instructionsBinding.wrappedValue.isEmpty {
                         Text("Enter system instructions for your bot here...")
                             .font(theme.fontCode)
-                            .foregroundColor(theme.secondaryText.opacity(0.5))
+                            .foregroundColor(theme.placeholderText)
                             .padding(.horizontal, 16)
                             .padding(.vertical, 16)
                             .allowsHitTesting(false)
@@ -488,8 +488,9 @@ struct BotConfigDetailView: View {
                 IslandPillButton(
                     title: "Save",
                     style: .primary,
+                    help: "Save profile changes (⌘S)",
                     accessibilityLabel: "Save profile changes",
-                    keyboardShortcut: .defaultAction
+                    keyboardShortcut: KeyboardShortcut("s", modifiers: .command)
                 ) {
                     // Pre-flight: a bot with empty instructions has no persona
                     // and no behavioural guardrails. We don't auto-fill a default

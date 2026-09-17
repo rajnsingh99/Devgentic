@@ -78,11 +78,6 @@ enum SkillMaterializer {
 
         do {
             try fm.createDirectory(at: root, withIntermediateDirectories: true)
-            try skillMarkdown(name: name,
-                              description: version.skillDescription,
-                              allowedTools: allowedTools,
-                              body: version.body)
-                .write(to: root.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
         } catch {
             throw SkillMaterializeError.writeFailed(error.localizedDescription)
         }
@@ -115,6 +110,34 @@ enum SkillMaterializer {
             } catch {
                 throw SkillMaterializeError.writeFailed("\(file.relativePath): \(error.localizedDescription)")
             }
+        }
+
+        // ⚠️⚠️ SKILL.md IS WRITTEN LAST, AND THAT ORDERING IS LOAD-BEARING — do not move it back
+        // above the loop for tidiness. `SkillRuntimeFiles.materialize` decides "already projected"
+        // by testing whether this file exists, so writing it FIRST made it a sentinel that lied:
+        // a write that threw on a bundled file left the directory holding SKILL.md and nothing
+        // else, and the NEXT call returned that directory as complete. `LoadSkillTool` then told
+        // the model "Bundled files for this skill are on disk at: …" for a tree with no files in
+        // it, and logged nothing — the second call was less honest than the first, which at least
+        // returned nil. Written last, its presence means every bundled file already landed.
+        //
+        // ⚠️ A retry is safe and is the intended recovery: `createDirectory` tolerates an existing
+        // directory and every file write is `.atomic`, so re-running over a partial tree completes
+        // it. This is also why a failed write is left in place rather than cleaned up — a cleanup
+        // that deleted the tree would race a second process that had already completed it.
+        //
+        // ⚠️ A bundled row stored at the path `SKILL.md` is now overwritten by this rebuilt one
+        // rather than overwriting it. That is the better of the two losses: before, an exported
+        // folder carried a foreign file's frontmatter and `SkillIngest` read back a different
+        // skill's name and description.
+        do {
+            try skillMarkdown(name: name,
+                              description: version.skillDescription,
+                              allowedTools: allowedTools,
+                              body: version.body)
+                .write(to: root.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+        } catch {
+            throw SkillMaterializeError.writeFailed("SKILL.md: \(error.localizedDescription)")
         }
 
         logger.info("[SKILL_EXPORT] Materialized '\(name)' (version \(version.id)) with \(version.files.count) file(s) at \(root.path).")
@@ -155,12 +178,41 @@ enum SkillMaterializer {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .joined(separator: " ")
+        // ⚠️ The leading-indicator set includes `#`, `-` and `?`, and omitting them was a live export
+        // bug: `#` opens a YAML comment, so a description beginning with one was emitted BARE and
+        // read back EMPTY — the routing key silently erased on a round trip. `- ` opens a sequence
+        // and `? ` a complex key, both of which make the document parse as something other than a
+        // description. The interior `contains(" #")` check catches a mid-string hash and is exactly
+        // what made the leading one easy to miss.
+        //
+        // ⚠️ Over-quoting is free now and under-quoting is not: since the escape became `''` and
+        // reversible, quoting a description that did not strictly need it costs nothing and round
+        // trips byte-exact, while a missed indicator loses content.
         let needsQuotes = collapsed.isEmpty
             || collapsed.contains(": ")
             || collapsed.hasSuffix(":")
             || collapsed.contains(" #")
-            || "[]{}&*!|>'\"%@`,".contains(collapsed.first ?? "x")
+            || "[]{}&*!|>'\"%@`,#-?".contains(collapsed.first ?? "x")
         guard needsQuotes else { return collapsed }
-        return "\"\(collapsed.replacingOccurrences(of: "\"", with: "'"))\""
+
+        // ⚠️⚠️ SINGLE-QUOTED, AND THE ESCAPE IS `''`. This replaced
+        // `"\(collapsed.replacingOccurrences(of: "\"", with: "'"))\""`, which did not escape at all
+        // — it SWAPPED the user's double quotes for apostrophes, so `Reviews "legacy" code` came
+        // back as `Reviews 'legacy' code`. That is the fifth instance in this codebase of a
+        // transform rewriting content, in the one file whose stated contract is round-trip fidelity.
+        //
+        // ⚠️ Single-quoted rather than double-quoted with `\"`, because `YAMLFrontmatterParser`
+        // processes NO escapes inside a double-quoted scalar — emitting the spec-correct `\"` would
+        // read back with literal backslashes, a different corruption rather than a fix. In a
+        // single-quoted YAML scalar `''` IS the escape for one quote, and nothing else is special:
+        // a backslash is literal. That last part matters on its own, because the old double-quoted
+        // form made `Matches \d+ patterns: numbers` a scanner error in any spec-conformant reader —
+        // export could produce a SKILL.md that only this app could load, which is a failed escape
+        // hatch rather than a degraded one.
+        //
+        // ⚠️ `SkillFolderScanner.unquote` MUST collapse `''` on the way back in. The two halves are
+        // one encoding and shipping either alone creates a corruption: without the collapse,
+        // `the user's code` round-trips to `the user''s code`.
+        return "'\(collapsed.replacingOccurrences(of: "'", with: "''"))'"
     }
 }

@@ -51,7 +51,35 @@ class ShellProcess {
     /// few dozen log lines, which is all any consumer of `readStdErr()` displays.
     private static let maxCapturedStderrChars = 16_384
 
+    /// The command line in REDACTED form — the only form that is ever logged. Register KC-16.
+    ///
+    /// This string exists to be quoted in log lines (the stderr-trim warning, the deinit warning),
+    /// and it used to hold the raw argv while the spawn line 130 lines below it was carefully
+    /// redacted. `--api-key X` is the common published form for a local MCP server's credential, so
+    /// the key travelled into the unified log and from there into every bug-report bundle. The live
+    /// `process.arguments` keeps the real values; nothing else does.
     let commandLine: String
+
+    /// ⚠️ TEST SEAM. When set, receives exactly the line `logStderrLine` would have logged, so a
+    /// test can drive a real child process and assert on the text as it would appear in the log.
+    nonisolated(unsafe) static var stderrLogSinkForTesting: (@Sendable (String) -> Void)?
+
+    /// Logs one line of child stderr, REDACTED. Register KC-17.
+    ///
+    /// Server CLIs echo their effective configuration to stderr on a failed start — including the
+    /// key that was wrong — and this was the one consumer of those bytes that did not run
+    /// `MCPRedaction.redact(text:)` first: `MCPClientService` redacts the same buffer at all three
+    /// places it quotes `readStdErr()`. The log is what a bug-report bundle carries, and a bug
+    /// report is what gets pasted into a public issue.
+    private static func logStderrLine(_ line: String) {
+        // One message for both destinations, so the seam cannot drift from the log.
+        let message = "[STDERR] \(MCPRedaction.redact(text: line))"
+        if let sink = stderrLogSinkForTesting {
+            sink(message)
+            return
+        }
+        logger.error(message)
+    }
     
     init(command: String, arguments: [String], environment: [String: String] = [:]) throws {
         self.process = Process()
@@ -98,7 +126,9 @@ class ShellProcess {
         process.executableURL = URL(fileURLWithPath: resolvedExecutable)
         process.arguments = arguments
 
-        self.commandLine = ([resolvedExecutable] + arguments).joined(separator: " ")
+        // Redacted once, here, and reused by the spawn log below — see `commandLine`.
+        let redactedArguments = MCPRedaction.redact(arguments: arguments)
+        self.commandLine = ([resolvedExecutable] + redactedArguments).joined(separator: " ")
 
         // 3. Pipe Setup
         process.standardInput = stdInPipe
@@ -113,7 +143,7 @@ class ShellProcess {
             if let str = String(data: data, encoding: .utf8) {
                 let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty {
-                    logger.error("[STDERR] \(trimmed)")
+                    Self.logStderrLine(trimmed)
                     self?.stderrQueue.async {
                         self?.appendStderr(str)
                     }
@@ -141,9 +171,9 @@ class ShellProcess {
         )
 
         // MCP server CLIs commonly take secrets as args (`--api-key X`, `TOKEN=X`,
-        // `Authorization: Bearer X`). Redact before logging — the live `process.arguments`
+        // `Authorization: Bearer X`). Redacted before logging — the live `process.arguments`
         // above still receives the original, unredacted values.
-        let redactedArgs = MCPRedaction.redact(arguments: arguments).joined(separator: " ")
+        let redactedArgs = redactedArguments.joined(separator: " ")
         logger.info("Spawning ShellProcess: \(resolvedExecutable) \(redactedArgs)")
         logger.info("Constructed PATH: \(currentPath)")
     }

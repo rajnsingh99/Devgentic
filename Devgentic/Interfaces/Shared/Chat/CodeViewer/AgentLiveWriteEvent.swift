@@ -31,7 +31,25 @@ enum AgentLiveWriteEvent {
     /// Live tabs cover the FULL-CONTENT writers only. Append writes carry just the
     /// fragment (post-state unknowable before the pre-read lands) and edit tools carry
     /// find/replace strings — both stay on the completion-chip path.
-    static let liveWriteToolNames: Set<String> = ["write_file", "overwrite_file", "create_new_file"]
+    ///
+    /// ⚠️ [CR52/CR59] This is the FOURTH member of a four-way contract, and it is the one that
+    /// drifted. `create_file` was in `ToolExecutionLoop.preSnapshotToolNames`, in
+    /// `TimelineFileViewerAction.chipEligibleTools` and in `primaryLabel`'s write case, but never
+    /// here — it was missing from the day this set was introduced, not removed later. Since
+    /// `create_file` is `.libraryExceptCode` it is the AGENT and WORKFLOW profiles' ordinary
+    /// creation tool, so those profiles got no live tab, no pulsing pill and no "agent is writing"
+    /// banner for a file creation, while `write_file` — the same visibility class — did. The nil
+    /// was SILENT: the guards below return before `skip` is even declared.
+    ///
+    /// ⚠️ The membership rule is DERIVED, not a list to curate by hand: this set is exactly the
+    /// pre-snapshotted tools whose params already carry the full post-state, i.e.
+    /// `preSnapshot − postSnapshot`. That is what "full-content writer" means above, and
+    /// `SnapshotToolContractDriftTests` now binds both directions of it so a fifth member cannot
+    /// drift in or out silently. Do not add a name here without adding it to the executor's
+    /// snapshot sets — the test will say so.
+    static let liveWriteToolNames: Set<String> = [
+        "write_file", "overwrite_file", "create_new_file", "create_file"
+    ]
 
     /// Same cap as the executor's snapshots — a live tab isn't worth more memory than
     /// a persisted diff is.

@@ -107,6 +107,45 @@ final class SkillRuntimeFilesTests: XCTestCase {
         XCTAssertEqual(first, second)
     }
 
+    /// ⚠️⚠️ THE DEFECT: a failed materialisation used to poison the reuse check, and the SECOND
+    /// call was less honest than the first.
+    ///
+    /// `SkillMaterializer.write` wrote SKILL.md before the bundled files, so a throw mid-loop left
+    /// the directory holding SKILL.md alone. This function reads exactly that file to decide
+    /// "already projected", so the next call returned a directory whose `scripts/run.py` did not
+    /// exist — and returned it silently, where the first call had at least returned nil.
+    /// `LoadSkillTool` then told the model the bundled files were on disk.
+    ///
+    /// **Mutation check:** move the SKILL.md write back above the file loop and the second
+    /// assertion goes red.
+    func testAFailedMaterialisationIsNotReportedAsCompleteOnTheNextCall() throws {
+        // ⚠️ INSERTED DIRECTLY, not through `store.create` — and the reason is a second fix landing
+        // on this one. `SkillStore` now REFUSES an unsafe bundled path at the door, so this fixture
+        // is no longer constructible through the store at all; the seeded version of this test began
+        // failing on `.get()` before it reached a single assertion.
+        //
+        // That is the store fix working, not a regression here. What it leaves behind is exactly the
+        // state this test is about: a GRANDFATHERED row, written under an earlier and narrower rule,
+        // which `addVersion` deliberately carries forward rather than bricking the skill over. Such a
+        // row still makes `SkillMaterializer.write` throw, so the projection can still fail — and a
+        // failure must still not be reported as a complete projection on the next call.
+        //
+        // `orderedFiles` sorts "a/./bad.txt" before "scripts/run.py", so the write throws before any
+        // bundled file lands — the same state a disk-full or sandbox denial produces.
+        let bad = SkillFileSD(relativePath: "a/./bad.txt", content: Data("x".utf8))
+        let good = SkillFileSD(relativePath: "scripts/run.py", content: Data("print('hi')".utf8))
+        let version = SkillVersionSD(skillDescription: "d", body: "Run scripts/run.py",
+                                     files: [bad, good])
+        let skill = SkillSD(name: "partial", latestVersionID: version.id, versions: [version])
+        container.mainContext.insert(skill)
+        try container.mainContext.save()
+
+        XCTAssertNil(SkillRuntimeFiles.materialize(version: version, name: skill.name),
+                     "the write threw, so the first call must report failure")
+        XCTAssertNil(SkillRuntimeFiles.materialize(version: version, name: skill.name),
+                     "and so must the second — a path to a tree with no bundled files in it is worse than nil, because the caller hands it to the model")
+    }
+
     /// ⚠️ Keyed by VERSION, not by skill: a profile pinning an older snapshot must not be handed the
     /// files of `latest`. Two versions of one skill are two directories.
     func testTwoVersionsOfOneSkillProjectToDifferentDirectories() throws {

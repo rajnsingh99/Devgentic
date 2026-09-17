@@ -63,7 +63,21 @@ struct ModelSettingsSection: View {
                 description: "Needed only for gated or private models. Without a token those downloads fail, and anonymous requests hit HuggingFace's rate limit sooner.",
                 theme: theme
             ) {
-                if tokenStore.hasToken, let masked = tokenStore.maskedToken {
+                if tokenStore.readFailed {
+                    // ⚠️ Register KC-8. Without this the card renders the identical empty state it
+                    // shows a brand-new user, so someone whose Keychain was momentarily unreadable
+                    // is told they have no token and re-pastes one they never lost.
+                    HStack(alignment: .top, spacing: 5) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11))
+                        Text("A token is stored but the Keychain could not be read. Nothing has been "
+                             + "lost — unlock your Keychain, or re-grant access after an app update, "
+                             + "then reopen this pane.")
+                            .font(.caption2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .foregroundColor(theme.warningColor)
+                } else if tokenStore.hasToken, let masked = tokenStore.maskedToken {
                     HStack(spacing: 8) {
                         HStack(spacing: 6) {
                             Image(systemName: "checkmark.seal.fill")
@@ -228,6 +242,12 @@ struct ModelSettingsSection: View {
                 .padding(.vertical, 10)
             }
         }
+        // ⚠️ THE PRODUCTION CALLER `refreshFromKeychain` NEVER HAD — register KC-8. The store reads
+        // the Keychain once, in `init`, and caches the answer. Before this, a read that FAILED at
+        // launch was cached as "no token" for the life of the process, `invalidateCache()` had zero
+        // callers, and the only recovery was to quit the app. Re-deriving when this pane appears
+        // means the user's natural next move — unlock the Keychain, come back to Settings — works.
+        .onAppear { tokenStore.refreshFromKeychain() }
     }
 
     // MARK: - Models location (G14)

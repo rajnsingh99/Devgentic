@@ -150,10 +150,22 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
     func configureContainer(_ container: ModelContainer) {
         self.modelContainer = container
         logger.info("BackendProfileStore configured with SwiftData ModelContainer.")
-        migrateAPIKeysToKeychain()
+        // ⚠️ REFUSED under XCTest. The test host is the real app on the REAL store, but its Keychain
+        // is an in-memory stand-in (`TestHostKeychain`, registers KC-54/55) — so a "successful" key
+        // write here proves nothing, and the strip that follows it would move a real credential out
+        // of a real profile blob into a store that vanishes with the process.
+        if TestHost.permits("migrate profile API keys out of the SwiftData blobs into the Keychain", logger: logger) {
+            migrateAPIKeysToKeychain()
+        }
         // register A53 — the blob sweep above only reaches credentials stored in SwiftData.
         // `GeminiService` also wrote raw keys into UserDefaults; those need their own removal.
         ProviderKeyStore.purgeLegacyPlaintextKeys()
+        // register KC-0 — the bundle-id rename orphaned the previous preferences domain with its
+        // plaintext credentials intact, where the purge above cannot see them. Refused under
+        // XCTest: it rewrites a real file in ~/Library/Preferences/.
+        if TestHost.permits("purge plaintext credentials from orphaned preference domains", logger: logger) {
+            ProviderKeyStore.purgeOrphanedLegacyDomains()
+        }
     }
 
     /// One-time sweep moving API keys out of the stored blobs and into the Keychain.

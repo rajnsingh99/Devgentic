@@ -141,6 +141,29 @@ enum ChatOpsConnectionState: Equatable {
 /// ⚠️ THE REGISTER CALLED THIS AN "ACCEPTED COST" BECAUSE "THE LOG LINE SAYS SO EXPLICITLY". That was
 /// wrong, and this function is the correction: a log line is not an affordance. The user is not
 /// reading Console; they are looking at a green dot and wondering why their phone is ignored.
+/// What a credential read actually told us. Register KC-10.
+///
+/// ⚠️⚠️ `.absent` AND `.unreadable` MUST NOT COLLAPSE. The four ChatOps getters returned `String?`
+/// via `SecureKeyStorage.retrieve`, which maps both to nil — so a locked Keychain, or a denied ACL
+/// prompt on the first launch after an update re-signed the binary, rendered as **"you have never
+/// paired"**. All three bridges declined to start and the Settings pane offered "Start Pairing" for
+/// a pairing that was intact the whole time. The user's only visible option was to redo a pairing
+/// they never undid — on all three platforms.
+enum ChatOpsCredentialState: Equatable {
+    case present
+    case absent
+    case unreadable(OSStatus)
+
+    /// Folds a set of reads into one verdict. ⚠️ `unreadable` DOMINATES: Slack needs two tokens, and
+    /// "one token present, the other unreadable" is not a partial pairing — it is an outage.
+    static func combining(_ states: [ChatOpsCredentialState]) -> ChatOpsCredentialState {
+        if let failure = states.first(where: { if case .unreadable = $0 { return true }; return false }) {
+            return failure
+        }
+        return states.allSatisfy { $0 == .present } ? .present : .absent
+    }
+}
+
 enum ChatOpsPairingRestore {
 
     /// ⚠️ MATCHED EXACTLY by `ChatOpsConnectionState.needsRepairing`, which is how the Settings pane
@@ -149,13 +172,23 @@ enum ChatOpsPairingRestore {
     static let needsRepairingMessage =
         "This pairing predates per-sender authorization and records no account, so every remote command is refused. Start pairing again to fix it."
 
+    /// ⚠️ DELIBERATELY NOT `needsRepairingMessage`. Re-pairing is the wrong advice here and would
+    /// overwrite a working credential with a new one for no reason; the fix is to make the Keychain
+    /// readable. Kept distinct so `needsRepairing` does not match it and offer the pairing button.
+    static let unreadableMessage =
+        "Your ChatOps credentials are stored but could not be read from the Keychain, so the bridge cannot start. Nothing has been lost — unlock your Keychain, or re-grant access after an app update, and reopen this pane. Do not re-pair: that would replace a credential that is still intact."
+
+    /// - Parameter credentials: whether the tokens are present, absent, **or unreadable**.
     /// - Parameter authorizedUserID: the account recorded at pairing. ⚠️ NIL IS THE UPGRADE CASE,
     ///   not a corrupt install — it is what every pairing made before invariant 38 looks like.
-    static func state(credentialsPresent: Bool,
+    static func state(credentials: ChatOpsCredentialState,
                       addressPresent: Bool,
                       authorizedUserID: String?,
                       chatID: Int64) -> ChatOpsConnectionState {
-        guard credentialsPresent, addressPresent else { return .disconnected }
+        // ⚠️ FIRST, and before `addressPresent`. An unreadable Keychain must never be reported as
+        // `.disconnected`, which is the state that renders as "never paired".
+        if case .unreadable = credentials { return .error(unreadableMessage) }
+        guard credentials == .present, addressPresent else { return .disconnected }
         guard authorizedUserID != nil else { return .error(needsRepairingMessage) }
         return .connected(chatID: chatID)
     }
@@ -171,6 +204,79 @@ final class ChatOpsConfigManager {
     private let keychain = SecureKeyStorage()
     private let logger = DGLogger(category: "ChatOpsConfig")
     nonisolated private static let keychainService = Bundle.main.bundleIdentifier ?? "app.devgentic.macos"
+
+    /// Reads one ChatOps credential, distinguishing "not stored" from "could not look". Register KC-10.
+    ///
+    /// ⚠️ Used by the RESTORE path, not by the four getters. The getters still return `String?` —
+    /// they are reached from SwiftUI view bodies, and recording a failure from there would mean
+    /// mutating observable state during a view update. The restore path runs in `init`, where it is
+    /// safe, and it is the only place `connectionState` is derived.
+    ///
+    /// ⚠️ TEST SEAM: `nonisolated static` with an injected `keychain`, exactly like
+    /// `migrateCredentialsFromLegacyServices(keychain:)` above. The manager is a singleton with a
+    /// `private init`, so the restore cannot be re-run from a test; making the derivation static is
+    /// what lets the `.failed → .unreadable` mapping be exercised at all.
+    nonisolated static func credentialState(
+        _ account: String,
+        keychain: KeychainAccessing,
+        logger: DGLogger? = nil
+    ) -> ChatOpsCredentialState {
+        switch keychain.read(service: keychainService, account: account) {
+        case .found:
+            return .present
+        case .notFound:
+            return .absent
+        case .failed(let status):
+            logger?.error(
+                "[CHATOPS] Could not read the credential '\(account)' from the Keychain "
+                + "(OSStatus \(status)) — this is NOT the same as it being absent. CONSEQUENCE: this "
+                + "provider is reported as UNREADABLE rather than unpaired, so the Settings pane does "
+                + "not offer to re-pair and overwrite a credential that is still intact; the bridge "
+                + "stays down until the Keychain is readable."
+            )
+            return .unreadable(status)
+        }
+    }
+
+    /// Folds the per-provider credential reads into the three restore verdicts.
+    ///
+    /// ⚠️ EXTRACTED SO THE WIRING IS TESTABLE, not for tidiness. Mutation-checking found that a
+    /// test of `ChatOpsPairingRestore.state` alone stays green when `init` goes back to
+    /// `botToken != nil ? .present : .absent` — i.e. it covers the policy and not the thing that
+    /// actually decides what the user sees. This function is the decision; `init` only stores it.
+    nonisolated static func restoreStates(
+        keychain: KeychainAccessing,
+        logger: DGLogger? = nil,
+        telegram: (addressPresent: Bool, userID: String?, chatID: Int64),
+        discord: (addressPresent: Bool, userID: String?, chatID: Int64),
+        slack: (addressPresent: Bool, userID: String?)
+    ) -> (telegram: ChatOpsConnectionState, discord: ChatOpsConnectionState, slack: ChatOpsConnectionState) {
+        func state(_ account: String) -> ChatOpsCredentialState {
+            credentialState(account, keychain: keychain, logger: logger)
+        }
+        return (
+            telegram: ChatOpsPairingRestore.state(
+                credentials: state(AppSettings.chatOpsBotTokenKey),
+                addressPresent: telegram.addressPresent,
+                authorizedUserID: telegram.userID,
+                chatID: telegram.chatID),
+            discord: ChatOpsPairingRestore.state(
+                credentials: state(AppSettings.chatOpsDiscordBotTokenKey),
+                addressPresent: discord.addressPresent,
+                authorizedUserID: discord.userID,
+                chatID: discord.chatID),
+            // ⚠️ Slack needs BOTH tokens, and `combining` lets `unreadable` dominate `absent`:
+            // one present + one unreadable is an outage, not a half-finished pairing.
+            slack: ChatOpsPairingRestore.state(
+                credentials: .combining([
+                    state(AppSettings.chatOpsSlackBotTokenKey),
+                    state(AppSettings.chatOpsSlackAppTokenKey),
+                ]),
+                addressPresent: slack.addressPresent,
+                authorizedUserID: slack.userID,
+                chatID: 0)
+        )
+    }
 
     var connectionState: ChatOpsConnectionState = .disconnected
 
@@ -838,23 +944,17 @@ final class ChatOpsConfigManager {
         // the address here painted `.connected` — a green dot — over a bridge that could not answer
         // anything. `ChatOpsPairingRestore.state` asks all three questions; see it for why a log line
         // was not an adequate substitute for saying so in the UI.
-        connectionState = ChatOpsPairingRestore.state(
-            credentialsPresent: botToken != nil,
-            addressPresent: authorizedChatID != nil,
-            authorizedUserID: authorizedUserID,
-            chatID: authorizedChatID ?? 0
+        // ⚠️ The derivation lives in `restoreStates` so it can be tested; this only stores it.
+        let restored = Self.restoreStates(
+            keychain: keychain,
+            logger: logger,
+            telegram: (authorizedChatID != nil, authorizedUserID, authorizedChatID ?? 0),
+            discord: (discordAuthorizedChannelID != nil, discordAuthorizedUserID,
+                      Int64(discordAuthorizedChannelID ?? "0") ?? 0),
+            slack: (slackAuthorizedChannelID != nil, slackAuthorizedUserID)
         )
-        discordConnectionState = ChatOpsPairingRestore.state(
-            credentialsPresent: discordBotToken != nil,
-            addressPresent: discordAuthorizedChannelID != nil,
-            authorizedUserID: discordAuthorizedUserID,
-            chatID: Int64(discordAuthorizedChannelID ?? "0") ?? 0
-        )
-        slackConnectionState = ChatOpsPairingRestore.state(
-            credentialsPresent: slackBotToken != nil && slackAppToken != nil,
-            addressPresent: slackAuthorizedChannelID != nil,
-            authorizedUserID: slackAuthorizedUserID,
-            chatID: 0
-        )
+        connectionState = restored.telegram
+        discordConnectionState = restored.discord
+        slackConnectionState = restored.slack
     }
 }

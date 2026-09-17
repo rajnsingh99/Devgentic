@@ -46,6 +46,9 @@ struct DownloadSidebarView: View {
     @State private var recordPendingRedownload: DownloadRecord? = nil
     @State private var showingClearHistoryAlert: Bool = false
 
+    @State private var focusedRecordID: UUID? = nil
+    @FocusState private var isListFocused: Bool
+
     // MARK: - Partitions
 
     private var activeRecords: [DownloadRecord] {
@@ -54,6 +57,15 @@ struct DownloadSidebarView: View {
 
     private var historyRecords: [DownloadRecord] {
         allRecords.filter { !$0.isActive }
+    }
+
+    private var orderedRecords: [DownloadRecord] {
+        var result: [DownloadRecord] = []
+        result.append(contentsOf: activeRecords)
+        for group in groupedHistory {
+            result.append(contentsOf: group.records)
+        }
+        return result
     }
 
     var body: some View {
@@ -67,28 +79,7 @@ struct DownloadSidebarView: View {
                     systemImage: "arrow.down.circle"
                 )
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        if !activeRecords.isEmpty {
-                            sectionHeader("In Progress", count: activeRecords.count)
-                            ForEach(activeRecords) { record in
-                                ActiveDownloadRowView(record: record)
-                                    .contextMenu { activeContextMenu(for: record) }
-                            }
-                        }
-
-                        ForEach(groupedHistory, id: \.id) { group in
-                            sectionHeader(group.bucket.localizedTitle, count: group.records.count)
-                            ForEach(group.records) { record in
-                                HistoryDownloadRowView(record: record)
-                                    .contextMenu { historyContextMenu(for: record) }
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.top, 4)
-                    .padding(.bottom, 20)
-                }
+                downloadsScrollView
             }
         }
         // ⚠️ Two different questions behind one menu item. For a completed or cancelled row,
@@ -154,6 +145,161 @@ struct DownloadSidebarView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This removes every completed, failed, and cancelled record from your download history. Active downloads are kept.")
+        }
+        .onAppear {
+            if focusedRecordID == nil {
+                focusedRecordID = orderedRecords.first?.id
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .clearDownloadHistory)) { _ in
+            showingClearHistoryAlert = true
+        }
+        .onChange(of: orderedRecords.map(\.id)) { _, newIDs in
+            if let id = focusedRecordID, !newIDs.contains(id) {
+                focusedRecordID = newIDs.first
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var activeDownloadsSection: some View {
+        if !activeRecords.isEmpty {
+            sectionHeader("In Progress", count: activeRecords.count)
+            ForEach(activeRecords) { record in
+                ActiveDownloadRowView(
+                    record: record,
+                    isSelected: focusedRecordID == record.id
+                )
+                .id(record.id)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    focusedRecordID = record.id
+                }
+                .contextMenu { activeContextMenu(for: record) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var historyDownloadsSection: some View {
+        ForEach(groupedHistory, id: \.id) { group in
+            sectionHeader(group.bucket.localizedTitle, count: group.records.count)
+            ForEach(group.records) { record in
+                HistoryDownloadRowView(
+                    record: record,
+                    isSelected: focusedRecordID == record.id
+                )
+                .id(record.id)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    focusedRecordID = record.id
+                }
+                .contextMenu { historyContextMenu(for: record) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var downloadsScrollView: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    activeDownloadsSection
+                    historyDownloadsSection
+                }
+                .padding(.horizontal, 8)
+                .padding(.top, 4)
+                .padding(.bottom, 20)
+            }
+            .focusable()
+            .focused($isListFocused)
+            .focusEffectDisabled()
+            .onMoveCommand { direction in
+                moveFocus(direction)
+                if let id = focusedRecordID {
+                    withAnimation(.easeInOut(duration: 0.12)) {
+                        proxy.scrollTo(id, anchor: .center)
+                    }
+                }
+            }
+            .onKeyPress(.return) {
+                handleReturnKey()
+            }
+            .onKeyPress(.delete) {
+                handleDeleteKey()
+            }
+            .onKeyPress("r") {
+                handleRedownloadKey()
+            }
+            .onKeyPress("c") {
+                handleCancelKey()
+            }
+        }
+    }
+
+    private func handleReturnKey() -> KeyPress.Result {
+        if let id = focusedRecordID,
+           let record = orderedRecords.first(where: { $0.id == id }) {
+            if record.isActive {
+                router.navigateToDownloadManager()
+            } else {
+                recordPendingRedownload = record
+            }
+            return .handled
+        }
+        return .ignored
+    }
+
+    private func handleDeleteKey() -> KeyPress.Result {
+        if let id = focusedRecordID,
+           let record = orderedRecords.first(where: { $0.id == id }) {
+            if !record.isActive {
+                pendingDeletionBytes = reclaimableBytes(for: record)
+                recordPendingDeletion = record
+                return .handled
+            }
+        }
+        return .ignored
+    }
+
+    private func handleRedownloadKey() -> KeyPress.Result {
+        if let id = focusedRecordID,
+           let record = orderedRecords.first(where: { $0.id == id }),
+           !record.isActive {
+            recordPendingRedownload = record
+            return .handled
+        }
+        return .ignored
+    }
+
+    private func handleCancelKey() -> KeyPress.Result {
+        if let id = focusedRecordID,
+           let record = orderedRecords.first(where: { $0.id == id }),
+           record.isActive {
+            DownloadManager.shared.cancelDownload(record)
+            return .handled
+        }
+        return .ignored
+    }
+
+    private func moveFocus(_ direction: MoveCommandDirection) {
+        let records = orderedRecords
+        guard !records.isEmpty else { return }
+        guard let currentID = focusedRecordID,
+              let currentIndex = records.firstIndex(where: { $0.id == currentID }) else {
+            focusedRecordID = records.first?.id
+            return
+        }
+
+        switch direction {
+        case .down:
+            let nextIndex = min(currentIndex + 1, records.count - 1)
+            focusedRecordID = records[nextIndex].id
+        case .up:
+            let prevIndex = max(currentIndex - 1, 0)
+            focusedRecordID = records[prevIndex].id
+        default:
+            break
         }
     }
 
@@ -444,6 +590,7 @@ struct DownloadSidebarView: View {
 
 private struct ActiveDownloadRowView: View {
     let record: DownloadRecord
+    var isSelected: Bool = false
 
     @Environment(\.appTheme) private var theme
     // B19 shipped Dynamic Type but not Reduce Motion, and this file was the gap: both hover
@@ -507,7 +654,7 @@ private struct ActiveDownloadRowView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
-        .sidebarRowBackground(isHovering: isHovering)
+        .sidebarRowBackground(isSelected: isSelected, isHovering: isHovering)
         .onHover { hovering in
             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { isHovering = hovering }
         }
@@ -520,6 +667,7 @@ private struct ActiveDownloadRowView: View {
 
 private struct HistoryDownloadRowView: View {
     let record: DownloadRecord
+    var isSelected: Bool = false
 
     @Environment(\.appTheme) private var theme
     // B19 shipped Dynamic Type but not Reduce Motion, and this file was the gap: both hover
@@ -554,7 +702,7 @@ private struct HistoryDownloadRowView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        .sidebarRowBackground(isHovering: isHovering)
+        .sidebarRowBackground(isSelected: isSelected, isHovering: isHovering)
         .onHover { hovering in
             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { isHovering = hovering }
         }

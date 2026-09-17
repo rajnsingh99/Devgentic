@@ -151,8 +151,11 @@ enum ProviderKeyStore {
     /// `GeminiService` wrote it on every successful model-list fetch and its `getApiKey` /
     /// `clearApiKey` accessors had zero callers repo-wide, so removing it cannot break anything.
     /// A key that is still read back must NOT be added — it needs migrating to the Keychain
-    /// first, then purging. In particular `webSearchAPIKey` is a live setting with a real reader
-    /// (`SettingsCoordinator`) and is deliberately absent: deleting it would disable web search.
+    /// first, then purging. `webSearchAPIKey` is the worked example: it now has a Keychain home
+    /// (`WebSearchKeyStore`, register KC-2) and `WebSearchKeyStore.migrateFromUserDefaults` owns its
+    /// removal, which happens ONLY after the Keychain write succeeded. It stays off this list because
+    /// this purge runs at container configuration and that migration at view-model load; an
+    /// unconditional delete here would race the migration and disable web search.
     private static let legacyPlaintextDefaultsKeys = ["gemini_api_key"]
 
     /// Removes credentials earlier builds left in `~/Library/Preferences/`.
@@ -173,6 +176,67 @@ enum ProviderKeyStore {
                 + "the live key is unaffected — it lives in the Keychain, keyed on profile id."
             )
         }
+    }
+
+    // MARK: - Orphaned preference domains (register KC-0)
+
+    /// Bundle identifiers this app shipped under before the current one. A preferences domain is
+    /// addressed by bundle id, so the rename `com.dev.devgentic` → `app.devgentic.macos` orphaned
+    /// the old domain INTACT: every plaintext credential a pre-Keychain build wrote there is still
+    /// on disk, and no reader resolves to that domain any more — the purge above looks in
+    /// `UserDefaults.standard`, which is the NEW domain, and can never see that file.
+    ///
+    /// `VectorStoreService.legacyBundleIdentifiers` and `ChatOpsConfigManager.legacyKeychainServices`
+    /// name the same identifier for their own migrations; this is the UserDefaults side.
+    static let legacyPreferenceDomains = ["com.dev.devgentic"]
+
+    /// `UserDefaults` keys that ever carried a raw credential, in any build. In an ORPHANED domain
+    /// nothing reads them, so unlike `legacyPlaintextDefaultsKeys` there is no reader to protect —
+    /// and no migration either: the current domain holds its own copy of anything still in use,
+    /// and a value the user was told to rotate is not one to copy forward. Verified on disk
+    /// 2026-09-16: a live Telegram bot token, a Google API key and a DeepSeek key, all cleartext.
+    static let orphanedDomainCredentialKeys: Set<String> = [
+        "chatOpsBotToken", "webSearchAPIKey", "gemini_api_key", "deepseek_api_key",
+    ]
+
+    /// Whether a key in an orphaned domain is treated as a credential.
+    ///
+    /// The explicit list plus the `<provider>_api_key` family by NAME. `deepseek_api_key` was on
+    /// nobody's list — it proved the family has more members than anyone enumerated — so a key is
+    /// matched on how it is named, never on what its value looks like.
+    static func isOrphanedDomainCredentialKey(_ key: String) -> Bool {
+        orphanedDomainCredentialKeys.contains(key) || key.hasSuffix("_api_key")
+    }
+
+    /// Removes plaintext credentials from preference domains the app no longer resolves to.
+    ///
+    /// Works on the persistent domain directly. `UserDefaults(suiteName:)` layers the global domain
+    /// and this app's own on top of the named one, so enumerating THAT would delete keys the current
+    /// app still uses. Idempotent, and it logs only when something was actually removed.
+    /// - Returns: the number of keys removed.
+    @discardableResult
+    static func purgeOrphanedLegacyDomains(
+        domainNames: [String] = legacyPreferenceDomains,
+        defaults: UserDefaults = .standard
+    ) -> Int {
+        var removed = 0
+        for domain in domainNames {
+            guard var contents = defaults.persistentDomain(forName: domain) else { continue }
+            let credentialKeys = contents.keys.filter(isOrphanedDomainCredentialKey).sorted()
+            guard !credentialKeys.isEmpty else { continue }
+
+            for key in credentialKeys { contents.removeValue(forKey: key) }
+            defaults.setPersistentDomain(contents, forName: domain)
+            removed += credentialKeys.count
+            logger.notice(
+                "[SECRETS] Removed \(credentialKeys.count) plaintext credential(s) "
+                + "(\(credentialKeys.joined(separator: ", "))) from the orphaned preferences domain "
+                + "'\(domain)'. CONSEQUENCE: ~/Library/Preferences/\(domain).plist no longer carries "
+                + "them; nothing in the app read that domain, so no feature changes — but any of "
+                + "those values that is still live sat in cleartext until now and should be rotated."
+            )
+        }
+        return removed
     }
 }
 

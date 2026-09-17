@@ -183,22 +183,34 @@ struct LoadSkillTool: DevgenticTool {
         )
     }
 
+    /// This tool's labels go through `SkillToolText.label` — see that type for what a label is and
+    /// why a body is never one. It lives there rather than here because `UpdateSkillTool` needs the
+    /// identical treatment and did not get it while this was private.
+    private static func label(_ raw: String, limit: Int = 200) -> String {
+        SkillToolText.label(raw, limit: limit)
+    }
+
     func call(arguments: Arguments) async throws -> String {
         let includeResources = arguments.includeResources ?? false
 
         guard let manifest = manifests.first(where: { $0.name == arguments.skillName }) else {
-            let available = manifests.map(\.name).joined(separator: ", ")
-            logger.warning("Skill '\(arguments.skillName)' not found. Available: \(available)")
-            return "Error: Skill '\(arguments.skillName)' not found. Available skills: \(available)"
+            let available = manifests.map { Self.label($0.name) }.joined(separator: ", ")
+            logger.error("[SKILL_LOAD] MISS: the model asked for '\(SkillToolText.label(arguments.skillName))' and this run resolved \(manifests.count) skill(s): \(available.isEmpty ? "none" : available). CONSEQUENCE: nothing was loaded and the model is told which names it COULD have used — a miss here means the profile does not link that skill, or the model invented the name from the task rather than from <available_skills>.")
+            // ⚠️ The requested name is echoed back so the model can see its own typo, and it is a
+            // MODEL-supplied string — unbounded, and free to contain newlines. Echoed as a label.
+            return "Error: Skill '\(Self.label(arguments.skillName))' not found. Available skills: \(available)"
         }
 
-        logger.info("Loading skill: \(manifest.name) (includeResources: \(includeResources))")
+        // ⚠️ The version id is the correlation key for everything below — a pinned profile and an
+        // unpinned one loading the "same" skill are different bodies, and only this id tells them apart.
+        logger.notice("[SKILL_LOAD] Loading '\(manifest.name)' [skill \(manifest.folderPath)] version=\(manifest.versionID ?? "LEGACY-DISK-PATH") includeResources=\(includeResources) declaredTools=\(manifest.allowedTools?.joined(separator: ",") ?? "none") bundledFiles=\(manifest.resourceCount). CONSEQUENCE: the body of THIS version reaches the model — a profile pinning an older version reads that one, so compare this id against the library before concluding an edit did not take.")
 
         do {
             var resourceRoot: URL?
             let package = try await Self.loadPackage(for: manifest, resourceRoot: &resourceRoot)
 
-            var result = "# Skill: \(package.manifest.name)\n\n\(package.body)"
+            // ⚠️ The NAME is a label (it is a heading); the BODY is verbatim. See `label`.
+            var result = "# Skill: \(Self.label(package.manifest.name))\n\n\(package.body)"
 
             // ⚠️ Stated whether or not resource TEXT was requested. The model needs the path to run
             // a bundled script, and that is independent of wanting the files read into context —
@@ -211,15 +223,24 @@ struct LoadSkillTool: DevgenticTool {
             if includeResources && !package.resources.isEmpty {
                 result += "\n\n---\n\n# Skill Resources\n"
                 for resource in package.resources {
-                    result += "\n## \(resource.relativePath)\n\(resource.content)\n"
+                    // ⚠️ The PATH is a label (a heading) and is defence-in-depth here: a control
+                    // character in it is now refused at ingest by `isSafeRelativePath`, but a row
+                    // stored before that guard, or by a future write path that skips ingest, would
+                    // otherwise forge a heading from a filename alone. The CONTENT stays verbatim.
+                    result += "\n## \(Self.label(resource.relativePath))\n\(resource.content)\n"
                 }
             }
 
-            logger.info("Skill '\(manifest.name)' loaded successfully (\(result.count) chars, \(package.resources.count) resources)")
+            logger.notice("[SKILL_LOAD] Loaded '\(manifest.name)' [skill \(manifest.folderPath)] version=\(manifest.versionID ?? "legacy"): \(result.count) chars, \(package.resources.count) resource(s), filesOnDisk=\(resourceRoot?.path ?? "NONE"). CONSEQUENCE: this text is now in the model's context for the rest of the run\(resourceRoot == nil && package.resources.isEmpty == false ? " — but the bundled files could NOT be written to disk, so any path the instructions name does not exist" : "").")
             return result
         } catch {
-            logger.error("Failed to load skill '\(manifest.name)': \(error.localizedDescription)")
-            return "Error loading skill '\(manifest.name)': \(error.localizedDescription)"
+            logger.error("[SKILL_LOAD] FAILED to load '\(manifest.name)' [skill \(manifest.folderPath)] version=\(manifest.versionID ?? "legacy"): \(error.localizedDescription). CONSEQUENCE: the model gets an error string instead of instructions and will most likely proceed WITHOUT the skill — the skill was resolved at run start, so this means it was deleted, un-drafted or re-versioned mid-run, or a pinned version is gone.")
+            // ⚠️ LABELLED TOO, and this site is easy to miss because it looks like app voice rather
+            // than rendering: the name still comes from the manifest, and `SkillLoadError`'s own
+            // messages interpolate it as well. A hostile name reaches the model through the FAILURE
+            // path just as readily as through the success path — found by the test below, which was
+            // written against the success path and landed here.
+            return "Error loading skill '\(Self.label(manifest.name))': \(Self.label(error.localizedDescription, limit: 400))"
         }
     }
 }

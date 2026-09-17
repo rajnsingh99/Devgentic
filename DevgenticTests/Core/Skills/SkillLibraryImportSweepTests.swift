@@ -91,7 +91,7 @@ final class SkillLibraryImportSweepTests: XCTestCase {
     /// Every other test here injects the container in `setUp` and then calls the sweep, which is
     /// exactly the order that hides this. This one reproduces the launch sequence instead:
     /// configure, then immediately run, with no suspension in between.
-    func testConfiguringTheContainerTakesEffectBeforeTheSweepRuns() throws {
+    func testConfiguringTheContainerTakesEffectBeforeTheSweepRuns() async throws {
         let alpha = try makeSkillFolder("alpha")
         try capture([ref("alpha", at: alpha)])
 
@@ -100,7 +100,7 @@ final class SkillLibraryImportSweepTests: XCTestCase {
         SkillStore.shared.configureContainer(container)
 
         // No `await` between the two — a deferred assignment would still be pending here.
-        let outcome = SkillLibraryImportSweep.run(container: container)
+        let outcome = await SkillLibraryImportSweep.run(container: container)
 
         XCTAssertNil(outcome.abortReason,
                      "the sweep must see the container the line above gave it — a deferred assignment aborts the whole migration")
@@ -160,7 +160,7 @@ final class SkillLibraryImportSweepTests: XCTestCase {
     ///
     /// **Mutation check:** source `run` from `peekPendingImports()` alone and this goes red while
     /// every other test in the file stays green — which is precisely what happened in production.
-    func testItImportsAndRelinksFromProfileLinksAloneWithNoCaptureFile() throws {
+    func testItImportsAndRelinksFromProfileLinksAloneWithNoCaptureFile() async throws {
         let alpha = try makeSkillFolder("alpha")
         let profile = try makeProfile("Agent 1", selections: [
             SkillSelection(skillID: nil, legacyFolderPath: alpha.path, name: "alpha")
@@ -169,7 +169,7 @@ final class SkillLibraryImportSweepTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: captureURL.path),
                        "the premise: a real V3 upgrade has no capture file at all")
 
-        let outcome = SkillLibraryImportSweep.run(container: container)
+        let outcome = await SkillLibraryImportSweep.run(container: container)
 
         XCTAssertNil(outcome.abortReason)
         XCTAssertEqual(outcome.imported, ["alpha"], "the folder named only by a profile link must still be ingested")
@@ -183,13 +183,13 @@ final class SkillLibraryImportSweepTests: XCTestCase {
 
     /// The differential control for the test above: the same profile, but already linked, must not
     /// cause a re-import. Without this, a harvest that ignored `isAwaitingRelink` would look correct.
-    func testAnAlreadyLinkedProfileContributesNoWorkAndImportsNothing() throws {
+    func testAnAlreadyLinkedProfileContributesNoWorkAndImportsNothing() async throws {
         let alpha = try makeSkillFolder("alpha")
         let skill = try store.create(name: "alpha", description: "d", body: "b",
                                      allowedTools: nil, files: []).get()
         try makeProfile("Agent 1", selections: [.link(skillID: skill.id, name: "alpha")])
 
-        let outcome = SkillLibraryImportSweep.run(container: container)
+        let outcome = await SkillLibraryImportSweep.run(container: container)
 
         XCTAssertTrue(outcome.imported.isEmpty,
                       "a linked selection carries no legacy folder; re-ingesting would duplicate the skill")
@@ -285,13 +285,13 @@ final class SkillLibraryImportSweepTests: XCTestCase {
     /// "could not be imported" list. A failure the user cannot SEE is one they cannot retry or
     /// dismiss, so every failure is recorded regardless of where the folder came from. Retrying is
     /// safe either way, because the harvest re-derives the same folder from the profile.
-    func testAFailedHarvestedFolderIsRecordedSoTheUserCanSeeIt() throws {
+    func testAFailedHarvestedFolderIsRecordedSoTheUserCanSeeIt() async throws {
         let missing = work.appendingPathComponent("never-existed")
         try makeProfile("A", selections: [
             SkillSelection(skillID: nil, legacyFolderPath: missing.path, name: "ghost")
         ])
 
-        let outcome = SkillLibraryImportSweep.run(container: container)
+        let outcome = await SkillLibraryImportSweep.run(container: container)
 
         XCTAssertEqual(outcome.failed.count, 1, "the unreadable folder is reported in the outcome")
         XCTAssertTrue(FileManager.default.fileExists(atPath: captureURL.path),
@@ -301,8 +301,8 @@ final class SkillLibraryImportSweepTests: XCTestCase {
 
     // MARK: - Nothing to do
 
-    func testNoCaptureFileIsANoOp() {
-        let outcome = SkillLibraryImportSweep.run(container: container)
+    func testNoCaptureFileIsANoOp() async {
+        let outcome = await SkillLibraryImportSweep.run(container: container)
         XCTAssertTrue(outcome.imported.isEmpty)
         XCTAssertEqual(outcome.selectionsRelinked, 0)
         XCTAssertEqual(outcome.profilesExamined, 0, "a sweep with nothing pending must not even read profiles")
@@ -310,7 +310,7 @@ final class SkillLibraryImportSweepTests: XCTestCase {
 
     // MARK: - The happy path
 
-    func testImportsCapturedFoldersAndRelinksTheProfilesThatReferencedThem() throws {
+    func testImportsCapturedFoldersAndRelinksTheProfilesThatReferencedThem() async throws {
         let alpha = try makeSkillFolder("alpha")
         let beta = try makeSkillFolder("beta")
         try capture([ref("alpha", at: alpha), ref("beta", at: beta)])
@@ -320,7 +320,7 @@ final class SkillLibraryImportSweepTests: XCTestCase {
             SkillSelection(skillID: nil, legacyFolderPath: beta.path, name: "beta", isEnabled: false)
         ])
 
-        let outcome = SkillLibraryImportSweep.run(container: container)
+        let outcome = await SkillLibraryImportSweep.run(container: container)
 
         XCTAssertEqual(outcome.imported.sorted(), ["alpha", "beta"])
         XCTAssertEqual(outcome.selectionsRelinked, 2)
@@ -340,11 +340,11 @@ final class SkillLibraryImportSweepTests: XCTestCase {
         XCTAssertTrue(resolved.awaitingRelink.isEmpty)
     }
 
-    func testTheCaptureFileIsClearedOnlyAfterEverythingSucceeded() throws {
+    func testTheCaptureFileIsClearedOnlyAfterEverythingSucceeded() async throws {
         let alpha = try makeSkillFolder("alpha")
         try capture([ref("alpha", at: alpha)])
 
-        SkillLibraryImportSweep.run(container: container)
+        await SkillLibraryImportSweep.run(container: container)
         XCTAssertFalse(FileManager.default.fileExists(atPath: captureURL.path))
         XCTAssertTrue(SkillLibraryMigration.peekPendingImports().isEmpty)
     }
@@ -352,12 +352,12 @@ final class SkillLibraryImportSweepTests: XCTestCase {
     /// ⚠️ A second run must not duplicate. The capture being cleared IS the idempotence — nothing in
     /// the library records where a skill came from, so a re-run of the same capture would create a
     /// second copy of every skill.
-    func testRunningTwiceDoesNotDuplicate() throws {
+    func testRunningTwiceDoesNotDuplicate() async throws {
         let alpha = try makeSkillFolder("alpha")
         try capture([ref("alpha", at: alpha)])
 
-        SkillLibraryImportSweep.run(container: container)
-        let second = SkillLibraryImportSweep.run(container: container)
+        await SkillLibraryImportSweep.run(container: container)
+        let second = await SkillLibraryImportSweep.run(container: container)
 
         XCTAssertTrue(second.imported.isEmpty)
         XCTAssertEqual(second.selectionsRelinked, 0)
@@ -373,11 +373,11 @@ final class SkillLibraryImportSweepTests: XCTestCase {
     /// arrives NOT agent-writable, and the user grants `update_skill` access deliberately. A
     /// migration that silently handed an agent write access to instructions it then executes is
     /// precisely what default-deny exists to prevent.
-    func testARecoveredSkillIsNotAgentWritableUntilTheUserSaysSo() throws {
+    func testARecoveredSkillIsNotAgentWritableUntilTheUserSaysSo() async throws {
         let alpha = try makeSkillFolder("alpha")
         try capture([ref("alpha", at: alpha)])
 
-        SkillLibraryImportSweep.run(container: container)
+        await SkillLibraryImportSweep.run(container: container)
         let skill = try XCTUnwrap(try store.fetchSkills().get().first)
         XCTAssertFalse(skill.isAgentWritable,
                        "no migration may grant an agent write access to a skill — the user does that")
@@ -386,7 +386,7 @@ final class SkillLibraryImportSweepTests: XCTestCase {
     // MARK: - Failure is reported and retried
 
     /// The ordinary case: an external volume that was not mounted at this launch.
-    func testAnUnreachableFolderIsReportedAndKeptForTheNextLaunch() throws {
+    func testAnUnreachableFolderIsReportedAndKeptForTheNextLaunch() async throws {
         let alpha = try makeSkillFolder("alpha")
         let missing = work.appendingPathComponent("not-there")
         try capture([ref("alpha", at: alpha), ref("ghost", at: missing)])
@@ -396,7 +396,7 @@ final class SkillLibraryImportSweepTests: XCTestCase {
             SkillSelection(skillID: nil, legacyFolderPath: missing.path, name: "ghost")
         ])
 
-        let outcome = SkillLibraryImportSweep.run(container: container)
+        let outcome = await SkillLibraryImportSweep.run(container: container)
 
         XCTAssertEqual(outcome.imported, ["alpha"], "one bad folder must not cost the user the good ones")
         XCTAssertEqual(outcome.failed.map(\.label), ["ghost"])
@@ -444,7 +444,7 @@ final class SkillLibraryImportSweepTests: XCTestCase {
 
     /// ⚠️ One folder can yield several skills. Taking the first would silently repoint a link at a
     /// SIBLING — the link would still "work", against the wrong instructions.
-    func testAFolderYieldingSeveralSkillsRelinksByNameNotByPosition() throws {
+    func testAFolderYieldingSeveralSkillsRelinksByNameNotByPosition() async throws {
         let bundle = work.appendingPathComponent("bundle")
         try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
         try makeSkillFolder("aaa-first", in: bundle, description: "The wrong one.")
@@ -455,7 +455,7 @@ final class SkillLibraryImportSweepTests: XCTestCase {
             SkillSelection(skillID: nil, legacyFolderPath: bundle.path, name: "zzz-wanted")
         ])
 
-        SkillLibraryImportSweep.run(container: container)
+        await SkillLibraryImportSweep.run(container: container)
 
         let selection = try XCTUnwrap(selections(of: profile).first)
         XCTAssertFalse(selection.isAwaitingRelink)
@@ -466,7 +466,7 @@ final class SkillLibraryImportSweepTests: XCTestCase {
 
     /// If no imported skill carries the selection's name, the link is LEFT PENDING rather than
     /// pointed at something plausible.
-    func testNoNameMatchLeavesTheSelectionPending() throws {
+    func testNoNameMatchLeavesTheSelectionPending() async throws {
         let bundle = work.appendingPathComponent("bundle")
         try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
         try makeSkillFolder("something-else", in: bundle)
@@ -476,7 +476,7 @@ final class SkillLibraryImportSweepTests: XCTestCase {
             SkillSelection(skillID: nil, legacyFolderPath: bundle.path, name: "renamed-since")
         ])
 
-        let outcome = SkillLibraryImportSweep.run(container: container)
+        let outcome = await SkillLibraryImportSweep.run(container: container)
 
         XCTAssertEqual(outcome.imported, ["something-else"])
         XCTAssertEqual(outcome.selectionsStillPending, 1)
@@ -485,7 +485,7 @@ final class SkillLibraryImportSweepTests: XCTestCase {
 
     // MARK: - Profiles it must not touch
 
-    func testAlreadyLinkedSelectionsAreLeftExactlyAsTheyAre() throws {
+    func testAlreadyLinkedSelectionsAreLeftExactlyAsTheyAre() async throws {
         let alpha = try makeSkillFolder("alpha")
         try capture([ref("alpha", at: alpha)])
         let existing = SkillSelection.link(skillID: "skill_already", name: "already",
@@ -495,14 +495,14 @@ final class SkillLibraryImportSweepTests: XCTestCase {
             SkillSelection(skillID: nil, legacyFolderPath: alpha.path, name: "alpha")
         ])
 
-        SkillLibraryImportSweep.run(container: container)
+        await SkillLibraryImportSweep.run(container: container)
 
         let after = selections(of: profile)
         XCTAssertEqual(after.first { $0.skillID == "skill_already" }, existing,
                        "a selection that already points somewhere is not this sweep's to touch — pin included")
     }
 
-    func testAProfileWithNothingPendingIsNotRewritten() throws {
+    func testAProfileWithNothingPendingIsNotRewritten() async throws {
         let alpha = try makeSkillFolder("alpha")
         try capture([ref("alpha", at: alpha)])
         let profile = try makeProfile("Untouched", selections: [
@@ -510,7 +510,7 @@ final class SkillLibraryImportSweepTests: XCTestCase {
         ])
         let before = profile.configData
 
-        SkillLibraryImportSweep.run(container: container)
+        await SkillLibraryImportSweep.run(container: container)
 
         XCTAssertEqual(profile.configData, before,
                        "⚠️ writing every profile on every launch churns configData for nothing and defeats the no-op-save guard")
@@ -548,7 +548,7 @@ final class SkillLibraryImportSweepTests: XCTestCase {
 
     /// ⚠️ An unreadable blob decodes to a `.bot` PLACEHOLDER with no skills and no error. Treating
     /// that as "no selections" is exactly the silent under-migration this guards against.
-    func testAnUnreadableProfileIsReportedNotSilentlySkipped() throws {
+    func testAnUnreadableProfileIsReportedNotSilentlySkipped() async throws {
         let alpha = try makeSkillFolder("alpha")
         try capture([ref("alpha", at: alpha)])
         // ⚠️ Inserted through a SEPARATE context. `_cachedDetails` is populated at `init`, so a
@@ -564,7 +564,54 @@ final class SkillLibraryImportSweepTests: XCTestCase {
         broken.configData = Data("not json".utf8)
         try writer.save()
 
-        let outcome = SkillLibraryImportSweep.run(container: container)
+        let outcome = await SkillLibraryImportSweep.run(container: container)
         XCTAssertEqual(outcome.unreadableProfiles, ["Broken"])
+    }
+}
+
+/// ⚠️⚠️ THE SWEEP GAINED A SUSPENSION POINT WHEN ITS INGEST MOVED OFF THE MAIN ACTOR, AND WITH IT
+/// THE ABILITY TO OVERLAP WITH ITSELF.
+///
+/// Before that, a pass held the main actor from the profile fetch through the capture rewrite, so
+/// two passes could not interleave. Freeing the main actor is precisely what lets the user open the
+/// Skills window during a slow launch ingest and press "Try again" — and two passes over the same
+/// pending list would ingest the same folder twice and create two skills with the same name.
+/// Nothing records where a skill came from, so the user cannot tell the duplicates apart.
+@MainActor
+final class SkillSweepExclusivityTests: XCTestCase {
+
+    override func tearDown() async throws {
+        SkillLibraryImportSweep.endExclusive()
+        try await super.tearDown()
+    }
+
+    /// **Mutation check:** delete the `beginExclusive()` guard from `run` and this goes red.
+    func testASecondPassIsRefusedWhileOneIsRunning() {
+        XCTAssertTrue(SkillLibraryImportSweep.beginExclusive(), "the first pass takes the guard")
+        XCTAssertFalse(SkillLibraryImportSweep.beginExclusive(),
+                       "a second overlapping pass must be refused — it would re-ingest the same folders and duplicate every skill")
+    }
+
+    /// The control: the guard is released, not a one-shot latch. A `beginExclusive` that never
+    /// released would satisfy the test above and disable the sweep for the rest of the session —
+    /// including the launch it exists for.
+    func testTheGuardIsReleasedSoALaterPassCanRun() {
+        XCTAssertTrue(SkillLibraryImportSweep.beginExclusive())
+        SkillLibraryImportSweep.endExclusive()
+        XCTAssertTrue(SkillLibraryImportSweep.beginExclusive(),
+                      "a sweep must be runnable again once the previous one finished")
+    }
+
+    /// ⚠️ A refused pass must report WHY rather than looking like a clean no-op, or the retry button
+    /// silently does nothing and the user presses it again.
+    func testARefusedPassSaysSoRatherThanReportingSuccess() async throws {
+        let container = try ModelContainer(for: DevgenticSchema.schema,
+                                           configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        XCTAssertTrue(SkillLibraryImportSweep.beginExclusive())
+        let outcome = await SkillLibraryImportSweep.run(container: container)
+        XCTAssertNotNil(outcome.abortReason,
+                        "a refused pass is not a successful empty pass — the capture must be kept")
+        XCTAssertFalse(SkillLibraryImportSweep.shouldClearCapture(outcome),
+                       "and an aborted pass must never clear the capture file")
     }
 }

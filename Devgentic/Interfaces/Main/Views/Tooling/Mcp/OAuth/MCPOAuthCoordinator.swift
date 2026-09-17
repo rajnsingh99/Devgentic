@@ -39,11 +39,18 @@ protocol MCPOAuthRedirectHandler: Sendable {
 enum MCPOAuthCoordinatorError: LocalizedError {
     case cannotPersist(String)
     case bundleNotFound
+    /// Register KC-4. The provider rotated the refresh token and the replacement could not be
+    /// stored, so the grant is dead: the previous refresh token is already invalid at the provider
+    /// and the new one existed only in memory.
+    case rotatedRefreshTokenLost(sourceID: UUID, underlying: String)
 
     var errorDescription: String? {
         switch self {
         case .cannotPersist(let s): return "Failed to persist OAuth bundle: \(s)"
         case .bundleNotFound:        return "No OAuth bundle stored for this source."
+        case .rotatedRefreshTokenLost(_, let underlying):
+            return "The sign-in was refreshed but the new credentials could not be saved to the "
+                + "Keychain (\(underlying)). This server must be signed in to again from its editor."
         }
     }
 }
@@ -259,23 +266,97 @@ struct MCPOAuthCoordinator {
         )
     }
 
+    // MARK: - Refresh
+
+    /// Refreshes in flight, keyed on source. Register KC-3.
+    ///
+    /// ⚠️⚠️ `@MainActor` DOES NOT SERIALIZE `refresh`. It suspends at two awaits — the metadata
+    /// fetch and the token POST — and the actor is free in between. Two tool calls in one turn both
+    /// reached `loadBundle` before either persisted, both read the same refresh token, and both
+    /// POSTed it. The first exchange rotated it; the second presented a token the provider had just
+    /// retired, and any AS implementing RFC 6819 §5.2.2.3 reuse detection (Auth0, Okta, Entra —
+    /// OAuth 2.1 recommends rotation by default) treats a replayed refresh token as theft and
+    /// REVOKES THE WHOLE GRANT FAMILY. A permanent lockout from an ordinary two-tool-call turn.
+    ///
+    /// Same shape as `MCPClientService.connectionTasks`: a second caller joins the in-flight task
+    /// instead of starting a second exchange. The task is unstructured on purpose — a rotation must
+    /// run to completion even when the caller that started it is cancelled, because abandoning it
+    /// after the POST leaves the new token unpersisted (KC-4's failure by another route).
+    private static var inFlightRefreshes: [UUID: Task<MCPOAuthCredentialBundle, Error>] = [:]
+
+    /// The collaborators `refresh` needs, so the single-flight and the rotation-safe persist are
+    /// testable without a network or a Keychain. ⚠️ TEST SEAM — production never reassigns these.
+    struct RefreshDependencies {
+        var loadBundle: @MainActor (UUID) -> MCPOAuthCredentialBundle?
+        var fetchMetadata: @MainActor (URL) async throws -> MCPOAuthMetadata
+        var exchange: @MainActor (MCPOAuthCredentialBundle, MCPOAuthMetadata) async throws -> RefreshedTokens
+        var persist: @MainActor (MCPOAuthCredentialBundle, UUID) throws -> Void
+    }
+
+    typealias RefreshedTokens = (
+        accessToken: String, refreshToken: String?, expiresAt: Date, grantedScopes: [String]
+    )
+
+    private static let liveRefreshDependencies = RefreshDependencies(
+        loadBundle: { loadBundle(sourceID: $0) },
+        fetchMetadata: { try await MCPOAuthDiscovery.fetch(issuer: $0) },
+        // Repeat the audience binding on refresh — see MCPOAuthCredentialBundle.resource.
+        exchange: { bundle, metadata in
+            try await MCPOAuthTokenExchange.refresh(
+                bundle: bundle, metadata: metadata, resource: bundle.resource
+            )
+        },
+        persist: { try persist($0, sourceID: $1) }
+    )
+
+    private static var refreshDependencies = liveRefreshDependencies
+
+    /// Swaps the refresh collaborators. Test-only — pass nil to restore the live ones. Also drops
+    /// any in-flight entry so one test's task cannot be joined by the next.
+    static func setRefreshDependenciesForTesting(_ replacement: RefreshDependencies?) {
+        refreshDependencies = replacement ?? liveRefreshDependencies
+        inFlightRefreshes = [:]
+    }
+
     /// Refresh a stored bundle's access token. Used reactively (on 401) and
     /// proactively (on launch when within 5 min of expiry). Returns the
     /// updated bundle; persists it before returning so callers don't have
     /// to remember to write back.
+    ///
+    /// Concurrent calls for one source coalesce onto a single exchange — see
+    /// `inFlightRefreshes`. A persist failure after the provider rotated the
+    /// refresh token throws `rotatedRefreshTokenLost`, which says what actually
+    /// happened rather than "refresh failed".
     @discardableResult
     static func refresh(sourceID: UUID) async throws -> MCPOAuthCredentialBundle {
-        guard var bundle = loadBundle(sourceID: sourceID) else {
+        if let inFlight = inFlightRefreshes[sourceID] {
+            logger.info("""
+                [MCP-OAUTH] A refresh is already in flight for source \(sourceID.uuidString); joining \
+                it instead of presenting the same refresh token a second time. CONSEQUENCE: one token \
+                exchange and one rotation — a replayed refresh token is what makes providers revoke \
+                the whole grant.
+                """)
+            return try await inFlight.value
+        }
+
+        let task = Task { @MainActor in
+            try await performRefresh(sourceID: sourceID)
+        }
+        inFlightRefreshes[sourceID] = task
+        defer { inFlightRefreshes[sourceID] = nil }
+        return try await task.value
+    }
+
+    private static func performRefresh(sourceID: UUID) async throws -> MCPOAuthCredentialBundle {
+        let deps = refreshDependencies
+        guard var bundle = deps.loadBundle(sourceID) else {
             throw MCPOAuthCoordinatorError.bundleNotFound
         }
 
         // Re-fetch metadata — endpoints can rotate, and the spec mandates
         // we honor the current document on every refresh.
-        let metadata = try await MCPOAuthDiscovery.fetch(issuer: bundle.issuer)
-        // Repeat the audience binding on refresh — see MCPOAuthCredentialBundle.resource.
-        let tokens = try await MCPOAuthTokenExchange.refresh(
-            bundle: bundle, metadata: metadata, resource: bundle.resource
-        )
+        let metadata = try await deps.fetchMetadata(bundle.issuer)
+        let tokens = try await deps.exchange(bundle, metadata)
 
         // MUTATE the fields the refresh actually changed. This branch used to REBUILD the
         // bundle from scratch whenever the server rotated the refresh token — and a rebuild
@@ -291,18 +372,51 @@ struct MCPOAuthCoordinator {
 
         // Some servers rotate the refresh token on every refresh. When they don't, keep the
         // old one — a nil here means "unchanged", not "revoked".
+        let rotated = tokens.refreshToken.map { $0 != bundle.refreshToken } ?? false
         if let newRefresh = tokens.refreshToken {
-            if newRefresh != bundle.refreshToken {
-                logger.info("""
-                    [MCP-OAUTH] Issuer \(bundle.issuer.absoluteString) rotated the refresh token \
-                    for source \(sourceID.uuidString); the previous one is now dead at the \
-                    provider and the new one is persisted below.
-                    """)
-            }
             bundle.refreshToken = newRefresh
         }
 
-        try persist(bundle, sourceID: sourceID)
+        // ⚠️ Register KC-4. The rotation used to be logged as persisted ONE LINE BEFORE the write
+        // that can fail, and when it failed the new refresh token unwound with this frame while the
+        // previous one was already dead at the provider: every later refresh returned
+        // `invalid_grant`, forever, and the log said the opposite. The write is retried once (the
+        // ordinary causes — a Keychain prompt mid-answer, a transient lock — are brief), the
+        // rotation line now FOLLOWS the successful write, and a final failure names the real
+        // consequence instead of "refresh failed".
+        do {
+            try persistWithOneRetry(bundle, sourceID: sourceID, persist: deps.persist)
+        } catch {
+            if rotated {
+                logger.error("""
+                    [MCP-OAUTH] Issuer \(bundle.issuer.absoluteString) rotated the refresh token \
+                    for source \(sourceID.uuidString) and the new one could NOT be stored after two \
+                    attempts (\(error.localizedDescription)). CONSEQUENCE: the grant is DEAD — the \
+                    previous refresh token is already invalid at the provider and the replacement \
+                    existed only in memory. Every later refresh for this server will fail with \
+                    invalid_grant; the user must sign in to it again from its editor.
+                    """)
+                throw MCPOAuthCoordinatorError.rotatedRefreshTokenLost(
+                    sourceID: sourceID, underlying: error.localizedDescription
+                )
+            }
+            logger.error("""
+                [MCP-OAUTH] Refreshed the access token for source \(sourceID.uuidString) but could \
+                NOT store it after two attempts (\(error.localizedDescription)). CONSEQUENCE: the \
+                stored bundle still holds the previous, expired access token, so the next call \
+                refreshes again; the refresh token was not rotated and remains valid, so that retry \
+                can succeed once the Keychain is writable.
+                """)
+            throw error
+        }
+
+        if rotated {
+            logger.info("""
+                [MCP-OAUTH] Issuer \(bundle.issuer.absoluteString) rotated the refresh token for \
+                source \(sourceID.uuidString); the previous one is now dead at the provider and \
+                the new one IS persisted.
+                """)
+        }
         logger.info("""
             [MCP-OAUTH] Refreshed OAuth tokens for source \(sourceID.uuidString) — \
             expires in \(Int(tokens.expiresAt.timeIntervalSinceNow))s, \
@@ -310,6 +424,25 @@ struct MCPOAuthCoordinator {
             audience binding: \(bundle.resource?.absoluteString ?? "none").
             """)
         return bundle
+    }
+
+    /// One immediate retry. ⚠️ Not a loop: a locked Keychain stays locked, and a second failure
+    /// should reach the caller quickly with the real consequence rather than stall a tool call
+    /// behind more attempts.
+    private static func persistWithOneRetry(
+        _ bundle: MCPOAuthCredentialBundle,
+        sourceID: UUID,
+        persist: @MainActor (MCPOAuthCredentialBundle, UUID) throws -> Void
+    ) throws {
+        do {
+            try persist(bundle, sourceID)
+        } catch {
+            logger.warning("""
+                [MCP-OAUTH] First attempt to store the refreshed tokens for source \
+                \(sourceID.uuidString) failed (\(error.localizedDescription)); retrying once.
+                """)
+            try persist(bundle, sourceID)
+        }
     }
 
     // MARK: - Bundle persistence

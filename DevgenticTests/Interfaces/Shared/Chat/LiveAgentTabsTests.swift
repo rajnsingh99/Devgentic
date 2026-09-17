@@ -194,4 +194,86 @@ final class LiveAgentTabsTests: XCTestCase {
         XCTAssertEqual(payload?.isSuccess, true)
         XCTAssertEqual(payload?.preWriteContent, "old")
     }
+
+    // MARK: - [CR52/CR59] create_file is a full-content writer
+
+    /// ⚠️ WHY EIGHT GREEN LIVE-TAB SUITES NEVER NOTICED. Every view-model test in this file builds
+    /// `AgentLiveWriteEvent.Began`/`.Completed` structs directly through the helpers above, which
+    /// bypasses `liveWriteToolNames` entirely — so the whole live-tab cluster could stay green
+    /// while the set that ADMITS a tool was one name short. These four tests go through the
+    /// FACTORIES with a real tool name and a real params string, which is the only path that
+    /// touches the set. Same shape as the standing "test the wiring, not just the policy" rule.
+    ///
+    /// `create_file` is `.libraryExceptCode` — the same visibility class as `write_file`, which
+    /// was already covered — so this is the AGENT/WORKFLOW profiles' ordinary creation tool.
+    /// Mutation that must kill this: remove `"create_file"` from `liveWriteToolNames`.
+    func testBeganFactoryPlantsATabForCreateFile() throws {
+        let payload = try XCTUnwrap(AgentLiveWriteEvent.began(
+            toolName: "create_file",
+            params: #"{"file_path":"/Users/alice/Proj/Notes.swift","content":"struct Notes {}"}"#,
+            conversationID: conversationID
+        ), "create_file carries the whole file in `content`, exactly like write_file — it must get a live tab")
+        XCTAssertEqual(payload.fileName, "Notes.swift")
+        XCTAssertEqual(payload.proposedContent, "struct Notes {}")
+        XCTAssertEqual(payload.path, FilePathResolver.resolve("/Users/alice/Proj/Notes.swift"),
+                       "the tab's identity must be the path the executor resolved, not the raw argument")
+    }
+
+    /// ⚠️ THE TWO FACTORIES ARE GATED SEPARATELY against the same constant. A fix inlined into
+    /// `began` alone widens the OPEN path and leaves the SETTLE path narrow — the tab is planted
+    /// and can never be settled, so it holds `.active` for the session: permanent "agent is
+    /// writing" banner, pulsing pill, and ⌘S refused as on-disk drift. That is the CF-9 shape.
+    ///
+    /// The fixture is the REFUSAL case on purpose: `create_file` fails when the file already
+    /// exists and `overwrite` is not set, so for this tool a failed completion is the everyday
+    /// outcome rather than an exception, and `preWriteContent` is what makes the rejected tab's
+    /// drift baseline the real bytes rather than nil.
+    /// Mutation that must kill this: narrow `completed`'s guard, or inline the names into `began` only.
+    func testCompletedFactorySettlesACreateFileThatWasRefused() throws {
+        let payload = try XCTUnwrap(AgentLiveWriteEvent.completed(
+            toolName: "create_file",
+            params: #"{"file_path":"/Users/alice/Proj/Notes.swift","content":"struct Notes {}"}"#,
+            isSuccess: false,
+            preWriteContent: "the file that was already there\n",
+            conversationID: conversationID
+        ))
+        XCTAssertEqual(payload.fileName, "Notes.swift")
+        XCTAssertEqual(payload.isSuccess, false)
+        XCTAssertEqual(payload.preWriteContent, "the file that was already there\n",
+                       "without the pre-write bytes the rejected tab has no drift baseline and ⌘S is refused forever")
+    }
+
+    /// ⚠️ THE NARROWNESS CONTROL. Widening the set is the fix; widening the FACTORY would not be.
+    /// `create_file` has no append mode, but the shared guards must still refuse the cases they
+    /// always refused — otherwise this test's siblings above pass for the wrong reason.
+    /// Mutation that must kill this: replace either guard with `true`, or drop the `content` check.
+    func testCreateFileStillObeysTheFactoryGuards() {
+        XCTAssertNil(AgentLiveWriteEvent.began(
+            toolName: "create_file",
+            params: #"{"file_path":"/tmp/Empty.swift","content":""}"#,
+            conversationID: conversationID
+        ), "a create with no content has nothing to show")
+        XCTAssertNil(AgentLiveWriteEvent.began(
+            toolName: "create_file",
+            params: #"{"content":"struct A {}"}"#,
+            conversationID: conversationID
+        ), "no path argument means no tab identity")
+        XCTAssertNil(AgentLiveWriteEvent.began(
+            toolName: "create_file",
+            params: #"{"file_path":"/tmp/Big.swift","content":"\#(String(repeating: "x", count: 512_001))"}"#,
+            conversationID: conversationID
+        ), "over the live-tab byte cap")
+    }
+
+    /// The set must not have been widened by simply admitting everything.
+    /// Mutation that must kill this: replace the `liveWriteToolNames.contains` guard with `true`.
+    func testNonWriterToolsStillGetNoLiveTab() {
+        for tool in ["execute_shell", "read_file", "edit_code_single", "delete_file"] {
+            XCTAssertNil(AgentLiveWriteEvent.began(
+                toolName: tool,
+                params: #"{"file_path":"/tmp/a.txt","content":"x"}"#,
+                conversationID: conversationID
+            ), "\(tool) is not a full-content writer and must stay on the completion-chip path")
+        }
+    }
 }

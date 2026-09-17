@@ -69,32 +69,42 @@ struct AddMCPServerContainerView: View {
 
     // MARK: - Save bridges
 
-    /// Returns false if a server with the same name already exists, matching
-    /// the previous sheet contract so the form's duplicate alert still fires.
-    /// `oauthBundle` is non-nil when the user signed in via the OAuth flow —
-    /// persisted to Keychain under the *new* source ID once the store
-    /// assigns one.
+    /// `.duplicate` when a server with the same name already exists, so the
+    /// form's duplicate alert still fires; `.failed` when the save itself did not
+    /// happen. `oauthBundle` is non-nil when the user signed in via the OAuth
+    /// flow — persisted to Keychain under the new source ID BEFORE the row is
+    /// inserted (register KC-5; the ordering lives in `MCPServerAddFlow`).
     private func handleAdd(
         serverName: String,
         definition: ServerDefinition,
         secrets: MCPRuntimeSecrets,
         tools: [ToolDefinition],
         oauthBundle: MCPOAuthCredentialBundle?
-    ) -> Bool {
-        let exists = MCPToolStore.shared.sources.contains { source in
-            source.serverName.caseInsensitiveCompare(serverName) == .orderedSame
-        }
-        if exists { return false }
-        let newID = MCPToolStore.shared.addTool(
+    ) -> MCPAddOutcome {
+        MCPServerAddFlow.add(
             serverName: serverName,
-            serverDefinition: definition,
-            secrets: secrets,
-            newTools: tools
+            oauthBundle: oauthBundle,
+            isDuplicate: { name in
+                MCPToolStore.shared.sources.contains { source in
+                    source.serverName.caseInsensitiveCompare(name) == .orderedSame
+                }
+            },
+            persistBundle: { bundle, sourceID in
+                try MCPOAuthCoordinator.persist(bundle, sourceID: sourceID)
+            },
+            addTool: { newID in
+                MCPToolStore.shared.addTool(
+                    id: newID,
+                    serverName: serverName,
+                    serverDefinition: definition,
+                    secrets: secrets,
+                    newTools: tools
+                )
+            },
+            discardBundle: { sourceID in
+                _ = MCPSecretStore.shared.delete(scope: .oauthBundle, sourceID: sourceID)
+            }
         )
-        if let oauthBundle, let newID {
-            try? MCPOAuthCoordinator.persist(oauthBundle, sourceID: newID)
-        }
-        return true
     }
 
     private func handleUpdate(

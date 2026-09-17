@@ -171,6 +171,10 @@ struct PromptLibrarySidebarView: View {
                 focusedPromptID = newIDs.first
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .newPrompt)) { _ in
+            createEditVM.loadCreateDraft()
+            showingCreateSheet = true
+        }
     }
 
     // MARK: - Header
@@ -453,6 +457,13 @@ struct PromptLibrarySidebarView: View {
                        let prompt = viewModel.filteredPrompts.first(where: { $0.id == id }),
                        !prompt.text.isEmpty {
                         useInChat(prompt)
+                        return .handled
+                    }
+                    return .ignored
+                }
+                .onKeyPress { press in
+                    if press.key == "f" && press.modifiers.contains(.command) {
+                        isSearchFocused = true
                         return .handled
                     }
                     return .ignored

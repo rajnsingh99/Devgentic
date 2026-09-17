@@ -18,6 +18,9 @@ struct SettingsSidebarListView: View {
     @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
+    @FocusState private var isListFocused: Bool
+    @State private var focusedCategory: SettingsCategory? = nil
+
     /// The currently-displayed settings category (derived from the router).
     private var activeCategory: SettingsCategory? {
         if case .settingsDetail(let cat) = router.activeDestination { return cat }
@@ -33,23 +36,98 @@ struct SettingsSidebarListView: View {
                 .padding(.bottom, 8)
 
             // Category list
-            ScrollView {
-                VStack(spacing: 2) {
-                    ForEach(SettingsCategory.allCases) { category in
-                        SettingsCategoryRow(
-                            category: category,
-                            isSelected: activeCategory == category,
-                            onSelect: {
-                                router.navigateToSettings(category)
-                            }
-                        )
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 2) {
+                        ForEach(SettingsCategory.allCases) { category in
+                            SettingsCategoryRow(
+                                category: category,
+                                isSelected: activeCategory == category,
+                                isFocused: isListFocused && focusedCategory == category,
+                                onSelect: {
+                                    focusedCategory = category
+                                    router.navigateToSettings(category)
+                                }
+                            )
+                            .id(category)
+                        }
                     }
+                    .padding(.horizontal, 8)
+                    .padding(.top, 4)
+                    .padding(.bottom, 20)
                 }
-                .padding(.horizontal, 8)
-                .padding(.top, 4)
-                .padding(.bottom, 20)
+                .scrollContentBackground(.hidden)
+                .focusable()
+                .focused($isListFocused)
+                .focusEffectDisabled()
+                .onMoveCommand { direction in
+                    moveFocus(direction, proxy: proxy)
+                }
+                .onKeyPress(.return) {
+                    if let cat = focusedCategory {
+                        router.navigateToSettings(cat)
+                        return .handled
+                    }
+                    return .ignored
+                }
+                .onKeyPress { press in
+                    if let char = press.characters.first,
+                       let num = Int(String(char)),
+                       num >= 1 && num <= SettingsCategory.allCases.count {
+                        let cat = SettingsCategory.allCases[num - 1]
+                        focusedCategory = cat
+                        router.navigateToSettings(cat)
+                        withAnimation(.easeInOut(duration: 0.12)) {
+                            proxy.scrollTo(cat, anchor: .center)
+                        }
+                        return .handled
+                    }
+                    return .ignored
+                }
             }
-            .scrollContentBackground(.hidden)
+        }
+        .onAppear {
+            if focusedCategory == nil {
+                focusedCategory = activeCategory ?? .general
+            }
+        }
+        .onChange(of: activeCategory) { _, newCat in
+            if let newCat {
+                focusedCategory = newCat
+            }
+        }
+    }
+
+    private func moveFocus(_ direction: MoveCommandDirection, proxy: ScrollViewProxy) {
+        let categories = SettingsCategory.allCases
+        guard !categories.isEmpty else { return }
+        let current = focusedCategory ?? activeCategory ?? categories.first!
+        guard let currentIndex = categories.firstIndex(of: current) else {
+            let first = categories.first!
+            focusedCategory = first
+            router.navigateToSettings(first)
+            return
+        }
+
+        switch direction {
+        case .up:
+            let prevIndex = max(0, currentIndex - 1)
+            let cat = categories[prevIndex]
+            focusedCategory = cat
+            router.navigateToSettings(cat)
+            withAnimation(.easeInOut(duration: 0.12)) {
+                proxy.scrollTo(cat, anchor: .center)
+            }
+        case .down:
+            let nextIndex = min(categories.count - 1, currentIndex + 1)
+            let cat = categories[nextIndex]
+            focusedCategory = cat
+            router.navigateToSettings(cat)
+            withAnimation(.easeInOut(duration: 0.12)) {
+                proxy.scrollTo(cat, anchor: .center)
+            }
+        default:
+            break
         }
     }
 }
@@ -57,6 +135,7 @@ struct SettingsSidebarListView: View {
 private struct SettingsCategoryRow: View {
     let category: SettingsCategory
     let isSelected: Bool
+    var isFocused: Bool = false
     let onSelect: () -> Void
 
     @State private var isHovering = false
@@ -97,7 +176,7 @@ private struct SettingsCategoryRow: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .sidebarRowBackground(isSelected: isSelected, isHovering: isHovering)
+        .sidebarRowBackground(isSelected: isSelected, isHovering: isHovering || isFocused)
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { hovering in

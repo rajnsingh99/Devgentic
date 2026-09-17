@@ -2,11 +2,65 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- [L3] Microphone access. Harmless without the hardened runtime (dev builds), but REQUIRED
-	     once the hardened runtime is enabled for Developer-ID notarization: without it,
+	<!-- ⚠️⚠️ EVERY KEY IN THIS FILE IS A HARDENED-RUNTIME "RESOURCE ACCESS" ENTITLEMENT.
+	     All four are HARMLESS AND INERT without the hardened runtime, which is why their absence
+	     was invisible for so long: a Debug build (ad-hoc, no hardened runtime) exercises every one
+	     of these APIs successfully with an empty entitlements file. They become LOAD-BEARING the
+	     moment ENABLE_HARDENED_RUNTIME = YES lands on the Release configuration — which it now has
+	     (KC-7). A missing key here is a feature that works in every dev build and is dead in the
+	     shipped one.
+
+	     ⚠️ AN ENTITLEMENT IS NOT A USAGE STRING. Each key below is paired with an Info.plist
+	     NS*UsageDescription. The entitlement lets the process ASK; the usage string is what TCC
+	     shows the user, and calling the API with the string missing terminates the process. Adding
+	     one without the other leaves the feature broken in a different way. Both halves live in
+	     Devgentic/Info.plist — keep them in step.
+
+	     ⚠️ DO NOT ADD ANY com.apple.security.cs.* KEY HERE. All six opt-outs (allow-jit,
+	     allow-unsigned-executable-memory, disable-library-validation,
+	     allow-dyld-environment-variables, debugger, disable-executable-page-protection) were
+	     audited against the real dependency surface and every one was rejected on source evidence.
+	     In particular MLX is built in Metal-JIT mode and compiles kernels from source strings at
+	     runtime, but it does so through the system Metal compiler — that produces GPU code, not
+	     CPU-executable pages, so it needs no JIT entitlement. Each cs.* key weakens the runtime
+	     process-wide and draws notarization scrutiny. See Planout/Keychain_Production_Readiness.md §3.
+
+	     ⚠️ NOT sandboxed, deliberately. The App Sandbox is a separate mechanism from the hardened
+	     runtime; sandbox-only keys (files.user-selected.*, network.client, keychain-access-groups)
+	     do not belong here and keychain-access-groups would break launch rather than protect
+	     anything — the app uses the legacy file-based login keychain, which needs no entitlement. -->
+
+	<!-- [L3] Microphone. REQUIRED once the hardened runtime is enabled: without it,
 	     AVAudioApplication.requestRecordPermission() returns false and voice dictation (panel +
-	     main window) silently dies in the shipped build while working in every dev build. -->
+	     main window) plus the Jarvis duplex engine silently die in the shipped build while working
+	     in every dev build. Paired with NSMicrophoneUsageDescription. -->
 	<key>com.apple.security.device.audio-input</key>
+	<true/>
+
+	<!-- [L3] Apple Events — sending them to OTHER applications from IN-PROCESS NSAppleScript.
+	     Reached by run_applescript (NativeSystemTools.swift:250, arbitrary user script), the Safari
+	     tools (SafariAutomationTools.swift:117/:211), the system toggles
+	     (SystemToggleTools.swift:75/:154), AudioMediaTools.swift:53, PrivilegeEscalationService
+	     and ExplorerViewModel's Finder reveal. All are registered in NativeToolCatalog, so an agent
+	     can reach them on any turn. Paired with NSAppleEventsUsageDescription — the entitlement
+	     alone is not enough, because without the usage string TCC cannot present the Automation
+	     prompt and the user has no way to grant it. -->
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
+
+	<!-- [L3] Calendar + Reminders, via in-process EventKit. EKEventStore() at
+	     NativePIMTools.swift:43/:103/:187/:248 with requestFullAccessToEvents() and
+	     requestFullAccessToReminders(); ManageCalendarTool, DeleteCalendarEventTool,
+	     ManageRemindersTool and DeleteReminderTool are all live in NativeToolCatalog (:145-148).
+	     Paired with NSCalendarsFullAccessUsageDescription and NSRemindersFullAccessUsageDescription
+	     — the macOS 14+ full-access keys, which are the ones these APIs actually read. -->
+	<key>com.apple.security.personal-information.calendars</key>
+	<true/>
+
+	<!-- [L3] Contacts, via in-process CNContactStore() at NativePIMTools.swift:356 with
+	     requestAccess(for: .contacts); ManageContactsTool is live at NativeToolCatalog:149.
+	     Same Resource Access category as calendars. Paired with NSContactsUsageDescription. -->
+	<key>com.apple.security.personal-information.addressbook</key>
 	<true/>
 </dict>
 </plist>

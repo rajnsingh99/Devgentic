@@ -35,14 +35,15 @@ struct SkillLibraryContainerView: View {
     let routeProfileID: UUID?
 
     /// A skill to open on arrival, from a sidebar row that named it. Nil for a plain visit.
-    var openSkillID: String?
 
     @Environment(BackendProfileService.self) private var profileService
     @Environment(\.appTheme) private var theme
+    @Environment(MainViewRouter.self) private var router
 
     @AppStorage("skillLibrary.lastProfileID") private var rememberedProfileIDRaw: String = ""
     @State private var revision = 0
-    @State private var inspecting: SkillSD?
+    @State private var searchText = ""
+    @State private var isSearchExpanded = false
     /// Name of a just-linked skill that wants a shell this profile lacks. Nil means no offer.
     @State private var shellToolOffer: String?
     /// The skill a delete has been requested for, held while the user confirms.
@@ -98,6 +99,17 @@ struct SkillLibraryContainerView: View {
         (try? skillsResult.get()) ?? []
     }
 
+    private var filteredSkills: [SkillSD] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return skills }
+        return skills.filter { skill in
+            skill.name.localizedCaseInsensitiveContains(query) ||
+            skill.displayName.localizedCaseInsensitiveContains(query) ||
+            (skill.latestVersion?.skillDescription.localizedCaseInsensitiveContains(query) ?? false) ||
+            skill.id.localizedCaseInsensitiveContains(query)
+        }
+    }
+
     /// "Storage is down" must not render as "you have no skills yet" — opposite remedies.
     private var storeFailure: String? {
         if case .failure(let error) = skillsResult { return error.localizedDescription }
@@ -112,8 +124,22 @@ struct SkillLibraryContainerView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
+        VStack(spacing: 0) {
+            DynamicIslandBar {
+                IslandExpandableSearchHeader(
+                    title: "Skills",
+                    icon: "puzzlepiece",
+                    text: $searchText,
+                    placeholder: "Search skills…",
+                    isExpanded: $isSearchExpanded,
+                    accessibilityIdentifier: "skills.library.search"
+                )
+            } trailing: {
+                HStack(spacing: 8) {
+                    IslandSearchToggleButton(isExpanded: $isSearchExpanded)
+                    profileSelector
+                }
+            }
 
             if let storeFailure {
                 ContentNotFoundView(
@@ -121,37 +147,33 @@ struct SkillLibraryContainerView: View {
                     title: "Skill storage is unavailable",
                     subtitle: "\(storeFailure) Your skills are still configured — do not re-import them."
                 )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                // ⚠️⚠️ THE EMPTY STATE LIVES INSIDE THE LIST, NOT INSTEAD OF IT. It used to be an
-                // `else if skills.isEmpty` arm that replaced the whole scroll view — so the failed-
-                // import rows and the dangling-link rows were unreachable in precisely the case
-                // they exist for. A user whose skills folder was on an unmounted volume saw "No
-                // skills yet — add one", was never told that N imports had FAILED, never saw which
-                // folders, and had no Retry: the app knew, and showed them the blank-slate screen.
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 6) {
-                        if skills.isEmpty {
-                            ContentNotFoundView(
-                                icon: "sparkles",
-                                title: "No skills yet",
-                                subtitle: "Add one from the Skills sidebar — a folder, a .zip or .skill archive, or a .md file with YAML frontmatter — or write your own."
-                            )
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, failedImports.isEmpty ? 40 : 16)
+                    VStack(spacing: 20) {
+                        if canConfigureSkills {
+                            agentScopeCard
                         } else {
-                            ForEach(skills, id: \.id) { skill in
-                                skillRow(skill)
-                            }
+                            libraryOverviewCard
                         }
+
                         if !failedImports.isEmpty {
                             failedImportsSection
                         }
+
                         if let shellToolOffer {
                             shellOfferRow(shellToolOffer)
                         }
+
+                        skillsContentSection
+
                         unresolvedSection
                     }
-                    .padding(16)
+                    .padding(.horizontal, ViewLayout.containerPadding)
+                    .padding(.top, 16)
+                    .padding(.bottom, 32)
+                    .frame(maxWidth: ViewLayout.maxContentWidth)
+                    .frame(maxWidth: .infinity)
                 }
             }
         }
@@ -159,24 +181,12 @@ struct SkillLibraryContainerView: View {
         .background(theme.primaryBackground)
         .onAppear {
             failedImports = SkillLibraryMigration.peekPendingImports()
-            openRoutedSkillIfNeeded()
         }
-        // The pane stays mounted across sidebar clicks, so a second row must open too — `onAppear`
-        // alone would fire once and every later click would silently do nothing.
-        .onChange(of: openSkillID) { _, _ in openRoutedSkillIfNeeded() }
         // Resets @State across a profile switch within the same destination.
         .id(profileID ?? UUID(uuidString: "00000000-0000-0000-0000-000000000000")!)
         .onChange(of: profileID) { _, new in
             if let new { rememberedProfileIDRaw = new.uuidString }
         }
-        // ⚠️ NO ON-APPEAR REFRESH, NO STALENESS CHECK AND NO FILE WATCHER SINCE V6. All three
-        // existed to reconcile a database index against folders that could change underneath it.
-        // The library owns the bytes now, so there is nothing on disk left to drift from and
-        // nothing to watch — the store's `revision`, observed above, is the only invalidation.
-        // ⚠️ CONFIRMED, and the message counts what is actually lost. The library holds the only
-        // copy of a skill — there is no folder on disk to recover it from and no undo — so this is
-        // the one place in the feature where a wrong click is unrecoverable. The count of linked
-        // profiles is the part users do not otherwise know.
         .confirmationDialog(
             pendingDeletion.map { "Delete '\($0.displayName)'?" } ?? "",
             isPresented: Binding(get: { pendingDeletion != nil },
@@ -195,49 +205,68 @@ struct SkillLibraryContainerView: View {
         } message: {
             if let actionError { Text(actionError) }
         }
-        .sheet(item: $inspecting) { skill in
-            SkillDetailSheet(skill: skill) { revision += 1 }
-        }
     }
 
-    // MARK: - Header
+    // MARK: - Navigation Bar Profile Selector
 
-    private var header: some View {
-        HStack(spacing: 12) {
-            Text("Skills")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(theme.primaryText)
-
-            Spacer()
-
-            profileSelector
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-    }
-
-    /// Always present, disabled when the route pinned a profile — arriving from a profile's own
-    /// config is an explicit statement about what is being configured.
+    /// Pinned when arrived from a route profile (e.g. AgentConfigDetailView); switchable otherwise.
     private var profileSelector: some View {
-        Menu {
-            Button("None (browse only)") { rememberedProfileIDRaw = "" }
-            Divider()
+        let isPinned = routeProfileID != nil
+
+        return Menu {
+            if !isPinned {
+                Button("No profile (browse only)") { rememberedProfileIDRaw = "" }
+                Divider()
+            }
             ForEach(linkableProfiles) { profile in
-                Button(profile.displayName) { rememberedProfileIDRaw = profile.id.uuidString }
+                Button {
+                    rememberedProfileIDRaw = profile.id.uuidString
+                } label: {
+                    if profile.id == profileID {
+                        Label(profile.displayName, systemImage: "checkmark")
+                    } else {
+                        Text(profile.displayName)
+                    }
+                }
             }
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: "person.crop.square")
+                Image(systemName: canConfigureSkills ? "person.crop.circle.badge.checkmark" : "person.crop.circle")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(canConfigureSkills ? theme.accentColor : theme.secondaryText)
+
                 Text(currentProfileName)
+                    .font(theme.fontCaption.weight(.medium))
+                    .foregroundStyle(canConfigureSkills ? theme.primaryText : theme.secondaryText)
                     .lineLimit(1)
+
+                if isPinned {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 8))
+                        .foregroundStyle(theme.secondaryText.opacity(0.8))
+                } else {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(theme.secondaryText)
+                }
             }
-            .font(.system(size: 12))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(canConfigureSkills ? theme.accentColor.opacity(0.12) : theme.secondaryBackground)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(canConfigureSkills ? theme.accentColor.opacity(0.35) : theme.dividerColor.opacity(0.4), lineWidth: 0.5)
+            )
         }
         .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .fixedSize()
-        .disabled(routeProfileID != nil)
-        .help(routeProfileID != nil
-              ? "Configuring the profile you arrived from"
+        .disabled(isPinned)
+        .help(isPinned
+              ? "Configuring '\(currentProfileName)'. Tap Back (⌘[) to return to this agent."
               : "Choose which agent profile these skills apply to")
     }
 
@@ -249,89 +278,144 @@ struct SkillLibraryContainerView: View {
         return profile.displayName
     }
 
-    // MARK: - Rows
+    // MARK: - Header Context Cards
 
-    @MainActor
-    private func skillRow(_ skill: SkillSD) -> some View {
-        let selection = selections.first { $0.skillID == skill.id }
-        let isLinked = selection != nil
-        let isEnabled = selection?.isEnabled ?? false
+    /// Contextual header when configuring skills for a specific agent profile.
+    private var agentScopeCard: some View {
+        let enabledCount = selections.filter { $0.isEnabled && !$0.isAwaitingRelink }.count
+        let pinnedCount = selections.filter { $0.pinnedVersionID != nil }.count
+        let draftCount = skills.filter(\.isDraft).count
 
-        return HStack(alignment: .top, spacing: 10) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(skill.name)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(theme.primaryText)
-                    if skill.latestVersion?.hasScripts == true {
-                        // ⚠️ LABELS, never grants. Bundling a script is a fact about the package; it
-                        // must not decide the profile's tool set. The shell tool is OFFERED, with a
-                        // button, and granted only by a person — see `offerShellToolIfNeeded` below,
-                        // which is called from `setLink` and routed through `SkillCapabilityHints`.
-                        Text("scripts")
-                            .font(.system(size: 9, weight: .medium))
-                            .padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(theme.secondaryText.opacity(0.15), in: Capsule())
-                            .foregroundStyle(theme.secondaryText)
-                    }
-                }
-                Text(skill.latestVersion?.skillDescription ?? "")
-                    .font(.system(size: 11))
+        return SettingsCard(title: "Agent Skills Configuration", icon: "puzzlepiece", theme: theme) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Skills provide domain instructions and specialized tools that \(Text(currentProfileName).fontWeight(.semibold).foregroundStyle(theme.primaryText)) activates on demand during task execution.")
+                    .font(theme.fontSubheadline)
                     .foregroundStyle(theme.secondaryText)
-                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
 
-                // ⚠️ Shown only when this profile LINKS the skill and the skill has more than one
-                // version. Offering a pin on a single-version skill is a control that cannot change
-                // anything, and offering it on an unlinked skill asks about a relationship that does
-                // not exist.
-                if canConfigureSkills, let selection, skill.versions.count > 1 {
-                    pinControl(for: skill, selection: selection)
+                HStack(spacing: 8) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("\(enabledCount) of \(skills.count) enabled")
+                            .font(theme.fontCaption.weight(.medium))
+                    }
+                    .foregroundStyle(theme.accentColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(theme.accentColor.opacity(0.12), in: Capsule())
+                    .overlay(Capsule().stroke(theme.accentColor.opacity(0.25), lineWidth: 0.5))
+
+                    if pinnedCount > 0 {
+                        HStack(spacing: 4) {
+                            Image(systemName: "pin.fill")
+                                .font(.system(size: 9))
+                            Text("\(pinnedCount) pinned")
+                                .font(theme.fontCaption.weight(.medium))
+                        }
+                        .foregroundStyle(theme.secondaryText)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(theme.secondaryBackground, in: Capsule())
+                        .overlay(Capsule().stroke(theme.dividerColor.opacity(0.4), lineWidth: 0.5))
+                    }
+
+                    if draftCount > 0 {
+                        HStack(spacing: 4) {
+                            Image(systemName: "pencil.and.ruler")
+                                .font(.system(size: 9))
+                            Text("\(draftCount) in draft")
+                                .font(theme.fontCaption.weight(.medium))
+                        }
+                        .foregroundStyle(Color.orange)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.orange.opacity(0.12), in: Capsule())
+                        .overlay(Capsule().stroke(Color.orange.opacity(0.25), lineWidth: 0.5))
+                    }
+
+                    Spacer()
                 }
             }
-
-            Spacer(minLength: 0)
-
-            if canConfigureSkills {
-                Toggle("", isOn: Binding(
-                    get: { isLinked && isEnabled },
-                    set: { setLink(skill, enabled: $0) }
-                ))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .help(isLinked ? "Unlink from this profile" : "Link to this profile")
-            }
-        }
-        .padding(10)
-        .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 8))
-        .contentShape(Rectangle())
-        .onTapGesture { inspecting = skill }
-        .contextMenu {
-            Button("Inspect & Edit…") { inspecting = skill }
-            // ⚠️ NO "Reveal in Finder" SINCE V6. The library owns a skill's bytes; there is no
-            // folder on disk to reveal. Export writes one on demand instead — a menu item that
-            // opened an empty or stale directory would be worse than its absence.
-            Button("Copy skill ID") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(skill.id, forType: .string)
-            }
-            Divider()
-            Button("Delete Skill…", role: .destructive) { pendingDeletion = skill }
+            .padding(16)
         }
     }
 
-    /// Links this profile holds that the LIBRARY cannot resolve — the skill was deleted, or is
-    /// still a draft. Shown so they can be removed rather than sitting invisible: the tools path
-    /// leaves exactly these orphans with no row to un-tick.
-    ///
-    /// ⚠️ A selection AWAITING RE-LINK is excluded below and must stay excluded. Its skill very
-    /// likely still exists and the import sweep repairs it, so offering removal would invite the
-    /// user to destroy a link that is about to fix itself.
+    /// Overview header when browsing skills without an active profile.
+    private var libraryOverviewCard: some View {
+        let drafts = skills.filter(\.isDraft).count
+
+        return SettingsCard(title: "Skill Library", icon: "puzzlepiece", theme: theme) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("\(skills.count) skill\(skills.count == 1 ? "" : "s") in your library")
+                    .font(theme.fontHeadline)
+                    .foregroundStyle(theme.primaryText)
+
+                Text("Select a skill in the sidebar or from the list below to inspect or edit it. To link skills to an agent, select an agent profile in the top bar or tap \"Manage Skills\" from that agent's settings.")
+                    .font(theme.fontSubheadline)
+                    .foregroundStyle(theme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if drafts > 0 {
+                    Label("\(drafts) \(drafts == 1 ? "is a draft and is" : "are drafts and are") invisible to agents until Draft Mode is turned off in skill settings.",
+                          systemImage: "pencil.and.ruler")
+                        .font(theme.fontCaption)
+                        .foregroundStyle(Color.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    // MARK: - Skills List Content
+
+    @ViewBuilder
+    private var skillsContentSection: some View {
+        if skills.isEmpty {
+            ContentNotFoundView(
+                icon: "puzzlepiece",
+                title: "No skills yet",
+                subtitle: "Add one from the Skills sidebar (+ New or Import) or create your own."
+            )
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 32)
+        } else if filteredSkills.isEmpty {
+            VStack(spacing: 12) {
+                ContentNotFoundView(
+                    icon: "magnifyingglass",
+                    title: "No matching skills",
+                    subtitle: "No skills match \"\(searchText)\". Check your spelling or clear the search."
+                )
+                GlassActionButton(title: "Clear Search", icon: "xmark", isAccent: false) {
+                    searchText = ""
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 32)
+        } else {
+            VStack(spacing: 10) {
+                ForEach(filteredSkills, id: \.id) { skill in
+                    SkillLibraryCardRow(
+                        skill: skill,
+                        selection: selections.first { $0.skillID == skill.id },
+                        canConfigureSkills: canConfigureSkills,
+                        currentProfileName: currentProfileName,
+                        theme: theme,
+                        onToggle: { enabled in setLink(skill, enabled: enabled) },
+                        onSetPin: { versionID in setPin(versionID, for: skill.id) },
+                        onOpenDetail: { router.navigate(to: .skillDetail(skillID: skill.id)) },
+                        onDelete: { pendingDeletion = skill }
+                    )
+                }
+            }
+        }
+    }
+
+    // MARK: - Unresolved Links
+
     @ViewBuilder
     private var unresolvedSection: some View {
-        // ⚠️ A selection AWAITING RE-LINK is not dangling and must not be offered for removal —
-        // its skill very likely still exists and the import sweep repairs it. Telling the user to
-        // delete a link that is about to fix itself is the opposite of helpful.
         let known = Set(skills.map(\.id))
         let dangling = selections.filter { selection in
             guard let skillID = selection.skillID else { return false }
@@ -339,62 +423,89 @@ struct SkillLibraryContainerView: View {
         }
 
         if canConfigureSkills, !dangling.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Linked but not found")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(theme.secondaryText)
-                    .padding(.top, 8)
+            SettingsCard(title: "Linked but Not Found", icon: "questionmark.circle", theme: theme) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("These skills are linked to this profile but no longer exist in the library. You can safely remove them.")
+                        .font(theme.fontCaption)
+                        .foregroundStyle(theme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
 
-                ForEach(dangling) { selection in
-                    HStack(spacing: 10) {
-                        Image(systemName: "questionmark.circle")
-                            .foregroundStyle(.orange)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(selection.name)
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(theme.primaryText)
-                            Text(selection.skillID ?? selection.legacyFolderPath ?? "unknown address")
-                                .font(.system(size: 10))
-                                .foregroundStyle(theme.secondaryText)
-                                .lineLimit(1)
-                                .truncationMode(.head)
+                    ForEach(dangling) { selection in
+                        HStack(spacing: 10) {
+                            Image(systemName: "questionmark.circle.fill")
+                                .foregroundStyle(Color.orange)
+                                .font(.system(size: 13))
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(selection.name)
+                                    .font(theme.fontBody.weight(.medium))
+                                    .foregroundStyle(theme.primaryText)
+                                Text(selection.skillID ?? selection.legacyFolderPath ?? "unknown address")
+                                    .font(theme.fontCodeCaption)
+                                    .foregroundStyle(theme.secondaryText)
+                                    .lineLimit(1)
+                                    .truncationMode(.head)
+                            }
+
+                            Spacer(minLength: 0)
+
+                            GlassActionButton(title: "Remove", icon: "trash", isAccent: false) {
+                                if let id = selection.skillID {
+                                    removeLink(skillID: id)
+                                }
+                            }
                         }
-                        Spacer(minLength: 0)
-                        Button("Remove") { if let id = selection.skillID { removeLink(skillID: id) } }
-                            .font(.system(size: 11))
+                        .padding(10)
+                        .background(theme.secondaryBackground.opacity(0.6), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(theme.dividerColor.opacity(0.35), lineWidth: 0.5)
+                        )
                     }
-                    .padding(10)
-                    .background(theme.secondaryBackground.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
                 }
+                .padding(16)
             }
         }
     }
 
-    /// ⚠️ A sentence and a button. The grant is a person's answer to a question — that is the whole
-    /// reason this may read a declaration at all.
+    // MARK: - Shell Offer Banner
+
     @ViewBuilder
     private func shellOfferRow(_ skillName: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Image(systemName: "terminal")
-                .font(.system(size: 11))
-                .foregroundStyle(.orange)
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Image(systemName: "terminal.fill")
+                .font(.system(size: 14))
+                .foregroundStyle(Color.orange)
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 4) {
                 Text("'\(skillName)' runs shell commands")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(theme.fontBody.weight(.semibold))
                     .foregroundStyle(theme.primaryText)
                 Text("This profile has no shell tool, so the skill's steps that need one will fail. Adding it asks for your confirmation on every command.")
-                    .font(.system(size: 11))
+                    .font(theme.fontCaption)
                     .foregroundStyle(theme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: 0)
-            Button("Add execute_shell") { acceptShellToolOffer() }
-                .font(.system(size: 11))
-            Button("Not now") { shellToolOffer = nil }
-                .font(.system(size: 11))
+
+            Spacer(minLength: 8)
+
+            HStack(spacing: 8) {
+                GlassActionButton(title: "Add execute_shell", icon: "plus", isAccent: true) {
+                    acceptShellToolOffer()
+                }
+                GlassActionButton(title: "Not now", icon: "xmark", isAccent: false) {
+                    shellToolOffer = nil
+                }
+            }
         }
-        .padding(10)
-        .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.orange.opacity(0.3), lineWidth: 0.5)
+        )
     }
 
     /// Says what goes, and what else it breaks. Counted across ALL agent profiles, not just the one
@@ -420,11 +531,6 @@ struct SkillLibraryContainerView: View {
     /// ⚠️ Silent when the id is unknown rather than showing an error: the only way to hold a stale
     /// id here is to click a row for a skill deleted in the same moment, and an alert for that would
     /// be noise about something the user just did.
-    private func openRoutedSkillIfNeeded() {
-        guard let openSkillID,
-              let match = skills.first(where: { $0.id == openSkillID }) else { return }
-        inspecting = match
-    }
 
     private func confirmDeletion() {
         guard let skill = pendingDeletion else { return }
@@ -443,60 +549,7 @@ struct SkillLibraryContainerView: View {
         revision += 1
     }
 
-    /// Lets a profile freeze on one version of a skill.
-    ///
-    /// ⚠️ A pin is the ONLY thing that stops an `update_skill` write — or a re-import — reaching this
-    /// profile. That is its whole purpose, so the menu says what following latest actually means
-    /// rather than leaving the user to infer it from a checkmark.
-    ///
-    /// ⚠️ A DANGLING pin resolves to nothing rather than silently falling back to latest
-    /// (`SkillResolution`), which is why the current selection is shown even when the pinned version
-    /// is gone — otherwise the skill would just stop working with nothing on screen to explain it.
-    @ViewBuilder
-    private func pinControl(for skill: SkillSD, selection: SkillSelection) -> some View {
-        let ordered = skill.versions.sorted { $0.createdAt > $1.createdAt }
-        let pinned = selection.pinnedVersionID.flatMap { id in ordered.first { $0.id == id } }
-        let pinnedButMissing = selection.pinnedVersionID != nil && pinned == nil
 
-        Menu {
-            Button {
-                setPin(nil, for: skill.id)
-            } label: {
-                Label("Follow latest — updates reach this profile",
-                      systemImage: selection.pinnedVersionID == nil ? "checkmark" : "")
-            }
-            Divider()
-            ForEach(ordered, id: \.id) { version in
-                Button {
-                    setPin(version.id, for: skill.id)
-                } label: {
-                    Label("\(version.createdAt.formatted(date: .abbreviated, time: .shortened))\(version.note.isEmpty ? "" : " — \(version.note)")",
-                          systemImage: selection.pinnedVersionID == version.id ? "checkmark" : "")
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: pinnedButMissing ? "exclamationmark.triangle"
-                                : pinned != nil ? "pin.fill" : "arrow.triangle.2.circlepath")
-                    .font(.system(size: 9))
-                Text(pinLabel(pinned: pinned, pinnedButMissing: pinnedButMissing))
-                    .font(.system(size: 10))
-            }
-            .foregroundStyle(pinnedButMissing ? Color.orange
-                             : pinned != nil ? Color.accentColor : theme.secondaryText)
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help(pinnedButMissing
-              ? "The pinned version no longer exists, so this skill is skipped for this profile. Pick another version or follow latest."
-              : "Choose which version this profile reads")
-    }
-
-    private func pinLabel(pinned: SkillVersionSD?, pinnedButMissing: Bool) -> String {
-        if pinnedButMissing { return "Pinned version missing" }
-        guard let pinned else { return "Follows latest" }
-        return "Pinned · \(pinned.createdAt.formatted(date: .abbreviated, time: .omitted))"
-    }
 
     /// ⚠️ Rewrites the selection IN PLACE rather than removing and re-adding it, so `isEnabled`
     /// survives. Re-adding would silently re-enable a skill the user had switched off — a pin change
@@ -506,56 +559,61 @@ struct SkillLibraryContainerView: View {
     }
 
     /// Folders the migration sweep could not import — almost always a volume that was not mounted.
-    ///
-    /// ⚠️ THIS EXISTED ONLY IN THE LOG until now. The sweep computed the list, reported it to
-    /// `os_log`, and dropped it — so a user upgrading with an external drive unplugged saw skills
-    /// simply missing, with no way to learn why or to retry once the drive was back. A failure the
-    /// user cannot see is the same as a silent drop.
     @ViewBuilder
     private var failedImportsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.triangle")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.orange)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(Color.orange)
                 Text("\(failedImports.count) skill\(failedImports.count == 1 ? "" : "s") could not be imported")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(theme.fontBody.weight(.semibold))
                     .foregroundStyle(theme.primaryText)
                 Spacer(minLength: 0)
                 if isRetryingImports {
                     ProgressView().controlSize(.small)
                 } else {
-                    Button("Try again") { retryFailedImports() }
-                        .font(.system(size: 11))
-                    // ⚠️ "Forget" is destructive in the only sense that matters here: it is the
-                    // user deciding those skills are not coming back. Nothing else clears the
-                    // capture, so without it the banner would be permanent.
-                    Button("Forget") { forgetFailedImports() }
-                        .font(.system(size: 11))
+                    HStack(spacing: 8) {
+                        GlassActionButton(title: "Try again", icon: "arrow.clockwise", isAccent: false) {
+                            retryFailedImports()
+                        }
+                        GlassActionButton(title: "Forget", icon: "xmark", isAccent: false) {
+                            forgetFailedImports()
+                        }
+                    }
                 }
             }
             Text("These came from folders your skills used to live in. They are usually on a drive that was not mounted when Devgentic upgraded — reconnect it and try again.")
-                .font(.system(size: 11))
+                .font(theme.fontCaption)
                 .foregroundStyle(theme.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
 
-            ForEach(failedImports, id: \.folderPath) { ref in
-                HStack(spacing: 6) {
-                    Text(ref.name)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(theme.primaryText)
-                    Text(ref.folderPath)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(theme.secondaryText)
-                        .lineLimit(1)
-                        .truncationMode(.head)
-                    Spacer(minLength: 0)
+            VStack(spacing: 4) {
+                ForEach(failedImports, id: \.folderPath) { ref in
+                    HStack(spacing: 8) {
+                        Text(ref.name)
+                            .font(theme.fontCaption.weight(.medium))
+                            .foregroundStyle(theme.primaryText)
+                        Text(ref.folderPath)
+                            .font(theme.fontCodeCaption)
+                            .foregroundStyle(theme.secondaryText)
+                            .lineLimit(1)
+                            .truncationMode(.head)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(theme.secondaryBackground.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
                 }
             }
         }
-        .padding(10)
+        .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.orange.opacity(0.3), lineWidth: 0.5)
+        )
     }
 
     /// Re-runs the sweep. Safe to press repeatedly: it reads the capture, imports what it can, and
@@ -566,10 +624,20 @@ struct SkillLibraryContainerView: View {
             return
         }
         isRetryingImports = true
-        let outcome = SkillLibraryImportSweep.run(container: container)
-        failedImports = SkillLibraryMigration.peekPendingImports()
-        isRetryingImports = false
-        revision += 1
+        // ⚠️ The spinner above is only reachable now that the sweep suspends. Before the ingest moved
+        // off the main actor this whole method completed inside one main-actor turn, so
+        // `isRetryingImports` went true and false without a frame ever being drawn between them —
+        // the ProgressView was unreachable code that looked wired.
+        Task { @MainActor in
+            let outcome = await SkillLibraryImportSweep.run(container: container)
+            failedImports = SkillLibraryMigration.peekPendingImports()
+            isRetryingImports = false
+            revision += 1
+            report(outcome)
+        }
+    }
+
+    private func report(_ outcome: SkillImportSweepOutcome) {
 
         if outcome.imported.isEmpty && !outcome.failed.isEmpty {
             DGLogger(category: "SkillLibrary").notice("[SKILLS] Retry imported nothing; \(outcome.failed.count) folder(s) still unreadable. CONSEQUENCE: the banner stays and the capture file is kept — the folders are still missing.")
@@ -606,28 +674,59 @@ struct SkillLibraryContainerView: View {
     private func offerShellToolIfNeeded(for skill: SkillSD) {
         guard let profileID,
               let profile = profileService.profiles.first(where: { $0.id == profileID }),
-              case .agent(let config) = profile.details else { return }
+              case .agent(let config) = profile.details else {
+            // ⚠️ A silent early return here means a skill that bundles scripts is linked and the
+            // user is never offered the tool that runs them — indistinguishable, from the outside,
+            // from the offer logic deciding against it.
+            DGLogger(category: "SkillLibrary").notice("[SKILLS] No shell-tool offer evaluated for '\(skill.name)' [skill \(skill.id)]: no AGENT profile is in scope. CONSEQUENCE: if this skill bundles scripts, nothing will prompt for execute_shell — the user must add it from the Tool Library themselves.")
+            return
+        }
 
+        let declared = skill.latestVersion?.allowedTools
+        let hasScripts = skill.latestVersion?.hasScripts ?? false
+        let alreadyHas = config.tools.contains { $0.name == "execute_shell" }
+
+        // ⚠️ The decision is logged HERE rather than inside `SkillCapabilityHints`, which stays a
+        // pure predicate — it is unit-tested directly, and a logger inside it would fire on every
+        // assertion in that suite for no benefit.
         guard SkillCapabilityHints.shouldOfferShellTool(
-            declaredTools: skill.latestVersion?.allowedTools,
-            hasScripts: skill.latestVersion?.hasScripts ?? false,
+            declaredTools: declared,
+            hasScripts: hasScripts,
             profileTools: config.tools
         ) else {
+            DGLogger(category: "SkillLibrary").info("[SKILLS] No shell-tool offer for '\(skill.name)' [skill \(skill.id)] on '\(profile.displayName)': declaredTools=\(declared?.joined(separator: ",") ?? "none") hasScripts=\(hasScripts) profileAlreadyHasShell=\(alreadyHas). CONSEQUENCE: no prompt is shown — either the skill needs no shell, or the profile already has execute_shell and a second copy would be unreachable from the Tool Library.")
             shellToolOffer = nil
             return
         }
+
+        DGLogger(category: "SkillLibrary").notice("[SKILLS] OFFERING execute_shell for '\(skill.name)' [skill \(skill.id)] on '\(profile.displayName)': triggered by \(hasScripts ? "a bundled scripts/ directory" : "the skill's allowed-tools declaration") (declaredTools=\(declared?.joined(separator: ",") ?? "none")). CONSEQUENCE: this is an OFFER and grants nothing — the tool is added only if the user accepts, and it stays confirmation-gated when they do.")
         shellToolOffer = skill.name
     }
 
     /// Adds `execute_shell` because the USER asked, from the offer row.
     private func acceptShellToolOffer() {
         defer { shellToolOffer = nil }
+        // ⚠️⚠️ READ THE ROW FRESH, NEVER `profiles[index]`. The launch sweep re-links every pre-V6
+        // skill reference by writing `details` on the SwiftData row directly, and the service's
+        // array is a snapshot of VALUE TYPES taken before that. Mutating the stale copy and calling
+        // `saveProfile` writes the whole pre-sweep `details` back — `BackendProfileStore.saveProfile`
+        // does `existing.details = snapshot.details` — so toggling one skill link would silently
+        // revert the entire migration for that profile. `activateEditBuffer` already learned this
+        // for three other out-of-band writers; `freshProfile` is that rule with a name.
         guard let profileID,
               let index = profileService.profiles.firstIndex(where: { $0.id == profileID }),
-              case .agent(var config) = profileService.profiles[index].details else { return }
-        guard !config.tools.contains(where: { $0.name == "execute_shell" }) else { return }
+              let current = profileService.freshProfile(id: profileID),
+              case .agent(var config) = current.details else {
+            DGLogger(category: "SkillLibrary").error("[SKILLS] The user ACCEPTED the execute_shell offer but no agent profile was in scope. CONSEQUENCE: the tool was NOT granted and the offer row disappears anyway — the user believes they granted it and the next run has no shell.")
+            return
+        }
+        guard !config.tools.contains(where: { $0.name == "execute_shell" }) else {
+            DGLogger(category: "SkillLibrary").notice("[SKILLS] The user accepted the execute_shell offer for '\(profileService.profiles[index].displayName)' but the profile already has it. CONSEQUENCE: nothing was added — a second copy would render as OFF while the first is live, which is a defect this codebase has already shipped once.")
+            return
+        }
 
         config.tools.append(SkillCapabilityHints.shellTool())
+        DGLogger(category: "SkillLibrary").notice("[SKILLS] GRANTED execute_shell to '\(profileService.profiles[index].displayName)' [profile \(profileID)] from the skills offer. CONSEQUENCE: this profile can now run shell commands in every conversation, not just for the skill that prompted it — each call still requires per-call confirmation, and the tool can be removed from the Tool Library.")
 
         // ⚠️ Same three steps as `mutateSelections`, and for the same reasons: sync the open edit
         // buffer FACET-ONLY so an editor showing this profile does not overwrite the new tool on its
@@ -640,7 +739,10 @@ struct SkillLibraryContainerView: View {
             buffer.draft.details = .agent(draftConfig)
         }
 
-        var profile = profileService.profiles[index]
+        // ⚠️ From the FRESH row, for the same reason as `mutateSelections`: starting from the stale
+        // snapshot would write the pre-sweep `details` back and revert the skill re-link as a side
+        // effect of granting a tool.
+        var profile = current
         profile.details = .agent(config)
         profileService.profiles[index] = profile
         do {
@@ -683,11 +785,26 @@ struct SkillLibraryContainerView: View {
     /// ⚠️ The buffer sync writes only the `skillSelections` FACET, never the whole `details` — the
     /// user's other pending edits in that draft must survive.
     private func mutateSelections(_ transform: ([SkillSelection]) -> [SkillSelection]) {
+        // ⚠️⚠️ READ THE ROW FRESH, NEVER `profiles[index]`. The launch sweep re-links every pre-V6
+        // skill reference by writing `details` on the SwiftData row directly, and the service's
+        // array is a snapshot of VALUE TYPES taken before that. Mutating the stale copy and calling
+        // `saveProfile` writes the whole pre-sweep `details` back — `BackendProfileStore.saveProfile`
+        // does `existing.details = snapshot.details` — so toggling one skill link would silently
+        // revert the entire migration for that profile. `activateEditBuffer` already learned this
+        // for three other out-of-band writers; `freshProfile` is that rule with a name.
         guard let profileID,
               let index = profileService.profiles.firstIndex(where: { $0.id == profileID }),
-              case .agent(var config) = profileService.profiles[index].details else { return }
+              let current = profileService.freshProfile(id: profileID),
+              case .agent(var config) = current.details else {
+            // ⚠️ A silent return here is the shape that hides a dead toggle: the switch animates,
+            // nothing is written, and the user finds out on relaunch.
+            DGLogger(category: "SkillLibrary").error("[SKILLS] A skill link change was requested for profile \(profileID?.uuidString ?? "nil") but it is not an AGENT profile in the loaded list. CONSEQUENCE: NOTHING was changed and no error is shown — if a toggle appeared to move, it is lying and will revert on relaunch.")
+            return
+        }
 
-        config.skillSelections = transform(config.skillSelections ?? [])
+        let before = config.skillSelections ?? []
+        config.skillSelections = transform(before)
+        let after = config.skillSelections ?? []
 
         // 1. Sync the open edit buffer — facet only.
         if let buffer = profileService.editBuffer,
@@ -697,8 +814,9 @@ struct SkillLibraryContainerView: View {
             buffer.draft.details = .agent(draftConfig)
         }
 
-        // 2. Write the service array.
-        var profile = profileService.profiles[index]
+        // 2. Write the service array — from the FRESH row, so every field the sweep or a healer
+        //    wrote out of band survives this save instead of being reverted by it.
+        var profile = current
         profile.details = .agent(config)
         profileService.profiles[index] = profile
 
@@ -707,6 +825,20 @@ struct SkillLibraryContainerView: View {
             // 3. Rebase, success branch only — rebasing after a FAILED save would baseline the
             //    editor against bytes that were never written.
             profileService.rebaseEditBuffer(to: profile)
+
+            // ⚠️ THE SUCCESS PATH IS LOGGED TOO, and it used not to be. Only failures were, which
+            // makes "I linked a skill — did it take?" unanswerable from the log: an unchanged
+            // profile and a saved one looked identical. The before/after counts and the pin state
+            // are what distinguish a real link from a no-op transform.
+            let linked = after.filter(\.isEnabled).count
+            let pinned = after.filter { $0.pinnedVersionID != nil }.count
+            DGLogger(category: "SkillLibrary").notice("[SKILLS] SAVED skill links for '\(profile.displayName)' [profile \(profile.id)]: \(before.count) selection(s) -> \(after.count), \(linked) enabled, \(pinned) pinned. CONSEQUENCE: this is what the NEXT run of this profile resolves — an enabled selection reaches <available_skills>, a pinned one reads that exact version, and a disabled one is stored but never offered.")
+            for selection in after where !before.contains(where: { $0.skillID == selection.skillID && $0.isEnabled == selection.isEnabled && $0.pinnedVersionID == selection.pinnedVersionID }) {
+                DGLogger(category: "SkillLibrary").info("[SKILLS]   '\(selection.name)' [skill \(selection.skillID ?? "unlinked")] enabled=\(selection.isEnabled) pinned=\(selection.pinnedVersionID ?? "latest").")
+            }
+            for removed in before where !after.contains(where: { $0.skillID == removed.skillID }) {
+                DGLogger(category: "SkillLibrary").notice("[SKILLS]   UNLINKED '\(removed.name)' [skill \(removed.skillID ?? "unlinked")]. CONSEQUENCE: the next run of this profile does not see it in <available_skills> and cannot load_skill it.")
+            }
         } catch {
             DGLogger(category: "SkillLibrary").error("[SKILLS] Failed to save skill links for '\(profile.displayName)': \(error.localizedDescription). CONSEQUENCE: the toggle shows the new state but it was NOT written to disk — it reverts on relaunch, and the edit buffer was NOT rebased so the editor still describes the previous state.")
             // ⚠️ The toggle is already showing the new state, so silence here is worse than a bad
@@ -714,5 +846,254 @@ struct SkillLibraryContainerView: View {
             actionError = "The skill links for '\(profile.displayName)' were not saved: \(error.localizedDescription) The switch shows the new state but it was not written — it reverts when you relaunch."
         }
         revision += 1
+    }
+}
+
+// MARK: - Skill Library Card Row
+
+private struct SkillLibraryCardRow: View {
+    let skill: SkillSD
+    let selection: SkillSelection?
+    let canConfigureSkills: Bool
+    let currentProfileName: String
+    let theme: any Theme
+    let onToggle: (Bool) -> Void
+    let onSetPin: (String?) -> Void
+    let onOpenDetail: () -> Void
+    let onDelete: () -> Void
+
+    @State private var isHovered = false
+
+    private var isLinked: Bool { selection != nil }
+    private var isEnabled: Bool { selection?.isEnabled ?? false }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            // 36x36 Rounded Glass Icon Container
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill((isEnabled ? theme.accentColor : theme.secondaryText).opacity(isEnabled ? 0.16 : 0.08))
+                Image(systemName: "puzzlepiece")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(isEnabled ? theme.accentColor : theme.secondaryText)
+            }
+            .frame(width: 36, height: 36)
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder((isEnabled ? theme.accentColor : theme.dividerColor).opacity(isEnabled ? 0.35 : 0.2), lineWidth: 0.5)
+            )
+            .padding(.top, 2)
+
+            // Center Content
+            VStack(alignment: .leading, spacing: 6) {
+                // Title & Badges
+                HStack(spacing: 8) {
+                    Text(skill.displayName.isEmpty ? skill.name : skill.displayName)
+                        .font(theme.fontBody.weight(.semibold))
+                        .foregroundStyle(theme.primaryText)
+                        .lineLimit(1)
+
+                    // Origin
+                    Text(skill.origin == .imported ? "Imported" : "Created")
+                        .font(theme.fontCodeCaption)
+                        .foregroundStyle(theme.secondaryText)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(theme.textBackground, in: Capsule())
+                        .overlay(Capsule().stroke(theme.dividerColor.opacity(0.4), lineWidth: 0.5))
+
+                    // Version count
+                    Text("v\(skill.versions.count)")
+                        .font(theme.fontCodeCaption)
+                        .foregroundStyle(theme.secondaryText)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(theme.textBackground, in: Capsule())
+                        .overlay(Capsule().stroke(theme.dividerColor.opacity(0.4), lineWidth: 0.5))
+
+                    // Scripts badge
+                    if skill.latestVersion?.hasScripts == true {
+                        HStack(spacing: 3) {
+                            Image(systemName: "terminal.fill")
+                                .font(.system(size: 8))
+                            Text("scripts")
+                                .font(theme.fontCodeCaption.weight(.medium))
+                        }
+                        .foregroundStyle(Color.orange)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.orange.opacity(0.12), in: Capsule())
+                        .overlay(Capsule().stroke(Color.orange.opacity(0.25), lineWidth: 0.5))
+                    }
+
+                    // Draft badge
+                    if skill.isDraft {
+                        HStack(spacing: 3) {
+                            Image(systemName: "pencil.and.ruler")
+                                .font(.system(size: 8))
+                            Text("Draft")
+                                .font(theme.fontCodeCaption.weight(.medium))
+                        }
+                        .foregroundStyle(Color.orange)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.orange.opacity(0.12), in: Capsule())
+                        .overlay(Capsule().stroke(Color.orange.opacity(0.25), lineWidth: 0.5))
+                    }
+
+                    Spacer(minLength: 0)
+
+                    // Hover hint to inspect
+                    if isHovered {
+                        HStack(spacing: 4) {
+                            Text("Details")
+                                .font(theme.fontCaption2.weight(.medium))
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 9, weight: .bold))
+                        }
+                        .foregroundStyle(theme.accentColor)
+                    }
+                }
+
+                // Description
+                if let desc = skill.latestVersion?.skillDescription, !desc.isEmpty {
+                    Text(desc)
+                        .font(theme.fontSubheadline)
+                        .foregroundStyle(theme.secondaryText)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                // Version Pinning if linked and multi-version
+                if canConfigureSkills, let selection, skill.versions.count > 1 {
+                    pinControl(for: skill, selection: selection)
+                        .padding(.top, 2)
+                }
+            }
+
+            // Trailing Toggle / Action
+            if canConfigureSkills {
+                VStack(alignment: .trailing, spacing: 4) {
+                    Toggle("", isOn: Binding(
+                        get: { isLinked && isEnabled },
+                        set: { onToggle($0) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.regular)
+                    .tint(theme.accentColor)
+                    .help(isLinked && isEnabled ? "Unlink from \(currentProfileName)" : "Link to \(currentProfileName)")
+
+                    Text(isLinked && isEnabled ? "Enabled" : "Disabled")
+                        .font(theme.fontCaption2.weight(.medium))
+                        .foregroundStyle(isLinked && isEnabled ? theme.accentColor : theme.secondaryText.opacity(0.7))
+                }
+                .padding(.leading, 8)
+            } else {
+                Button {
+                    onOpenDetail()
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(theme.secondaryText)
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, 8)
+            }
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isHovered ? theme.secondaryBackground.opacity(0.85) : theme.secondaryBackground.opacity(0.55))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(
+                    isHovered
+                        ? theme.accentColor.opacity(0.4)
+                        : (isEnabled ? theme.accentColor.opacity(0.25) : theme.dividerColor.opacity(0.35)),
+                    lineWidth: isHovered ? 1 : 0.5
+                )
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
+        .onTapGesture {
+            onOpenDetail()
+        }
+        .contextMenu {
+            Button("Inspect & Edit…") { onOpenDetail() }
+            Button("Copy Skill ID") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(skill.id, forType: .string)
+            }
+            Divider()
+            Button("Delete Skill…", role: .destructive) { onDelete() }
+        }
+    }
+
+    @ViewBuilder
+    private func pinControl(for skill: SkillSD, selection: SkillSelection) -> some View {
+        let ordered = skill.versions.sorted { $0.createdAt > $1.createdAt }
+        let pinned = selection.pinnedVersionID.flatMap { id in ordered.first { $0.id == id } }
+        let pinnedButMissing = selection.pinnedVersionID != nil && pinned == nil
+
+        Menu {
+            Button {
+                onSetPin(nil)
+            } label: {
+                Label("Follow latest — updates reach this profile",
+                      systemImage: selection.pinnedVersionID == nil ? "checkmark" : "")
+            }
+            Divider()
+            ForEach(ordered, id: \.id) { version in
+                Button {
+                    onSetPin(version.id)
+                } label: {
+                    Label("\(version.createdAt.formatted(date: .abbreviated, time: .shortened))\(version.note.isEmpty ? "" : " — \(version.note)")",
+                          systemImage: selection.pinnedVersionID == version.id ? "checkmark" : "")
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: pinnedButMissing ? "exclamationmark.triangle"
+                                : pinned != nil ? "pin.fill" : "arrow.triangle.2.circlepath")
+                    .font(.system(size: 9))
+                Text(pinLabel(pinned: pinned, pinnedButMissing: pinnedButMissing))
+                    .font(theme.fontCaption2.weight(.medium))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 7, weight: .bold))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                Capsule()
+                    .fill(pinnedButMissing ? Color.orange.opacity(0.12)
+                          : pinned != nil ? theme.accentColor.opacity(0.12) : theme.textBackground)
+            )
+            .overlay(
+                Capsule()
+                    .stroke(pinnedButMissing ? Color.orange.opacity(0.3)
+                            : pinned != nil ? theme.accentColor.opacity(0.3) : theme.dividerColor.opacity(0.4), lineWidth: 0.5)
+            )
+            .foregroundStyle(pinnedButMissing ? Color.orange
+                             : pinned != nil ? theme.accentColor : theme.secondaryText)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(pinnedButMissing
+              ? "The pinned version no longer exists, so this skill is skipped for this profile. Pick another version or follow latest."
+              : "Choose which version this profile reads")
+    }
+
+    private func pinLabel(pinned: SkillVersionSD?, pinnedButMissing: Bool) -> String {
+        if pinnedButMissing { return "Pinned version missing" }
+        guard let pinned else { return "Follows latest" }
+        return "Pinned · \(pinned.createdAt.formatted(date: .abbreviated, time: .omitted))"
     }
 }

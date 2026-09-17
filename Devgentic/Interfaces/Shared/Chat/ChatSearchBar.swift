@@ -92,6 +92,8 @@ struct ChatSearchBar: View {
                     .foregroundColor(theme.primaryText.opacity(0.85))
                     .onHover { hovering in withAnimation(.easeInOut(duration: 0.15)) { isPrevHovered = hovering } }
                     .accessibilityLabel("Previous match")
+                    .help("Previous match (⇧⌘G)")
+                    .keyboardShortcut("g", modifiers: [.command, .shift])
 
                     Button(action: { searchViewModel.nextMatch() }) {
                         Image(systemName: "chevron.down")
@@ -104,6 +106,8 @@ struct ChatSearchBar: View {
                     .foregroundColor(theme.primaryText.opacity(0.85))
                     .onHover { hovering in withAnimation(.easeInOut(duration: 0.15)) { isNextHovered = hovering } }
                     .accessibilityLabel("Next match")
+                    .help("Next match (⌘G)")
+                    .keyboardShortcut("g", modifiers: .command)
                 }
             }
 

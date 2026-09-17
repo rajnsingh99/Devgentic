@@ -191,14 +191,14 @@ final class SyntheticSkillsStoreMigrationTests: XCTestCase {
     ///
     /// **Mutation check:** source `SkillLibraryImportSweep.run` from `peekPendingImports()` alone
     /// and this goes red — while every in-memory sweep test stays green, as they did in production.
-    func testTheSweepRecoversAndRelinksSkillsFromProfilesAloneOnARealV3Store() throws {
+    func testTheSweepRecoversAndRelinksSkillsFromProfilesAloneOnARealV3Store() async throws {
         try stageStoreWithSkills(named: ["code-review", "data-cleaner"])
         let container = try migrate()
 
         XCTAssertTrue(SkillLibraryMigration.peekPendingImports().isEmpty,
                       "premise: a V3 store yields NO capture entries — the registry never existed")
 
-        let outcome = SkillLibraryImportSweep.run(container: container)
+        let outcome = await SkillLibraryImportSweep.run(container: container)
 
         XCTAssertNil(outcome.abortReason)
         XCTAssertEqual(outcome.imported.sorted(), ["code-review", "data-cleaner"],
@@ -213,10 +213,10 @@ final class SyntheticSkillsStoreMigrationTests: XCTestCase {
     }
 
     /// And the skills are genuinely usable afterwards — the bodies came off disk into the library.
-    func testTheRecoveredSkillsResolveAndCarryTheirInstructions() throws {
+    func testTheRecoveredSkillsResolveAndCarryTheirInstructions() async throws {
         try stageStoreWithSkills(named: ["code-review"])
         let container = try migrate()
-        _ = SkillLibraryImportSweep.run(container: container)
+        _ = await SkillLibraryImportSweep.run(container: container)
 
         let selections = try targetSelections(in: container)
         let config = AgentConfig(llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "llama3"),
@@ -233,12 +233,12 @@ final class SyntheticSkillsStoreMigrationTests: XCTestCase {
     /// ⚠️ Idempotence. The sweep runs on EVERY launch; a second pass must not re-ingest folders it
     /// already imported. Re-harvesting is prevented by the selections no longer awaiting re-link —
     /// if that ever stops being true, this store gains a duplicate skill on every restart.
-    func testASecondLaunchImportsNothingFurther() throws {
+    func testASecondLaunchImportsNothingFurther() async throws {
         try stageStoreWithSkills(named: ["code-review", "data-cleaner"])
         let container = try migrate()
 
-        _ = SkillLibraryImportSweep.run(container: container)
-        let second = SkillLibraryImportSweep.run(container: container)
+        _ = await SkillLibraryImportSweep.run(container: container)
+        let second = await SkillLibraryImportSweep.run(container: container)
 
         XCTAssertTrue(second.imported.isEmpty, "a relaunch must not duplicate the library")
         XCTAssertEqual(second.selectionsRelinked, 0)
@@ -248,12 +248,12 @@ final class SyntheticSkillsStoreMigrationTests: XCTestCase {
 
     /// A folder that has gone away (unmounted volume, deleted directory) must be reported and must
     /// leave its link pending — never silently dropped, and never blocking its siblings.
-    func testAMissingFolderIsReportedAndItsSiblingStillImports() throws {
+    func testAMissingFolderIsReportedAndItsSiblingStillImports() async throws {
         let folders = try stageStoreWithSkills(named: ["code-review", "data-cleaner"])
         try FileManager.default.removeItem(at: try XCTUnwrap(folders["data-cleaner"]))
         let container = try migrate()
 
-        let outcome = SkillLibraryImportSweep.run(container: container)
+        let outcome = await SkillLibraryImportSweep.run(container: container)
 
         XCTAssertEqual(outcome.imported, ["code-review"], "the readable folder still imports")
         XCTAssertEqual(outcome.failed.count, 1, "and the missing one is reported to the user")

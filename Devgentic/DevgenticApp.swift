@@ -87,7 +87,12 @@ struct DevgenticApp: App {
                 // ⚠️ The ORDER and the PRESENCE of these two steps have each broken in production.
                 // Both are asserted in `SkillLaunchSequenceTests`; the sequence lives in
                 // `SkillLaunchSequence` so that they can be.
-                SkillLaunchSequence.run(container: container, logger: startupLoggerForSkills)
+                // ⚠️ AWAITED, not fired into a detached Task. The ingest inside it now suspends — it
+                // walks and reads every file of every skill, which on an unmounted volume blocks for
+                // the mount timeout — so awaiting here frees the MAIN ACTOR for that whole phase
+                // while keeping this step strictly before the gate below, which is the ordering the
+                // test asserts. Detaching it would make that ordering a race.
+                await SkillLaunchSequence.run(container: container, logger: startupLoggerForSkills)
 
                 // Everything below MUTATES OR DELETES rows, so it runs only when the schema is
                 // unchanged since the last clean open. A lightweight migration can succeed
@@ -714,12 +719,196 @@ struct DevgenticApp: App {
                 }
         }
         .commands {
+            // MARK: - File Menu
             CommandMenu("File") {
-                Button("Close File Viewer Window") {
+                Button("New Chat / Session") {
+                    NotificationCenter.default.post(name: .newChatSession, object: nil)
+                }
+                .keyboardShortcut("n", modifiers: .command)
+
+                Button("Attach Files...") {
+                    NotificationCenter.default.post(name: .openFilePicker, object: nil)
+                }
+                .keyboardShortcut("o", modifiers: .command)
+
+                Divider()
+
+                Button("Rename Conversation...") {
+                    NotificationCenter.default.post(name: .renameActiveConversation, object: nil)
+                }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+                .disabled(mainApplicationViewModel.selectedConversationID == nil)
+
+                Button("Pin / Unpin Conversation") {
+                    NotificationCenter.default.post(name: .togglePinActiveConversation, object: nil)
+                }
+                .keyboardShortcut("p", modifiers: .command)
+                .disabled(mainApplicationViewModel.selectedConversationID == nil)
+
+                Button("Export Conversation as Markdown...") {
+                    NotificationCenter.default.post(name: .exportActiveConversation, object: nil)
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(mainApplicationViewModel.selectedConversationID == nil)
+
+                Button("Delete Conversation...") {
+                    NotificationCenter.default.post(name: .deleteActiveConversation, object: nil)
+                }
+                .keyboardShortcut(.delete, modifiers: .command)
+                .disabled(mainApplicationViewModel.selectedConversationID == nil)
+
+                Divider()
+
+                Button("Close Window") {
                     NSApp.keyWindow?.close()
                 }
                 .keyboardShortcut("w", modifiers: .command)
             }
+
+            // MARK: - View Menu
+            CommandMenu("View") {
+                Button("Command Palette...") {
+                    NotificationCenter.default.post(name: .toggleCommandPalette, object: nil)
+                }
+                .keyboardShortcut("k", modifiers: .command)
+
+                Button("Toggle Sidebar") {
+                    NotificationCenter.default.post(name: .toggleSidebar, object: nil)
+                }
+                .keyboardShortcut("b", modifiers: .command)
+
+                Divider()
+
+                Menu("Interface Mode") {
+                    Button("Chat Mode") {
+                        mainApplicationViewModel.switchInterfaceMode(to: .chat)
+                    }
+                    .keyboardShortcut("1", modifiers: .control)
+
+                    Button("Workflow Canvas") {
+                        mainApplicationViewModel.switchInterfaceMode(to: .workflow)
+                    }
+                    .keyboardShortcut("2", modifiers: .control)
+
+                    Button("Code Workspace") {
+                        mainApplicationViewModel.switchInterfaceMode(to: .code)
+                    }
+                    .keyboardShortcut("3", modifiers: .control)
+
+                    Divider()
+
+                    Button("Cycle Interface Mode") {
+                        let all = MainApplicationViewModel.InterfaceMode.allCases
+                        if let cur = all.firstIndex(of: mainApplicationViewModel.interfaceMode) {
+                            let next = all[(cur + 1) % all.count]
+                            mainApplicationViewModel.switchInterfaceMode(to: next)
+                        }
+                    }
+                    .keyboardShortcut("`", modifiers: .control)
+                }
+
+                Divider()
+
+                Menu("Sidebar Tabs") {
+                    Button("Chats") {
+                        NotificationCenter.default.post(name: .selectSidebarTab, object: SidebarTab.conversations)
+                    }
+                    .keyboardShortcut("1", modifiers: [.command, .option])
+
+                    Button("Explorer") {
+                        NotificationCenter.default.post(name: .selectSidebarTab, object: SidebarTab.explorer)
+                    }
+                    .keyboardShortcut("2", modifiers: [.command, .option])
+
+                    Button("Prompts") {
+                        NotificationCenter.default.post(name: .selectSidebarTab, object: SidebarTab.promptLibrary)
+                    }
+                    .keyboardShortcut("3", modifiers: [.command, .option])
+
+                    Button("Scheduler") {
+                        NotificationCenter.default.post(name: .selectSidebarTab, object: SidebarTab.scheduler)
+                    }
+                    .keyboardShortcut("4", modifiers: [.command, .option])
+
+                    Button("Profiles") {
+                        NotificationCenter.default.post(name: .selectSidebarTab, object: SidebarTab.backendProfiles)
+                    }
+                    .keyboardShortcut("5", modifiers: [.command, .option])
+
+                    Button("Tools") {
+                        NotificationCenter.default.post(name: .selectSidebarTab, object: SidebarTab.tools)
+                    }
+                    .keyboardShortcut("6", modifiers: [.command, .option])
+
+                    Button("Skills") {
+                        NotificationCenter.default.post(name: .selectSidebarTab, object: SidebarTab.skills)
+                    }
+                    .keyboardShortcut("7", modifiers: [.command, .option])
+
+                    Button("Downloads") {
+                        NotificationCenter.default.post(name: .selectSidebarTab, object: SidebarTab.downloads)
+                    }
+                    .keyboardShortcut("8", modifiers: [.command, .option])
+                }
+            }
+
+            // MARK: - Navigate Menu
+            CommandMenu("Navigate") {
+                Button("Back") {
+                    if mainViewRouter.canGoBack {
+                        mainViewRouter.goBack()
+                    }
+                }
+                .keyboardShortcut("[", modifiers: .command)
+                .disabled(!mainViewRouter.canGoBack)
+
+                Button("Home") {
+                    if !mainViewRouter.isShowingChat {
+                        mainViewRouter.returnToChat()
+                    }
+                    mainApplicationViewModel.deselectConversationAndShowWelcome()
+                }
+                .keyboardShortcut("h", modifiers: [.command, .shift])
+
+                Divider()
+
+                Button("Focus Chat Composer") {
+                    NotificationCenter.default.post(name: .focusChatInput, object: nil)
+                }
+                .keyboardShortcut("l", modifiers: .command)
+
+                Divider()
+
+                Button("Next Conversation") {
+                    NotificationCenter.default.post(name: .selectNextConversation, object: nil)
+                }
+                .keyboardShortcut(.downArrow, modifiers: [.command, .option])
+
+                Button("Previous Conversation") {
+                    NotificationCenter.default.post(name: .selectPreviousConversation, object: nil)
+                }
+                .keyboardShortcut(.upArrow, modifiers: [.command, .option])
+            }
+
+            // MARK: - Find Commands (Edit Menu)
+            CommandGroup(after: .pasteboard) {
+                Button("Find in Chat...") {
+                    NotificationCenter.default.post(name: .findInChat, object: nil)
+                }
+                .keyboardShortcut("f", modifiers: .command)
+
+                Button("Find Next") {
+                    NotificationCenter.default.post(name: .findNextInChat, object: nil)
+                }
+                .keyboardShortcut("g", modifiers: .command)
+
+                Button("Find Previous") {
+                    NotificationCenter.default.post(name: .findPreviousInChat, object: nil)
+                }
+                .keyboardShortcut("g", modifiers: [.command, .shift])
+            }
+
+            // MARK: - Input Menu
             CommandMenu("Input") {
                 Button("Toggle Voice Input") {
                     NotificationCenter.default.post(
@@ -729,6 +918,47 @@ struct DevgenticApp: App {
                 }
                 .keyboardShortcut("v", modifiers: [.command, .shift])
             }
+
+            // MARK: - Tools Menu
+            CommandMenu("Tools") {
+                Button("New Prompt...") {
+                    NotificationCenter.default.post(name: .selectSidebarTab, object: SidebarTab.promptLibrary)
+                    NotificationCenter.default.post(name: .newPrompt, object: nil)
+                }
+
+                Button("New Scheduled Task...") {
+                    mainViewRouter.navigateToNewTask()
+                }
+
+                Button("New Backend Profile...") {
+                    NotificationCenter.default.post(name: .selectSidebarTab, object: SidebarTab.backendProfiles)
+                    NotificationCenter.default.post(name: .newProfile, object: nil)
+                }
+
+                Divider()
+
+                Button("Add Custom MCP Server...") {
+                    mainViewRouter.navigate(to: .addMCPServer)
+                }
+
+                Button("Create Skill...") {
+                    NotificationCenter.default.post(name: .selectSidebarTab, object: SidebarTab.skills)
+                    NotificationCenter.default.post(name: .createSkill, object: nil)
+                }
+
+                Button("Import Skills...") {
+                    NotificationCenter.default.post(name: .selectSidebarTab, object: SidebarTab.skills)
+                    NotificationCenter.default.post(name: .importSkills, object: nil)
+                }
+
+                Divider()
+
+                Button("Download Manager") {
+                    mainViewRouter.navigateToDownloadManager()
+                }
+            }
+
+            // MARK: - App Info / Preferences Group
             CommandGroup(after: .appInfo) {
                 Button("Settings...") {
                     mainViewRouter.navigateToSettings(.general)
@@ -767,6 +997,11 @@ struct DevgenticApp: App {
                     openWindow(id: "trends-window")
                 }
                 .keyboardShortcut("t", modifiers: [.command, .shift, .option])
+
+                Button("Keyboard Shortcuts...") {
+                    openWindow(id: "shortcuts-window")
+                }
+                .keyboardShortcut("/", modifiers: .command)
             }
         }
 
@@ -794,6 +1029,18 @@ struct DevgenticApp: App {
                 .environment(\.surfaceStyle, themeManager.surfaceStyle)
                 .environment(\.buttonAccentStyle, themeManager.buttonAccentStyle)
                 .frame(minWidth: 760, minHeight: 560)
+                .tint(themeManager.currentTheme.accentColor)
+        }
+        .windowResizability(.contentSize)
+
+        // MARK: - Keyboard Shortcuts Reference Window
+        Window("Keyboard Shortcuts", id: "shortcuts-window") {
+            KeyboardShortcutsReferenceView()
+                .environment(themeManager)
+                .environment(\.appTheme, themeManager.currentTheme)
+                .environment(\.surfaceStyle, themeManager.surfaceStyle)
+                .environment(\.buttonAccentStyle, themeManager.buttonAccentStyle)
+                .frame(minWidth: 700, minHeight: 520)
                 .tint(themeManager.currentTheme.accentColor)
         }
         .windowResizability(.contentSize)

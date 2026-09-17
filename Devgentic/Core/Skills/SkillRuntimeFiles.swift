@@ -64,6 +64,14 @@ enum SkillRuntimeFiles {
 
         // Already projected by an earlier call in this run (or an earlier run): versions are
         // immutable, so what is there is what we would write.
+        //
+        // ⚠️⚠️ THIS CHECK IS ONLY SOUND BECAUSE `SkillMaterializer.write` WRITES SKILL.md LAST.
+        // It used to be written FIRST, which made this a sentinel that lied: a write that threw on
+        // a bundled file left SKILL.md behind, and this branch then handed the caller a directory
+        // containing nothing else — so the first call returned nil honestly and the second claimed
+        // success, silently, for a tree whose `scripts/run.py` did not exist. If anyone moves that
+        // write back above the file loop, this returns to being a bug; `SkillMaterializerTests`
+        // guards the ordering.
         if FileManager.default.fileExists(atPath: expected.appendingPathComponent("SKILL.md").path) {
             return expected
         }

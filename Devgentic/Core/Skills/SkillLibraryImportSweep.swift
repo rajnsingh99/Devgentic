@@ -75,13 +75,48 @@ struct SkillImportSweepOutcome: Sendable, Equatable {
 @MainActor
 enum SkillLibraryImportSweep {
 
+    /// ⚠️⚠️ THE SWEEP IS NOT RE-ENTRANT, AND IT NOW HAS A SUSPENSION POINT IN IT.
+    ///
+    /// Before the ingest moved off the main actor two overlapping passes were impossible: a pass
+    /// held the main actor from the profile fetch to the capture rewrite. It no longer does — and
+    /// freeing the main actor is exactly what makes the Skills window openable DURING a slow launch
+    /// ingest, where "Try again" starts a second pass over the same pending list. Both would ingest
+    /// the same folder and create two skills with the same name, which the user then has to find and
+    /// delete by hand: nothing records where a skill came from, so nothing can tell them apart.
+    ///
+    /// ⚠️ `isRetryingImports` in the library view is NOT this guard — it is a guard on one NAME, and
+    /// the launch path never sees it.
+    ///
+    /// No lock is needed: both accessors are main-actor-isolated, and the guard is taken and
+    /// released without an `await` between the check and the set.
+    private static var isSweeping = false
+
+    /// ⚠️ Extracted for the same reason `shouldClearCapture` is: the state it protects is only
+    /// reachable while a pass is suspended, which no test can reach from outside `run`.
+    static func beginExclusive() -> Bool {
+        guard !isSweeping else { return false }
+        isSweeping = true
+        return true
+    }
+
+    static func endExclusive() { isSweeping = false }
+
     /// Imports every captured pre-V6 folder and re-links the profiles that referenced them.
     ///
     /// Total: it reports rather than throws, and a failure anywhere leaves the capture file in place
     /// so the next launch can retry.
     @discardableResult
-    static func run(container: ModelContainer, store: SkillStore = .shared) -> SkillImportSweepOutcome {
+    static func run(container: ModelContainer, store: SkillStore = .shared) async -> SkillImportSweepOutcome {
         var outcome = SkillImportSweepOutcome()
+
+        // ⚠️ EXCLUSIVITY FIRST — see `beginExclusive`. A second overlapping pass would re-ingest the
+        // same folders and duplicate every skill, and the duplicates are indistinguishable.
+        guard beginExclusive() else {
+            outcome.abortReason = "another import sweep is already running"
+            logger.notice("[SKILL_SWEEP] A sweep is already in progress; this request was ignored. CONSEQUENCE: nothing was imported twice — the pass already running will finish and report, and the capture file is untouched.")
+            return outcome
+        }
+        defer { endExclusive() }
 
         // ⚠️⚠️ PROFILES ARE FETCHED FIRST BECAUSE THEY ARE A SOURCE OF WORK, NOT ONLY ITS TARGET.
         // The capture file is empty for every real upgrade — see `harvestLegacyFolders`. Fetching
@@ -114,7 +149,10 @@ enum SkillLibraryImportSweep {
         var stillPending: [SkillLibraryMigration.LegacySkillRef] = []
 
         for ref in pending {
-            let result = SkillIngest.read(contentsOf: URL(fileURLWithPath: ref.folderPath))
+            // ⚠️ The hop is PER FOLDER. Reading everything in one hop would free the main actor
+            // for the whole phase but hold every skill's bytes at once — `maxSkillBytes` is 30 MB,
+            // so twenty folders is 600 MB resident. One at a time keeps the peak where it was.
+            let result = await SkillIngest.readOffCallerActor(contentsOf: URL(fileURLWithPath: ref.folderPath))
 
             guard !result.skills.isEmpty else {
                 let reason = result.rejected.first?.reason

@@ -37,9 +37,28 @@ struct ToolNavigationPane: View {
     @Environment(MainViewRouter.self) private var router
 
     @State private var pendingDeletion: ToolSource?
+    @FocusState private var isListFocused: Bool
 
     private var nav: ToolLibraryNavigationState { .shared }
     private var toolStore: UnifiedToolStore { UnifiedToolStore.shared }
+
+    private var currentNavSelections: [SidebarSelection] {
+        switch nav.section {
+        case .builtIn:
+            var items: [SidebarSelection] = [.all]
+            if favoriteCount > 0 { items.append(.favorites) }
+            for group in builtInGroups {
+                items.append(.localCategory(group.name))
+            }
+            return items
+        case .mcp:
+            var items: [SidebarSelection] = [.marketplace]
+            for source in mcpSources {
+                items.append(.mcp(source.id))
+            }
+            return items
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -51,14 +70,37 @@ struct ToolNavigationPane: View {
             titleRow
             sectionSwitcher
 
-            ScrollView {
-                switch nav.section {
-                case .builtIn: builtInSections
-                case .mcp:     mcpSections
+            ScrollViewReader { proxy in
+                ScrollView {
+                    switch nav.section {
+                    case .builtIn: builtInSections
+                    case .mcp:     mcpSections
+                    }
+                }
+                .focusable()
+                .focused($isListFocused)
+                .focusEffectDisabled()
+                .onMoveCommand { direction in
+                    moveFocus(direction)
+                }
+                .onKeyPress(.return) {
+                    ensureLibraryVisible()
+                    return .handled
+                }
+                .onKeyPress(.delete) {
+                    if case .mcp(let id) = nav.selectedSidebar,
+                       let source = mcpSources.first(where: { $0.id == id }) {
+                        pendingDeletion = source
+                        return .handled
+                    }
+                    return .ignored
                 }
             }
         }
         .onAppear { openLibraryIfNeeded() }
+        .onReceive(NotificationCenter.default.publisher(for: .addMCPServer)) { _ in
+            router.navigate(to: .addMCPServer)
+        }
         .confirmationDialog(
             "Remove “\(pendingDeletion?.serverName ?? "")”?",
             isPresented: Binding(get: { pendingDeletion != nil }, set: { if !$0 { pendingDeletion = nil } }),
@@ -74,6 +116,24 @@ struct ToolNavigationPane: View {
             Button("Cancel", role: .cancel) { pendingDeletion = nil }
         } message: {
             Text(pendingDeletion.map(Self.deletionWarning) ?? "")
+        }
+    }
+
+    private func moveFocus(_ direction: MoveCommandDirection) {
+        let items = currentNavSelections
+        guard !items.isEmpty else { return }
+        let currentIndex = items.firstIndex(where: { $0 == nav.selectedSidebar }) ?? 0
+        switch direction {
+        case .down:
+            let nextIndex = min(currentIndex + 1, items.count - 1)
+            nav.selectedSidebar = items[nextIndex]
+            ensureLibraryVisible()
+        case .up:
+            let prevIndex = max(currentIndex - 1, 0)
+            nav.selectedSidebar = items[prevIndex]
+            ensureLibraryVisible()
+        default:
+            break
         }
     }
 
@@ -135,10 +195,15 @@ struct ToolNavigationPane: View {
             Spacer()
 
             // Manual configuration, distinct from the Marketplace's registry-driven flow.
-            SidebarHeaderActionButton(title: "Add Custom", systemImage: "plus") {
+            SidebarHeaderActionButton(
+                title: "Add Custom",
+                systemImage: "plus",
+                shortcut: "⌘N"
+            ) {
                 router.navigate(to: .addMCPServer)
             }
-            .help("Configure an MCP server by hand")
+            .keyboardShortcut("n", modifiers: [.command])
+            .help("Configure an MCP server by hand (⌘N)")
         }
         .padding(.horizontal, 14)
         .padding(.top, host == .profilesTab ? 4 : 12)

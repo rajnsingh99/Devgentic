@@ -26,6 +26,8 @@
 import SwiftUI
 import AppKit
 
+private let logger = DGLogger(category: "SkillCreateSheet")
+
 struct SkillCreateSheet: View {
 
     /// Called after the skill is created, so the library re-reads.
@@ -73,25 +75,34 @@ struct SkillCreateSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Divider()
+            Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    nameField
-                    descriptionField
-                    instructionsField
-                    filesSection
+                VStack(alignment: .leading, spacing: 16) {
+                    identityCard
+                    instructionsCard
+                    filesCard
                     if let createError {
-                        Label(createError, systemImage: "exclamationmark.triangle")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.orange)
-                            .padding(8)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Color.orange)
+                            Text(createError)
+                                .font(theme.fontCaption2)
+                                .foregroundStyle(Color.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(Color.orange.opacity(0.3), lineWidth: 0.5)
+                        )
                     }
                 }
-                .padding(16)
+                .padding(20)
             }
-            Divider()
+            Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
             footer
         }
         .frame(width: 660, height: 640)
@@ -101,151 +112,382 @@ struct SkillCreateSheet: View {
     // MARK: - Pieces
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Create a skill")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(theme.primaryText)
-            Text("A skill is a set of instructions an agent loads when a task matches its description.")
-                .font(.system(size: 11))
-                .foregroundStyle(theme.secondaryText)
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(theme.accentColor.opacity(0.15))
+                Image(systemName: "puzzlepiece")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(theme.accentColor)
+            }
+            .frame(width: 36, height: 36)
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(theme.accentColor.opacity(0.3), lineWidth: 0.5)
+            )
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Create New Skill")
+                    .font(theme.fontTitle3.weight(.bold))
+                    .foregroundStyle(theme.primaryText)
+                Text("A skill is a set of instructions an agent loads when a task matches its description.")
+                    .font(theme.fontCaption2)
+                    .foregroundStyle(theme.secondaryText)
+                    .lineSpacing(2)
+            }
+
+            Spacer()
+
+            Button(action: { dismiss() }) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(theme.secondaryText.opacity(0.6))
+            }
+            .buttonStyle(.plain)
+            .help("Close (Esc)")
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+    }
+
+    private var identityCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "tag.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(theme.accentColor)
+                Text("IDENTITY & ROUTING")
+                    .font(theme.fontCodeCaption.weight(.bold))
+                    .foregroundStyle(theme.secondaryText)
+                    .tracking(0.6)
+            }
+
+            // Name
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Skill Identifier")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundStyle(theme.primaryText)
+                    Spacer()
+                    Text("Fixed after creation")
+                        .font(theme.fontCaption2)
+                        .foregroundStyle(theme.secondaryText)
+                }
+
+                ZStack(alignment: .leading) {
+                    if name.isEmpty {
+                        Text("e.g. weekly-status-report")
+                            .font(theme.fontCode)
+                            .foregroundStyle(theme.placeholderText)
+                            .padding(.horizontal, 10)
+                            .allowsHitTesting(false)
+                    }
+
+                    TextField("", text: $name)
+                        .textFieldStyle(.plain)
+                        .font(theme.fontCode)
+                        .foregroundStyle(theme.primaryText)
+                        .padding(10)
+                }
+                .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(nameProblem != nil || duplicateName ? Color.orange.opacity(0.6) : theme.dividerColor.opacity(0.35), lineWidth: 1)
+                )
+
+                Text("Lowercase letters, digits and hyphens. This is how agents invoke the skill, and cannot be changed.")
+                    .font(theme.fontCaption2)
+                    .foregroundStyle(theme.secondaryText)
+                    .lineSpacing(1.5)
+
+                if let nameProblem {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                        Text(nameProblem)
+                            .font(theme.fontCaption2)
+                    }
+                    .foregroundStyle(Color.orange)
+                } else if duplicateName {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.system(size: 10))
+                        Text("Another skill is already called '\(name)'. Only one will be reachable by agents.")
+                            .font(theme.fontCaption2)
+                    }
+                    .foregroundStyle(Color.orange)
+                }
+            }
+
+            Rectangle().fill(theme.dividerColor.opacity(0.2)).frame(height: 0.5)
+
+            // Description
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Routing Description")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundStyle(theme.primaryText)
+                    Spacer()
+                    Text("\(description.count)/\(SkillLibraryLimits.maxDescriptionChars)")
+                        .font(theme.fontCodeCaption)
+                        .foregroundStyle(descriptionProblem == nil ? theme.secondaryText : Color.orange)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background((descriptionProblem == nil ? theme.secondaryBackground : Color.orange.opacity(0.12)), in: Capsule())
+                }
+
+                ZStack(alignment: .topLeading) {
+                    if description.isEmpty {
+                        Text("e.g. Generates weekly status reports from recent work. Use when asked for updates or progress summaries.")
+                            .font(theme.fontFootnote)
+                            .foregroundStyle(theme.placeholderText)
+                            .lineSpacing(2)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 10)
+                            .allowsHitTesting(false)
+                    }
+
+                    TextField("", text: $description, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .font(theme.fontFootnote)
+                        .foregroundStyle(theme.primaryText)
+                        .lineLimit(2...4)
+                        .padding(10)
+                }
+                .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(descriptionProblem != nil ? Color.orange.opacity(0.6) : theme.dividerColor.opacity(0.35), lineWidth: 1)
+                )
+
+                Text("The model reads only this description when deciding whether to load the skill. Clearly state what it does and when to use it.")
+                    .font(theme.fontCaption2)
+                    .foregroundStyle(theme.secondaryText)
+                    .lineSpacing(1.5)
+
+                if let descriptionProblem {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                        Text(descriptionProblem)
+                            .font(theme.fontCaption2)
+                    }
+                    .foregroundStyle(Color.orange)
+                }
+            }
         }
         .padding(16)
+        .background(theme.secondaryBackground.opacity(0.5), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(theme.dividerColor.opacity(0.3), lineWidth: 0.5)
+        )
     }
 
-    private var nameField: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Name")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(theme.secondaryText)
-            TextField("weekly-status-report", text: $name)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12, design: .monospaced))
-                .padding(8)
-                .background(theme.textBackground, in: RoundedRectangle(cornerRadius: 6))
-            // ⚠️ Says WHY the name cannot change later, at the only moment it is still free.
-            Text("Lowercase letters, digits and hyphens. This is how an agent refers to the skill, and it cannot be changed afterwards — every profile that links it resolves against this name.")
-                .font(.system(size: 10))
-                .foregroundStyle(theme.secondaryText.opacity(0.8))
-                .fixedSize(horizontal: false, vertical: true)
-            if let nameProblem {
-                Text(nameProblem).font(.system(size: 10)).foregroundStyle(.orange)
-            } else if duplicateName {
-                Text("Another skill is already called '\(name)'. Both can exist, but an agent addresses skills by name, so only one of them will be reachable.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    private var descriptionField: some View {
-        VStack(alignment: .leading, spacing: 4) {
+    private var instructionsCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Description")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(theme.secondaryText)
-                Spacer()
-                Text("\(description.count)/\(SkillLibraryLimits.maxDescriptionChars)")
-                    .font(.system(size: 10))
-                    .foregroundStyle(descriptionProblem == nil ? theme.secondaryText : .orange)
-            }
-            // This text is the routing key — worth saying so where it is written.
-            Text("The model reads only this when deciding whether to load the skill. Say what it does and when to use it.")
-                .font(.system(size: 10))
-                .foregroundStyle(theme.secondaryText.opacity(0.8))
-            TextField("Generate weekly status reports from recent work. Use when asked for updates or progress summaries.",
-                      text: $description, axis: .vertical)
-                .textFieldStyle(.plain)
-                .lineLimit(2...4)
-                .padding(8)
-                .background(theme.textBackground, in: RoundedRectangle(cornerRadius: 6))
-            if let descriptionProblem {
-                Text(descriptionProblem).font(.system(size: 10)).foregroundStyle(.orange)
-            }
-        }
-    }
+                HStack(spacing: 8) {
+                    Image(systemName: "text.quote")
+                        .font(.system(size: 12))
+                        .foregroundStyle(theme.accentColor)
+                    Text("INSTRUCTIONS (SKILL.MD)")
+                        .font(theme.fontCodeCaption.weight(.bold))
+                        .foregroundStyle(theme.secondaryText)
+                        .tracking(0.6)
+                }
 
-    private var instructionsField: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Instructions")
-                .font(.system(size: 11, weight: .semibold))
+                Spacer()
+
+                let charCount = instructions.count
+                let tokenEstimate = Int(Double(charCount) / 3.8)
+                Text("\(charCount) chars · ~\(tokenEstimate) tokens")
+                    .font(theme.fontCodeCaption)
+                    .foregroundStyle(theme.secondaryText)
+            }
+
+            ZStack(alignment: .topLeading) {
+                if instructions.isEmpty {
+                    Text("# Instructions\n\nProvide step-by-step guidance for the agent when this skill is invoked.\n\nExample:\n1. Check git status and recent commit logs.\n2. Summarize key changes and open pull requests.\n3. Return a clean summary report.")
+                        .font(theme.fontCode)
+                        .foregroundStyle(theme.placeholderText.opacity(0.7))
+                        .lineSpacing(2.5)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 14)
+                        .allowsHitTesting(false)
+                }
+
+                TextEditor(text: $instructions)
+                    .font(theme.fontCode)
+                    .foregroundStyle(theme.primaryText)
+                    .frame(minHeight: 200)
+                    .scrollContentBackground(.hidden)
+                    .padding(10)
+            }
+            .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(theme.dividerColor.opacity(0.35), lineWidth: 1)
+            )
+
+            Text("Loaded in full only when the skill is used by an agent, so length here costs nothing until then.")
+                .font(theme.fontCaption2)
                 .foregroundStyle(theme.secondaryText)
-            Text("Loaded in full only when the skill is used, so length here costs nothing until then.")
-                .font(.system(size: 10))
-                .foregroundStyle(theme.secondaryText.opacity(0.8))
-            TextEditor(text: $instructions)
-                .font(.system(size: 12, design: .monospaced))
-                .frame(minHeight: 220)
-                .scrollContentBackground(.hidden)
-                .padding(8)
-                .background(theme.textBackground, in: RoundedRectangle(cornerRadius: 6))
+                .lineSpacing(1.5)
         }
+        .padding(16)
+        .background(theme.secondaryBackground.opacity(0.5), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(theme.dividerColor.opacity(0.3), lineWidth: 0.5)
+        )
     }
 
-    private var filesSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
+    private var filesCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Files")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(theme.secondaryText)
+                HStack(spacing: 8) {
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(theme.accentColor)
+                    Text("BUNDLED FILES")
+                        .font(theme.fontCodeCaption.weight(.bold))
+                        .foregroundStyle(theme.secondaryText)
+                        .tracking(0.6)
+
+                    if !files.isEmpty {
+                        Text("\(files.count)")
+                            .font(theme.fontCodeCaption.weight(.bold))
+                            .foregroundStyle(theme.accentColor)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(theme.accentColor.opacity(0.12), in: Capsule())
+                    }
+                }
+
                 Spacer()
-                Button {
+
+                GlassActionButton(title: "Add Files", icon: "plus", isAccent: false) {
                     addFiles()
-                } label: {
-                    Label("Add file", systemImage: "plus")
-                        .font(.system(size: 11))
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(Color.accentColor)
             }
-            Text("Reference documents, templates or scripts the instructions can point to. A file under scripts/ keeps its executable bit.")
-                .font(.system(size: 10))
-                .foregroundStyle(theme.secondaryText.opacity(0.8))
-                .fixedSize(horizontal: false, vertical: true)
 
-            ForEach(files, id: \.relativePath) { file in
-                HStack(spacing: 6) {
-                    Text(file.relativePath)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(theme.primaryText)
-                    if file.isExecutable {
-                        Text("exec")
-                            .font(.system(size: 9, weight: .medium))
-                            .padding(.horizontal, 4).padding(.vertical, 1)
-                            .background(theme.secondaryText.opacity(0.15), in: Capsule())
+            Text("Reference documents, templates, or scripts bundled with the skill. Scripts keep their executable permissions.")
+                .font(theme.fontCaption2)
+                .foregroundStyle(theme.secondaryText)
+                .lineSpacing(1.5)
+
+            if files.isEmpty {
+                HStack {
+                    Spacer()
+                    VStack(spacing: 4) {
+                        Image(systemName: "doc.badge.plus")
+                            .font(.system(size: 20))
+                            .foregroundStyle(theme.secondaryText.opacity(0.5))
+                        Text("No bundled files attached.")
+                            .font(theme.fontCaption2)
+                            .foregroundStyle(theme.secondaryText.opacity(0.7))
                     }
-                    Spacer(minLength: 0)
-                    Button {
-                        files.removeAll { $0.relativePath == file.relativePath }
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 11))
-                            .foregroundStyle(theme.secondaryText)
-                    }
-                    .buttonStyle(.plain)
+                    .padding(.vertical, 12)
+                    Spacer()
                 }
-                .padding(8)
-                .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 6))
+            } else {
+                VStack(spacing: 6) {
+                    ForEach(files, id: \.relativePath) { file in
+                        HStack(spacing: 8) {
+                            Image(systemName: file.isExecutable ? "terminal.fill" : "doc.text.fill")
+                                .font(.system(size: 11))
+                                .foregroundStyle(file.isExecutable ? Color.orange : theme.accentColor)
+
+                            Text(file.relativePath)
+                                .font(theme.fontCodeCaption)
+                                .foregroundStyle(theme.primaryText)
+
+                            if file.isExecutable {
+                                Text("exec")
+                                    .font(theme.fontCodeCaption.weight(.medium))
+                                    .foregroundStyle(Color.orange)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1.5)
+                                    .background(Color.orange.opacity(0.12), in: Capsule())
+                            }
+
+                            Spacer(minLength: 0)
+
+                            Text(formatFileSize(file.content.count))
+                                .font(theme.fontCodeCaption)
+                                .foregroundStyle(theme.secondaryText)
+
+                            Button {
+                                files.removeAll { $0.relativePath == file.relativePath }
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(theme.secondaryText.opacity(0.6))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Remove file")
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .strokeBorder(theme.dividerColor.opacity(0.25), lineWidth: 0.5)
+                        )
+                    }
+                }
             }
         }
-        .padding(10)
-        .background(theme.secondaryBackground.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+        .padding(16)
+        .background(theme.secondaryBackground.opacity(0.5), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(theme.dividerColor.opacity(0.3), lineWidth: 0.5)
+        )
+    }
+
+    private func formatFileSize(_ bytes: Int) -> String {
+        bytes < 1024 ? "\(bytes) B"
+            : bytes < 1024 * 1024 ? "\(bytes / 1024) KB"
+            : String(format: "%.1f MB", Double(bytes) / 1024 / 1024)
     }
 
     private var footer: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Spacer()
-            Button("Cancel") { dismiss() }
+
+            TactileButton(title: "Cancel", variant: .subtle, size: .compact) {
+                dismiss()
+            }
+            .keyboardShortcut(.cancelAction)
+
             // ⚠️ Draft FIRST and unaccented. A skill is a routing entry the moment it is linked, so
             // the safe action is the one that does not put unfinished instructions in front of the
             // model.
-            Button("Save as draft") { create(isDraft: true) }
-                .disabled(!canCreate)
-            Button("Create") { create(isDraft: false) }
-                .keyboardShortcut(.defaultAction)
-                .disabled(!canCreate)
+            TactileButton(
+                title: "Save as Draft",
+                icon: "pencil.and.ruler",
+                variant: .secondary,
+                size: .compact,
+                isEnabled: canCreate
+            ) {
+                create(isDraft: true)
+            }
+
+            TactileButton(
+                title: "Create Skill",
+                icon: "puzzlepiece",
+                variant: .primary,
+                size: .compact,
+                isEnabled: canCreate
+            ) {
+                create(isDraft: false)
+            }
+            .keyboardShortcut(.defaultAction)
         }
-        .padding(12)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
     }
 
     // MARK: - Actions
@@ -322,8 +564,11 @@ struct SkillCreateSheet: View {
             note: "Created in Devgentic."
         )
         switch result {
-        case .failure(let error): createError = error.localizedDescription
+        case .failure(let error):
+            createError = error.localizedDescription
+            logger.error("[SKILL_CREATE] Creating '\(name)' FAILED: \(error.localizedDescription). CONSEQUENCE: nothing was written and the sheet keeps the user's text so they can correct it and retry.")
         case .success(let skill):
+            logger.notice("[SKILL_CREATE] Created '\(skill.name)' [skill \(skill.id)] version \(skill.latestVersionID ?? "?"): \(files.count) bundled file(s), draft=\(isDraft). CONSEQUENCE: \(isDraft ? "it is a DRAFT — it is NOT offered to any agent and cannot be linked until draft is turned off" : "it can now be linked to a profile; it is not linked to anything yet, so no agent sees it until you link it").")
             onCreated(skill)
             dismiss()
         }

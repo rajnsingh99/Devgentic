@@ -88,7 +88,7 @@ struct OllamaModelStoreContainerView: View {
                             style: .prominent,
                             help: "Pull Model (⌘↩)",
                             accessibilityLabel: "Pull model",
-                            keyboardShortcut: .defaultAction
+                            keyboardShortcut: KeyboardShortcut(.return, modifiers: .command)
                         ) {
                             viewModel.downloadModel(name: viewModel.searchText)
                         }

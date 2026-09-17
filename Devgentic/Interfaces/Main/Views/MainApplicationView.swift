@@ -52,6 +52,8 @@ struct MainApplicationView: View {
     /// for the whole drag rather than a full drag behind it.
     @AppStorage("codeViewerPanelWidth") private var codeViewerPanelWidth: Double = 600
     @State private var showModePicker: Bool = true
+    @State private var isCommandPalettePresented: Bool = false
+    @AppStorage(SidebarTab.storageKey) private var selectedSidebarTab: String = SidebarTab.conversations.rawValue
     /// Window content width, for clamping the split inset (measured, not derived — the
     /// window is user-resizable). `.infinity` until the first geometry pass, which makes
     /// the clamp a no-op rather than squeezing the chat to the floor at startup.
@@ -245,24 +247,23 @@ struct MainApplicationView: View {
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
+            // Hidden shortcut button for Explorer (IDE standard Cmd+Shift+E)
             Button(action: {
-                if viewModel.interfaceMode == .workflow {
-                    viewModel.deselectConversationAndShowWelcome()
-                    logger.debug("Triggered new workflow (deselect) via Cmd+N.")
-                } else if viewModel.interfaceMode == .code {
-                    viewModel.deselectConversationAndShowWelcome()
-                    logger.debug("Triggered new code session via Cmd+N.")
-                } else {
-                    viewModel.startNewConversation()
-                    logger.debug("Triggered new conversation via Cmd+N.")
-                }
-                if isSidebarVisible {
-                    isSidebarVisible = false
-                    logger.debug("Hid sidebar pane via Cmd+N.")
-                }
+                selectSidebarTab(.explorer)
             }) { EmptyView() }
                 .hidden()
-                .keyboardShortcut("n", modifiers: .command)
+                .keyboardShortcut("e", modifiers: [.command, .shift])
+
+            // Universal Command Palette overlay (Cmd+K)
+            if isCommandPalettePresented {
+                CommandPaletteView(
+                    isPresented: $isCommandPalettePresented,
+                    isSidebarVisible: $isSidebarVisible
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .zIndex(100)
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            }
         }
         .frame(minWidth: 800, minHeight: 500)
         .onGeometryChange(for: CGFloat.self) { proxy in
@@ -340,6 +341,58 @@ struct MainApplicationView: View {
                   let id = UUID(uuidString: idString) else { return }
             router.navigate(to: .profileDetail(profileID: id))
         }
+        .onReceive(NotificationCenter.default.publisher(for: .toggleCommandPalette)) { _ in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isCommandPalettePresented.toggle()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .toggleSidebar)) { _ in
+            withAnimation(.easeInOut(duration: 0.2)) {
+                isSidebarVisible.toggle()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .newChatSession)) { _ in
+            if viewModel.interfaceMode == .workflow {
+                viewModel.deselectConversationAndShowWelcome()
+                logger.debug("Triggered new workflow (deselect) via newChatSession.")
+            } else if viewModel.interfaceMode == .code {
+                viewModel.deselectConversationAndShowWelcome()
+                logger.debug("Triggered new code session via newChatSession.")
+            } else {
+                viewModel.startNewConversation()
+                logger.debug("Triggered new conversation via newChatSession.")
+            }
+            if isSidebarVisible {
+                isSidebarVisible = false
+                logger.debug("Hid sidebar pane via newChatSession.")
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .selectSidebarTab)) { note in
+            if let tab = note.object as? SidebarTab {
+                selectSidebarTab(tab)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .focusChatInput)) { _ in
+            if !router.isShowingChat {
+                router.returnToChat()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                isInputFocused = true
+            }
+            logger.debug("Focused chat input via focusChatInput.")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .togglePinActiveConversation)) { _ in
+            if let currentID = viewModel.selectedConversationID {
+                viewModel.togglePinStatus(for: currentID)
+                logger.debug("Toggled pin status for active conversation \(currentID).")
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .exportActiveConversation)) { _ in
+            if let currentID = viewModel.selectedConversationID {
+                viewModel.exportConversation(conversationID: currentID)
+                logger.debug("Triggered export for active conversation \(currentID).")
+            }
+        }
     }
 
     // MARK: - Subviews
@@ -355,8 +408,10 @@ struct MainApplicationView: View {
             SettingsDetailContainerView(category: category)
         case .toolLibrary(let profileID):
             ToolLibraryContainerView(routeProfileID: profileID)
-        case .skillLibrary(let profileID, let openSkillID):
-            SkillLibraryContainerView(routeProfileID: profileID, openSkillID: openSkillID)
+        case .skillLibrary(let profileID):
+            SkillLibraryContainerView(routeProfileID: profileID)
+        case .skillDetail(let skillID):
+            SkillDetailContainerView(skillID: skillID)
         case .addMCPServer:
             AddMCPServerContainerView(mode: .add)
         case .editMCPServer(let sourceID):
@@ -544,6 +599,31 @@ struct MainApplicationView: View {
         }
     }
     #endif
+
+    // MARK: - Navigation & Mode Helpers
+
+    private func selectSidebarTab(_ tab: SidebarTab) {
+        if !router.isShowingChat {
+            router.returnToChat()
+        }
+        if !isSidebarVisible {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                isSidebarVisible = true
+            }
+        }
+        selectedSidebarTab = tab.rawValue
+        logger.debug("Switched sidebar tab to \(tab.rawValue)")
+    }
+
+    private func cycleInterfaceMode() {
+        let allModes = MainApplicationViewModel.InterfaceMode.allCases
+        if let currentIndex = allModes.firstIndex(of: viewModel.interfaceMode) {
+            let nextIndex = (currentIndex + 1) % allModes.count
+            let nextMode = allModes[nextIndex]
+            viewModel.switchInterfaceMode(to: nextMode)
+            logger.debug("Cycled interface mode to \(nextMode.rawValue)")
+        }
+    }
 }
 
 // MARK: - Interface Mode Picker (Liquid Glass)

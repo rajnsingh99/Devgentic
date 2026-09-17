@@ -65,8 +65,9 @@ struct RecordingOverlayView: View {
         }
         .buttonStyle(.plain)
         .onHover { hover in withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { isCancelHovering = hover } }
-        .help("Cancel recording")
-        .accessibilityLabel("Cancel recording")
+        .help("Cancel recording (Esc)")
+        .accessibilityLabel("Cancel recording (Esc)")
+        .keyboardShortcut(.cancelAction)
     }
 
     private var confirmButton: some View {
@@ -83,8 +84,9 @@ struct RecordingOverlayView: View {
         }
         .buttonStyle(.plain)
         .onHover { hover in withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { isConfirmHovering = hover } }
-        .help("Stop and transcribe")
-        .accessibilityLabel("Stop and transcribe")
+        .help("Stop and transcribe (↩)")
+        .accessibilityLabel("Stop and transcribe (↩)")
+        .keyboardShortcut(.defaultAction)
     }
 }
 

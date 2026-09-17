@@ -197,6 +197,13 @@ enum SkillResolution {
         // Stable, machine-independent order — this becomes prompt bytes.
         outcome.manifests.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
 
+        // ⚠️ ONE LINE THAT ANSWERS "what did this run actually get?", which previously had to be
+        // reconstructed from the error lines below — and those only fire when something is WRONG, so
+        // a healthy run said nothing at all and an empty <available_skills> was indistinguishable
+        // from a profile with no skills linked.
+        let offered = outcome.manifests.map { "\($0.name)@\($0.versionID ?? "legacy")" }.joined(separator: ", ")
+        logger.notice("[SKILL_RESOLVE] Profile '\(profileName)': \(outcome.manifests.count) skill(s) reach this run — \(offered.isEmpty ? "NONE" : offered). CONSEQUENCE: exactly these names appear in <available_skills> and exactly these versions are what `load_skill` returns; anything the user linked that is missing here is accounted for by the lines that follow.")
+
         if !outcome.unresolved.isEmpty {
             logger.error("[SKILL_RESOLVE] Profile '\(profileName)': \(outcome.unresolved.count) linked skill(s) are NOT in the library and were skipped: \(outcome.unresolved.map(\.name).joined(separator: ", ")). CONSEQUENCE: the agent runs without them and cannot load them — they were deleted from the library, or are still drafts. They remain linked, so restoring or un-drafting the skill brings them back.")
         }

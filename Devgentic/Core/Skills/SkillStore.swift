@@ -39,6 +39,7 @@ enum SkillStoreError: LocalizedError, Equatable {
     case saveFailed(String)
     case notFound(String)
     case nameImmutable(was: String, attempted: String)
+    case unsafeFilePath(String)
 
     var errorDescription: String? {
         switch self {
@@ -48,7 +49,23 @@ enum SkillStoreError: LocalizedError, Equatable {
         case .notFound(let id): return "No skill with id \(id)"
         case .nameImmutable(let was, let attempted):
             return "This skill is named '\(was)'. A new version cannot rename it to '\(attempted)'."
+        case .unsafeFilePath(let path):
+            return "A bundled file's path cannot be used: \(Self.displayable(path)). Nothing was saved."
         }
+    }
+
+    /// A stored path rendered so it cannot forge structure in whatever reads this message.
+    ///
+    /// ⚠️ NOT cosmetic. This string is interpolated into `UpdateSkillTool`'s return value, which is
+    /// a TOOL RESULT the model reads as markdown. `SkillIngest.isSafeRelativePath` refuses control
+    /// characters precisely because a filename reaches the model as a heading — echoing the same
+    /// bytes back in the REFUSAL would reopen that hole through the error path, which is exactly how
+    /// `LoadSkillTool`'s own failure branch was found to leak a hostile name.
+    ///
+    /// Truncate BEFORE quoting, for the reason `SkillDiscoveryRendering` records: cutting the source
+    /// can only destroy a boundary sequence, while cutting an escaped string can split one in half.
+    private static func displayable(_ path: String) -> String {
+        String(path.prefix(120)).debugDescription
     }
 }
 
@@ -191,6 +208,30 @@ final class SkillStore {
             return .failure(.containerUnavailable)
         }
 
+        // ⚠️ THE STORE ENFORCES THIS, not only ingest, because ingest is not the only way in.
+        // `create` and `addVersion` are a SECOND write path — the create sheet and `update_skill` —
+        // that never passes through `SkillIngest`. A guard living only at the create sheet is a
+        // guard on a NAME, not on a capability; `SkillStore` is the only constructor of
+        // `SkillFileSD` in the tree, so it is the one seam where "every stored path is
+        // materialisable" can actually be true.
+        //
+        // ⚠️ The cost of a bad row is larger than a failed export: `SkillMaterializer.write` throws
+        // on the FIRST unusable path, so the version projects NOTHING — `load_skill` then tells the
+        // model there are no bundled files, and a `scripts/run.py` named in the instructions does
+        // not exist at run time.
+        //
+        // ⚠️ SHAPE, NEVER POLICY. Only `isSafeRelativePath` is enforced here; the byte and
+        // file-count caps stay at ingest. A cap is policy a future build may raise, and enforcing
+        // policy at the store would let a changed constant retroactively make an existing skill
+        // unsaveable.
+        //
+        // ⚠️ REFUSES THE WHOLE WRITE rather than dropping the file, for the reason `checkLimits`
+        // already records: a skill stored minus a file looks complete and fails later, elsewhere.
+        if let offender = files.first(where: { !SkillIngest.isSafeRelativePath($0.relativePath) }) {
+            logger.error("[SKILL_STORE] REFUSED to create '\(name)': a bundled file's path is not materialisable. CONSEQUENCE: nothing was written — a stored path that cannot become a file would make this version project NO files at run time, so `load_skill` would report no bundled files and any path the instructions name would not exist.")
+            return .failure(.unsafeFilePath(offender.relativePath))
+        }
+
         let version = SkillVersionSD(
             note: note,
             skillDescription: description,
@@ -254,6 +295,34 @@ final class SkillStore {
         if let declaredName, declaredName != skill.name {
             logger.error("[SKILL_STORE] REFUSED a new version of '\(skill.name)' (\(id)) because it declares the name '\(declaredName)'. CONSEQUENCE: nothing was written — a rename would leave every profile that linked '\(skill.name)' silently unresolved while the skill kept working under another name.")
             return .failure(.nameImmutable(was: skill.name, attempted: declaredName))
+        }
+
+        // ⚠️⚠️ NEWLY INTRODUCED PATHS ONLY — a blanket refusal here would be a net regression, not a
+        // fix. Three of this method's four production callers CARRY FILES FORWARD from a stored
+        // version (`update_skill`, plus Save and Restore in the detail sheet all map `SkillFileSD`
+        // rows 1:1), so refusing everything would not protect anything — it would BRICK a skill that
+        // already holds a bad row: no edit, no restore, and `update_skill` returning a permanent
+        // error the model retries, spending a destructive-tier approval each time, for a state no
+        // sheet can repair.
+        //
+        // ⚠️ A stored-but-now-invalid row is NOT hypothetical: `isSafeRelativePath` has already
+        // WIDENED once (it began refusing control characters), so a row that was valid when written
+        // can be invalid now — and the next widening will do it again. The rule has to be about what
+        // this write ADDS, never about what the skill already carries.
+        //
+        // ⚠️ A carried row is preserved VERBATIM. Repairing a path by rewriting it is the
+        // content-corruption class this codebase has shipped four times.
+        //
+        // Scans EVERY version rather than just the latest, because Restore can bring an older
+        // version's files forward. Paid for only when something is already wrong.
+        let unsafe = files.map(\.relativePath).filter { !SkillIngest.isSafeRelativePath($0) }
+        if !unsafe.isEmpty {
+            let alreadyStored = Set(skill.versions.flatMap { $0.files.map(\.relativePath) })
+            if let introduced = unsafe.first(where: { !alreadyStored.contains($0) }) {
+                logger.error("[SKILL_STORE] REFUSED a new version of '\(skill.name)': it introduces a bundled path that is not materialisable. CONSEQUENCE: nothing was written and the previous version is still current — this write would have added a path that makes the whole version project no files at run time.")
+                return .failure(.unsafeFilePath(introduced))
+            }
+            logger.notice("[SKILL_STORE] '\(skill.name)' carries \(unsafe.count) bundled path(s) that would be refused if introduced today, kept verbatim because this version only carries them FORWARD. CONSEQUENCE: the write proceeds, but `SkillMaterializer` refuses the whole projection while such a row exists — remove the file in the Skills library to make the skill's bundled files reachable again.")
         }
 
         let version = SkillVersionSD(

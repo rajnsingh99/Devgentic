@@ -86,6 +86,14 @@ private struct ServerConfigFormData: Hashable {
     /// Remote transport. Ignored for local-process servers, which are always stdio.
     var transport: MCPTransportMode = .streamableHTTP
     var authSecret: String = ""              // bearer token or API key value
+
+    /// Scopes whose stored secret could not be READ when this form was hydrated. Register KC-1.
+    ///
+    /// ⚠️ NOT the same as "empty". An empty field means the user has no secret configured; a scope
+    /// in here means one exists and we could not look at it, so the blank field on screen is a lie.
+    /// The persistence layer refuses to delete these regardless (`MCPSecretStore.clear`); this set
+    /// exists so the UI stops telling the user the secret is gone.
+    var unreadableScopes: Set<String> = []
     var apiKeyHeaderName: String = "X-API-Key"
 
     // OAuth
@@ -122,8 +130,10 @@ struct AddMCPServerView: View {
     var existingSource: ToolSource? = nil
 
     /// Save callback for "Add to Library". Last param is the OAuth credential
-    /// bundle when scheme = `.oauth` (otherwise nil). Returns false on duplicate.
-    var onToolAdded: ((String, ServerDefinition, MCPRuntimeSecrets, [ToolDefinition], MCPOAuthCredentialBundle?) -> Bool)?
+    /// bundle when scheme = `.oauth` (otherwise nil). The outcome tells a
+    /// duplicate from a failed save (register KC-5), so the form never
+    /// dismisses over a sign-in that was not stored.
+    var onToolAdded: ((String, ServerDefinition, MCPRuntimeSecrets, [ToolDefinition], MCPOAuthCredentialBundle?) -> MCPAddOutcome)?
     var onToolUpdated: ((UUID, String, ServerDefinition, MCPRuntimeSecrets, [ToolDefinition]) -> Void)? = nil
 
     /// Returns the user to the previous route when a save completes or the
@@ -523,9 +533,13 @@ struct AddMCPServerView: View {
                         .foregroundColor(theme.secondaryText)
                     SecureField("Token…", text: $formData.authSecret)
                         .textFieldStyle(.roundedBorder)
-                    Text("Stored in the macOS Keychain. Sent as `Authorization: Bearer …`.")
-                        .font(.caption2)
-                        .foregroundColor(theme.tertiaryText)
+                    if formData.unreadableScopes.contains(MCPSecretScope.bearerToken.rawScope) {
+                        unreadableSecretNotice
+                    } else {
+                        Text("Stored in the macOS Keychain. Sent as `Authorization: Bearer …`.")
+                            .font(.caption2)
+                            .foregroundColor(theme.tertiaryText)
+                    }
                 }
 
             case .apiKeyHeader:
@@ -545,6 +559,9 @@ struct AddMCPServerView: View {
                             .foregroundColor(theme.secondaryText)
                         SecureField("API key…", text: $formData.authSecret)
                             .textFieldStyle(.roundedBorder)
+                        if formData.unreadableScopes.contains(MCPSecretScope.apiKeyHeaderValue.rawScope) {
+                            unreadableSecretNotice
+                        }
                     }
                 }
 
@@ -552,6 +569,29 @@ struct AddMCPServerView: View {
                 oauthSection
             }
         }
+    }
+
+    /// Shown in place of the usual caption when a stored secret could not be READ. Register KC-1.
+    ///
+    /// ⚠️ WHY THIS EXISTS AT ALL. The field below it is blank, and a blank field means "no secret
+    /// configured" everywhere else in this form. When the Keychain is unreadable that reading is
+    /// wrong and dangerous: the user concludes the secret was lost, retypes or clears it, and saves.
+    /// The persistence layer already refuses to DELETE what it could not read, so nothing is
+    /// destroyed either way — but without this line the user has no way to tell a blank field
+    /// caused by an outage from one caused by an empty Keychain, and would have no reason to wait.
+    @ViewBuilder
+    private var unreadableSecretNotice: some View {
+        HStack(alignment: .top, spacing: 5) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.caption2)
+            Text("A secret is stored for this server but the Keychain could not be read, so this "
+                 + "field is blank. Nothing has been lost. Leave it empty and save to keep the "
+                 + "stored value; unlock your Keychain (or re-grant access after an app update) to "
+                 + "see or change it.")
+                .font(.caption2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .foregroundColor(theme.warningColor)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -960,8 +1000,17 @@ struct AddMCPServerView: View {
                 // empty strings — the user can retype if they want.
                 if let keys = def.envKeys, !keys.isEmpty {
                     formData.environmentVariables = keys.map { key in
-                        let value = MCPSecretStore.shared.retrieve(.envValue(key: key), sourceID: source.id) ?? ""
-                        return KeyValueItem(key: key, value: value)
+                        // ⚠️ `read`, not `retrieve` — a failed read must not render as an empty
+                        // field the user would then save over. Register KC-1.
+                        switch MCPSecretStore.shared.read(.envValue(key: key), sourceID: source.id) {
+                        case .found(let value):
+                            return KeyValueItem(key: key, value: value)
+                        case .notFound:
+                            return KeyValueItem(key: key, value: "")
+                        case .failed:
+                            formData.unreadableScopes.insert(MCPSecretScope.envValue(key: key).rawScope)
+                            return KeyValueItem(key: key, value: "")
+                        }
                     }
                 } else {
                     formData.environmentVariables = [KeyValueItem()]
@@ -975,11 +1024,27 @@ struct AddMCPServerView: View {
                     formData.authScheme = .none
                 case .bearer:
                     formData.authScheme = .bearer
-                    formData.authSecret = MCPSecretStore.shared.retrieve(.bearerToken, sourceID: source.id) ?? ""
+                    switch MCPSecretStore.shared.read(.bearerToken, sourceID: source.id) {
+                    case .found(let value): formData.authSecret = value
+                    case .notFound:         formData.authSecret = ""
+                    case .failed:
+                        // Register KC-1: leave the field blank but REMEMBER why, so the
+                        // UI can say "unreadable" instead of implying "not set".
+                        formData.authSecret = ""
+                        formData.unreadableScopes.insert(MCPSecretScope.bearerToken.rawScope)
+                    }
                 case .apiKeyHeader(let headerName):
                     formData.authScheme = .apiKeyHeader
                     formData.apiKeyHeaderName = headerName
-                    formData.authSecret = MCPSecretStore.shared.retrieve(.apiKeyHeaderValue, sourceID: source.id) ?? ""
+                    switch MCPSecretStore.shared.read(.apiKeyHeaderValue, sourceID: source.id) {
+                    case .found(let value): formData.authSecret = value
+                    case .notFound:         formData.authSecret = ""
+                    case .failed:
+                        // Register KC-1: leave the field blank but REMEMBER why, so the
+                        // UI can say "unreadable" instead of implying "not set".
+                        formData.authSecret = ""
+                        formData.unreadableScopes.insert(MCPSecretScope.apiKeyHeaderValue.rawScope)
+                    }
                 case .oauth(let issuer):
                     formData.authScheme = .oauth
                     formData.oauthIssuer = issuer.absoluteString
@@ -1083,20 +1148,45 @@ struct AddMCPServerView: View {
         let secrets = buildRuntimeSecrets()
 
         if let existing = existingSource, let onToolUpdated = onToolUpdated {
-            onToolUpdated(existing.id, formData.serverName, config, secrets, tools)
-            // Persist OAuth bundle (if any) under the existing source ID.
-            if let oauthBundle {
-                try? MCPOAuthCoordinator.persist(oauthBundle, sourceID: existing.id)
+            // ⚠️ Register KC-5. A re-authenticated OAuth bundle is persisted BEFORE the update, so
+            // a Keychain refusal is shown instead of swallowed by `try?` and nothing is
+            // half-applied. An unchanged bundle (a plain rename) is not rewritten.
+            do {
+                try MCPServerAddFlow.persistIfChanged(
+                    oauthBundle,
+                    stored: MCPOAuthCoordinator.loadBundle(sourceID: existing.id),
+                    sourceID: existing.id,
+                    persist: { try MCPOAuthCoordinator.persist($0, sourceID: $1) }
+                )
+            } catch {
+                logger.error("""
+                    [MCP-OAUTH] Could not store the re-authenticated OAuth sign-in for \
+                    '\(formData.serverName)' (\(existing.id)): \(error.localizedDescription). \
+                    CONSEQUENCE: the edit was NOT applied and the user is shown the failure; the \
+                    previously stored sign-in, if any, is untouched.
+                    """)
+                activeError = MCPUserError(
+                    title: "Sign-in could not be saved",
+                    message: "The new sign-in could not be written to the Keychain, so the changes were not saved.",
+                    suggestion: "Unlock your login keychain (or allow Devgentic access if macOS asked), then press Save again — the sign-in you completed is still held by this form.",
+                    rawLog: error.localizedDescription
+                )
+                return
             }
+            onToolUpdated(existing.id, formData.serverName, config, secrets, tools)
             Task { await MCPClientService.shared.disconnect(sourceId: tempSourceId) }
             onDismiss?()
         } else if let onToolAdded = onToolAdded {
-            let success = onToolAdded(formData.serverName, config, secrets, tools, oauthBundle)
-            if success {
+            switch onToolAdded(formData.serverName, config, secrets, tools, oauthBundle) {
+            case .added:
                 Task { await MCPClientService.shared.disconnect(sourceId: tempSourceId) }
                 onDismiss?()
-            } else {
+            case .duplicate:
                 isShowingDuplicateAlert = true
+            case .failed(let error):
+                // Register KC-5: stay on the form so the user sees what happened and can retry;
+                // `oauthBundle` is still held, so a retry needs no second browser round trip.
+                activeError = error
             }
         }
     }

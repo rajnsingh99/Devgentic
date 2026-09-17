@@ -322,22 +322,40 @@ final class BackendProfileService {
     /// the editor from that stale array meant the user saw the pre-heal value, and saving any
     /// unrelated field wrote it back, undoing the heal: the provider 400 the healer had just fixed
     /// would return on the very next send, silently, every time.
-    func activateEditBuffer(for id: UUID) {
+    /// The profile as the STORE has it, falling back to the in-memory copy when the read fails.
+    ///
+    /// ⚠️⚠️ ANY WRITER OF A WHOLE PROFILE MUST START HERE, not from `profiles`. That array is a
+    /// snapshot of VALUE TYPES taken when it was last loaded, and several things write profile rows
+    /// out of band without refreshing it — `BackendOrchestrationService` auto-healing an unsupported
+    /// thinking flag, `MLXContextWindowHealer` backfilling a context window, and (since V6)
+    /// `SkillLibraryImportSweep`, which re-links every pre-V6 skill reference at launch by setting
+    /// `details` on the SwiftData row directly.
+    ///
+    /// A writer that reads `profiles`, mutates one facet and calls `saveProfile` writes the WHOLE
+    /// stale snapshot back — `BackendProfileStore.saveProfile` does `existing.details =
+    /// snapshot.details` — so an unrelated edit silently reverts whatever was written out of band.
+    /// That is how the editor path was fixed; this is the same rule, named so the next writer can
+    /// reach for it instead of rediscovering the bug.
+    ///
+    /// ⚠️ The sweep write is the worst case of the class: it is the one pass that carries a pre-V6
+    /// user's skills into the library, and reverting it loses the migration rather than one setting.
+    func freshProfile(id: UUID) -> BackendProfileModel? {
         let cached = profiles.first(where: { $0.id == id })
-        let fresh: BackendProfileModel?
         do {
-            fresh = try profileStore.fetchProfile(byId: id)
+            if let fresh = try profileStore.fetchProfile(byId: id) { return fresh }
         } catch {
             logger.error(
-                "[PROFILE] Could not re-read profile \(id) from the store when opening the editor: "
-                + "\(error.localizedDescription). CONSEQUENCE: falling back to the in-memory copy, "
-                + "which may predate an out-of-band write (auto-healed thinking flag, backfilled "
-                + "context window) — saving could revert it."
+                "[PROFILE] Could not re-read profile \(id) from the store before a whole-profile "
+                + "write: \(error.localizedDescription). CONSEQUENCE: falling back to the in-memory "
+                + "copy, which may predate an out-of-band write (auto-healed thinking flag, "
+                + "backfilled context window, or the V6 skill re-link) — saving could revert it."
             )
-            fresh = nil
         }
+        return cached
+    }
 
-        guard let profile = fresh ?? cached else {
+    func activateEditBuffer(for id: UUID) {
+        guard let profile = freshProfile(id: id) else {
             logger.error(
                 "[PROFILE] activateEditBuffer found no profile \(id) in the store or in memory. "
                 + "CONSEQUENCE: the previous edit buffer is cleared and the detail view renders its "

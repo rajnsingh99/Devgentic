@@ -86,6 +86,85 @@ final class SkillMaterializerTests: XCTestCase {
         XCTAssertEqual(try SkillIngest.readSkillDirectory(at: folder).description, tricky)
     }
 
+    /// ⚠️ THE QUOTE SWAP. `yamlScalar` used to `replacingOccurrences(of: "\"", with: "'")` — not an
+    /// escape, a SUBSTITUTION — so a description carrying a double quote came back altered. Fifth
+    /// instance of this codebase's content-rewritten-by-a-transform class, in the one file whose
+    /// contract is round-trip fidelity.
+    ///
+    /// **Mutation check:** restore the swap and this goes red.
+    func testADescriptionWithADoubleQuoteRoundTrips() throws {
+        let tricky = #"Reviews "legacy" code: carefully"#
+        let source = version(description: tricky)
+
+        let folder = try SkillMaterializer.write(version: source, name: "quoted", allowedTools: nil, into: work)
+        XCTAssertEqual(try SkillIngest.readSkillDirectory(at: folder).description, tricky)
+    }
+
+    /// The other half of the encoding: an apostrophe is doubled on the way out and halved on the way
+    /// back. Ship `yamlScalar` without `unquote`'s collapse and this returns `user''s`.
+    func testADescriptionWithAnApostropheRoundTrips() throws {
+        let tricky = "Reviews the user's code: carefully"
+        let source = version(description: tricky)
+
+        let folder = try SkillMaterializer.write(version: source, name: "apostrophe", allowedTools: nil, into: work)
+        XCTAssertEqual(try SkillIngest.readSkillDirectory(at: folder).description, tricky)
+    }
+
+    /// ⚠️ A backslash made the OLD double-quoted output a scanner error in any spec-conformant YAML
+    /// reader, so export could produce a SKILL.md that only this app could load. In a single-quoted
+    /// scalar a backslash is literal, which is the point.
+    func testADescriptionWithABackslashRoundTrips() throws {
+        let tricky = #"Matches \d+ patterns: numbers"#
+        let source = version(description: tricky)
+
+        let folder = try SkillMaterializer.write(version: source, name: "backslash", allowedTools: nil, into: work)
+        XCTAssertEqual(try SkillIngest.readSkillDirectory(at: folder).description, tricky)
+    }
+
+    /// ⚠️⚠️ A LEADING YAML INDICATOR, AND A LESSON ABOUT WHAT TO ASSERT ON.
+    ///
+    /// `needsQuotes` omitted `#`, `-` and `?`, so a description beginning with one was emitted BARE.
+    /// Verified against a spec-conformant parser (PyYAML) rather than reasoned about:
+    ///
+    ///     description: #1 priority triage      ->  None          (`#` opens a comment)
+    ///     description: - first read the diff   ->  ScannerError
+    ///     description: ? maybe reviews code    ->  ScannerError
+    ///
+    /// ⚠️ THIS ASSERTS ON THE EMITTED BYTES, NOT ON A ROUND TRIP, and the first version of this test
+    /// did the opposite and was VACUOUS — it passed with the fix reverted. Two reasons, both worth
+    /// keeping: `YAMLFrontmatterParser` is a naive line-based reader that splits on the first colon
+    /// and treats none of these characters specially, so the app's own round trip cannot see the
+    /// defect at all; and the sample strings contained `": "`, which triggered quoting through a
+    /// different predicate. The defect is export fidelity to OTHER tools, so the assertion has to be
+    /// about what we WRITE.
+    ///
+    /// **Mutation check:** remove `#-?` from the indicator set and every case below goes red.
+    func testADescriptionBeginningWithAYAMLIndicatorIsQuoted() {
+        for tricky in ["#1 priority triage", "- first read the diff", "? maybe reviews code"] {
+            let emitted = SkillMaterializer.yamlScalar(tricky)
+            XCTAssertTrue(emitted.hasPrefix("'") && emitted.hasSuffix("'"),
+                          "'\(tricky)' must be quoted — unquoted it is a comment or a scanner error in any spec YAML reader")
+        }
+    }
+
+    /// The control that makes the assertion above meaningful: quoting is not blanket. Ordinary prose
+    /// with no indicator and no colon still comes back bare, so the predicate is still a predicate.
+    func testALeadingOrdinaryWordIsStillUnquoted() {
+        XCTAssertEqual(SkillMaterializer.yamlScalar("Reviews code carefully"), "Reviews code carefully")
+    }
+
+    /// And the app's own parser still reads the quoted form back exactly — the encoding is reversible
+    /// in both directions, which is what makes over-quoting free.
+    func testTheQuotedIndicatorFormStillRoundTripsThroughOurParser() throws {
+        for tricky in ["#1 priority triage", "- first read the diff", "? maybe reviews code"] {
+            let source = version(description: tricky)
+            let folder = try SkillMaterializer.write(version: source, name: "indicator",
+                                                    allowedTools: nil, into: work)
+            XCTAssertEqual(try SkillIngest.readSkillDirectory(at: folder).description, tricky)
+            try FileManager.default.removeItem(at: folder)
+        }
+    }
+
     /// The counterpart: ordinary prose must come back byte-exact, not wrapped in quotes it never had.
     /// Four transforms in this codebase have corrupted content by shape-matching it.
     func testOrdinaryProseIsNotQuoted() {
@@ -133,6 +212,43 @@ final class SkillMaterializerTests: XCTestCase {
                                                             allowedTools: nil, into: work),
                                  "'\(sneaky)' must be refused rather than written somewhere else")
         }
+    }
+
+    // MARK: - SKILL.md is written LAST
+
+    /// ⚠️⚠️ THE ORDERING IS LOAD-BEARING, AND THIS IS THE ONLY THING GUARDING IT.
+    ///
+    /// SKILL.md used to be written FIRST, before the bundled files. `SkillRuntimeFiles.materialize`
+    /// decides "already projected" by testing whether SKILL.md exists, so a write that threw on a
+    /// bundled file left behind a directory holding SKILL.md and nothing else — and the NEXT call
+    /// returned it as complete. Written last, its presence means every file already landed.
+    ///
+    /// **Mutation check:** move the SKILL.md write back above the file loop and this goes red.
+    func testAFailedWriteLeavesNoSKILLmdBehind() throws {
+        let bad = SkillFileSD(relativePath: "a/./bad.txt", content: Data("x".utf8))
+        container.mainContext.insert(bad)
+        let source = version(files: [bad])
+
+        XCTAssertThrowsError(try SkillMaterializer.write(version: source, name: "half-written",
+                                                        allowedTools: nil, into: work))
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: work.appendingPathComponent("half-written/SKILL.md").path),
+            "SKILL.md is the completeness sentinel — present after a failed write, it tells the next caller a broken projection is finished")
+    }
+
+    /// The other half: on success it IS there, so the sentinel is not simply never written.
+    /// Without this, deleting the SKILL.md write entirely would leave the test above green.
+    func testASuccessfulWriteDoesProduceSKILLmd() throws {
+        let file = SkillFileSD(relativePath: "scripts/run.py", content: Data("print(1)".utf8))
+        container.mainContext.insert(file)
+        let source = version(files: [file])
+
+        let folder = try SkillMaterializer.write(version: source, name: "complete",
+                                                 allowedTools: nil, into: work)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("SKILL.md").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("scripts/run.py").path))
     }
 
     /// ⚠️ A stored file path is data too. Ingest validates on the way in, but this is where one

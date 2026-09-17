@@ -220,6 +220,7 @@ struct BackendProfileDetailView: View {
 struct ProfileRowView: View {
     let profile: BackendProfileModel
     let isSelected: Bool
+    var isFocused: Bool = false
     let onSelect: () -> Void
     let onDuplicate: () -> Void
     let onDelete: () -> Void
@@ -229,8 +230,8 @@ struct ProfileRowView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            // Left rail = STATE: accent when selected or hovered; absent otherwise
-            if isSelected || isHovering {
+            // Left rail = STATE: accent when selected, focused, or hovered; absent otherwise
+            if isSelected || isHovering || isFocused {
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(
                         LinearGradient(
@@ -279,6 +280,13 @@ struct ProfileRowView: View {
                                 .stroke(theme.accentColor.opacity(0.15), lineWidth: 0.5)
                         )
                         .shadow(color: theme.accentColor.opacity(0.05), radius: 4, x: 0, y: 0)
+                } else if isFocused {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(theme.surfaceOverlayStrong)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(theme.accentColor.opacity(0.35), lineWidth: 1)
+                        )
                 } else if isHovering {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .fill(theme.surfaceOverlay)

@@ -166,3 +166,66 @@ final class SkillCommandPickerScopeTests: XCTestCase {
         XCTAssertEqual(vm.skillSuggestionState.filteredItems.map(\.name).sorted(), ["alpha", "beta"])
     }
 }
+
+// MARK: - The send-path orphan guard
+
+/// ⚠️⚠️ EVERY OTHER TEST FOR `/skill` EXERCISES A PURE FUNCTION. This one asserts that the COMPOSER
+/// STILL CALLS IT.
+///
+/// `SkillCommandParser.render` is well covered, and `ComposerSuggestionKeyRoutingTests` guards the
+/// keyboard half. Nothing guarded the SEND half: delete the `expandSkillCommand(in:)` call from
+/// `ChatInputAreaView`'s send path and every skill command silently degrades to plain text — the
+/// model receives a literal `/code-review do the thing`, has no idea a skill was meant, and the
+/// whole suite stays green. That is the same defect shape as the keyboard-dead picker, one layer
+/// further down, and it is the reason the keyboard fix alone was not enough.
+///
+/// Asserted on the source because the send path runs inside a SwiftUI view with no reachable seam.
+final class SkillCommandSendPathOrphanTests: XCTestCase {
+
+    /// **Mutation check:** replace `expandSkillCommand(in: attributedString)` with
+    /// `attributedString` at the send site and this goes red.
+    func testTheComposerStillExpandsSkillCommandsOnSend() throws {
+        let source = try Self.read("Devgentic/Interfaces/Shared/ChatInput/ChatInputAreaView.swift")
+
+        XCTAssertTrue(source.contains("private func expandSkillCommand("),
+                      "the rewrite must still exist")
+
+        // ⚠️ Anchored on the CALL INSIDE THE SEND, not merely on the function existing. A private
+        // method with no caller compiles, warns about nothing useful, and is exactly the state this
+        // guard exists to catch.
+        XCTAssertTrue(source.contains("onSendMessage(expandSkillCommand("),
+                      "the send path must pass the message THROUGH the rewrite — without this call a `/skill` command is sent as literal text and the model never learns a skill was intended")
+    }
+
+    /// ⚠️ The rewrite must sit on the SUCCESS arm of profile resolution. Expanding a command for a
+    /// profile that cannot be resolved would send a directive naming a skill the run never gets.
+    func testTheExpansionHappensOnlyAfterTheProfileResolves() throws {
+        let source = try Self.read("Devgentic/Interfaces/Shared/ChatInput/ChatInputAreaView.swift")
+        let resolve = try XCTUnwrap(source.range(of: "switch backendConfiguration.resolveRequestConfig()"))
+        let call = try XCTUnwrap(source.range(of: "onSendMessage(expandSkillCommand("))
+        XCTAssertTrue(resolve.lowerBound < call.lowerBound,
+                      "the command is expanded only once a config resolved — otherwise the directive names a skill this send will never have")
+    }
+
+    /// ⚠️ The send path and the picker must read the SAME reachable set. Computing it independently
+    /// at each site is precisely how the two came to disagree once already.
+    func testTheSendPathUsesTheSameReachableSetAsThePicker() throws {
+        let source = try Self.read("Devgentic/Interfaces/Shared/ChatInput/ChatInputAreaView.swift")
+        XCTAssertTrue(source.contains("SkillCommandParser.render(command, availableNames: reachableSkillNames)"),
+                      "the send path must render against `reachableSkillNames` — the same value the picker filters by")
+        XCTAssertTrue(source.contains("SkillCommandReachability.reachableNames("),
+                      "and that value must come from the shared reachability rule, not a second derivation")
+    }
+
+    private static func read(_ relativePath: String) throws -> String {
+        var dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        for _ in 0..<10 {
+            let candidate = dir.appendingPathComponent(relativePath)
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return try String(contentsOf: candidate, encoding: .utf8)
+            }
+            dir = dir.deletingLastPathComponent()
+        }
+        throw XCTSkip("Could not locate \(relativePath) from \(#filePath) — source-reading tests need the checkout present.")
+    }
+}

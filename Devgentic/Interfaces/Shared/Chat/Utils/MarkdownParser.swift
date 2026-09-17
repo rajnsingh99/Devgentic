@@ -222,13 +222,36 @@ func parseMarkdown(_ markdown: String) -> [ContentBlock] {
     // CONSUMED on purpose — that sentinel must never reach the user — so a document consisting
     // only of markers legitimately produces no blocks, and this fallback used to resurrect the
     // raw sentinel as prose. (Surfaced 2026-09-12 while testing mc-15; the fallback predates it
-    // and defeated the marker-only case on its own.) Stripping the marker lines first tells the
-    // two apart: if nothing is left, the emptiness was deliberate.
-    let withoutMarkers = BlockBuilder.strippingFileMarkerLines(from: markdown)
-    if blocks.isEmpty, !withoutMarkers.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-        let preview = markdown.prefix(120).replacingOccurrences(of: "\n", with: "\\n")
-        logger.warning("Markdown AST produced zero blocks for non-empty input (\(markdown.count) chars). Preview: \"\(preview)\". Falling back to raw paragraph.")
-        blocks.append(ContentBlock(id: "block-0", type: .paragraph(markdown)))
+    // and defeated the marker-only case on its own.) The emptiness verdict tells the two apart.
+    //
+    // ⚠️ The verdict is computed INSIDE `blocks.isEmpty`. It is O(n) over the whole message with
+    // two allocations per line, and it used to run EAGERLY on every parse — including
+    // `ChatPersistenceStore.fetchSearchDocuments`, which parses every persisted message on the
+    // main actor during ⌘F. The streaming twin already carried a warning that this must not run
+    // on the normal path; the authoritative parser was quietly violating it.
+    if blocks.isEmpty, !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if !FileMarkerLine.isNothingButFileMarkers(markdown) {
+            let preview = markdown.prefix(120).replacingOccurrences(of: "\n", with: "\\n")
+            logger.warning("Markdown AST produced zero blocks for non-empty input (\(markdown.count) chars). Preview: \"\(preview)\". Falling back to raw paragraph.")
+            blocks.append(ContentBlock(id: "block-0", type: .paragraph(markdown)))
+        } else {
+            // [CR30] The DELIBERATE empty render. Its sibling above logs, so silence here read as
+            // "nothing happened" when in fact a whole message was consumed — a blank bubble left
+            // no trace at all to start a diagnosis from.
+            //
+            // `.debug` because this is a designed outcome rather than an anomaly, and because it
+            // is the one level `DGLogger` does not sanitize for egress: a marker on an agent or
+            // code profile carries the file's absolute path, so this line reports COUNTS and
+            // never a preview of the text.
+            //
+            // ⚠️ [CR62] The CONSEQUENCE clause used to name "prose that shared a line with a
+            // sentinel" as a likely cause, because a sentinel LINE was removed WHOLE. Only the
+            // SPAN goes now, so that prose survives and this branch no longer fires for it — but
+            // it still fires when the span could not be resolved cleanly (a closer with no
+            // trailing whitespace, an unterminated marker), which is the residue named on
+            // `strippingFileMarkerLines`.
+            logger.debug("[RENDER] Markdown consumed entirely as file-marker sentinels — \(markdown.count) chars in, 0 blocks out, every line was a '--- Start/End of file: … ---' sentinel. CONSEQUENCE: this message renders as an EMPTY bubble. Expected when the text really was nothing but sentinels; if content was expected, suspect upstream truncation, or a sentinel whose closing dashes are not followed by whitespace (that line is dropped whole rather than having its span removed).")
+        }
     }
 
     return blocks
@@ -300,6 +323,52 @@ enum CodeFileNameInference {
     /// updated `Main.swift`:", not a paragraph that happens to end in one. Kept as a
     /// second gate alongside the markup requirement in `fromTrailingProse`.
     private static let proseClaimLimit = 160
+
+    /// [CR55] `"Foo.swift (/Users/raj/proj/Foo.swift)"` → `"Foo.swift"`; anything else verbatim.
+    ///
+    /// `BackendOrchestrationService.assembleTextFileContent(includeAbsolutePaths:)` labels the
+    /// injected marker `<name> (<absolute path>)` for agent and code profiles, so the model can
+    /// write back to the right file rather than to a relative path `FilePathResolver` would anchor
+    /// to HOME. When a model echoes that marker into its visible answer, the whole decorated label
+    /// became the claimed filename: the badge read as a full home path, and linking — which
+    /// matches `AttachedTextFile.name`, a bare name — matched nothing.
+    ///
+    /// ⚠️ "Ends in a parenthetical that looks like a path" is NOT a sufficient test. A real file
+    /// named `snapshot (~/Documents)` has exactly that shape, and on a bot profile (name-only
+    /// label) it would be truncated to `snapshot`, breaking a link that works today. So the last
+    /// component of the parenthesised path must EQUAL the leading part — the self-consistency that
+    /// only this app's own label shape can satisfy. The scan is balanced, so a genuine
+    /// `notes (v1).txt (/Users/raj/notes (v1).txt)` survives intact.
+    ///
+    /// ⚠️ Runs on the CAPTURED label, never on the marker text before the match. Normalising the
+    /// marker is what ate the backslash in `back\slash.txt` during mc-15.
+    static func nameFromMarkerLabel(_ label: String) -> String {
+        guard label.hasSuffix(")") else { return label }
+
+        // Walk back from the close paren to its partner so nested parens in the NAME can't
+        // confuse the split.
+        var depth = 0
+        var open: String.Index? = nil
+        var index = label.endIndex
+        while index > label.startIndex {
+            index = label.index(before: index)
+            let character = label[index]
+            if character == ")" {
+                depth += 1
+            } else if character == "(" {
+                depth -= 1
+                if depth == 0 { open = index; break }
+            }
+        }
+        guard let open else { return label }
+
+        let inner = String(label[label.index(after: open)..<label.index(before: label.endIndex)])
+        guard inner.hasPrefix("/") || inner.hasPrefix("~/") else { return label }
+
+        let name = String(label[label.startIndex..<open]).trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, (inner as NSString).lastPathComponent == name else { return label }
+        return name
+    }
 
     /// The anchored "looks like a filename" test: `stem.ext` with a letter-led extension
     /// (1–8 chars), optionally path-qualified. Digit-led extensions are rejected so
@@ -603,6 +672,131 @@ struct PendingFileNameClaim: Equatable {
     let origin: Origin
 }
 
+/// [CR32] The ONE definition of "this line is an injected file-marker sentinel".
+///
+/// `consumedFileMarker` and `BlockBuilder.strippingFileMarkerLines` must never disagree about
+/// that, because detection GATES the strip: the strip runs only when detection fired, so any line
+/// the strip would remove but detection misses renders the raw sentinel to the reader. They used
+/// to disagree by construction — detection was an unanchored `firstMatch` over the whole node,
+/// stripping was a per-line `hasPrefix` — and the two directions fail very differently:
+///
+///  - detection WIDER than stripping costs a visible sentinel (prose quoting our format) and, for
+///    the Start branch, a bogus `.marker` claim, which `mc-6` exempts from the one-sibling bound
+///    and which therefore names an arbitrarily later fence;
+///  - detection NARROWER than stripping is the dangerous one: it is silent, and it puts the raw
+///    sentinel on screen on input the old code hid.
+///
+/// Both now call `kind(of:)`, so the Start half agrees by construction. The End half deliberately
+/// does not — see `consumedFileMarker`.
+enum FileMarkerLine: Equatable {
+    case start
+    case end
+
+    /// The marker kind this line IS, or nil for every other line.
+    ///
+    /// ⚠️ BEGINS-with, not contains. The injected markers are always emitted on their own line, so
+    /// a prefix test catches every real one while prose that merely MENTIONS "--- End of file:"
+    /// mid-sentence keeps its whole line. Widening this to `contains` would delete the author's
+    /// sentence around the mention.
+    ///
+    /// ⚠️ Backslashes are removed before the test and the trimmed copy is then DISCARDED — the
+    /// caller keeps the raw line. That is the difference from the identical strip removed from
+    /// `consumedFileMarker` during mc-15, which rewrote the CAPTURED filename and turned
+    /// `back\slash.txt` into `backslash.txt`. Here it only decides, and it is NOT dead code:
+    /// `parseMarkdown`'s zero-block check passes the RAW message text, which cmark has never seen,
+    /// and `MarkupFormatter.visitHTMLBlock` re-emits an HTML block's source lines verbatim — so
+    /// `\--- Start of file: X ---` reaches this test with its backslashes on both of those paths.
+    static func kind(of line: some StringProtocol) -> FileMarkerLine? {
+        let bare = line.replacingOccurrences(of: "\\", with: "")
+            .trimmingCharacters(in: .whitespaces)
+        guard bare.hasPrefix("---") || bare.hasPrefix("—") else { return nil }
+        if bare.contains("Start of file:") { return .start }
+        if bare.contains("End of file:") { return .end }
+        return nil
+    }
+
+    /// The lines of a text, CRLF included.
+    ///
+    /// ⚠️ [mc-14, again] NOT `split(separator: "\n")`. Swift's `"\r\n"` is ONE Character and is not
+    /// `"\n"`, so that spelling sees an all-CRLF document as a SINGLE line — the identical bug
+    /// `lastSafeBoundary` carries a warning about 400 lines below. cmark normalises line endings,
+    /// so only the RAW-text callers can ever see CRLF; that is exactly where a whole document
+    /// collapsing to one "line" decides whether a sentinel is published.
+    static func lines<S: StringProtocol>(of text: S) -> [S.SubSequence] {
+        text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+    }
+
+    /// A line split into its block-quote / indent PREFIX and the BODY after it.
+    ///
+    /// `MarkupFormatter.linePrefix(for:)` decorates every line of `format()` output with one
+    /// `"> "` per BlockQuote ancestor — and it reads the node's REAL parental chain, so a
+    /// paragraph formatted on its own still carries them. `'>'` is the only prefix character that
+    /// is not whitespace (list nesting contributes spaces, which `kind` already trims), which is
+    /// why the block-quote case is the only one that ever defeated the sentinel test.
+    static func quotePrefixSplit<S: StringProtocol>(_ line: S) -> (prefix: S.SubSequence, body: S.SubSequence) {
+        let start = line.firstIndex(where: { $0 != ">" && $0 != " " && $0 != "\t" }) ?? line.endIndex
+        return (line[line.startIndex..<start], line[start...])
+    }
+
+    /// The sentinel SPAN inside a line — what `strippingFileMarkerLines` removes.
+    ///
+    /// ⚠️ DELIBERATELY NOT the capture regex in `consumedFileMarker`, and the two must not be
+    /// merged: that one names a FILE THE APP WRITES TO, this one only decides where the marker
+    /// ends on screen.
+    ///
+    /// ⚠️ The `(?=\s|$)` lookahead is load-bearing. Without it the lazy `.*?` stops at the first
+    /// `---` INSIDE a filename, so `--- Start of file: my---file.txt ---` leaves `file.txt ---`
+    /// on screen — filename debris published where today the whole line is hidden. With it, a
+    /// closer that is not followed by whitespace simply does not match, and the caller falls back
+    /// to exactly what it does today.
+    static let sentinelSpan = /(?:---|—)\s*(?:Start|End) of file:\s*.*?\s*(?:---|—)(?=\s|$)/
+
+    /// Whether every non-blank line of `text` IS a sentinel line.
+    ///
+    /// The EMPTINESS question, kept separate from the RENDER question `strippingFileMarkerLines`
+    /// answers. They are genuinely different, and conflating them coupled two substrates that
+    /// disagree: `parseMarkdown` and `StreamingMarkdownParser` pass RAW message text, which cmark
+    /// has never touched, while the block branches pass `format()` output, which cmark has already
+    /// decoded. `--- End of file: x.txt --- &nbsp;` is the case that exposed it — the raw text
+    /// still spells the entity (letters!) where `format()` carries a decoded U+00A0 — and a
+    /// disagreement there flips `parseMarkdown` between rendering nothing and republishing the
+    /// whole raw sentinel. Asking each caller its own question removes the coupling entirely.
+    static func isNothingButFileMarkers(_ text: some StringProtocol) -> Bool {
+        var sawContent = false
+        for line in lines(of: text) {
+            let body = quotePrefixSplit(line).body
+            if body.trimmingCharacters(in: .whitespaces).isEmpty { continue }
+            sawContent = true
+            if kind(of: body) == nil { return false }
+        }
+        return sawContent
+    }
+
+    /// A node's plain text with its LINE STRUCTURE intact.
+    ///
+    /// Neither of the two obvious spellings can be used for a line-anchored test:
+    ///
+    ///  - `plainText` flattens. `SoftBreak.plainText` is a SPACE in the pinned swift-markdown
+    ///    (probed, 0.7.3), so a marker on its own line and a marker mid-sentence arrive as the
+    ///    same string and the anchor cannot tell them apart.
+    ///  - `format()` keeps the lines but decorates them. `MarkupFormatter.linePrefix(for:)` walks
+    ///    the node's REAL `parentalChain`, not the chain below whatever node you called `format()`
+    ///    on, so a paragraph inside a block quote comes back with `"> "` on every line and no line
+    ///    begins with the sentinel any more. It also re-emits inline markup, so a marker the model
+    ///    wrote as `--- **Start** of file: X ---` stops matching.
+    ///
+    /// So: the children's own plain text, with the two break kinds restored as newlines.
+    /// `InlineCode.plainText` keeps its backticks, which is the behaviour we want — a marker
+    /// inside a code span no longer begins its line and correctly stops claiming.
+    static func lineStructuredPlainText(of markup: Markup) -> String {
+        markup.children.map { child -> String in
+            if child is SoftBreak || child is LineBreak { return "\n" }
+            if child is InlineContainer, child.childCount > 0 { return lineStructuredPlainText(of: child) }
+            return (child as? PlainTextConvertibleMarkup)?.plainText ?? ""
+        }.joined()
+    }
+}
+
 private struct BlockBuilder {
     let makeID: (Int) -> String
     var blocks: [ContentBlock] = []
@@ -645,46 +839,161 @@ private struct BlockBuilder {
     /// The claim must still be applied even when text survives, or the following fence loses its
     /// filename badge — which is a worse outcome than losing the prose, and the reason this
     /// returns a claim rather than just a remainder.
-    private mutating func consumedFileMarker(_ text: String) -> Bool {
+    private mutating func consumedFileMarker(lineStructured: String, flattened: String) -> Bool {
         // ⚠️ Do NOT "normalise" the text before matching — in particular, do not strip
         // backslashes. I added exactly that during mc-15 to compensate for the `\-\-\-` escape
-        // the comment at the paragraph call site describes, and BOTH were wrong: a probe of the
+        // the comment at the paragraph call site described, and BOTH were wrong: a probe of the
         // pinned swift-markdown shows `Paragraph.format()` emits `--- Start of file: X ---`
         // unescaped, so there was nothing to compensate for. The strip was not harmless either —
         // `match.1` below is captured out of the matched string and becomes `pendingFileName`,
         // i.e. the filename the rest of the app links by, so a legitimately-named
         // `back\slash.txt` was captured as `backslash.txt` and its badge stopped resolving.
-        if let match = text.firstMatch(of: /(?:---|—)\s*Start of file:\s*(.*?)\s*(?:---|—)/) {
-            pendingFileName = PendingFileNameClaim(name: String(match.1), origin: .marker)
+        // `FileMarkerLine.kind` may strip backslashes because it only DECIDES; this must not,
+        // because it CAPTURES.
+        //
+        // ⚠️ [CR32] The Start branch is LINE-ANCHORED, through the same predicate
+        // `strippingFileMarkerLines` uses, so the two cannot disagree about which lines are
+        // sentinels. It used to be an unanchored `firstMatch` over the whole node, which fired on
+        // a sentence merely QUOTING our format — the strip then removed nothing (its own test is
+        // line-anchored), so the sentinel rendered AND a `.marker` claim was armed from prose.
+        // `.marker` is the one origin mc-6 exempts from the one-sibling bound, so that bogus claim
+        // named an arbitrarily later fence, and a name that collides with an attached file puts
+        // Apply Changes' on-disk write one keystroke away. Start's error runs toward a write;
+        // that is why it is the branch that gets anchored.
+        let lines = lineStructured.split(separator: "\n", omittingEmptySubsequences: false)
+        if let index = lines.firstIndex(where: { FileMarkerLine.kind(of: $0) == .start }) {
+            // ⚠️ Matched from THIS LINE ONWARD, rejoined, not on the line alone. The
+            // `includeAbsolutePaths` label an agent/code profile injects
+            // (`<name> (<absolute path>)`) routinely runs past 70 characters, and a model
+            // re-emitting it can wrap before the closing dashes — leaving the opener on one line
+            // and `---` on the next. Matching the line alone would find no closer, drop the claim,
+            // and take the fence's badge and Apply Changes with it. Starting AT this line is what
+            // an unanchored match over the whole node could not do: an earlier mid-sentence
+            // mention can no longer win the capture.
+            let fromMarker = lines[index...].joined(separator: " ")
+            if let match = fromMarker.firstMatch(of: /(?:---|—)\s*Start of file:\s*(.*?)\s*(?:---|—)/) {
+                let label = String(match.1)
+                let name = CodeFileNameInference.nameFromMarkerLabel(label)
+                if name != label {
+                    // ⚠️ Logs the BARE NAME and a length, never the label. By construction this
+                    // branch only fires when the label was `<name> (<its own absolute path>)`, so
+                    // printing it would put the user's home path in the log — and `DGLogger.debug`
+                    // is the one level that does NOT run `sanitizedForEgress`. The CR30 branch
+                    // thirty lines up refuses a preview for exactly this reason; this line was
+                    // doing what that comment forbids.
+                    logger.debug("[FILENAME] Marker label carried its own absolute path (\(label.count) chars) — agent and code profiles disclose it so the model can write back to the right file. Linking by the bare name '\(name)'. CONSEQUENCE: none intended; the decorated label matched no attachment, so the fence had no badge, no source link and no Apply Changes.")
+                }
+                pendingFileName = PendingFileNameClaim(name: name, origin: .marker)
+            }
+            // True even when the regex found no closer: this line IS a sentinel by the shared
+            // predicate, so `strippingFileMarkerLines` will remove it, and returning false here
+            // would leave it on screen — the precise failure this anchoring exists to prevent.
             return true
         }
-        if text.contains("--- End of file:") || text.contains("— End of file:") {
+        // ⚠️ The End branch stays UNANCHORED, deliberately — the asymmetry is the point.
+        // Its errors run the SAFE way round: over-clearing costs a filename badge, under-clearing
+        // leaves a `.marker` claim alive past the file body it belonged to, which is the same
+        // unbounded reach the Start branch is anchored to prevent. It also has to keep working
+        // inside a block quote, where `format()` gives every line a `"> "` prefix (see
+        // `FileMarkerLine.lineStructuredPlainText`) and no line-anchored test would fire at all.
+        if flattened.contains("--- End of file:") || flattened.contains("— End of file:") {
             pendingFileName = nil
             return true
         }
         return false
     }
 
-    /// The marker LINES removed, markup intact.
+    /// The marker LINES removed, every other line kept verbatim.
     ///
-    /// Operates on the FORMATTED text so surviving prose keeps its bold/links/code — detection
-    /// stays on `plainText` above, which is the only form the regex reliably matches (the
-    /// formatter escapes a leading `---` to `\-\-\-`). Backslashes are stripped per line before
-    /// testing, so an escaped marker line is recognised too.
-    static func strippingFileMarkerLines(from formatted: String) -> String {
-        let kept = formatted.split(separator: "\n", omittingEmptySubsequences: false).filter { line in
-            let bare = line.replacingOccurrences(of: "\\", with: "")
-                .trimmingCharacters(in: .whitespaces)
-            // ⚠️ A marker LINE is one that BEGINS with the sentinel. The injected markers are
-            // always emitted on their own line, so a prefix test strips every real one — while
-            // prose that merely MENTIONS "--- End of file:" mid-sentence keeps its whole line.
-            // That distinction matters because `consumedFileMarker`'s End branch is a loose
-            // `contains` and fires on such prose; without it, "I looked for the --- End of file:
-            // marker" was deleted as though it were a sentinel.
-            let opensWithDashes = bare.hasPrefix("---") || bare.hasPrefix("—")
-            let isStart = opensWithDashes && bare.contains("Start of file:")
-            let isEnd = opensWithDashes && bare.contains("End of file:")
-            return !(isStart || isEnd)
+    /// ⚠️ [CR43] This used to claim that detection "stays on `plainText` … the only form the regex
+    /// reliably matches (the formatter escapes a leading `---` to `\-\-\-`)". Both halves were
+    /// false, and the same sentence is what talked mc-15 into a blanket backslash strip inside
+    /// `consumedFileMarker` that ate a legal character out of `back\slash.txt`. What is actually
+    /// true, probed in the pinned swift-markdown: `MarkupFormatter.visitText` prints through
+    /// `softWrapPrint(text.string)`, which with the default `preferredLineLimit == nil` writes the
+    /// string raw — so `format()` neither escapes the sentinel nor re-wraps a long line.
+    ///
+    /// THREE callers, and they are all `format()` output — but not all the same `format()`. The
+    /// paragraph branch and the unknown-node fallback pass a node with its REAL ancestors, so a
+    /// block quote decorates every line with `"> "`; `appendTextRun` passes a SYNTHETIC
+    /// `Paragraph`, a new root with no ancestors and therefore no prefix. Either way cmark has
+    /// already decoded the text.
+    ///
+    /// ⚠️ The two RAW-text callers — `parseMarkdown`'s zero-block check and
+    /// `StreamingMarkdownParser`'s — do NOT come here. They ask
+    /// `FileMarkerLine.isNothingButFileMarkers` instead, because they want an emptiness VERDICT,
+    /// not rendered text, and answering both questions with one function coupled two substrates
+    /// that disagree about their own input. Raw text is the one input cmark has never run over,
+    /// which is why `FileMarkerLine.kind` removes backslashes before testing and why that is not
+    /// dead code — see its own note.
+    ///
+    /// ⚠️ The line predicate is SHARED with `consumedFileMarker`'s Start branch on purpose. This
+    /// function runs only when detection fired, so a line it would remove but detection misses
+    /// renders the raw sentinel; going through one `FileMarkerLine.kind` is what makes that
+    /// impossible rather than merely unlikely.
+    ///
+    /// ⚠️ [CR61 + CR62] THE RULE THIS FUNCTION OBEYS: it may remove a sentinel, and it may
+    /// RECOVER prose that used to be deleted — but it must never delete anything this same code
+    /// would have rendered yesterday, and never publish a sentinel yesterday hid. Every case the
+    /// span removal cannot resolve cleanly therefore falls back to `todayWouldDropTheLine`, which
+    /// is literally the old predicate. That is what makes the change monotone, and it is the only
+    /// reason widening the gate to block-quoted lines is safe.
+    ///
+    /// [CR62] A sentinel LINE used to be removed WHOLE, so
+    /// `--- End of file: config.yaml --- and that is everything I changed.` lost the author's
+    /// sentence — and, being the only content, rendered as an empty bubble. Only the SPAN goes
+    /// now. mc-15's contract was "a file marker takes only itself with it"; the mid-sentence half
+    /// was fixed then, this is the other half.
+    ///
+    /// [CR61] A marker inside a BLOCK QUOTE used to survive: `format()` prefixes every line with
+    /// `"> "`, so nothing began with the sentinel and nothing was removed, while detection — which
+    /// reads the undecorated `lineStructuredPlainText` — armed the claim anyway. The test now runs
+    /// on the BODY after that prefix and the prefix is put back on the output, so ordinary quoted
+    /// prose is byte-identical and only marker lines change. ⚠️ Not the whole story even before
+    /// this: a quoted marker paragraph that also carries an IMAGE was already stripped, because
+    /// `appendTextRun` formats a SYNTHETIC `Paragraph` which is a new root with no BlockQuote
+    /// ancestor and therefore no prefix. The two branches agree now.
+    ///
+    /// ⚠️ Residue, stated rather than hidden: a closer not followed by whitespace
+    /// (`--- End of file: x.txt ---.`) does not match the span, so that line still behaves as it
+    /// does today. Recovering it would mean guessing where the sentinel ends, and guessing is what
+    /// publishes filename debris — see `FileMarkerLine.sentinelSpan`.
+    static func strippingFileMarkerLines(from text: String) -> String {
+        var kept: [String] = []
+        for line in FileMarkerLine.lines(of: text) {
+            let (prefix, body) = FileMarkerLine.quotePrefixSplit(line)
+            guard FileMarkerLine.kind(of: body) != nil else { kept.append(String(line)); continue }
+
+            // The old predicate, verbatim: it saw the WHOLE line, so a `"> "` prefix hid the
+            // sentinel from it and the line was kept. Anything this fix cannot clean must land
+            // exactly here.
+            let todayWouldDropTheLine = FileMarkerLine.kind(of: line) != nil
+            func fallBackToTodaysBehaviour() {
+                if !todayWouldDropTheLine { kept.append(String(line)) }
+            }
+
+            let cleaned = body.replacing(FileMarkerLine.sentinelSpan, with: "")
+            // No span matched — an unterminated marker, or one whose closer the lookahead
+            // rejected. There is no way to tell sentinel from prose here.
+            guard cleaned != body else { fallBackToTodaysBehaviour(); continue }
+            // A stranded half-sentinel: one marker's closer was eaten as another's opener. Never
+            // publish that.
+            guard !cleaned.contains("Start of file:"), !cleaned.contains("End of file:") else {
+                fallBackToTodaysBehaviour(); continue
+            }
+
+            let trimmed = cleaned.trimmingCharacters(in: .whitespaces)
+            // The body was NOTHING but the sentinel: drop the line. Nothing an author wrote is
+            // lost, and this is the case that closes CR61 for the ordinary quoted marker.
+            if trimmed.isEmpty { continue }
+            // A residue with no letter or digit is punctuation left over from the sentinel — an
+            // escape that survived, a stray dash. Not worth publishing, and on the raw substrate
+            // it is what used to flip a message between "renders nothing" and "renders the whole
+            // sentinel". Emptiness is NOT the test: `\` is not blank.
+            guard trimmed.contains(where: { $0.isLetter || $0.isNumber }) else {
+                fallBackToTodaysBehaviour(); continue
+            }
+            kept.append(String(prefix) + trimmed)
         }
         return kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -748,26 +1057,42 @@ private struct BlockBuilder {
             // it. The whole `localImagePath` / `LocalMarkdownImageView` path was reachable from
             // the single-child branch alone.
             //
-            // Marker detection is fed plainText here because it is the cheapest form available
-            // on this branch — NOT because `format()` would defeat the regex. This comment used
-            // to claim the formatter escapes a leading `---` to `\-\-\-`; a probe of the pinned
-            // swift-markdown shows it does not, and acting on that claim corrupted filenames
-            // containing a backslash. The unknown-node fallback matches on `format()` directly.
+            // [CR32] Two forms, because the two branches need different things: the End branch
+            // wants the flat text (it is a deliberately unanchored `contains`), the Start branch
+            // wants the line structure (it is anchored). `plain` also serves as the cheap gate —
+            // it is the string this branch already needed, and building the line-structured form
+            // for every ordinary paragraph would be pure waste. `format()` is NOT the substrate
+            // here: it carries a block quote's `"> "` line prefix and re-emits inline markup,
+            // either of which stops an anchored test from firing. See `FileMarkerLine`.
             let plain = paragraph.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
             // [mc-15] The claim is applied either way; only a node that is NOTHING BUT the
             // marker disappears. A merged marker+content paragraph renders its content.
             // ⚠️ Applied BEFORE the image split: a marker paragraph CAN carry an image (a quoted
             // or persisted `.md` attachment opening with a logo), and splitting first would print
             // the sentinel as prose and lose the filename claim for the fence that follows.
-            let hadMarker = consumedFileMarker(plain)
+            let mayCarryMarker = plain.contains("Start of file:") || plain.contains("End of file:")
+            let hadMarker = mayCarryMarker
+                ? consumedFileMarker(lineStructured: FileMarkerLine.lineStructuredPlainText(of: paragraph),
+                                     flattened: plain)
+                : false
             didClaim = didClaim || hadMarker
             if paragraph.children.contains(where: { Self.imageChild($0) != nil }) {
                 appendSplittingImages(in: paragraph, stripMarkers: hadMarker)
                 return didClaim
             }
             if hadMarker {
-                let remainder = Self.strippingFileMarkerLines(
-                    from: paragraph.format().trimmingCharacters(in: .whitespacesAndNewlines))
+                // ⚠️ [CR62 + CR17] `escapingLeadingBlockSyntax`, the same helper `appendTextRun`
+                // has always applied to a run that follows an inline image, and for the same
+                // reason: what survives here was INLINE content in the source, protected from
+                // block interpretation by the sentinel in front of it. Handed to
+                // `AttributedString(markdown:)` on its own, a leading `1.` / `-` / `>` / `#`
+                // becomes a list or heading whose marker that renderer silently eats. Span
+                // removal makes this reachable for the first time — `--- End of file: x --- 1.
+                // renumbered` now leaves a residue that STARTS with a block marker — and without
+                // it the two branches would disagree about the identical input, since
+                // `appendTextRun` escapes and this one did not.
+                let remainder = Self.escapingLeadingBlockSyntax(Self.strippingFileMarkerLines(
+                    from: paragraph.format().trimmingCharacters(in: .whitespacesAndNewlines)))
                 if remainder.isEmpty { return didClaim }
                 logger.debug("[FILENAME] File marker stripped from a paragraph that also carried \(remainder.count) chars of content — the content is kept.")
                 append(.paragraph(preprocessMarkdownText(remainder)))
@@ -882,9 +1207,13 @@ private struct BlockBuilder {
             let text = child.format().trimmingCharacters(in: .whitespacesAndNewlines)
             // [mc-15] Same rule as the paragraph branch: apply the claim, keep any content that
             // is not the marker itself. This branch already works on `format()` output, so the
-            // strip is over the same string it renders.
-            if consumedFileMarker(text) {
-                let remainder = Self.strippingFileMarkerLines(from: text)
+            // strip is over the same string it renders — and so, here, is detection: an HTML
+            // block has no inline children to derive a line-structured plain text from, and
+            // `format()` already preserves its source lines verbatim (`visitHTMLBlock` re-emits
+            // `trimmedLineSegments`, backslashes and all).
+            if consumedFileMarker(lineStructured: text, flattened: text) {
+                // Same escape, same reason as the paragraph branch — see its note.
+                let remainder = Self.escapingLeadingBlockSyntax(Self.strippingFileMarkerLines(from: text))
                 if remainder.isEmpty { return didClaim }
                 append(.paragraph(preprocessMarkdownText(remainder)))
                 return didClaim
@@ -1044,6 +1373,8 @@ final class StreamingMarkdownParser {
     /// File-marker state carried across settled regions (marker paragraph and its
     /// code block may arrive in different flushes).
     private var pendingFileName: PendingFileNameClaim? = nil
+    /// [CR29] One-shot, so a marker-only stream logs once per message rather than once per flush.
+    private var didLogMarkerOnlyRender = false
 
     /// Parses the full accumulated text, reusing blocks for already-settled regions.
     /// Safe for arbitrary input: if `fullText` is not an append to what was consumed
@@ -1101,10 +1432,32 @@ final class StreamingMarkdownParser {
 
         var result = prefixBlocks + activeBlocks
 
-        // Mirror parseMarkdown's non-empty-input fallback so a malformed stream
-        // still shows raw text instead of a blank bubble.
-        if result.isEmpty && !fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            result = [ContentBlock(id: "block-0", type: .paragraph(fullText))]
+        // Mirror parseMarkdown's non-empty-input fallback so a malformed stream still shows raw
+        // text instead of a blank bubble — INCLUDING its marker test, which [CR29] found missing
+        // here. A node that is nothing but a sentinel is consumed on purpose, so zero blocks is
+        // DELIBERATE, and resurrecting the raw text as prose defeats mc-15 for the whole duration
+        // of the stream: the user watches `--- Start of file: x ---` sit in the bubble until the
+        // next flush carries real content.
+        //
+        // ⚠️ RESIDUE, stated rather than hidden: this hides a line the sentinel predicate
+        // recognises. The frames before that — `---` (a thematic break), then `--- S`, `--- Sta`
+        // … up to `--- Start of file` — are ordinary paragraphs and still show. Suppressing those
+        // would mean shape-matching an unfinished payload, which is this file's documented
+        // content-corruption class, and it would make this parser disagree with the authoritative
+        // `parseMarkdown` at settle. Both are worse than the residue.
+        //
+        // ⚠️ The strip stays INSIDE this branch. It is O(n) over the whole accumulated text, and
+        // on the normal path — where `result` is never empty — it must not run at all, or it
+        // reintroduces exactly the per-flush whole-text work this parser exists to avoid.
+        if result.isEmpty, !fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if FileMarkerLine.isNothingButFileMarkers(fullText) {
+                if !didLogMarkerOnlyRender {
+                    didLogMarkerOnlyRender = true
+                    logger.debug("[RENDER] Streamed text is nothing but file-marker sentinel(s) so far — rendering no blocks rather than falling back to the raw text. CONSEQUENCE: the bubble is briefly empty while the sentinel is on its own; it fills as soon as content arrives, and the sentinel is never shown. Logged once per message.")
+                }
+            } else {
+                result = [ContentBlock(id: "block-0", type: .paragraph(fullText))]
+            }
         }
         return result
     }
@@ -1115,6 +1468,7 @@ final class StreamingMarkdownParser {
         prefixBlocks = []
         pendingFileName = nil
         lastUnboundedTailWarning = 0
+        didLogMarkerOnlyRender = false
     }
 
     /// Index just past the last completed blank line that sits outside any ``` fence,

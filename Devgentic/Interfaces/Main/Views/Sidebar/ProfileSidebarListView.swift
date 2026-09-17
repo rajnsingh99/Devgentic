@@ -35,6 +35,10 @@ struct ProfileSidebarListView: View {
     @State private var pendingProfileID: UUID? = nil
     @State private var showingDiscardAlert = false
 
+    @FocusState private var isListFocused: Bool
+    @FocusState private var isSearchFocused: Bool
+    @State private var focusedProfileID: UUID? = nil
+
     private let typeFilters: [ProfileType?] = [nil] + ProfileType.allCases.filter { $0 != .code }
 
     /// Code profiles are hidden from the sidebar — managed by CodeSessionManager.
@@ -88,14 +92,17 @@ struct ProfileSidebarListView: View {
                 title: "Profiles",
                 buttonTitle: "New",
                 systemImage: "plus",
+                shortcut: "⌘N",
                 onAction: { isAddingProfile = true }
             )
+            .keyboardShortcut("n", modifiers: [.command])
             .padding(.horizontal, 12)
             .padding(.top, 12)
             .padding(.bottom, 8)
 
             // Search
             SidebarSearchBarView("Search profiles...", text: $searchText)
+                .focused($isSearchFocused)
                 .padding(.horizontal, 12)
                 .padding(.bottom, 10)
 
@@ -166,50 +173,73 @@ struct ProfileSidebarListView: View {
                     .frame(maxWidth: .infinity)
                 }
             } else {
-                ScrollView {
-                    VStack(spacing: 4) {
-                        ForEach(filteredProfiles) { profile in
-                            ProfileRowView(
-                                profile: profile,
-                                isSelected: activeProfileID == profile.id,
-                                onSelect: {
-                                    // ⚠️ register B46 — FLUSH BEFORE THE CHECK. Text still sitting
-                                    // in the floating Advanced prompt editor is invisible to
-                                    // `hasUnsavedEditorChanges` until it is committed, and the
-                                    // service's doc comment says so. Switching rows without this
-                                    // destroyed it silently: `navigateToProfile` calls
-                                    // `activateEditBuffer`, which assigns a BRAND-NEW
-                                    // `ProfileEditBuffer`, before the old view's teardown commit
-                                    // runs — and that commit captured the OLD buffer by value
-                                    // (register B27), so it landed on an orphan while the new
-                                    // buffer was already clean. No prompt, no log, no text.
-                                    profileService.flushPendingEditorText()
-                                    // ⚠️ `hasUnsavedEditorChanges`, not `editBuffer?.isDirty`: a
-                                    // workflow canvas keeps its dirt in `WorkflowCanvasState`, so
-                                    // the buffer check alone reported "clean" for a canvas full of
-                                    // unsaved nodes and switched away without prompting.
-                                    if profileService.hasUnsavedEditorChanges && activeProfileID != profile.id {
-                                        pendingProfileID = profile.id
-                                        showingDiscardAlert = true
-                                    } else {
-                                        router.navigateToProfile(profile.id, activatingBufferOn: profileService)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(spacing: 4) {
+                            ForEach(filteredProfiles) { profile in
+                                ProfileRowView(
+                                    profile: profile,
+                                    isSelected: activeProfileID == profile.id,
+                                    isFocused: isListFocused && focusedProfileID == profile.id,
+                                    onSelect: {
+                                        focusedProfileID = profile.id
+                                        selectProfile(profile)
+                                    },
+                                    onDuplicate: {
+                                        profileToDuplicate = profile
+                                    },
+                                    onDelete: {
+                                        profileToDelete = profile
+                                        showingDeleteAlert = true
                                     }
-                                },
-                                onDuplicate: {
-                                    profileToDuplicate = profile
-                                },
-                                onDelete: {
-                                    profileToDelete = profile
-                                    showingDeleteAlert = true
-                                }
-                            )
+                                )
+                                .id(profile.id)
+                            }
                         }
+                        .padding(.horizontal, 8)
+                        .padding(.top, 4)
+                        .padding(.bottom, 20)
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.top, 4)
-                    .padding(.bottom, 20)
+                    .scrollContentBackground(.hidden)
+                    .focusable()
+                    .focused($isListFocused)
+                    .focusEffectDisabled()
+                    .onMoveCommand { direction in
+                        moveFocus(direction, proxy: proxy)
+                    }
+                    .onKeyPress(.return) {
+                        if let id = focusedProfileID,
+                           let profile = filteredProfiles.first(where: { $0.id == id }) {
+                            selectProfile(profile)
+                            return .handled
+                        }
+                        return .ignored
+                    }
+                    .onKeyPress(.delete) {
+                        if let id = focusedProfileID,
+                           let profile = filteredProfiles.first(where: { $0.id == id }) {
+                            profileToDelete = profile
+                            showingDeleteAlert = true
+                            return .handled
+                        }
+                        return .ignored
+                    }
+                    .onKeyPress { press in
+                        if press.modifiers.contains(.command) {
+                            if press.key == "d" {
+                                if let id = focusedProfileID,
+                                   let profile = filteredProfiles.first(where: { $0.id == id }) {
+                                    profileToDuplicate = profile
+                                    return .handled
+                                }
+                            } else if press.key == "f" {
+                                isSearchFocused = true
+                                return .handled
+                            }
+                        }
+                        return .ignored
+                    }
                 }
-                .scrollContentBackground(.hidden)
             }
         }
         .sheet(isPresented: $isAddingProfile) {
@@ -290,6 +320,63 @@ struct ProfileSidebarListView: View {
         } message: {
             Text("You have unsaved changes. Discard them?")
         }
+        .onAppear {
+            if focusedProfileID == nil {
+                focusedProfileID = activeProfileID ?? filteredProfiles.first?.id
+            }
+        }
+        .onChange(of: activeProfileID) { _, newID in
+            if let newID {
+                focusedProfileID = newID
+            }
+        }
+        .onChange(of: filteredProfiles.map(\.id)) { _, newIDs in
+            if let id = focusedProfileID, !newIDs.contains(id) {
+                focusedProfileID = newIDs.first
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .newProfile)) { _ in
+            isAddingProfile = true
+        }
+        }
+    }
+
+    private func selectProfile(_ profile: BackendProfileModel) {
+        profileService.flushPendingEditorText()
+        if profileService.hasUnsavedEditorChanges && activeProfileID != profile.id {
+            pendingProfileID = profile.id
+            showingDiscardAlert = true
+        } else {
+            router.navigateToProfile(profile.id, activatingBufferOn: profileService)
+        }
+    }
+
+    private func moveFocus(_ direction: MoveCommandDirection, proxy: ScrollViewProxy) {
+        guard !filteredProfiles.isEmpty else { return }
+        let currentID = focusedProfileID ?? activeProfileID ?? filteredProfiles.first?.id
+        guard let currentID,
+              let currentIndex = filteredProfiles.firstIndex(where: { $0.id == currentID }) else {
+            focusedProfileID = filteredProfiles.first?.id
+            return
+        }
+
+        switch direction {
+        case .up:
+            let prevIndex = max(0, currentIndex - 1)
+            let profile = filteredProfiles[prevIndex]
+            focusedProfileID = profile.id
+            withAnimation(.easeInOut(duration: 0.12)) {
+                proxy.scrollTo(profile.id, anchor: .center)
+            }
+        case .down:
+            let nextIndex = min(filteredProfiles.count - 1, currentIndex + 1)
+            let profile = filteredProfiles[nextIndex]
+            focusedProfileID = profile.id
+            withAnimation(.easeInOut(duration: 0.12)) {
+                proxy.scrollTo(profile.id, anchor: .center)
+            }
+        default:
+            break
         }
     }
 

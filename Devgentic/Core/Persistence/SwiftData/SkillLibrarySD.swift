@@ -269,6 +269,13 @@ final class SkillVersionSD {
     /// ⚠️ `nil` (field absent) and `[]` (`allowed-tools: []`, "this skill needs no tools") are
     /// DIFFERENT statements and both survive this round trip. Collapsing them would turn an explicit
     /// declaration into silence — see `YAMLFrontmatterParser`, where exactly that was a live defect.
+    ///
+    /// ⚠️ GET-ONLY, deliberately. This had a setter with no caller anywhere in the tree, on a class
+    /// whose own header says "NOTHING MAY MUTATE A VERSION AFTER IT IS SAVED" — the initialiser
+    /// writes `allowedToolsJSON` directly, so the setter was never needed. Removing it turns that
+    /// comment into something the compiler enforces: a future edit that tries to mutate a saved
+    /// version's declaration now fails to build instead of silently rewriting history that a pinned
+    /// profile may be reading.
     var allowedTools: [String]? {
         get {
             guard let allowedToolsJSON, let data = allowedToolsJSON.data(using: .utf8) else { return nil }
@@ -278,7 +285,6 @@ final class SkillVersionSD {
             }
             return decoded
         }
-        set { allowedToolsJSON = Self.encode(newValue) }
     }
 
     private static func encode(_ tools: [String]?) -> String? {
@@ -312,8 +318,15 @@ final class SkillFileSD {
     ///
     /// ⚠️ Structure lives ENTIRELY in this string — there are no directory rows. A materialized
     /// export recreates directories from these paths, so a value containing `..` or a leading `/`
-    /// would escape the destination. Validation belongs at the ingest boundary, where the untrusted
-    /// archive is read, not here: a stored row is already past the point where refusing helps.
+    /// would escape the destination.
+    ///
+    /// ⚠️ INGEST IS NOT THE ONLY BOUNDARY, and this comment used to say it was. `SkillStore.create`
+    /// and `addVersion` are a second write path — the create sheet and `update_skill` — that never
+    /// passes through `SkillIngest`, so the STORE refuses a newly introduced unsafe path itself.
+    /// What stays true is the original point: a row that is already here is not re-validated on read
+    /// and is never rewritten. A row stored under an earlier, narrower rule is carried forward
+    /// verbatim, and `SkillMaterializer` re-checks at the one moment the value becomes a filesystem
+    /// operation.
     var relativePath: String
 
     /// The file's bytes.

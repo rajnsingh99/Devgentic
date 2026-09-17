@@ -133,8 +133,13 @@ struct UpdateSkillTool: DevgenticTool {
             }
             let matches = skills.filter { $0.name == arguments.skillName }
             guard let skill = matches.first else {
-                let available = skills.map(\.name).sorted().joined(separator: ", ")
-                return "Error: no skill named '\(arguments.skillName)'. Available: \(available.isEmpty ? "none" : available)."
+                // ⚠️ LABELLED. `skill_name` is MODEL-supplied, unbounded and free to contain
+                // newlines, and this string is a TOOL RESULT the model reads as markdown — so an
+                // echoed name could open a `[SYSTEM ALERT]` line of its own, one character from a
+                // real one. The identical hole was closed in `LoadSkillTool` and left open here,
+                // which is why `label` now lives in a shared type instead of that tool.
+                let available = skills.map { SkillToolText.label($0.name) }.sorted().joined(separator: ", ")
+                return "Error: no skill named '\(SkillToolText.label(arguments.skillName))'. Available: \(available.isEmpty ? "none" : available)."
             }
             // ⚠️ REFUSE ON AMBIGUITY. The library keys on an opaque id, so two skills can share a
             // NAME — and this tool addresses skills by name. Picking one would mean an approved edit
@@ -143,18 +148,18 @@ struct UpdateSkillTool: DevgenticTool {
             guard matches.count == 1 else {
                 let ids = matches.map(\.id).sorted().joined(separator: ", ")
                 logger.error("[SKILL_EDIT] REFUSED an agent edit to '\(arguments.skillName)': \(matches.count) skills share that name (\(ids)). CONSEQUENCE: nothing was written — editing by name would have picked one arbitrarily.")
-                return "Error: \(matches.count) skills are named '\(arguments.skillName)'. Nothing was changed — this tool addresses skills by name and cannot tell which one you mean. Ask the user to rename or remove one."
+                return "Error: \(matches.count) skills are named '\(SkillToolText.label(arguments.skillName))'. Nothing was changed — this tool addresses skills by name and cannot tell which one you mean. Ask the user to rename or remove one."
             }
             guard skill.isAgentWritable else {
                 logger.notice("[SKILL_EDIT] REFUSED an agent edit to '\(skill.name)' — not marked agent-writable. CONSEQUENCE: nothing was written; the user must enable \"Allow agent edits\" for this skill in the Skills library before this can succeed.")
                 return """
-                    Error: skill '\(skill.name)' is not marked agent-writable, so nothing was changed. \
+                    Error: skill '\(SkillToolText.label(skill.name))' is not marked agent-writable, so nothing was changed. \
                     The user can enable "Allow agent edits" for this skill in the Skills library. \
                     Tell them what you would have changed and why.
                     """
             }
             guard let current = skill.latestVersion else {
-                return "Error: skill '\(skill.name)' has no version to build on. Nothing was changed."
+                return "Error: skill '\(SkillToolText.label(skill.name))' has no version to build on. Nothing was changed."
             }
 
             // ⚠️ Carries the current version's DESCRIPTION, DECLARATION and FILES forward unchanged.
@@ -173,7 +178,7 @@ struct UpdateSkillTool: DevgenticTool {
                 note: arguments.changeNote.isEmpty ? "Updated by an agent." : arguments.changeNote
             ) {
             case .failure(let error):
-                return "Error updating '\(skill.name)': \(error.localizedDescription). The previous version is still current, so the skill is unchanged."
+                return "Error updating '\(SkillToolText.label(skill.name))': \(SkillToolText.label(error.localizedDescription, limit: 400)). The previous version is still current, so the skill is unchanged."
             case .success(let version):
                 logger.notice("[SKILL_EDIT] Agent added version \(version.id) to skill '\(skill.name)': \(arguments.changeNote). CONSEQUENCE: it reaches EVERY profile linked to this skill that does not pin an older version, in every conversation, on every future run — this edit outlives the conversation that approved it. Earlier versions are untouched and restorable from the Skills library.")
                 // ⚠️⚠️ DO NOT TELL THE MODEL TO RELOAD. This used to end with "Call `load_skill`
@@ -185,7 +190,7 @@ struct UpdateSkillTool: DevgenticTool {
                 // identical version and asks the user to approve it. The text it just wrote is text
                 // it already has; nothing needs re-reading.
                 return """
-                    Updated '\(skill.name)'. A new version was added; the previous one is kept and \
+                    Updated '\(SkillToolText.label(skill.name))'. A new version was added; the previous one is kept and \
                     can be restored from the Skills library.
 
                     ⚠️ This run continues on the version it started with, and `load_skill` will keep \

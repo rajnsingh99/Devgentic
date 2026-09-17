@@ -39,9 +39,9 @@ final class SkillLaunchSequenceTests: XCTestCase {
     ///
     /// **Mutation check:** call `sweep` before `configure` in `SkillLaunchSequence.run` and this
     /// goes red.
-    func testTheStoreIsConfiguredBeforeTheSweepRuns() {
+    func testTheStoreIsConfiguredBeforeTheSweepRuns() async {
         var order: [String] = []
-        SkillLaunchSequence.run(
+        await SkillLaunchSequence.run(
             container: container,
             logger: logger,
             permits: { _, _ in true },
@@ -54,9 +54,9 @@ final class SkillLaunchSequenceTests: XCTestCase {
 
     /// ⚠️ THE PRESENCE BUG. Without this, removing the sweep call is a silent, permanent empty
     /// library for every upgrading user.
-    func testTheSweepActuallyRuns() {
+    func testTheSweepActuallyRuns() async {
         var swept = false
-        SkillLaunchSequence.run(container: container, logger: logger,
+        await SkillLaunchSequence.run(container: container, logger: logger,
                                 permits: { _, _ in true },
                                 configure: { _ in }, sweep: { _ in swept = true })
         XCTAssertTrue(swept)
@@ -65,10 +65,10 @@ final class SkillLaunchSequenceTests: XCTestCase {
     /// ⚠️ And it is REFUSED in the test host — the control that makes the test above honest. The
     /// sweep reads real skill folders and writes the real failure record; an ordinary
     /// `test-without-building` run must not consume the developer's own pending import.
-    func testTheSweepIsRefusedWhenTheHostSaysNo() {
+    func testTheSweepIsRefusedWhenTheHostSaysNo() async {
         var swept = false
         var configured = false
-        SkillLaunchSequence.run(container: container, logger: logger,
+        await SkillLaunchSequence.run(container: container, logger: logger,
                                 permits: { _, _ in false },
                                 configure: { _ in configured = true },
                                 sweep: { _ in swept = true })
@@ -85,7 +85,7 @@ final class SkillLaunchSequenceTests: XCTestCase {
     /// which has no observable seam.
     func testDevgenticAppStillRunsTheLaunchSequence() throws {
         let source = try Self.read("Devgentic/DevgenticApp.swift")
-        XCTAssertTrue(source.contains("SkillLaunchSequence.run(container: container"),
+        XCTAssertTrue(source.contains("await SkillLaunchSequence.run(container: container"),
                       "DevgenticApp must call the launch sequence — without it the skill library is never prepared")
     }
 

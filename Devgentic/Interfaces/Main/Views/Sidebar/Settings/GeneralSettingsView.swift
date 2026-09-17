@@ -22,6 +22,7 @@ struct GeneralSettingsView: View {
     @AppStorage(AppSettings.speechAutoStopOnSilenceKey) private var autoStopOnSilence: Bool = true
     @AppStorage(AppSettings.developerModeKey) private var developerMode: Bool = false
     @AppStorage(AppSettings.diagnosticsEnabledKey) private var diagnosticsEnabled: Bool = true
+    @AppStorage(AppSettings.showTimelineThoughtsKey) private var showTimelineThoughts: Bool = false
 
     // Download/delete confirmation state
     enum SettingsWhisperAlert { case download, delete }
@@ -212,6 +213,19 @@ struct GeneralSettingsView: View {
                         theme: theme
                     ) {
                         Toggle("", isOn: Bindable(viewModel).useStreamingResponse)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                            .tint(theme.accentColor)
+                    }
+
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+
+                    SettingsRow(
+                        title: "Show Reasoning & Thoughts",
+                        description: "Display internal reasoning steps between tool invocations in the execution timeline by default. Can also be toggled directly from any message's timeline header.",
+                        theme: theme
+                    ) {
+                        Toggle("", isOn: $showTimelineThoughts)
                             .toggleStyle(.switch)
                             .labelsHidden()
                             .tint(theme.accentColor)

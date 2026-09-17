@@ -504,7 +504,7 @@ struct AgentConfigDetailView: View {
             }
 
             VStack(alignment: .leading) {
-                TextField("Agent Name", text: profile.displayName)
+                TextField("", text: profile.displayName, prompt: Text("Agent Name").foregroundColor(theme.placeholderText))
                     .font(theme.fontTitle2)
                     .fontWeight(.bold)
                     .textFieldStyle(.plain)
@@ -694,7 +694,7 @@ struct AgentConfigDetailView: View {
                         if instructionsBinding.wrappedValue.isEmpty {
                             Text("Define persona, reasoning strategy, and tool guidelines...")
                                 .font(theme.fontCode)
-                                .foregroundColor(theme.secondaryText.opacity(0.5))
+                                .foregroundColor(theme.placeholderText)
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 16)
                                 .allowsHitTesting(false)
@@ -739,34 +739,103 @@ struct AgentConfigDetailView: View {
     ///
     /// What is left is the honest summary plus the way through.
     private var skillsSection: some View {
-        SettingsCard(title: "Skills", icon: "sparkles", theme: theme) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text(linkedSkillsSummary)
-                    .font(.system(size: 12))
-                    .foregroundStyle(theme.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
+        SettingsCard(title: "Skills", icon: "puzzlepiece", theme: theme) {
+            VStack(alignment: .leading, spacing: 14) {
+                // Header row
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 8) {
+                            Text("Agent Skills")
+                                .font(theme.fontFootnote.weight(.semibold))
+                                .foregroundColor(theme.primaryText)
+
+                            if !linkedSelections.isEmpty {
+                                let enabledCount = linkedSelections.filter { $0.isEnabled && !$0.isAwaitingRelink }.count
+                                Text("\(enabledCount) active")
+                                    .font(theme.fontCodeCaption.weight(.medium))
+                                    .foregroundStyle(theme.accentColor)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(theme.accentColor.opacity(0.12), in: Capsule())
+                            }
+                        }
+
+                        Text(linkedSkillsSummary)
+                            .font(theme.fontCaption2)
+                            .foregroundColor(theme.secondaryText)
+                            .lineSpacing(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Spacer(minLength: 16)
+
+                    GlassActionButton(title: "Manage Skills", icon: "arrow.up.forward.app", isAccent: false) {
+                        router.navigate(to: .skillLibrary(profileID: editBuffer.draft.id))
+                    }
+                }
 
                 // ⚠️ Named separately from "not found". A selection awaiting re-link points at a
                 // skill that probably still exists and the import sweep repairs it; telling the user
                 // to remove it would destroy a link that is about to fix itself.
                 if awaitingRelinkCount > 0 {
-                    Label("\(awaitingRelinkCount) skill\(awaitingRelinkCount == 1 ? "" : "s") carried over from before the skill library and will be re-linked automatically. Nothing to do.",
-                          systemImage: "clock.arrow.circlepath")
-                        .font(.system(size: 11))
-                        .foregroundStyle(theme.secondaryText)
-                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 8) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.orange)
+                        Text("\(awaitingRelinkCount) skill\(awaitingRelinkCount == 1 ? "" : "s") carried over from before the skill library and will be re-linked automatically. Nothing to do.")
+                            .font(theme.fontCaption2)
+                            .foregroundStyle(theme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(8)
+                    .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
                 }
 
-                HStack {
-                    Spacer()
-                    // Passing the profile PINS it there: arriving from a profile's own config is a
-                    // statement about which profile is being configured, so the library disables its
-                    // own picker rather than letting a different one be selected underneath.
-                    GlassActionButton(title: "Manage Skills", icon: "sparkles", isAccent: false) {
-                        router.navigate(to: .skillLibrary(profileID: editBuffer.draft.id, openSkillID: nil))
+                if linkedSelections.isEmpty {
+                    HStack(spacing: 12) {
+                        Image(systemName: "puzzlepiece")
+                            .font(theme.fontBody)
+                            .foregroundColor(theme.secondaryText.opacity(0.6))
+                            .frame(width: 28, height: 28)
+                            .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 6))
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("No skills linked yet")
+                                .font(theme.fontCaption.weight(.medium))
+                                .foregroundColor(theme.primaryText)
+                            Text("Link skills from the library to teach this agent reusable workflows and capabilities.")
+                                .font(theme.fontCaption2)
+                                .foregroundColor(theme.secondaryText)
+                        }
+
+                        Spacer()
+                    }
+                    .padding(12)
+                    .background(theme.secondaryBackground.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(theme.dividerColor.opacity(0.2), lineWidth: 1)
+                    )
+                } else {
+                    VStack(spacing: 8) {
+                        ForEach(linkedSelections) { selection in
+                            SkillSelectionRow(
+                                selection: selection,
+                                theme: theme,
+                                onOpenDetail: {
+                                    if let skillID = selection.skillID {
+                                        router.navigate(to: .skillDetail(skillID: skillID))
+                                    } else {
+                                        router.navigate(to: .skillLibrary(profileID: editBuffer.draft.id))
+                                    }
+                                }
+                            )
+                        }
                     }
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -1083,8 +1152,9 @@ struct AgentConfigDetailView: View {
                 IslandPillButton(
                     title: "Save",
                     style: .primary,
+                    help: "Save profile changes (⌘S)",
                     accessibilityLabel: "Save profile changes",
-                    keyboardShortcut: .defaultAction
+                    keyboardShortcut: KeyboardShortcut("s", modifiers: .command)
                 ) {
                     // Pre-flight: empty system instructions on a small/Q4 model
                     // routinely produces looping or wandering behaviour. We don't
@@ -1180,6 +1250,118 @@ struct AgentConfigDetailView: View {
         case .singleAction: return .orange
         case .parallelActions: return .green
         }
+    }
+}
+
+// MARK: - SkillSelectionRow
+
+private struct SkillSelectionRow: View {
+    let selection: SkillSelection
+    let theme: any Theme
+    let onOpenDetail: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onOpenDetail) {
+            HStack(spacing: 12) {
+                // 32x32 rounded icon badge
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill((selection.isEnabled ? theme.accentColor : theme.secondaryText).opacity(selection.isEnabled ? 0.15 : 0.08))
+                    Image(systemName: "puzzlepiece")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(selection.isEnabled ? theme.accentColor : theme.secondaryText)
+                }
+                .frame(width: 32, height: 32)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder((selection.isEnabled ? theme.accentColor : theme.dividerColor).opacity(selection.isEnabled ? 0.35 : 0.2), lineWidth: 0.5)
+                )
+
+                // Skill info
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(selection.name)
+                            .font(theme.fontFootnote.weight(.semibold))
+                            .foregroundStyle(selection.isEnabled ? theme.primaryText : theme.secondaryText)
+                            .lineLimit(1)
+
+                        if selection.pinnedVersionID != nil {
+                            HStack(spacing: 3) {
+                                Image(systemName: "pin.fill")
+                                    .font(.system(size: 8))
+                                Text("Pinned")
+                                    .font(theme.fontCodeCaption)
+                            }
+                            .foregroundStyle(theme.secondaryText)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(theme.secondaryBackground, in: Capsule())
+                            .overlay(Capsule().stroke(theme.dividerColor.opacity(0.4), lineWidth: 0.5))
+                        }
+                    }
+
+                    if selection.isAwaitingRelink {
+                        Text("Awaiting re-link from migration")
+                            .font(theme.fontCaption2)
+                            .foregroundStyle(Color.orange)
+                    } else if let versionID = selection.pinnedVersionID {
+                        Text("Pinned to version \(versionID)")
+                            .font(theme.fontCaption2)
+                            .foregroundStyle(theme.secondaryText)
+                    } else {
+                        Text("Follows latest version")
+                            .font(theme.fontCaption2)
+                            .foregroundStyle(theme.secondaryText)
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                // Trailing indicators & arrow
+                HStack(spacing: 8) {
+                    if !selection.isEnabled {
+                        Text("Disabled")
+                            .font(theme.fontCodeCaption.weight(.medium))
+                            .foregroundStyle(theme.secondaryText)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(theme.secondaryText.opacity(0.12), in: Capsule())
+                            .overlay(
+                                Capsule().stroke(theme.dividerColor.opacity(0.25), lineWidth: 0.5)
+                            )
+                    }
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(isHovered ? theme.accentColor : theme.secondaryText.opacity(0.45))
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isHovered ? theme.surfaceOverlayStrong : theme.secondaryBackground.opacity(0.6))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(
+                        isHovered ? theme.accentColor.opacity(0.4) : theme.dividerColor.opacity(0.35),
+                        lineWidth: isHovered ? 1 : 0.5
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
+        .accessibilityLabel("\(selection.name)\(selection.isEnabled ? "" : ", Disabled")\(selection.pinnedVersionID != nil ? ", Pinned" : "")")
+        .accessibilityHint(selection.skillID != nil ? "Open skill details" : "Open skill library")
+        .help(selection.skillID != nil ? "View details for '\(selection.name)'" : "Manage skills in library")
     }
 }
 

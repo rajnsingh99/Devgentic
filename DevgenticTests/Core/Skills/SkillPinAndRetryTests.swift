@@ -151,7 +151,7 @@ final class SkillFailedImportRetryTests: XCTestCase {
     /// failed. The view reads it directly rather than being handed a value from a launch-time run,
     /// because a handed value is gone the moment the user navigates away — which is exactly when
     /// they come looking for it.
-    func testAfterASweepTheCaptureHoldsExactlyWhatFailed() throws {
+    func testAfterASweepTheCaptureHoldsExactlyWhatFailed() async throws {
         let good = try makeSkillFolder("good-one")
         let missing = work.appendingPathComponent("never-existed")
         try JSONEncoder().encode([
@@ -159,7 +159,7 @@ final class SkillFailedImportRetryTests: XCTestCase {
             SkillLibraryMigration.LegacySkillRef(folderPath: missing.path, name: "ghost")
         ]).write(to: captureURL)
 
-        SkillLibraryImportSweep.run(container: container)
+        await SkillLibraryImportSweep.run(container: container)
 
         XCTAssertEqual(SkillLibraryMigration.peekPendingImports().map(\.name), ["ghost"],
                        "what remains pending IS the failure list the UI shows")
@@ -168,19 +168,19 @@ final class SkillFailedImportRetryTests: XCTestCase {
 
     /// The retry the button performs: once the folder is reachable, a second pass imports it and
     /// the banner empties.
-    func testRetryingAfterTheFolderReappearsImportsItAndClearsTheList() throws {
+    func testRetryingAfterTheFolderReappearsImportsItAndClearsTheList() async throws {
         let path = work.appendingPathComponent("came-back")
         try JSONEncoder().encode([
             SkillLibraryMigration.LegacySkillRef(folderPath: path.path, name: "came-back")
         ]).write(to: captureURL)
 
-        SkillLibraryImportSweep.run(container: container)
+        await SkillLibraryImportSweep.run(container: container)
         XCTAssertEqual(SkillLibraryMigration.peekPendingImports().count, 1, "still missing")
         XCTAssertTrue(try store.fetchSkills().get().isEmpty)
 
         // The drive comes back.
         _ = try makeSkillFolder("came-back")
-        SkillLibraryImportSweep.run(container: container)
+        await SkillLibraryImportSweep.run(container: container)
 
         XCTAssertTrue(SkillLibraryMigration.peekPendingImports().isEmpty,
                       "a successful retry must clear the banner")
@@ -188,7 +188,7 @@ final class SkillFailedImportRetryTests: XCTestCase {
     }
 
     /// Retrying repeatedly must not duplicate what already imported.
-    func testRepeatedRetriesDoNotDuplicate() throws {
+    func testRepeatedRetriesDoNotDuplicate() async throws {
         let good = try makeSkillFolder("stable")
         let missing = work.appendingPathComponent("gone")
         try JSONEncoder().encode([
@@ -196,9 +196,9 @@ final class SkillFailedImportRetryTests: XCTestCase {
             SkillLibraryMigration.LegacySkillRef(folderPath: missing.path, name: "gone")
         ]).write(to: captureURL)
 
-        SkillLibraryImportSweep.run(container: container)
-        SkillLibraryImportSweep.run(container: container)
-        SkillLibraryImportSweep.run(container: container)
+        await SkillLibraryImportSweep.run(container: container)
+        await SkillLibraryImportSweep.run(container: container)
+        await SkillLibraryImportSweep.run(container: container)
 
         XCTAssertEqual(try store.fetchSkills().get().filter { $0.name == "stable" }.count, 1,
                        "⚠️ the successful folder is dropped from the capture, so a retry cannot re-import it")
@@ -207,7 +207,7 @@ final class SkillFailedImportRetryTests: XCTestCase {
 
     /// "Forget" is the user deciding those skills are not coming back. Nothing else clears the
     /// capture, so without it the banner would be permanent.
-    func testForgettingClearsTheCaptureForGood() throws {
+    func testForgettingClearsTheCaptureForGood() async throws {
         let missing = work.appendingPathComponent("gone")
         try JSONEncoder().encode([
             SkillLibraryMigration.LegacySkillRef(folderPath: missing.path, name: "gone")
@@ -217,7 +217,7 @@ final class SkillFailedImportRetryTests: XCTestCase {
 
         XCTAssertTrue(SkillLibraryMigration.peekPendingImports().isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: captureURL.path))
-        SkillLibraryImportSweep.run(container: container)
+        await SkillLibraryImportSweep.run(container: container)
         XCTAssertTrue(try store.fetchSkills().get().isEmpty, "and a later sweep finds nothing to do")
     }
 }

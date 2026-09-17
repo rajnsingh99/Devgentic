@@ -31,7 +31,7 @@ final class ChatOpsUpgradePairingTests: XCTestCase {
     /// but no account was ever recorded, so every command will be refused.
     func testAPairingWithNoRecordedAccountDoesNotRestoreAsConnected() {
         let state = ChatOpsPairingRestore.state(
-            credentialsPresent: true, addressPresent: true, authorizedUserID: nil, chatID: 42)
+            credentials: .present, addressPresent: true, authorizedUserID: nil, chatID: 42)
         XCTAssertNotEqual(state, .connected(chatID: 42),
                           "a green dot over a bridge that refuses every message is worse than a red one")
         XCTAssertTrue(state.needsRepairing, "and it must be the state that OFFERS re-pairing")
@@ -40,7 +40,7 @@ final class ChatOpsUpgradePairingTests: XCTestCase {
     /// A complete pairing is unaffected — the common path must not regress.
     func testACompletePairingStillRestoresAsConnected() {
         XCTAssertEqual(
-            ChatOpsPairingRestore.state(credentialsPresent: true, addressPresent: true,
+            ChatOpsPairingRestore.state(credentials: .present, addressPresent: true,
                                         authorizedUserID: "12345", chatID: 42),
             .connected(chatID: 42))
     }
@@ -48,9 +48,9 @@ final class ChatOpsUpgradePairingTests: XCTestCase {
     /// Missing credentials or a missing address is "never paired", not "needs re-pairing" — the two
     /// must not be conflated, because only one of them is a surprise to the user.
     func testAnIncompletePairingRestoresAsDisconnected() {
-        for (creds, addr) in [(false, true), (true, false), (false, false)] {
+        for (creds, addr) in [(ChatOpsCredentialState.absent, true), (.present, false), (.absent, false)] {
             let state = ChatOpsPairingRestore.state(
-                credentialsPresent: creds, addressPresent: addr, authorizedUserID: nil, chatID: 42)
+                credentials: creds, addressPresent: addr, authorizedUserID: nil, chatID: 42)
             XCTAssertEqual(state, .disconnected, "creds=\(creds) addr=\(addr)")
             XCTAssertFalse(state.needsRepairing)
         }

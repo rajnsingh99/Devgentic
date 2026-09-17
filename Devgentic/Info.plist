@@ -2,10 +2,57 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- ⚠️⚠️ A MISSING NS*UsageDescription IS A CRASH, NOT A DENIAL. macOS terminates the process
+	     the first time a TCC-protected API is called without its usage string — it does not return
+	     an error the tool could report. Four of these were absent while the tools that call them
+	     were live and registered in NativeToolCatalog, so asking the agent to add a calendar event
+	     or read a contact would kill the app. That is independent of the hardened runtime; the
+	     entitlements in Devgentic.entitlements are the OTHER half and neither works without the
+	     other. Add a key here in the same commit that adds the API call.
+
+	     ⚠️ THIS FILE IS NOT THE WHOLE STORY. The app target sets BOTH INFOPLIST_FILE (this file)
+	     AND GENERATE_INFOPLIST_FILE = YES with INFOPLIST_KEY_* overrides in the pbxproj. Xcode
+	     merges them. Keep each key in ONE mechanism — duplicating a key across both is how one
+	     silently wins and the other's edit appears to do nothing. The microphone and speech keys
+	     are currently in both; that is pre-existing and consistent, so they agree. Verify the
+	     merged result in the built Contents/Info.plist, never in the source file alone. -->
+
+	<!-- Microphone: voice dictation (panel + main window) and the Jarvis duplex engine.
+	     Entitlement: com.apple.security.device.audio-input. -->
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Devgentic needs access to your microphone to capture audio for voice-to-text input.</string>
+
+	<!-- Speech recognition. ⚠️ Possibly vestigial — transcription runs through WhisperKit on-device
+	     and there is no SFSpeechRecognizer call left in the tree. Kept because removing a usage
+	     string is only safe once you are certain no framework reaches the API indirectly, and a
+	     surplus string is inert. Revisit with the Jarvis SpeechAnalyzer work. -->
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Devgentic needs to send audio data to Apple&apos;s servers or process it on-device for speech recognition to convert your voice to text.</string>
+
+	<!-- Automation. Required by every in-process NSAppleScript that targets another app:
+	     run_applescript, the Safari tools, the system toggles, media control, Finder reveal.
+	     Entitlement: com.apple.security.automation.apple-events. Without this string the Automation
+	     prompt cannot be shown at all, so the user cannot grant what the entitlement asks for. -->
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Devgentic uses AppleScript automation to control other apps on your behalf — for example switching Safari tabs, toggling system settings, or revealing a file in Finder — when you ask it to.</string>
+
+	<!-- Calendar. macOS 14+ FULL-ACCESS key, matching requestFullAccessToEvents() in
+	     NativePIMTools. ⚠️ The pre-14 NSCalendarsUsageDescription is deliberately NOT here: these
+	     call sites use the full-access API, which reads this key. Entitlement:
+	     com.apple.security.personal-information.calendars. -->
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Devgentic needs full access to your calendars so it can read, create, and delete events when you ask it to manage your schedule.</string>
+
+	<!-- Reminders. macOS 14+ full-access key, matching requestFullAccessToReminders().
+	     Shares the calendars entitlement — EventKit covers both. -->
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Devgentic needs full access to your reminders so it can read, create, and delete them when you ask it to manage your tasks.</string>
+
+	<!-- Contacts. Matches CNContactStore().requestAccess(for: .contacts) in NativePIMTools.
+	     Entitlement: com.apple.security.personal-information.addressbook. -->
+	<key>NSContactsUsageDescription</key>
+	<string>Devgentic needs access to your contacts so it can look up and update people you ask it to find.</string>
+
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict/>

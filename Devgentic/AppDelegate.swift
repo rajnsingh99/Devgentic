@@ -314,7 +314,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
         let dirtyWorkflowIDs = workflowCanvasOwner?.unsavedWorkflowCanvasProfileIDs ?? []
 
-        guard profileService.hasUnsavedEditorChanges || !dirtyWorkflowIDs.isEmpty else { return .proceed }
+        // ⚠️ SKILL DRAFTS ARE A FOURTH SOURCE OF UNSAVED WORK, and quit is the ONLY exit that can
+        // lose them. A skill draft lives in `SkillDraftStore` for the life of the app run, so every
+        // navigation exit — sidebar, tab switch, palette, ⌘[ — is lossless by construction and needs
+        // no prompt. Memory going away is the one case that is not, which is why this is the single
+        // place skills are gated rather than seven.
+        let dirtySkillIDs = SkillDraftStore.shared.skillIDsWithUnsavedEdits
+
+        guard profileService.hasUnsavedEditorChanges
+                || !dirtyWorkflowIDs.isEmpty
+                || !dirtySkillIDs.isEmpty else { return .proceed }
+
+        if !dirtySkillIDs.isEmpty {
+            Self.logger.notice(
+                "[SKILL_EDIT] Quit is gated on \(dirtySkillIDs.count) skill draft(s) with unsaved "
+                + "instructions: \(dirtySkillIDs.joined(separator: ", ")). CONSEQUENCE: quitting "
+                + "discards them — a draft is deliberately never persisted, because a half-typed "
+                + "instruction surviving a crash would look like a saved version, and versions are "
+                + "append-only and reach every linked profile."
+            )
+        }
 
         let bufferDirty = profileService.editBuffer?.isDirty == true
         let canvasDirty = profileService.canvasEditGuard.hasUnsavedChanges

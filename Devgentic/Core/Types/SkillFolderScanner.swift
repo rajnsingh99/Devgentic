@@ -520,13 +520,28 @@ enum YAMLFrontmatterParser {
     /// pointing at the wrong thing entirely. Quoting a scalar is ordinary YAML and mandatory for
     /// values starting with `[`, `{`, `*`, `&`, or `%`.
     ///
-    /// No escape processing: this parser does not claim to be YAML, and `\"` inside a quoted
-    /// scalar is rare enough in frontmatter that mangling it is worse than leaving it literal.
+    /// ⚠️⚠️ THE `''` COLLAPSE IS ONE HALF OF AN ENCODING — it must stay in step with
+    /// `SkillMaterializer.yamlScalar`, which emits single-quoted scalars and doubles every
+    /// apostrophe inside one. Shipping either half alone CREATES a corruption rather than fixing
+    /// one: without this collapse, exporting `Reviews the user's code` and re-importing it yields
+    /// `the user''s code`.
+    ///
+    /// It is also plain YAML — `''` is exactly how a single-quoted scalar spells one quote — so a
+    /// third-party SKILL.md that already used it was being misread before this.
+    ///
+    /// ⚠️ DOUBLE-quoted scalars still get NO escape processing: `\"` and `\\` stay literal. That gap
+    /// is deliberate and separate. Closing it correctly would mean making the `first == last` strip
+    /// above an escape-aware scan — `"He said \""` currently loses its final character — and this
+    /// app no longer emits that shape, so the gap only affects hand-written frontmatter.
     private static func unquote(_ value: String) -> String {
         guard value.count >= 2 else { return value }
         guard let first = value.first, let last = value.last, first == last,
               first == "\"" || first == "'" else { return value }
-        return String(value.dropFirst().dropLast())
+        let inner = String(value.dropFirst().dropLast())
+        // Applies only INSIDE a single-quoted scalar, which is YAML's own rule — an unquoted value
+        // containing `''` is left exactly as written.
+        guard first == "'" else { return inner }
+        return inner.replacingOccurrences(of: "''", with: "'")
     }
 
     /// Parses a YAML flow sequence — `[a, b]` — returning nil when the value is not one.
