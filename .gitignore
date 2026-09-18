@@ -1,0 +1,7 @@
+# The site is hand-authored static files — nothing is built here.
+.DS_Store
+*.log
+
+# Sparkle writes appcast.xml via `generate_appcast`; it IS committed (Sparkle
+# fetches it from this site), but its working files are not.
+*.delta
