@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  QuickAccessSessionViewModel.swift
 //  Devgentic
@@ -112,12 +112,12 @@ final class QuickAccessSessionViewModel {
     /// The panel's user turn: the message that is persisted, displayed AND handed to the send
     /// path — one object, so they cannot diverge.
     ///
-    /// ⚠️ The panel sends NO `promptOverride`. Unlike Jarvis it does not decorate the query, so
+    /// ⚠️ The panel sends NO `promptOverride`. Unlike Orb it does not decorate the query, so
     /// the model's text and the displayed text are the same string — and the duplicate-query strip
     /// keys on this message's ID either way. The absence is the contract: if a future change ever
     /// gives the panel its own prompt decoration, it must travel as `promptOverride` rather than by
     /// mutating this message, or the displayed row and the model's copy drift apart. That drift is
-    /// exactly what made every Jarvis voice turn arrive as an orphan.
+    /// exactly what made every Orb voice turn arrive as an orphan.
     ///
     /// ⚠️ It also builds NO HISTORY. The panel used to hand over a reversed slice of
     /// `currentChatMessages` — its PAGINATION WINDOW, a hard 20 rows that never grew because

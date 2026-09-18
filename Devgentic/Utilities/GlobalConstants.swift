@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  GlobalConstants.swift
 //  Devgentic
@@ -59,6 +59,16 @@ struct GlobalConstants {
     /// them. Attaching a custom domain later does NOT require changing this — GitHub 301-redirects
     /// this path — but RENAMING the account or repo breaks it, and breaks the Sparkle feed with it.
     static let homepageURL = "https://rajnsingh99.github.io/devgentic/"
+
+    /// The public source repository — the AGPL "Corresponding Source" offer, as a URL.
+    ///
+    /// Read by the ChatOps `/help` reply (`ChatOpsCommandService.help`). That placement is the point:
+    /// AGPL §13 obliges anyone who runs a MODIFIED Devgentic that other people reach over Slack,
+    /// Discord or Telegram to offer those users its source. Carrying the offer in the default reply
+    /// means every downstream operator inherits a compliant `/help` instead of having to remember
+    /// to add one. `Resources/Credits.html` (the About panel) repeats the same URL by hand.
+    /// ⚠️ Same account/repo-name dependency as `homepageURL`: a rename breaks both.
+    static let sourceCodeURL = "https://github.com/rajnsingh99/devgentic"
 
     // --- Notification Name ---
     static let showQuickAccessPanelNotification = Notification.Name("devgentic.showQuickAccessPanel")

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  SettingsView.swift
 //  Devgentic
@@ -26,7 +26,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     case theme = "Theme"
     case chatOps = "ChatOps"
     case quickAccess = "Quick Access"
-    case jarvis = "Jarvis"
+    case orb = "Orb"
     case about = "About"
 
     var id: String { self.rawValue }
@@ -42,7 +42,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .theme:            return "Theme"
         case .chatOps:          return "ChatOps"
         case .quickAccess:      return "Quick Access"
-        case .jarvis:           return "Jarvis"
+        case .orb:           return "Orb"
         case .about:            return "About"
         }
     }
@@ -60,7 +60,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
             return "paperplane.fill"
         case .quickAccess:
             return "bolt.circle"
-        case .jarvis:
+        case .orb:
             return "atom"
         case .about:
             return "info.circle"
@@ -75,7 +75,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .theme: return String(localized: "Appearance and Typography")
         case .chatOps: return String(localized: "Remote Telegram control")
         case .quickAccess: return String(localized: "Global shortcut and panel")
-        case .jarvis: return String(localized: "Voice assistant and listening")
+        case .orb: return String(localized: "Voice assistant and listening")
         case .about: return String(localized: "Version and licenses")
         }
     }
@@ -94,8 +94,8 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
             ChatOpsSettingsView()
         case .quickAccess:
             QuickAccessSettingsView()
-        case .jarvis:
-            JarvisSettingsView()
+        case .orb:
+            OrbSettingsView()
         case .about:
             VStack(spacing: 16) {
                 Image(systemName: "bolt.fill")

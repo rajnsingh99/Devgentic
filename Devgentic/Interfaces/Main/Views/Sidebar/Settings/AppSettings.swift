@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  AppSettings.swift
 //  Devgentic
@@ -69,43 +69,43 @@ struct AppSettings {
     // Chat & Execution Timeline
     static let showTimelineThoughtsKey = "showTimelineThoughts"
 
-    // Jarvis — the voice HUD.
+    // Orb — the voice HUD.
     // ⚠️ Key VALUES must stay free of "key"/"token"/"secret"/"auth"/"path": `BundleExporter`'s
     // allowlist is asserted by `ObservabilityHygieneTests.testAllowlistContainsNothingSecretShaped`,
-    // which matches on the value, not the symbol. Hence `jarvisShortcutCode`, not `…KeyCode`.
-    static let jarvisEnabledKey = "jarvisEnabled"
-    static let jarvisActivationModeKey = "jarvisActivationMode"
-    static let jarvisShortcutCodeKey = "jarvisShortcutCode"
-    static let jarvisShortcutModifiersKey = "jarvisShortcutModifiers"
-    static let jarvisEndpointingKey = "jarvisEndpointing"
-    static let jarvisSpokenResponsesKey = "jarvisSpokenResponses"
-    static let jarvisFollowUpKey = "jarvisFollowUp"
-    static let jarvisEarconsKey = "jarvisEarcons"
-    static let jarvisToolApprovalsKey = "jarvisToolApprovals"
+    // which matches on the value, not the symbol. Hence `orbShortcutCode`, not `…KeyCode`.
+    static let orbEnabledKey = "orbEnabled"
+    static let orbActivationModeKey = "orbActivationMode"
+    static let orbShortcutCodeKey = "orbShortcutCode"
+    static let orbShortcutModifiersKey = "orbShortcutModifiers"
+    static let orbEndpointingKey = "orbEndpointing"
+    static let orbSpokenResponsesKey = "orbSpokenResponses"
+    static let orbFollowUpKey = "orbFollowUp"
+    static let orbEarconsKey = "orbEarcons"
+    static let orbToolApprovalsKey = "orbToolApprovals"
     /// Developer-mode escape hatch for the Phase 4 duplex audio graph. Default OFF.
-    static let jarvisDuplexAudioKey = "jarvisDuplexAudio"
+    static let orbDuplexAudioKey = "orbDuplexAudio"
     // [Phase 6 · F3] Ambient run-completion announcements.
-    static let jarvisAmbientAnnouncementsKey = "jarvisAmbientAnnouncements"
-    static let jarvisAmbientThresholdKey = "jarvisAmbientThresholdSeconds"
+    static let orbAmbientAnnouncementsKey = "orbAmbientAnnouncements"
+    static let orbAmbientThresholdKey = "orbAmbientThresholdSeconds"
     // [Phase 6 · F2] Spoken tool approvals.
-    static let jarvisVoiceApprovalsKey = "jarvisVoiceApprovals"
+    static let orbVoiceApprovalsKey = "orbVoiceApprovals"
     // ⚠️ DELIBERATELY NOT IN `BundleExporter.exportablePreferenceKeys`. These two hold free-form
     // text the USER TYPED, and that allowlist's contract is that none of its entries carry user
     // content. The diagnostic value is near zero — which words were configured is inferable from
     // the approval log lines, which already record counts rather than content.
-    static let jarvisApprovalKeywordsKey = "jarvisApprovalKeywords"
-    static let jarvisDenialKeywordsKey = "jarvisDenialKeywords"
-    /// Which speech recognizer Jarvis uses. Developer-mode until device-proven. Default WhisperKit.
-    static let jarvisRecognizerKey = "jarvisRecognizer"
+    static let orbApprovalKeywordsKey = "orbApprovalKeywords"
+    static let orbDenialKeywordsKey = "orbDenialKeywords"
+    /// Which speech recognizer Orb uses. Developer-mode until device-proven. Default WhisperKit.
+    static let orbRecognizerKey = "orbRecognizer"
     /// Locale for Apple Speech. Empty = follow the system. ⚠️ Apple's models are per-LOCALE and
     /// must be reserved + installed before use, so this is a model choice, not a preference.
-    static let jarvisSpeechLocaleKey = "jarvisSpeechLocale"
-    /// Empty string is the sentinel for "same voice as chat Read Aloud" — see JarvisVoiceOutput.
-    static let jarvisNarratorVoiceKey = "jarvisNarratorVoice"
-    static let jarvisNarratorRateKey = "jarvisNarratorRate"
-    /// ⚠️ Pre-existing value, written by JarvisSessionController since the MVP. The STRING must
+    static let orbSpeechLocaleKey = "orbSpeechLocale"
+    /// Empty string is the sentinel for "same voice as chat Read Aloud" — see OrbVoiceOutput.
+    static let orbNarratorVoiceKey = "orbNarratorVoice"
+    static let orbNarratorRateKey = "orbNarratorRate"
+    /// ⚠️ Pre-existing value, written by OrbSessionController since the MVP. The STRING must
     /// not change or every user silently loses their remembered profile.
-    static let jarvisProfileIDKey = "jarvisProfileID"
+    static let orbProfileIDKey = "orbProfileID"
 
     // Speech Playback (Read Aloud)
     static let speechPlaybackRateKey = "speechPlaybackRate"

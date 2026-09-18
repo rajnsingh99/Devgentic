@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  WorkflowRunEditDisclosureTests.swift
 //  DevgenticTests
@@ -173,7 +173,7 @@ final class WorkflowRunEditDisclosureTests: XCTestCase {
     /// this discloses instead of prompting. A decision that varied by origin would mean a scheduled
     /// run silently kept the old behaviour.
     func testEveryRunOriginDisclosesEqually() throws {
-        for origin in [WorkflowRunOrigin.chat, .scheduled, .chatOps, .regenerate, .quickAccess, .jarvis, .resume] {
+        for origin in [WorkflowRunOrigin.chat, .scheduled, .chatOps, .regenerate, .quickAccess, .orb, .resume] {
             let profile = workflowProfile()
             let registry = FakeRegistry()
             registry.unsavedWorkflowCanvasProfileIDs = [profile.id]

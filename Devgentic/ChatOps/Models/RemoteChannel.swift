@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  RemoteChannel.swift
 //  Devgentic
@@ -69,7 +69,7 @@ extension MessageSource {
     /// The provider a remote-originated message came from, or nil for a local surface.
     ///
     /// ⚠️ `RemoteSessionInfo` stores a `MessageSource` rather than a provider, so the mirror needs
-    /// this to address a channel. Deliberately optional: `.localUI`, `.quickAccess`, `.jarvis` and
+    /// this to address a channel. Deliberately optional: `.localUI`, `.quickAccess`, `.orb` and
     /// `.scheduled` are real sources with no remote channel, and forcing them to a default would
     /// silently address the wrong platform.
     var remoteProvider: RemoteChannel.Provider? {
@@ -77,7 +77,7 @@ extension MessageSource {
         case .telegram: return .telegram
         case .discord:  return .discord
         case .slack:    return .slack
-        case .localUI, .quickAccess, .jarvis, .scheduled: return nil
+        case .localUI, .quickAccess, .orb, .scheduled: return nil
         }
     }
 }

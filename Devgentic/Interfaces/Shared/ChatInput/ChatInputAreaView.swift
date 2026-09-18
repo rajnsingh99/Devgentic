@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  ChatInputAreaView.swift
 //  Devgentic
@@ -60,6 +60,7 @@ struct ChatInputAreaView: View {
     @State private var editorTextView: CustomTextEditor.CustomNSTextView? = nil
     @State private var selectedProfile: BackendProfileModel?
     @State private var showingSchedulePopover = false
+    @State private var isDropTargeted: Bool = false
     /// [Context gauge] Occupancy of the selected model's window for THIS conversation
     /// (nil = non-chat profile, so the ring self-hides). Recomputed on turn / model /
     /// attachment changes — never per keystroke — so it stays cheap on long transcripts.
@@ -233,7 +234,7 @@ struct ChatInputAreaView: View {
             openFilePicker()
         }
         // MARK: - File Drop Zone (P1)
-        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             handleFileDrop(providers)
         }
 
@@ -445,7 +446,14 @@ struct ChatInputAreaView: View {
             elevation: .elevated,
             isFocused: isFocused
         )
+        .overlay {
+            if isDropTargeted {
+                ComposerDropZoneOverlay(cornerRadius: 18)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            }
+        }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isFocused)
+        .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.78), value: isDropTargeted)
         .transition(.opacity)
     }
 
@@ -667,11 +675,11 @@ struct ChatInputAreaView: View {
                 }
             }
 
-            // [Jarvis] Experimental voice-HUD entry point, and the feature's ONLY hook
-            // into existing code — Jarvis otherwise lives entirely in its own floating
-            // NSPanel. Delete Devgentic/Jarvis/ plus these four lines to remove it.
+            // [Orb] Experimental voice-HUD entry point, and the feature's ONLY hook
+            // into existing code — Orb otherwise lives entirely in its own floating
+            // NSPanel. Delete Devgentic/Orb/ plus these four lines to remove it.
             if mainViewModel.interfaceMode == .chat {
-                JarvisComposerButton()
+                OrbComposerButton()
             }
 
             // Voice — DynamicActionButton retained for its main-only machinery (voice states,
@@ -835,7 +843,8 @@ struct ChatInputAreaView: View {
     
     // MARK: - File Drop Handler (P1) — [Q8] shared with the QuickAccess panel via FileAttachmentPicker.
     private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
-        FileAttachmentPicker.handleDrop(providers) { item in
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+        return FileAttachmentPicker.handleDrop(providers) { item in
             inputViewModel.addAttachedFile(fileItem: item)
         }
     }

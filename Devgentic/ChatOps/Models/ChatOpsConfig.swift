@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  ChatOpsConfig.swift
 //  Devgentic
@@ -38,7 +38,7 @@ enum ChatOpsSecurityTier: String, Codable, CaseIterable, Identifiable {
 /// Whether a remote-started run stops for tool approval.
 ///
 /// ⚠️⚠️ THE MOST PRIVILEGED SETTING IN CHATOPS, AND ITS SAFETY IS ITS SHAPE — the same argument
-/// `JarvisToolApprovals` rests on, which this deliberately mirrors. `.autonomous` means a message
+/// `OrbToolApprovals` rests on, which this deliberately mirrors. `.autonomous` means a message
 /// from a phone runs `execute_shell` with no prompt on ANY surface: the banner is skipped, so no
 /// `PendingHITL` exists and the mirror has nothing to post either. What keeps that defensible:
 ///

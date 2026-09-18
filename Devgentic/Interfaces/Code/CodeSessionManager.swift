@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  CodeSessionManager.swift
 //  Devgentic
@@ -51,7 +51,7 @@ final class CodeSessionManager {
 
     /// Display string for the project path (truncated for toolbar).
     var projectDisplayName: String {
-        guard let path = projectPath else { return "Select folder" }
+        guard let path = projectPath else { return "Project" }
         return "~/\(path.lastPathComponent)"
     }
 
@@ -85,6 +85,9 @@ final class CodeSessionManager {
     // MARK: - Private
 
     private static let profileIDKey = "devgentic.codeProfileID"
+    /// Per-project quick settings live in their OWN UserDefaults key, deliberately outside the
+    /// profile row — see `CodeQuickSettingsStore`'s note on `resetSession()` deleting that row.
+    private static let quickSettingsKey = CodeQuickSettingsStore.defaultsKey
     private static let recentPathsKey = "devgentic.codeRecentProjectPaths"
     private static let legacyConfigKey = "devgentic.codeSessionConfig"
     private static let devgenticDirName = ".devgentic"
@@ -92,30 +95,68 @@ final class CodeSessionManager {
 
     @ObservationIgnored private var contextFileMonitor: FileSystemMonitor?
 
+    /// Set when `init()` kept the stored handle but could not READ the row, because the store threw
+    /// rather than reporting the row absent. The first `ensureCodeProfile()` that manages to read
+    /// it fills the caches.
+    ///
+    /// ⚠️ An explicit flag, NOT `modelName.isEmpty`. `resetSession()` deliberately empties the
+    /// caches while the row can still carry a model, so keying the re-hydrate off emptiness would
+    /// repopulate the session the user just reset — restoring a model they had explicitly cleared.
+    @ObservationIgnored private var needsHydrationFromStore = false
+
+    /// Where the profile handle and recent-paths cache live.
+    ///
+    /// ⚠️ Injectable for ONE reason: the handle is the thing whose loss creates duplicate code
+    /// profiles, so a test has to be able to clear it — and `UserDefaults.standard` under the test
+    /// host IS the shipping app's domain, so a test that cleared it there would delete the
+    /// developer's own `devgentic.codeProfileID` and hand them the very defect under test.
+    @ObservationIgnored private let defaults: UserDefaults
+
     // MARK: - Init
 
-    init() {
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+
         // Clean up legacy CodeSessionConfig from UserDefaults
-        UserDefaults.standard.removeObject(forKey: Self.legacyConfigKey)
+        defaults.removeObject(forKey: Self.legacyConfigKey)
 
         // Restore cached recent project paths
         loadRecentProjectPaths()
 
         // Restore profile ID
-        if let uuidString = UserDefaults.standard.string(forKey: Self.profileIDKey),
+        if let uuidString = self.defaults.string(forKey: Self.profileIDKey),
            let uuid = UUID(uuidString: uuidString) {
-            // Verify profile still exists in SwiftData
-            if let profile = try? BackendProfileStore.shared.fetchProfile(byId: uuid) {
+            // ⚠️ A THROWN fetch is not a deleted row, and the difference is a duplicate profile.
+            // `try?` collapsed both into `nil`, and the else-branch below deletes the handle — so a
+            // transient `containerNotConfigured` (this type is constructed from a stored-property
+            // default, i.e. before `DevgenticApp.init()`'s body, and only declaration order puts the
+            // container first) permanently orphaned the row: the store kept it, nothing referenced
+            // it, and the next `ensureCodeProfile()` minted a rival "Code Session". Keep the two
+            // cases apart — only a genuine `nil` may clear the key.
+            do {
+                if let profile = try BackendProfileStore.shared.fetchProfile(byId: uuid) {
+                    self.codeProfileID = uuid
+                    hydrateFromProfile(profile)
+                    logger.info("[CODE_PROFILE] Restored profile \(uuid.uuidString) — provider: \(self.provider.rawValue), model: \(self.modelName)")
+                    // ⚠️ Reconcile even on a SUCCESSFUL restore. Adoption only collapses duplicates
+                    // when the handle was lost, and a machine that already accumulated them has a
+                    // perfectly valid handle pointing at the newest one — so without this pass the
+                    // existing orphans are permanent. Once per launch, not per action: the rows
+                    // cannot multiply mid-session, and `ensureCodeProfile()` runs on every Tools
+                    // click and model change.
+                    collapseDuplicateCodeProfiles(keeping: uuid, from: sharedCodeProfilesOnDisk())
+                } else {
+                    // Genuinely absent — deleted out from under us. Clearing is correct here.
+                    self.defaults.removeObject(forKey: Self.profileIDKey)
+                    logger.warning("[CODE_PROFILE] Stale profile ID \(uuid.uuidString) — row not found, handle cleared. CONSEQUENCE: the next Code-mode action adopts a surviving code row if one is on disk, and only creates a new profile when there is none.")
+                }
+            } catch {
                 self.codeProfileID = uuid
-                hydrateFromProfile(profile)
-                logger.info("CodeSessionManager restored profile \(uuid.uuidString) — provider: \(self.provider.rawValue), model: \(self.modelName)")
-            } else {
-                // Profile was deleted externally — clear stale ID
-                UserDefaults.standard.removeObject(forKey: Self.profileIDKey)
-                logger.warning("CodeSessionManager: stale profile ID \(uuid.uuidString) — profile not found, cleared")
+                self.needsHydrationFromStore = true
+                logger.error("[CODE_PROFILE] Could not read profile \(uuid.uuidString): \(error.localizedDescription). CONSEQUENCE: the handle is KEPT rather than cleared, so the row is not orphaned; the model and project caches stay empty until the first Code-mode action re-reads them, so the toolbar reads 'Select Model' until then.")
             }
         } else {
-            logger.info("CodeSessionManager initialized — no existing code profile")
+            logger.info("[CODE_PROFILE] Initialized with no stored handle — an existing code profile is adopted on first use if one is on disk.")
         }
 
         // If a project path was restored, bootstrap memory and ensure it's in recents
@@ -131,16 +172,55 @@ final class CodeSessionManager {
 
     // MARK: - Profile Lifecycle
 
-    /// Lazily creates or returns the singleton code profile.
+    /// Returns the singleton code profile — adopting the one already on disk before creating a new
+    /// one.
+    ///
+    /// ⚠️ THE STORE IS AUTHORITATIVE; the UserDefaults handle is only a cache. It has been lost
+    /// three distinct ways in practice: a bundle-identifier change (`com.dev.devgentic` →
+    /// `app.devgentic.macos`) wiped the whole defaults domain while `DevgenticSD.store` — whose
+    /// path is not bundle-scoped — kept every row; a thrown fetch in `init()` was read as
+    /// "deleted"; and `resetSession()` cleared the handle on a delete that had silently failed.
+    /// Each loss used to mint a SECOND "Code Session" and orphan the first forever — nothing GCs
+    /// profiles, and the orphan stays selectable in the Tool Library under the identical name, so
+    /// tool enablement saved against it is read by nobody. Adopting makes every one of those
+    /// losses self-healing instead of duplicating.
     @discardableResult
     func ensureCodeProfile() -> UUID {
-        // Fast path: profile already exists
-        if let id = codeProfileID,
-           (try? BackendProfileStore.shared.fetchProfile(byId: id)) != nil {
-            return id
+        // 1. Fast path: the handle still resolves to a row.
+        if let id = codeProfileID {
+            do {
+                if let profile = try BackendProfileStore.shared.fetchProfile(byId: id) {
+                    if needsHydrationFromStore {
+                        hydrateFromProfile(profile)
+                        needsHydrationFromStore = false
+                        logger.info("[CODE_PROFILE] Hydrated \(id.uuidString) on first use after an unreadable launch read — model: '\(self.modelName.isEmpty ? "(none)" : self.modelName)'.")
+                    }
+                    return id
+                }
+            } catch {
+                // ⚠️ Return, do NOT fall through to create. Falling through on an unreadable store
+                // is precisely how a duplicate is born: the adopt scan below would fail for the
+                // same reason and a rival row would be written the moment the store recovered.
+                logger.error("[CODE_PROFILE] Could not verify profile \(id.uuidString): \(error.localizedDescription). CONSEQUENCE: the existing handle is returned unverified instead of creating a second 'Code Session'; a save against it fails loudly if the row really is gone.")
+                return id
+            }
         }
 
-        // Create a skeleton code profile with empty model (lenient validation allows this)
+        // 2. Adopt path: the handle is missing or stale, but the store may still hold the
+        //    singleton. Claim it rather than minting a rival.
+        let existingCodeProfiles = sharedCodeProfilesOnDisk()
+
+        if let adopted = existingCodeProfiles.sorted(by: Self.adoptionPreference).first {
+            codeProfileID = adopted.id
+            self.defaults.set(adopted.id.uuidString, forKey: Self.profileIDKey)
+            hydrateFromProfile(adopted)
+            needsHydrationFromStore = false
+            logger.info("[CODE_PROFILE] Adopted existing code profile \(adopted.id.uuidString) — model: '\(self.modelName.isEmpty ? "(none)" : self.modelName)'. CONSEQUENCE: the lost handle is restored in place of creating a duplicate 'Code Session'.")
+            collapseDuplicateCodeProfiles(keeping: adopted.id, from: existingCodeProfiles)
+            return adopted.id
+        }
+
+        // 3. Create a skeleton code profile with empty model (lenient validation allows this)
         let providerConfig = ProviderConfig(
             apiProvider: provider,
             modelName: ""
@@ -169,16 +249,90 @@ final class CodeSessionManager {
         do {
             try BackendProfileStore.shared.saveProfile(snapshot)
             codeProfileID = snapshot.id
-            UserDefaults.standard.set(snapshot.id.uuidString, forKey: Self.profileIDKey)
-            logger.info("Created code profile \(snapshot.id.uuidString)")
+            self.defaults.set(snapshot.id.uuidString, forKey: Self.profileIDKey)
+            logger.info("[CODE_PROFILE] Created code profile \(snapshot.id.uuidString) — no existing code row was on disk to adopt.")
             return snapshot.id
         } catch {
-            logger.error("Failed to create code profile: \(error.localizedDescription)")
+            logger.error("[CODE_PROFILE] Failed to create code profile: \(error.localizedDescription). CONSEQUENCE: an unbacked ID is returned, so this Code session cannot persist a model or project folder until a later action succeeds.")
             return UUID() // Should not happen — lenient validation for inserts
         }
     }
 
     // MARK: - Config Updates
+
+    // MARK: - Quick Settings (per project)
+
+    /// Execution overrides for the CURRENT project folder, or the preset defaults when the folder
+    /// has none (or when no folder is open).
+    ///
+    /// ⚠️ Reads through to UserDefaults on every access rather than caching. The store is the
+    /// single source of truth, and a cache here would have to be invalidated on project switch —
+    /// exactly the kind of staleness that makes a settings panel show one thing while the run
+    /// uses another.
+    var quickSettings: CodeQuickSettings {
+        CodeQuickSettingsStore.settings(for: projectPath?.path, defaults: defaults)
+    }
+
+    /// Persists quick settings for the current project and pushes them onto the live profile.
+    ///
+    /// The profile write is what makes a change take effect for a run already configured; the
+    /// per-send `refreshInstructionsOnProfile()` re-applies them anyway, so this is belt-and-braces
+    /// for the case where the user changes a setting between sends.
+    func updateQuickSettings(_ settings: CodeQuickSettings) {
+        guard let path = projectPath?.path else {
+            logger.warning("[CODE_SETTINGS] Quick settings changed with no project folder open. CONSEQUENCE: the change is dropped — settings are scoped per project and there is nothing to attach them to.")
+            return
+        }
+
+        CodeQuickSettingsStore.save(settings, for: path, defaults: defaults, now: Date())
+        logger.info("[CODE_SETTINGS] Saved quick settings for '\(URL(fileURLWithPath: path).lastPathComponent)' — maxIterations: \(settings.maxIterations.map(String.init) ?? "default"), timeout: \(settings.executionTimeout.map { String(Int($0)) } ?? "default")s, \(settings.toolConfirmations.count) tool override(s), thinking: \(settings.thinkingEnabled.map(String.init) ?? "default").")
+
+        applyQuickSettingsToProfile(settings)
+    }
+
+    /// Writes the execution-shaped fields of `settings` onto the persisted `.code` profile.
+    ///
+    /// ⚠️ Tool CONFIRMATIONS go through `mergePresetTools` rather than being written directly:
+    /// the preset is the authority on which tools exist, and a direct write here would let a
+    /// stale override resurrect a tool the preset had dropped.
+    private func applyQuickSettingsToProfile(_ settings: CodeQuickSettings) {
+        guard let profileID = codeProfileID,
+              var profile = try? BackendProfileStore.shared.fetchProfile(byId: profileID),
+              case .code(var agentConfig) = profile.details else { return }
+
+        Self.apply(settings, to: &agentConfig)
+        profile.details = .code(agentConfig)
+
+        do {
+            try BackendProfileStore.shared.saveProfile(profile)
+        } catch {
+            logger.error("[CODE_SETTINGS] Failed to push quick settings onto profile \(profileID.uuidString): \(error.localizedDescription). CONSEQUENCE: they remain saved in UserDefaults and are re-applied on the next send, so the loss is one send at most.")
+        }
+    }
+
+    /// The one place quick settings become `AgentConfig` fields.
+    ///
+    /// ⚠️ Static and pure so the settings→config mapping is testable without a store, a profile or
+    /// a MainActor hop. Both callers — `applyQuickSettingsToProfile` and the per-send
+    /// `refreshInstructionsOnProfile` — go through here, so the two cannot drift.
+    static func apply(_ settings: CodeQuickSettings, to agentConfig: inout AgentConfig) {
+        if let maxIterations = settings.maxIterations {
+            agentConfig.maxIterations = maxIterations
+        }
+        if let timeout = settings.executionTimeout {
+            // 0 is the UI's "No limit". `nil` on the config means unbounded — see AgentConnect's
+            // `[EXEC_LIMITS]` notice for what that costs.
+            agentConfig.executionTimeout = timeout > 0 ? timeout : nil
+        }
+        if let thinking = settings.thinkingEnabled {
+            agentConfig.llmConfig.thinkingEnabled = thinking
+        }
+        agentConfig.tools = mergePresetTools(
+            preset: CodeToolPreset.defaultTools,
+            existing: agentConfig.tools,
+            confirmationOverrides: settings.toolConfirmations
+        )
+    }
 
     /// Updates the provider selection. Lightweight — only clears local model cache.
     /// The profile is not written until a model is actually selected.
@@ -279,11 +433,11 @@ final class CodeSessionManager {
             updated = Array(updated.prefix(Self.maxRecentPaths))
         }
         recentProjectPaths = updated
-        UserDefaults.standard.set(updated.map(\.path), forKey: Self.recentPathsKey)
+        self.defaults.set(updated.map(\.path), forKey: Self.recentPathsKey)
     }
 
     private func loadRecentProjectPaths() {
-        guard let raw = UserDefaults.standard.array(forKey: Self.recentPathsKey) as? [String] else { return }
+        guard let raw = self.defaults.array(forKey: Self.recentPathsKey) as? [String] else { return }
         recentProjectPaths = raw
             .map { URL(fileURLWithPath: $0).standardizedFileURL }
             .filter { FileManager.default.fileExists(atPath: $0.path) }
@@ -324,8 +478,18 @@ final class CodeSessionManager {
         }
 
         agentConfig.instructions = instructions
-        agentConfig.tools = Self.mergePresetTools(preset: CodeToolPreset.defaultTools, existing: agentConfig.tools)
         agentConfig.projectPath = projectPathStr
+
+        // ⚠️ Quick settings are re-applied on EVERY send, not just when the user changes them.
+        // `resetSession()` deletes the profile row on every Home press, so the row minted by the
+        // next `ensureCodeProfile()` carries the hardcoded preset values — this is what puts the
+        // user's per-project choices back onto it. `apply` also performs the tool merge, so the
+        // preset's guarantees still hold.
+        let settings = CodeQuickSettingsStore.settings(for: projectPathStr, defaults: defaults)
+        Self.apply(settings, to: &agentConfig)
+        if !settings.isDefault {
+            logger.info("[CODE_SETTINGS] Applied per-project quick settings for '\(projectName)' — maxIterations: \(agentConfig.maxIterations.map(String.init) ?? "nil"), timeout: \(agentConfig.executionTimeout.map { String(Int($0)) } ?? "none")s, \(settings.toolConfirmations.count) tool confirmation override(s).")
+        }
 
         profile.details = .code(agentConfig)
 
@@ -333,7 +497,11 @@ final class CodeSessionManager {
             try BackendProfileStore.shared.saveProfile(profile)
             logger.info("[CODE] Instructions refreshed — project: '\(projectName)', instructions: \(instructions.count) chars")
         } catch {
-            logger.error("[CODE] Failed to refresh instructions: \(error.localizedDescription)")
+            // ⚠️ Store validation rejects a profile with no model, so this fires for a session
+            // that has a folder but no model yet. Harmless in practice — `attemptSend` refuses to
+            // send without a model, and the next refresh re-applies everything — but it means the
+            // write silently did nothing, so say what was lost.
+            logger.error("[CODE] Failed to refresh instructions: \(error.localizedDescription). CONSEQUENCE: the profile keeps its previous instructions, project path and quick settings for now; all of them are re-applied on the next successful refresh, so nothing is permanently lost.")
         }
     }
 
@@ -345,15 +513,29 @@ final class CodeSessionManager {
         contextFileMonitor = nil
         projectMemoryContent = nil
 
-        // Delete the profile from SwiftData
+        // Delete the profile from SwiftData.
+        //
+        // ⚠️ The handle is cleared only when the delete ACTUALLY succeeded. `try?` plus an
+        // unconditional clear is how a failed delete became a permanent orphan: the row survived,
+        // nothing pointed at it any more, and the next `ensureCodeProfile()` created a rival. This
+        // path is reached from the Home button on every Code-mode session
+        // (`deselectConversationAndShowWelcome`), so it runs often enough to matter.
         if let profileID = codeProfileID {
-            try? BackendProfileStore.shared.deleteProfile(withId: profileID)
-            logger.info("Deleted code profile \(profileID.uuidString)")
+            do {
+                try BackendProfileStore.shared.deleteProfile(withId: profileID)
+                codeProfileID = nil
+                self.defaults.removeObject(forKey: Self.profileIDKey)
+                logger.info("[CODE_PROFILE] Deleted code profile \(profileID.uuidString)")
+            } catch {
+                logger.error("[CODE_PROFILE] Failed to delete code profile \(profileID.uuidString): \(error.localizedDescription). CONSEQUENCE: the handle is KEPT so the surviving row is not orphaned into a duplicate 'Code Session'; the session still clears its model and folder below, and the next reset retries this delete.")
+            }
+        } else {
+            // No handle to delete by — make sure a stale key cannot outlive it.
+            self.defaults.removeObject(forKey: Self.profileIDKey)
         }
 
-        // Clear persisted handle
-        codeProfileID = nil
-        UserDefaults.standard.removeObject(forKey: Self.profileIDKey)
+        // The caches are cleared below; a pending re-hydrate would undo exactly that.
+        needsHydrationFromStore = false
 
         // Clear local caches
         modelName = ""
@@ -362,6 +544,67 @@ final class CodeSessionManager {
         baseURL = nil
 
         logger.info("Code session reset — profile deleted, folder & model cleared")
+    }
+
+    // MARK: - Duplicate Collapse
+
+    /// Every `.code` row in the shared library — the candidates for adoption and for collapse.
+    ///
+    /// ⚠️ `!isNodeOwned` matches `fetchSharedProfiles()`'s rule. A workflow node's private code row
+    /// belongs to that node's graph: adopting one would hand the Code interface a configuration it
+    /// does not own, and collapsing one would delete part of a workflow.
+    ///
+    /// (`fetchProfiles()` is capped at 500 rows by `lastSelected`. Past that cap this simply misses
+    /// and the caller creates instead — it degrades to the pre-fix behaviour, never worse.)
+    private func sharedCodeProfilesOnDisk() -> [BackendProfileSnapshot] {
+        do {
+            return try BackendProfileStore.shared.fetchProfiles()
+                .filter { $0.profileType == .code && !$0.isNodeOwned }
+        } catch {
+            logger.error("[CODE_PROFILE] Could not scan for existing code profiles: \(error.localizedDescription). CONSEQUENCE: no row can be adopted or collapsed on this pass — a caller resolving the profile creates a new one, which orphans any code row already on disk; that is the duplicate-row defect this scan exists to prevent.")
+            return []
+        }
+    }
+
+    /// Ordering for `ensureCodeProfile()`'s adoption: a row with a model configured outranks a bare
+    /// skeleton, then most-recently-selected wins.
+    ///
+    /// ⚠️ The skeleton tie-break is the part that matters. `ensureCodeProfile()` creates with an
+    /// EMPTY model, so "opened Code mode once, never picked a model" leaves a bare row behind —
+    /// exactly the shape of the orphans this whole change exists to stop. Adopting one of those
+    /// over a configured row would read to the user as their model being silently forgotten.
+    private static func adoptionPreference(_ lhs: BackendProfileSnapshot, _ rhs: BackendProfileSnapshot) -> Bool {
+        let lhsConfigured = !(lhs.details.agentConfig?.llmConfig.modelName.isEmpty ?? true)
+        let rhsConfigured = !(rhs.details.agentConfig?.llmConfig.modelName.isEmpty ?? true)
+        if lhsConfigured != rhsConfigured { return lhsConfigured }
+        return (lhs.lastSelected ?? .distantPast) > (rhs.lastSelected ?? .distantPast)
+    }
+
+    /// Deletes the code rows that lost the adoption race.
+    ///
+    /// ⚠️ Leaving them is not the neutral option. The code profile is a singleton by design: the
+    /// user cannot create a second one, and the Profiles sidebar filters `.code` out entirely, so a
+    /// duplicate has NO hand-removal path. It is not inert either — the Tool Library lists every
+    /// tool-capable profile, so duplicates appear there as several identically-named "Code Session"
+    /// entries, and tool enablement saved against the wrong one is a silent no-op.
+    ///
+    /// Deliberately narrow: it only ever deletes from the rows `ensureCodeProfile()` just scanned,
+    /// which are already filtered to shared `.code` rows.
+    private func collapseDuplicateCodeProfiles(keeping keptID: UUID, from scanned: [BackendProfileSnapshot]) {
+        let duplicates = scanned.filter { $0.id != keptID }
+        guard !duplicates.isEmpty else { return }
+
+        var removed = 0
+        for duplicate in duplicates {
+            do {
+                try BackendProfileStore.shared.deleteProfile(withId: duplicate.id)
+                removed += 1
+            } catch {
+                logger.error("[CODE_PROFILE] Failed to remove duplicate code profile \(duplicate.id.uuidString): \(error.localizedDescription). CONSEQUENCE: it stays in the Tool Library's profile menu as a second 'Code Session', and tools enabled on it apply to nothing.")
+            }
+        }
+
+        logger.warning("[CODE_PROFILE] Collapsed \(removed) of \(duplicates.count) duplicate code profile(s); kept \(keptID.uuidString). CONSEQUENCE: tool enablement previously saved against a removed row is gone — the Code interface never read it, so no behaviour the user could observe changes.")
     }
 
     // MARK: - Helpers
@@ -389,7 +632,16 @@ final class CodeSessionManager {
     // them), carrying over the user's requiresConfirmation / favorite / timeout
     // fields; user-added tools outside the preset are appended unchanged.
 
-    private static func mergePresetTools(preset: [Tool], existing: [Tool]) -> [Tool] {
+    /// - Parameter confirmationOverrides: per-project Ask/Auto from `CodeQuickSettings`, keyed by
+    ///   tool name. Authoritative over the carried-over profile value when present, because the
+    ///   profile row is deleted by `resetSession()` while the override survives in UserDefaults —
+    ///   so after a Home press the profile has nothing to carry and the override is the only
+    ///   record of what the user chose.
+    private static func mergePresetTools(
+        preset: [Tool],
+        existing: [Tool],
+        confirmationOverrides: [String: Bool] = [:]
+    ) -> [Tool] {
         func key(_ tool: Tool) -> String { "\(tool.sourceId)-\(tool.name)" }
         let existingByKey = Dictionary(uniqueKeysWithValues: existing.map { (key($0), $0) })
         let presetKeys = Set(preset.map(key))
@@ -398,16 +650,20 @@ final class CodeSessionManager {
 
         // 1. Preset tools — always present, carry over user preferences when set.
         for presetTool in preset {
+            var carried = presetTool
             if let user = existingByKey[key(presetTool)] {
-                var carried = presetTool
                 carried.requiresConfirmation = user.requiresConfirmation
                 carried.isFavorite = user.isFavorite
                 carried.timeout = user.timeout
                 carried.timeoutMessage = user.timeoutMessage
-                merged.append(carried)
-            } else {
-                merged.append(presetTool)
             }
+            // Applied AFTER the carry-over so it wins, and keyed by NAME so it cannot resurrect a
+            // tool the preset no longer contains — an override for an unknown name is simply
+            // never read.
+            if let override = confirmationOverrides[presetTool.name] {
+                carried.requiresConfirmation = override
+            }
+            merged.append(carried)
         }
 
         // 2. User-added tools that aren't in the preset — append in original order.

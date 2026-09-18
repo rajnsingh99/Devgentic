@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  VoiceSessionLedger.swift
 //  Devgentic
@@ -9,7 +9,7 @@
 //
 //  Three surfaces drive the shared WhisperRecognitionService — the main composer
 //  (ChatInputViewModel), the QuickAccess panel (ComposerVoiceController), and the
-//  Jarvis HUD (JarvisSessionController) — and every guard used to be per-surface,
+//  Orb HUD (OrbSessionController) — and every guard used to be per-surface,
 //  so a second surface starting dictation silently overwrote `streamTranscriber`
 //  and orphaned the first AudioStreamTranscriber into a permanent decode loop
 //  (observed on device as a zombie app process burning a core for a day). The
@@ -36,14 +36,14 @@ import Foundation
 enum VoiceSurface: String, Sendable, Codable, CaseIterable {
     case mainComposer = "main-composer"
     case quickAccess = "quickaccess"
-    case jarvis = "jarvis"
+    case orb = "orb"
 
     /// User-facing name for busy messages.
     var displayName: String {
         switch self {
         case .mainComposer: return String(localized: "the main composer")
         case .quickAccess: return String(localized: "the Quick Access panel")
-        case .jarvis: return String(localized: "the Jarvis overlay")
+        case .orb: return String(localized: "the Orb overlay")
         }
     }
 }
@@ -111,7 +111,7 @@ struct VoiceSessionLedger: Equatable, Sendable {
 /// Detects "the engine opened but never delivered audio" sessions — the
 /// `_StartIO error 35` / stale-HAL-IO-thread failure observed on-device
 /// 2026-07-19: three consecutive composer sessions recorded 0 chars while the
-/// UI showed a normal recording and no error. Jarvis has carried this detection
+/// UI showed a normal recording and no error. Orb has carried this detection
 /// since its MVP ("Energy samples are proof the engine is actually delivering
 /// audio"); this ports it to the composer path as a pure, testable core.
 ///

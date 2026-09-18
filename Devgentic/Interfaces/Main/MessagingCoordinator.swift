@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  MessagingCoordinator.swift
 //  Devgentic
@@ -55,7 +55,7 @@ final class MessagingCoordinator {
     ///
     /// ⚠️ This claimed "a second instance would mean two classification paths for the same file".
     /// It would not: `FileProcessorService` is a `struct` with NO stored properties and no static
-    /// state, so instances are behaviourally identical — Jarvis constructs its own at its call
+    /// state, so instances are behaviourally identical — Orb constructs its own at its call
     /// site, and both dispatch test files do the same. Sharing is a convenience, not an
     /// invariant. If the type ever gains state, THAT is when a real rule has to be written, and
     /// it has to be written at every construction site, not here.
@@ -847,7 +847,7 @@ final class MessagingCoordinator {
             // chat is disabling Ask-first globally. The two flags answer different questions; see
             // `WorkflowRunAttendance.hasRemoteResponder`.
             // ⚠️⚠️ THE POLICY IS RE-APPLIED EVERY TURN, NOT ONCE AT PAIRING — the same discipline
-            // `JarvisSessionController` states for its own: "the setting can change while the orb is
+            // `OrbSessionController` states for its own: "the setting can change while the orb is
             // open, and a stale autonomous grant is exactly the kind of invisible state this feature
             // must not have." Re-asserting here also means the surface about to run is always the
             // last writer, so a grant made on another surface cannot be inherited by accident.

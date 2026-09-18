@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  MessageStreamStarting.swift
 //  Devgentic
 //
 //  The seam at the send path's one chokepoint.
 //
-//  Every run in the app — typed chat, ChatOps, scheduled tasks, QuickAccess, Jarvis, regenerate,
+//  Every run in the app — typed chat, ChatOps, scheduled tasks, QuickAccess, Orb, regenerate,
 //  resume — reaches the backend through `ActiveStreamManager.startMessageStream`. That makes it
 //  the right place to assert what a surface is handing over, and for a long time it was
 //  impossible to: `ActiveStreamManager` is `final`, so there was no way to observe the boundary
@@ -46,7 +46,7 @@ protocol MessageStreamStarting: AnyObject {
     ///   neither is passed separately — and the `id` is what lets the duplicate-query strip stop
     ///   comparing on TEXT.
     /// - Parameter promptOverride: model-facing text when it must differ from what was persisted
-    ///   and displayed. Jarvis decorates its query with a spoken-response hint; declaring it here
+    ///   and displayed. Orb decorates its query with a spoken-response hint; declaring it here
     ///   keeps that divergence explicit instead of accidental. `nil` sends the message's own text.
     /// - Parameter updating: stream into an EXISTING assistant message (regenerate / resume)
     ///   rather than creating one. When set, the derived history is cut strictly before it.

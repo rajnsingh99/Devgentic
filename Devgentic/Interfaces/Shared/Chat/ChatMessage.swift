@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  ChatMessage.swift
 //  Devgentic
@@ -763,7 +763,7 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     /// Tagged at creation time by ActiveStreamManager — eliminates runtime profile store lookups.
     var profileType: ProfileType?
 
-    /// Where this message originated from (local Mac UI, Telegram, Discord, Jarvis, QuickAccess,
+    /// Where this message originated from (local Mac UI, Telegram, Discord, Orb, QuickAccess,
     /// a scheduled task).
     ///
     /// ⚠️ TRANSIENT — no column, and `ChatMessageSD.toChatMessage()` does not restore it, so every
@@ -773,7 +773,7 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     /// ⚠️ This said "Used by RemoteMirrorService to decide whether to mirror stream events to a
     /// remote transport". `RemoteMirrorService` contains no reference to it (checked 2026-09-07).
     /// The live readers are two log interpolations in `ActiveStreamManager` (`[HISTORY]` and
-    /// `[STREAM_START]`, naming the surface that started a run) and `JarvisAmbientRunWatcher`,
+    /// `[STREAM_START]`, naming the surface that started a run) and `OrbAmbientRunWatcher`,
     /// which reads it off the AGENT message to decide whether to announce a finished run.
     var messageSource: MessageSource = .localUI
     

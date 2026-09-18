@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  DuplicateQueryStripTests.swift
 //  DevgenticTests
@@ -10,7 +10,7 @@
 //  `BackendOrchestrationService` stripped it by TEXT EQUALITY against `conversationHistory.last`,
 //  and that failed in two independent ways that both shipped:
 //
-//    IDENTITY — Jarvis sends the model a DECORATED query (the spoken command plus a TTS style
+//    IDENTITY — Orb sends the model a DECORATED query (the spoken command plus a TTS style
 //    hint) while persisting the clean command. The texts differ, so the strip never fired, the
 //    message survived into the blob, and `EpisodicHistoryFormatter.pairTurns` emitted it through
 //    its orphan handler as `wasCancelled` / "Agent never responded to this query". Every voice
@@ -68,7 +68,7 @@ final class DuplicateQueryStripTests: XCTestCase {
         ).outcome
     }
 
-    // MARK: - Identity: the Jarvis defect
+    // MARK: - Identity: the Orb defect
 
     /// ⚠️ THE DEFECT. A decorated query and a clean persisted message share an ID and differ in
     /// TEXT. Identity strips it; text cannot.
@@ -86,7 +86,7 @@ final class DuplicateQueryStripTests: XCTestCase {
                        "the id matches even though the text does not — this is the fix")
         XCTAssertTrue(byText.contains { $0.id == question.id },
                       "and text equality demonstrably fails on the same input, which is why every "
-                      + "Jarvis turn arrived as an orphan marked \"Agent never responded\"")
+                      + "Orb turn arrived as an orphan marked \"Agent never responded\"")
     }
 
     /// The orphan is what the surviving row becomes downstream, so pin the actual consequence
@@ -241,7 +241,7 @@ final class DuplicateQueryStripTests: XCTestCase {
         XCTAssertTrue(caller.contains("currentUserMessageID: userMessage.id"),
                       "the send path must identify the current question to the strip; without it "
                       + "the argument defaults to nil and every surface silently reverts to text "
-                      + "equality, which cannot match a decorated Jarvis query")
+                      + "equality, which cannot match a decorated Orb query")
 
         let service = try code("Devgentic/Core/Backends/BackendOrchestrationService.swift")
         XCTAssertTrue(service.contains("Self.strippingCurrentQuery("),

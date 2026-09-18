@@ -7,8 +7,14 @@ Generated 2026-09-09 from `Package.resolved` (40 pins; 14 direct package referen
 project) and the resolved package checkouts. **Regenerate this file whenever dependencies change** —
 it is a compliance artefact for the shipped binary, not documentation.
 
-Every package below is under a permissive licence (MIT, Apache-2.0, BSD). None is copyleft and none
-carries a non-commercial restriction, so nothing here constrains the licence of Devgentic itself.
+**Hand-maintained, NOT produced by the generator — carry them across when regenerating:** the
+*Bundled models* section, the *highlight.js* sub-entry under Highlightr, and the *tree-sitter
+grammars* sub-entry under CodeEditLanguages. Each covers something the app ships that is not a
+Swift package pin.
+
+Every package that ships a licence is under a permissive one (MIT, Apache-2.0, BSD): none is copyleft
+and none carries a non-commercial restriction, so nothing here constrains the licence of Devgentic
+itself. Two packages ship no licence at all — see their entries.
 Note that ObjectBox's Swift bindings are Apache-2.0 while the ObjectBox core engine they wrap is a
 proprietary binary distributed free of charge under its own terms.
 
@@ -55,13 +61,113 @@ proprietary binary distributed free of charge under its own terms.
 | yyjson | 0.12.0 | MIT | <https://github.com/ibireme/yyjson.git> |
 | ZIPFoundation | 0.9.20 | MIT | <https://github.com/weichsel/ZIPFoundation.git> |
 
+## Bundled models — hand-maintained, not from `Package.resolved`
+
+The application bundle ships one machine-learning model and its tokenizer, used by `EmbeddingService`
+for the local RAG index. They are not Swift packages, so the generator does not see them.
+
+| Component | What ships | Licence | Source |
+|---|---|---|---|
+| all-MiniLM-L6-v2 | `Resources/All_MiniLM_L6_v2.mlpackage` — Core ML conversion of the PyTorch weights, 384-d output | Apache-2.0 | <https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2> |
+| MiniLM-L6-H384-uncased | `Resources/AllMiniLMTokenizer/tokenizer.json`, `tokenizer_config.json` — WordPiece tokenizer and vocabulary | MIT | <https://huggingface.co/nreimers/MiniLM-L6-H384-uncased> |
+
+### all-MiniLM-L6-v2 — Apache-2.0
+
+Sentence-embedding model from the sentence-transformers project (Nils Reimers et al.), trained during
+the Hugging Face JAX/Flax community week on a 1B sentence-pair corpus, fine-tuned from
+`nreimers/MiniLM-L6-H384-uncased`. Converted to Core ML with coremltools 7.1 for Devgentic; the
+conversion changes the container, not the licence, and the `.mlpackage` metadata names the upstream
+authors. Licence text: Apache License 2.0 — identical to the text reproduced verbatim under
+**CoreXLSX** below (the Apache text carries no per-project copyright line).
+
+### MiniLM-L6-H384-uncased — MIT
+
+A six-layer cut of `microsoft/MiniLM-L12-H384-uncased` (Microsoft Research, UniLM) published by
+Nils Reimers under the same MIT terms. Its WordPiece vocabulary is the BERT uncased vocabulary
+(Google Research, Apache-2.0).
+
+```text
+MIT License
+
+Copyright (c) Microsoft Corporation.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE
+```
+
 ---
 
 ## CodeEditLanguages — ⚠️ no licence file shipped
 
 Source: <https://github.com/CodeEditApp/CodeEditLanguages.git> · version 0.1.20
 
-The package checkout contains no LICENSE/COPYING file. The upstream repository's licence must be confirmed and its notice added here before a binary release ships.
+The package checkout contains no LICENSE/COPYING file. **Confirmed 2026-09-18 against the upstream
+repository:** GitHub's licence detection reports none there either (its sibling CodeEditTextView reports
+MIT), so as published this package is unlicensed — "all rights reserved" by default, whatever the
+maintainers intend. Open action: an issue asking CodeEditApp to add a licence file. Until it lands this
+entry stays a warning and claims nothing.
+
+### Tree-sitter grammars compiled into CodeEditLanguages — hand-maintained
+
+`CodeLanguagesContainer.xcframework` compiles the 35 grammars below into the binary, and the package
+ships their `highlights.scm` / `injections.scm` queries as resources — each under the grammar's own
+licence, none of which the checkout carries. Licences confirmed 2026-09-18 from each upstream
+repository: 34 MIT, 1 Apache-2.0 (Elixir), and the Ruby fork ships none (its origin is MIT). The MIT
+and Apache-2.0 texts are reproduced verbatim elsewhere in this file — identical text; only the copyright
+line differs, and it is given here.
+
+| Grammar | Upstream | Licence | Copyright |
+|---|---|---|---|
+| `tree-sitter-agda` | <https://github.com/tree-sitter/tree-sitter-agda> | MIT | Copyright (c) 2018 LUA Ting-Gan |
+| `tree-sitter-bash` | <https://github.com/tree-sitter/tree-sitter-bash> | MIT | Copyright (c) 2017 Max Brunsfeld |
+| `tree-sitter-c` | <https://github.com/tree-sitter/tree-sitter-c> | MIT | Copyright (c) 2014 Max Brunsfeld |
+| `tree-sitter-c-sharp` | <https://github.com/tree-sitter/tree-sitter-c-sharp> | MIT | Copyright (c) 2014-2023 Max Brunsfeld, Damien Guard, Amaan Qureshi, and contributors. |
+| `tree-sitter-cpp` | <https://github.com/tree-sitter/tree-sitter-cpp> | MIT | Copyright (c) 2014 Max Brunsfeld |
+| `tree-sitter-css` | <https://github.com/tree-sitter/tree-sitter-css> | MIT | Copyright (c) 2018 Max Brunsfeld |
+| `tree-sitter-dart` | <https://github.com/UserNobody14/tree-sitter-dart> | MIT | Copyright (c) 2020-2023 UserNobody14 and others |
+| `tree-sitter-dockerfile` | <https://github.com/camdencheek/tree-sitter-dockerfile> | MIT | Copyright (c) 2021 Camden Cheek |
+| `tree-sitter-elixir` | <https://github.com/elixir-lang/tree-sitter-elixir> | Apache-2.0 | The Elixir Team / elixir-lang contributors (Apache text carries no per-holder line) |
+| `tree-sitter-go` | <https://github.com/tree-sitter/tree-sitter-go> | MIT | Copyright (c) 2014 Max Brunsfeld |
+| `tree-sitter-go-mod` | <https://github.com/camdencheek/tree-sitter-go-mod> | MIT | Copyright (c) 2021 Camden Cheek |
+| `tree-sitter-haskell` | <https://github.com/tree-sitter/tree-sitter-haskell> | MIT | Copyright (c) 2014 Max Brunsfeld |
+| `tree-sitter-html` | <https://github.com/tree-sitter/tree-sitter-html> | MIT | Copyright (c) 2014 Max Brunsfeld |
+| `tree-sitter-java` | <https://github.com/tree-sitter/tree-sitter-java> | MIT | Copyright (c) 2017 Ayman Nadeem |
+| `tree-sitter-javascript` | <https://github.com/tree-sitter/tree-sitter-javascript> | MIT | Copyright (c) 2014 Max Brunsfeld |
+| `tree-sitter-jsdoc` | <https://github.com/tree-sitter/tree-sitter-jsdoc> | MIT | Copyright (c) 2018 Max Brunsfeld &lt;maxbrunsfeld@gmail.com&gt; |
+| `tree-sitter-json` | <https://github.com/tree-sitter/tree-sitter-json> | MIT | Copyright (c) 2014 Max Brunsfeld |
+| `tree-sitter-kotlin` | <https://github.com/fwcd/tree-sitter-kotlin> | MIT | Copyright (c) 2019 fwcd |
+| `tree-sitter-lua` | <https://github.com/tree-sitter-grammars/tree-sitter-lua> | MIT | Copyright (c) 2021 Munif Tanjim |
+| `tree-sitter-markdown` | <https://github.com/tree-sitter-grammars/tree-sitter-markdown> | MIT | Copyright (c) 2021 Matthias Deiml |
+| `tree-sitter-markdown-inline` | <https://github.com/tree-sitter-grammars/tree-sitter-markdown> | MIT | Copyright (c) 2021 Matthias Deiml (same repository as tree-sitter-markdown) |
+| `tree-sitter-objc` | <https://github.com/tree-sitter-grammars/tree-sitter-objc> | MIT | Copyright (c) 2023 Amaan Qureshi &lt;amaanq12@gmail.com&gt; |
+| `tree-sitter-ocaml` | <https://github.com/tree-sitter/tree-sitter-ocaml> | MIT | Copyright (c) 2020 Max Brunsfeld and Pieter Goetschalckx |
+| `tree-sitter-php` | <https://github.com/tree-sitter/tree-sitter-php> | MIT | Copyright (c) 2017 Josh Vera, GitHub |
+| `tree-sitter-python` | <https://github.com/tree-sitter/tree-sitter-python> | MIT | Copyright (c) 2016 Max Brunsfeld |
+| `tree-sitter-regex` | <https://github.com/tree-sitter/tree-sitter-regex> | MIT | Copyright (c) 2014 Max Brunsfeld |
+| `tree-sitter-ruby` | <https://github.com/mattmassicotte/tree-sitter-ruby>  (fork of tree-sitter/tree-sitter-ruby) | MIT (origin) — ⚠️ the fork ships no licence file | Copyright (c) 2016 Rob Rix (origin repository) |
+| `tree-sitter-rust` | <https://github.com/tree-sitter/tree-sitter-rust> | MIT | Copyright (c) 2017 Maxim Sokolov |
+| `tree-sitter-scala` | <https://github.com/tree-sitter/tree-sitter-scala> | MIT | Copyright (c) 2018 Max Brunsfeld and GitHub |
+| `tree-sitter-sql` | <https://github.com/DerekStride/tree-sitter-sql> | MIT | Copyright (c) 2021 Derek Stride |
+| `tree-sitter-swift` | <https://github.com/alex-pinkus/tree-sitter-swift> | MIT | Copyright (c) 2021 alex-pinkus |
+| `tree-sitter-toml` | <https://github.com/cengelbart39/tree-sitter-toml>  (fork of ikatyang/tree-sitter-toml) | MIT | Copyright (c) Ika (ikatyang) |
+| `tree-sitter-typescript` | <https://github.com/tree-sitter/tree-sitter-typescript> | MIT | Copyright (c) 2017 Max Brunsfeld |
+| `tree-sitter-yaml` | <https://github.com/tree-sitter-grammars/tree-sitter-yaml> | MIT | Copyright (c) 2024 tree-sitter-grammars contributors |
+| `tree-sitter-zig` | <https://github.com/tree-sitter-grammars/tree-sitter-zig> | MIT | Copyright (c) 2024 Amaan Qureshi &lt;amaanq12@gmail.com&gt; |
 
 ## CodeEditSourceEditor — MIT
 
@@ -95,7 +201,10 @@ SOFTWARE.
 
 Source: <https://github.com/CodeEditApp/CodeEditSymbols.git> · version 0.2.3
 
-The package checkout contains no LICENSE/COPYING file. The upstream repository's licence must be confirmed and its notice added here before a binary release ships.
+The package checkout contains no LICENSE/COPYING file. **Confirmed 2026-09-18 against the upstream
+repository:** GitHub's licence detection reports none there either. Same situation and same open action
+as CodeEditLanguages above — an issue asking CodeEditApp to add a licence file; nothing is claimed here
+until it lands.
 
 ## CodeEditTextView — MIT
 
@@ -425,6 +534,44 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+```
+
+### highlight.js — embedded in Highlightr — BSD-3-Clause — hand-maintained
+
+Highlightr bundles a build of highlight.js (`src/assets/highlighter/highlight.min.js`) under highlight.js's
+own licence, which is not the wrapper's MIT and is not covered by the text above. Source:
+<https://github.com/highlightjs/highlight.js> · file `src/assets/highlighter/LICENSE` in the Highlightr checkout.
+
+```text
+BSD 3-Clause License
+
+Copyright (c) 2006, Ivan Sagalaev.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+* Neither the name of the copyright holder nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ## HotKey — MIT

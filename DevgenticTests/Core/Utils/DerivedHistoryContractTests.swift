@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  DerivedHistoryContractTests.swift
 //  DevgenticTests
@@ -10,7 +10,7 @@
 //    - `SchedulerCoordinator` passed raw `fetchMessages` output — DESCENDING.
 //    - `QuickAccessSessionViewModel` passed the panel's pagination window — a hard 20 rows that
 //      never grew, because QuickAccess never calls `loadMoreMessages`.
-//    - `JarvisSessionController` passed a private append-only transcript never hydrated from the
+//    - `OrbSessionController` passed a private append-only transcript never hydrated from the
 //      store, so a turn typed into the same conversation was invisible to the next voice turn.
 //
 //  None of that is reachable any more: `startMessageStream` has no `history` parameter. This file
@@ -202,7 +202,7 @@ final class DerivedHistoryContractTests: XCTestCase {
 
     // MARK: - The surfaces that used to build it wrong
 
-    /// Jarvis's private transcript was never hydrated, so a turn typed into the same conversation
+    /// Orb's private transcript was never hydrated, so a turn typed into the same conversation
     /// from the chat window was invisible to the next voice turn. Deriving is store-backed, so it
     /// is not: this is §2c closed by construction.
     func testATypedTurnIsVisibleToTheNextVoiceTurn() async {
@@ -244,7 +244,7 @@ final class DerivedHistoryContractTests: XCTestCase {
         XCTAssertFalse(ids.contains(myQuestion), "but the question it is asking obviously stays")
     }
 
-    /// A CONCURRENT run — reachable because the scheduler, Jarvis and the ChatOps bridge carry no
+    /// A CONCURRENT run — reachable because the scheduler, Orb and the ChatOps bridge carry no
     /// admission check — contributes a whole unfinished turn that must be dropped.
     func testAConcurrentRunsWholeTurnIsExcluded() {
         let myQuestion = UUID(), myReply = UUID()

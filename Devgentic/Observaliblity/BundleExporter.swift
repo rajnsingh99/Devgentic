@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  BundleExporter.swift
 //  Devgentic
@@ -513,23 +513,23 @@ enum BundleExporter {
             AppSettings.speechPlaybackVoiceKey,
             AppSettings.speechPauseOnCodeKey,
         AppSettings.morningBriefIncludeAISummaryKey,
-            // Jarvis. Exported because a voice bug report is undebuggable without knowing how the
+            // Orb. Exported because a voice bug report is undebuggable without knowing how the
             // user had activation and endpointing configured — none of these carry user content.
-            AppSettings.jarvisEnabledKey,
-            AppSettings.jarvisActivationModeKey,
-            AppSettings.jarvisEndpointingKey,
-            AppSettings.jarvisSpokenResponsesKey,
-            AppSettings.jarvisFollowUpKey,
-            AppSettings.jarvisEarconsKey,
-            AppSettings.jarvisToolApprovalsKey,
-            AppSettings.jarvisDuplexAudioKey,
-            AppSettings.jarvisRecognizerKey,
-            AppSettings.jarvisAmbientAnnouncementsKey,
-            AppSettings.jarvisAmbientThresholdKey,
-            AppSettings.jarvisVoiceApprovalsKey,
-            AppSettings.jarvisSpeechLocaleKey,
-            AppSettings.jarvisNarratorVoiceKey,
-            AppSettings.jarvisNarratorRateKey
+            AppSettings.orbEnabledKey,
+            AppSettings.orbActivationModeKey,
+            AppSettings.orbEndpointingKey,
+            AppSettings.orbSpokenResponsesKey,
+            AppSettings.orbFollowUpKey,
+            AppSettings.orbEarconsKey,
+            AppSettings.orbToolApprovalsKey,
+            AppSettings.orbDuplexAudioKey,
+            AppSettings.orbRecognizerKey,
+            AppSettings.orbAmbientAnnouncementsKey,
+            AppSettings.orbAmbientThresholdKey,
+            AppSettings.orbVoiceApprovalsKey,
+            AppSettings.orbSpeechLocaleKey,
+            AppSettings.orbNarratorVoiceKey,
+            AppSettings.orbNarratorRateKey
     ]
 
     /// Extracts exactly the allowlisted preferences from a defaults store.

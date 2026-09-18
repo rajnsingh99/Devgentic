@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  WorkflowNodeView.swift
 //  Devgentic
@@ -200,11 +200,12 @@ struct WorkflowNodeView: View {
     private var nodeCardContent: some View {
         Group {
             switch node.kind {
-            case .profile:
+            case .profile(_, let pType):
                 ProfileNodeCard(
                     title: node.displayName,
                     subtitle: nodeKindLabel,
                     iconName: iconName,
+                    profileType: pType,
                     color: profileColor,
                     isSelected: isSelected
                 )
@@ -473,18 +474,26 @@ struct ProfileNodeCard: View {
     let title: String
     let subtitle: String
     let iconName: String
+    var profileType: ProfileType? = nil
     let color: Color
     let isSelected: Bool
     @Environment(\.appTheme) private var theme
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: iconName)
-                .font(.system(.subheadline, weight: .bold))
-                .foregroundColor(color)
-                .frame(width: 28, height: 28)
-                .background(Circle().fill(color.opacity(0.15)))
-                .overlay(Circle().stroke(color.opacity(0.35), lineWidth: 0.5))
+            ZStack {
+                Circle().fill(color.opacity(0.15))
+                Circle().stroke(color.opacity(0.35), lineWidth: 0.5)
+
+                if let profileType {
+                    ProfileTypeIcon(type: profileType, size: 16, color: color)
+                } else {
+                    Image(systemName: iconName)
+                        .font(.system(.subheadline, weight: .bold))
+                        .foregroundColor(color)
+                }
+            }
+            .frame(width: 28, height: 28)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  ProfileSelectorPopover.swift
 //  Devgentic
@@ -14,6 +14,7 @@
 //
 
 import SwiftUI
+import AppKit
 
 struct ProfileSelectorPopover: View {
 
@@ -229,6 +230,7 @@ struct ProfileSelectorPopover: View {
                             profile: profile,
                             isSelected: configuration.selectedProfileID == profile.id,
                             onSelect: {
+                                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
                                 configuration.selectedProfileID = profile.id
                                 isPresented = false
                             }

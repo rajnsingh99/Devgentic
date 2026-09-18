@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  CommandPaletteView.swift
 //  Devgentic
@@ -547,13 +547,13 @@ struct CommandPaletteView: View {
         )
         items.append(
             CommandPaletteItem(
-                title: "Settings: Jarvis Assistant",
+                title: "Settings: Orb Assistant",
                 subtitle: "Voice assistant, wake word, and live listening",
                 icon: "atom",
                 category: .navigation,
-                keywords: ["settings", "jarvis", "voice", "assistant", "listening", "speech"]
+                keywords: ["settings", "orb", "voice", "assistant", "listening", "speech"]
             ) {
-                router.navigateToSettings(.jarvis)
+                router.navigateToSettings(.orb)
             }
         )
         items.append(

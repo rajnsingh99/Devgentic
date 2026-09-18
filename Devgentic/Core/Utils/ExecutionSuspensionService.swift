@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  ExecutionSuspensionService.swift
 //  Devgentic
@@ -456,7 +456,7 @@ actor ExecutionSuspensionService {
     /// Resumes with `false` (Denied) for permissions, `nil` for clarifications.
     ///
     /// ⚠️ CONVERSATION-scoped by design, and staying that way: conversation delete, ChatOps
-    /// `/cancel`, Jarvis teardown, and chat-run stops all legitimately want EVERY park in the
+    /// `/cancel`, Orb teardown, and chat-run stops all legitimately want EVERY park in the
     /// conversation gone, including the token-less ones (chat/code confirmations, MCP-broker
     /// consents). A WORKFLOW root run's own stop wants `cancelRun` instead — see register EXC-2.
     func cancel(for conversationID: UUID) {

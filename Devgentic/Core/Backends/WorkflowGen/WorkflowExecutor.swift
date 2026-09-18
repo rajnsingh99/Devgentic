@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  WorkflowExecutor.swift
 //  Devgentic
@@ -47,7 +47,7 @@ enum WorkflowDepth {
 ///
 /// Why a run identity and not the conversationID: the skip store used to be conversation-keyed on
 /// the one-root-run-per-conversation invariant (§0.5), which nothing enforces on the inbound
-/// start paths (chat/ChatOps/scheduler/Jarvis carry no admission check — `RunAdmissionPolicy` is
+/// start paths (chat/ChatOps/scheduler/Orb carry no admission check — `RunAdmissionPolicy` is
 /// deliberately Redo/Resume-only until increment 4). A scheduled re-run of the SAME workflow into
 /// the same conversation has IDENTICAL node IDs, so under conversation keying run 2's start-clear
 /// silently discarded the user's pending skip requests for run 1, and run 2 could consume a
@@ -60,7 +60,7 @@ enum WorkflowRunScope {
 
 /// TaskLocal marking whether a HUMAN is watching this run.
 ///
-/// `true` (the default) for chat/QuickAccess/Jarvis/regenerate sends; bound `false` by the
+/// `true` (the default) for chat/QuickAccess/Orb/regenerate sends; bound `false` by the
 /// SCHEDULER and the CHATOPS bridges around `startMessageStream`, and inherited by every child
 /// task from there — through BOS, AgentConnect, the executor's stream task, and into nested
 /// sub-workflow executors — exactly like `WorkflowDepth`.
@@ -102,7 +102,7 @@ enum WorkflowRunAttendance {
     /// WHICH SURFACE started this run.
     ///
     /// ⚠️⚠️ EXISTS SO A STANDING GRANT CANNOT CROSS A SURFACE BOUNDARY. `SessionToolApprovals`'
-    /// autonomous grant was keyed on the conversation alone, and Jarvis publishes its conversation
+    /// autonomous grant was keyed on the conversation alone, and Orb publishes its conversation
     /// to ChatOps on purpose ("Bind the profile so restart-resume, ChatOps, and the sidebar all
     /// resolve it") — so a message from a paired phone inherited an "approve everything" grant the
     /// user had made by voice, and ran `execute_shell` with no prompt on ANY surface: the banner is
@@ -2412,30 +2412,22 @@ actor WorkflowExecutor: Executor {
     /// ⚠️ Park time is accounted per CONVERSATION, so parallel siblings share the credit and a node
     /// can over-run its limit when a sibling parked. Deliberate: over-crediting wastes some time,
     /// under-crediting kills work that was only ever waiting.
+    /// ⚠️ The loop itself now lives in `ComputeTimeoutSentinel` so the PROFILE path shares it.
+    /// The header above describes a defect that was fixed here and left live in `AgentConnect`
+    /// for both Chat and Code; keeping two copies is what let that happen. This wrapper stays so
+    /// workflow call sites read the same and keep the `[WF_TIMEOUT]` tag.
     static func computeTimeoutSentinel(
         _ limit: TimeInterval,
         conversationID: UUID,
         nodeName: String
     ) async throws -> Never {
-        let start = Date()
-        let parkedAtStart = await ExecutionSuspensionService.shared.cumulativeParkedTime(for: conversationID)
-        var remaining = limit
-
-        while true {
-            try await Task.sleep(for: .seconds(remaining))
-            let parked = await ExecutionSuspensionService.shared
-                .cumulativeParkedTime(for: conversationID) - parkedAtStart
-            let wall = Date().timeIntervalSince(start)
-            let compute = wall - parked
-
-            if compute >= limit {
-                logger.error("[WF_TIMEOUT] Node '\(nodeName)' exceeded its \(Int(limit))s compute budget (\(Int(compute))s compute, \(Int(parked))s parked awaiting a human, \(Int(wall))s wall-clock). CONSEQUENCE: the node fails and activates its `error` port; a branch wired there runs, otherwise this branch stops here.")
-                throw AgentExecutionError(reason: .executionTimeout(elapsed: compute, limit: limit))
-            }
-
-            remaining = limit - compute
-            logger.info("[WF_TIMEOUT] Node '\(nodeName)' timeout extended by \(Int(remaining))s — \(Int(parked))s of the elapsed \(Int(wall))s was spent awaiting a human, which does not count against the compute budget.")
-        }
+        try await ComputeTimeoutSentinel.sleepUntilComputeExceeded(
+            limit: limit,
+            conversationID: conversationID,
+            logTag: "WF_TIMEOUT",
+            subject: "Node '\(nodeName)'",
+            consequence: "the node fails and activates its `error` port; a branch wired there runs, otherwise this branch stops here."
+        )
     }
 
     /// The RUNNING-skip racer child — Phase B increment 5 (D2.1). Parks on the skip store until

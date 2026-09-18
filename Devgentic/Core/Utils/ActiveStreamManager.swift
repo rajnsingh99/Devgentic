@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  ActiveStreamManager.swift
 //  Devgentic
@@ -23,12 +23,12 @@ protocol ActiveStreamMirrorDelegate: AnyObject {
     ///   AGENT message, whose `messageSource` is still the `.localUI` default at this instant —
     ///   every attributing surface assigns it AFTER `startMessageStream` returns
     ///   (`MessagingCoordinator`, `SchedulerCoordinator`, `QuickAccessSessionViewModel`,
-    ///   `JarvisSessionController`). Two conformers already document having hit this. The USER
+    ///   `OrbSessionController`). Two conformers already document having hit this. The USER
     ///   message carries the truth here and is stamped before the call, so it is read from there.
     ///
     ///   ⚠️ **Do NOT "fix" this by stamping `agentMessage.messageSource` earlier instead.**
-    ///   `JarvisAmbientRunWatcher` reads that field off the agent message at `didEndStream` and its
-    ///   classification is calibrated to today's timing; moving the write changes what Jarvis
+    ///   `OrbAmbientRunWatcher` reads that field off the agent message at `didEndStream` and its
+    ///   classification is calibrated to today's timing; moving the write changes what Orb
     ///   announces.
     ///
     ///   ⚠️ `.localUI` here means "not attributed", not "definitely typed by hand" — a new surface
@@ -476,7 +476,7 @@ final class ActiveStreamManager {
             )
             agentMessage.profileType = config.profile.profileType
             // ⚠️ Reads `messageSource` off the USER's message, which every surface must set BEFORE
-            // calling this — `.jarvis`, `.quickAccess`, `.scheduled`, the ChatOps sources, else the
+            // calling this — `.orb`, `.quickAccess`, `.scheduled`, the ChatOps sources, else the
             // `.localUI` default for a typed send. The scheduler set it only on the AGENT message
             // until 2026-09-07, so scheduled runs reported `localUI` here; if a new surface appears
             // and forgets, this line under-reports rather than lying loudly, so treat `localUI` on a
@@ -542,7 +542,7 @@ final class ActiveStreamManager {
                 let profileType = config.profile.profileType.rawValue
                 // ⚠️ EVERY turn still being written is excluded — this run's own (its placeholder is
                 // registered before this task starts, and is EMPTY here) and any CONCURRENT run's.
-                // Concurrency in one conversation is reachable: the scheduler, Jarvis and the
+                // Concurrency in one conversation is reachable: the scheduler, Orb and the
                 // ChatOps bridge carry no admission check. Including an unfinished turn makes
                 // `pairTurns` report the question as answered with nothing —
                 // "(Terminated by user before any tools ran)" — while the run is still going.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  ExecutionLimitsSection.swift
 //  Devgentic
@@ -36,9 +36,16 @@ struct ExecutionLimitsSection: View {
                     "\(maxIterations ?? AgentExecutionDefaults.maxIterations)",
                     value: Binding(
                         get: { maxIterations ?? AgentExecutionDefaults.maxIterations },
-                        set: { maxIterations = $0 == 15 ? nil : $0 }
+                        // ⚠️ `AgentExecutionDefaults.maxIterations`, NOT a bare 15 — that literal
+                        // is register A38's exact drift class, and it survived here. A Code
+                        // profile defaults to 20, so a hardcoded 15 would store `.some(15)` as
+                        // though the user had chosen it and silently lower their cap.
+                        set: { maxIterations = $0 == AgentExecutionDefaults.maxIterations ? nil : $0 }
                     ),
-                    in: 3...30
+                    // Ceiling raised from 30: multi-file refactors on smaller models need more
+                    // steps, and the Code interface no longer applies a parameter-size floor that
+                    // kept those models out.
+                    in: 3...100
                 )
                 .fixedSize()
             }
@@ -49,7 +56,10 @@ struct ExecutionLimitsSection: View {
                     Text("Execution Timeout")
                         .font(theme.fontFootnote.weight(.semibold))
                         .foregroundColor(theme.primaryText)
-                    Text("Maximum wall-clock time for a single execution")
+                    // ⚠️ Says COMPUTE deliberately. `ComputeTimeoutSentinel` excludes time parked
+                    // awaiting a human, so approval banners no longer eat the budget. Describing
+                    // this as wall-clock would understate the limit users actually get.
+                    Text("Maximum compute time for a single execution — time spent awaiting your approval doesn't count")
                         .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
                         .lineSpacing(2.5)
@@ -65,7 +75,9 @@ struct ExecutionLimitsSection: View {
                                 get: { timeout },
                                 set: { executionTimeout = $0 }
                             ),
-                            in: 30...600,
+                            // Ceiling raised from 600: a `batch_command` running a test suite or a
+                            // build is ordinary Code-mode work and routinely exceeds ten minutes.
+                            in: 30...3600,
                             step: 30
                         )
                         .fixedSize()

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  DevgenticApp.swift
 //  Devgentic
@@ -677,7 +677,17 @@ struct DevgenticApp: App {
     var body: some Scene {
         // MARK: - Main Application Window
         WindowGroup {
-            MainApplicationView()
+            Group {
+                if !isOnboardingComplete {
+                    OnboardingContainerView(onComplete: {
+                        withAnimation(.easeInOut(duration: 0.35)) {
+                            isOnboardingComplete = true
+                        }
+                    })
+                } else {
+                    MainApplicationView()
+                }
+            }
                 .environment(themeManager)
                 .environment(\.appTheme, themeManager.currentTheme)
                 .environment(\.surfaceStyle, themeManager.surfaceStyle)
@@ -1002,6 +1012,15 @@ struct DevgenticApp: App {
                     openWindow(id: "shortcuts-window")
                 }
                 .keyboardShortcut("/", modifiers: .command)
+            }
+
+            // MARK: - Help Menu
+            CommandMenu("Help") {
+                Button("Welcome to Devgentic (Setup Assistant)...") {
+                    withAnimation(.easeInOut(duration: 0.35)) {
+                        isOnboardingComplete = false
+                    }
+                }
             }
         }
 

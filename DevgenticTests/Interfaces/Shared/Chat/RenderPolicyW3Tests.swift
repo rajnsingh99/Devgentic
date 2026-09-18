@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  RenderPolicyW3Tests.swift
 //  DevgenticTests
@@ -255,7 +255,7 @@ final class FollowNewestPolicyTests: XCTestCase {
 
     /// THE pin: a remote message does NOT yank a reader who has scrolled away.
     func testRemoteMessageDoesNotYankAReaderWhoHasScrolledAway() {
-        for source in [MessageSource.telegram, .discord, .slack, .jarvis] {
+        for source in [MessageSource.telegram, .discord, .slack, .orb] {
             XCTAssertFalse(
                 ChatHistoryView.shouldFollowNewest(isLocallyTyped: ChatHistoryView.isLocallyTyped(message(source)),
                                                    isAwayFromBottom: true),

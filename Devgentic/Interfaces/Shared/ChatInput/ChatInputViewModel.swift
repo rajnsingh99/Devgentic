@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  ChatInputViewModel.swift
 //  Devgentic
@@ -188,7 +188,7 @@ final class ChatInputViewModel {
     // MARK: - Private State
     @ObservationIgnored private let logger = DGLogger(category: "ChatInputViewModel")
     @ObservationIgnored private var recordingTimer: Timer?
-    /// [Dead-mic] Pure detection core (ported from Jarvis): a session that ran ≥1s
+    /// [Dead-mic] Pure detection core (ported from Orb): a session that ran ≥1s
     /// with zero energy samples = the engine opened but delivered no audio
     /// (`_StartIO error 35` class). Observed on-device 2026-07-19 as three silent
     /// sessions with a normal-looking recording UI and no error.
@@ -1014,7 +1014,7 @@ final class ChatInputViewModel {
         return dead
     }
 
-    /// Actionable message for a dead session (adapted from Jarvis's). Surfaced via
+    /// Actionable message for a dead session (adapted from Orb's). Surfaced via
     /// the composer's existing error state.
     private var deadMicErrorMessage: String {
         String(localized: "The microphone opened but delivered no audio. Try again — if it keeps happening, another app may be holding the mic, or check your input device in System Settings → Sound.")

@@ -17,7 +17,7 @@
 	     are currently in both; that is pre-existing and consistent, so they agree. Verify the
 	     merged result in the built Contents/Info.plist, never in the source file alone. -->
 
-	<!-- Microphone: voice dictation (panel + main window) and the Jarvis duplex engine.
+	<!-- Microphone: voice dictation (panel + main window) and the Orb duplex engine.
 	     Entitlement: com.apple.security.device.audio-input. -->
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Devgentic needs access to your microphone to capture audio for voice-to-text input.</string>
@@ -25,7 +25,7 @@
 	<!-- Speech recognition. ⚠️ Possibly vestigial — transcription runs through WhisperKit on-device
 	     and there is no SFSpeechRecognizer call left in the tree. Kept because removing a usage
 	     string is only safe once you are certain no framework reaches the API indirectly, and a
-	     surplus string is inert. Revisit with the Jarvis SpeechAnalyzer work. -->
+	     surplus string is inert. Revisit with the Orb SpeechAnalyzer work. -->
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Devgentic needs to send audio data to Apple&apos;s servers or process it on-device for speech recognition to convert your voice to text.</string>
 

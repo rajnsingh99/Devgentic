@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  GeneralSettingsView.swift
 //  Devgentic
@@ -23,6 +23,7 @@ struct GeneralSettingsView: View {
     @AppStorage(AppSettings.developerModeKey) private var developerMode: Bool = false
     @AppStorage(AppSettings.diagnosticsEnabledKey) private var diagnosticsEnabled: Bool = true
     @AppStorage(AppSettings.showTimelineThoughtsKey) private var showTimelineThoughts: Bool = false
+    @AppStorage(GlobalConstants.isOnboardingComplete) private var isOnboardingComplete: Bool = true
 
     // Download/delete confirmation state
     enum SettingsWhisperAlert { case download, delete }
@@ -229,6 +230,20 @@ struct GeneralSettingsView: View {
                             .toggleStyle(.switch)
                             .labelsHidden()
                             .tint(theme.accentColor)
+                    }
+
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+
+                    SettingsRow(
+                        title: "Setup Assistant (Onboarding)",
+                        description: "Revisit the initial welcome slideshow, feature overview, and profile setup assistant.",
+                        theme: theme
+                    ) {
+                        Button("Launch Setup Assistant...") {
+                            isOnboardingComplete = false
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                     }
                 }
 

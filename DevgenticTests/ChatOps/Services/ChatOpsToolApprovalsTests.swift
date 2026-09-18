@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  ChatOpsToolApprovalsTests.swift
 //  devgenticTests
@@ -7,7 +7,7 @@
 //  A standing "approve everything" grant must not cross a surface boundary.
 //
 //  ⚠️⚠️ CRIT-4, THE LEAK THIS CLOSES. `SessionToolApprovals`' autonomous grant was keyed on the
-//  conversation ALONE, and Jarvis publishes its conversation to ChatOps on purpose — its own code
+//  conversation ALONE, and Orb publishes its conversation to ChatOps on purpose — its own code
 //  says "Bind the profile so restart-resume, ChatOps, and the sidebar all resolve it". So a user who
 //  chose Autonomous for VOICE had that grant served to a message arriving from their paired phone,
 //  and `execute_shell` ran with no prompt on ANY surface: `ToolExecutionLoop` skips the banner, so no
@@ -35,10 +35,10 @@ final class ChatOpsToolApprovalsGrantTests: XCTestCase {
     }
 
     /// ⚠️ THE REGRESSION, in one test: a voice grant, a remote run.
-    func testAJarvisGrantIsNotServedToAChatOpsRun() async {
+    func testAOrbGrantIsNotServedToAChatOpsRun() async {
         let approvals = makeApprovals()
         let conversation = UUID()
-        await approvals.setAutonomous(true, conversationID: conversation, origin: .jarvis)
+        await approvals.setAutonomous(true, conversationID: conversation, origin: .orb)
 
         let leaked = await run(as: .telegram) {
             await approvals.isAllowed(toolName: "execute_shell", conversationID: conversation)
@@ -52,12 +52,12 @@ final class ChatOpsToolApprovalsGrantTests: XCTestCase {
     }
 
     /// …and the converse, which the per-platform setting now makes reachable.
-    func testAChatOpsGrantIsNotServedToAJarvisRun() async {
+    func testAChatOpsGrantIsNotServedToAOrbRun() async {
         let approvals = makeApprovals()
         let conversation = UUID()
         await approvals.setAutonomous(true, conversationID: conversation, origin: .telegram)
 
-        let leaked = await run(as: .jarvis) {
+        let leaked = await run(as: .orb) {
             await approvals.isAllowed(toolName: "execute_shell", conversationID: conversation)
         }
         XCTAssertFalse(leaked, "a grant made for a chat platform must not authorise a spoken run")
@@ -107,11 +107,11 @@ final class ChatOpsToolApprovalsGrantTests: XCTestCase {
         let approvals = makeApprovals()
         let conversation = UUID()
         await approvals.setAutonomous(true, conversationID: conversation, origin: .telegram)
-        await approvals.setAutonomous(true, conversationID: conversation, origin: .jarvis)
+        await approvals.setAutonomous(true, conversationID: conversation, origin: .orb)
 
         await approvals.clear(conversationID: conversation)
 
-        for origin in [MessageSource.telegram, .jarvis] {
+        for origin in [MessageSource.telegram, .orb] {
             let allowed = await run(as: origin) {
                 await approvals.isAllowed(toolName: "read_file", conversationID: conversation)
             }

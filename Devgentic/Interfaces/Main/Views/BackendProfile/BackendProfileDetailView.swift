@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  BackendProfileDetailView.swift
 //  Devgentic
@@ -250,10 +250,13 @@ struct ProfileRowView: View {
             }
 
             HStack(spacing: 12) {
-                Image(systemName: iconName(for: profile.profileType))
-                    .font(.system(.body))
-                    .foregroundColor(color(for: profile.profileType))
-                    .frame(width: 24)
+                ProfileTypeIcon(
+                    type: profile.profileType,
+                    size: 18,
+                    color: color(for: profile.profileType),
+                    isHovered: isHovering
+                )
+                .frame(width: 24)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(profile.displayName)

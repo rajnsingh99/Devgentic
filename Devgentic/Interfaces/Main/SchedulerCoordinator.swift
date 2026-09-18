@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  SchedulerCoordinator.swift
 //  Devgentic
@@ -225,7 +225,7 @@ final class SchedulerCoordinator {
             files: fileItems,
             fileProcessorService: fileProcessorService
         )
-        // ⚠️ Set BEFORE the send, exactly as QuickAccess and Jarvis do. Only the AGENT message
+        // ⚠️ Set BEFORE the send, exactly as QuickAccess and Orb do. Only the AGENT message
         // carried `.scheduled`, so `[STREAM_START]` — which reads the source off the USER message
         // to name the surface that started a run — reported every scheduled run as `localUI`.
         //
@@ -234,7 +234,7 @@ final class SchedulerCoordinator {
         // does not restore it — every reloaded row reads `.localUI` regardless. An earlier version
         // of this comment justified the assignment by naming ChatOps mirroring, analytics and the
         // audit trail; none of them read this field. Its only readers are two `[STREAM_START]`-side
-        // log interpolations and `JarvisAmbientRunWatcher`, all in-process.
+        // log interpolations and `OrbAmbientRunWatcher`, all in-process.
         userMessage.messageSource = .scheduled
         await Self.persistScheduledQuestion(
             userMessage: userMessage,

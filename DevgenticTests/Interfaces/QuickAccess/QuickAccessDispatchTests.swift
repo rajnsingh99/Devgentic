@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  QuickAccessDispatchTests.swift
 //  DevgenticTests
 //
 //  ⚠️ THE FIRST TESTS THIS SURFACE HAS EVER HAD. Nine production files under
 //  `Devgentic/Interfaces/QuickAccess/` and, before this file, no test named
-//  `QuickAccessSessionViewModel`, `QuickAccessPanel` or `QuickAccessWindow` — while Jarvis, the
+//  `QuickAccessSessionViewModel`, `QuickAccessPanel` or `QuickAccessWindow` — while Orb, the
 //  other non-main surface, had 269 tests across 48 classes.
 //
 //  That gap mattered most exactly where it was widest. QuickAccess handed the send path a REVERSED
@@ -22,7 +22,7 @@
 //  `QuickAccessSessionViewModel.init` takes a `MainApplicationViewModel`, whose init runs
 //  `ChatOpsCoordinator.bootstrap()` — real Telegram/Discord/Slack connections when the developer
 //  has them configured. A unit test must never be able to do that, so the contract that carries
-//  the defect is extracted, as it was for `JarvisSessionController.voiceTurn` and
+//  the defect is extracted, as it was for `OrbSessionController.voiceTurn` and
 //  `SchedulerCoordinator.prepareScheduledRequest`.
 //
 //  ⚠️ The STORE is no longer a blocker: `persistence` was widened to `ChatPersistenceProtocol` on
@@ -111,7 +111,7 @@ final class QuickAccessDispatchTests: XCTestCase {
         XCTAssertEqual(message.messageSource, .quickAccess)
     }
 
-    /// Unlike Jarvis the panel does not decorate its query, so the model's text and the displayed
+    /// Unlike Orb the panel does not decorate its query, so the model's text and the displayed
     /// text are the same string and no override is needed. Pinned as a contract: a future panel
     /// decoration must travel as `promptOverride`, never by mutating this message.
     func testThePanelDoesNotDecorateItsQuery() async {

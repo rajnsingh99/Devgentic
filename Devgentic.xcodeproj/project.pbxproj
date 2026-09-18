@@ -60,14 +60,14 @@
 			path = Devgentic;
 			sourceTree = "<group>";
 		};
-		35FCBA9C2DB5526B00D39123 /* devgenticTests */ = {
+		35FCBA9C2DB5526B00D39123 /* DevgenticTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = devgenticTests;
+			path = DevgenticTests;
 			sourceTree = "<group>";
 		};
-		35FCBAA62DB5526B00D39123 /* devgenticUITests */ = {
+		35FCBAA62DB5526B00D39123 /* DevgenticUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = devgenticUITests;
+			path = DevgenticUITests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -136,8 +136,8 @@
 			isa = PBXGroup;
 			children = (
 				35FCBA8A2DB5526B00D39123 /* Devgentic */,
-				35FCBA9C2DB5526B00D39123 /* devgenticTests */,
-				35FCBAA62DB5526B00D39123 /* devgenticUITests */,
+				35FCBA9C2DB5526B00D39123 /* DevgenticTests */,
+				35FCBAA62DB5526B00D39123 /* DevgenticUITests */,
 				35DB4C1E2DC53B9D002B3BF7 /* Frameworks */,
 				35FCBA892DB5526B00D39123 /* Products */,
 				35F483F92E23C8680031D7CB /* generated */,
@@ -164,6 +164,7 @@
 				35FCBA842DB5526B00D39123 /* Sources */,
 				35FCBA852DB5526B00D39123 /* Frameworks */,
 				35FCBA862DB5526B00D39123 /* Resources */,
+				35A9C0DE2F9A0000000000A1 /* Copy licence notices into the bundle */,
 			);
 			buildRules = (
 			);
@@ -213,7 +214,7 @@
 				35FCBA9B2DB5526B00D39123 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				35FCBA9C2DB5526B00D39123 /* devgenticTests */,
+				35FCBA9C2DB5526B00D39123 /* DevgenticTests */,
 			);
 			name = devgenticTests;
 			packageProductDependencies = (
@@ -236,7 +237,7 @@
 				35FCBAA52DB5526B00D39123 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				35FCBAA62DB5526B00D39123 /* devgenticUITests */,
+				35FCBAA62DB5526B00D39123 /* DevgenticUITests */,
 			);
 			name = devgenticUITests;
 			packageProductDependencies = (
@@ -328,6 +329,32 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		35A9C0DE2F9A0000000000A1 /* Copy licence notices into the bundle */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/LICENSE",
+				"$(SRCROOT)/THIRD_PARTY_NOTICES.md",
+			);
+			name = "Copy licence notices into the bundle";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/LICENSE",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/THIRD_PARTY_NOTICES.md",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\n# Licence compliance: MIT/BSD/Apache all require their notice text to accompany the BINARY, and the\n# root files are the single source of truth (no copies under Devgentic/ that could drift).\ndest=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\nmkdir -p \"${dest}\"\ncp -f \"${SRCROOT}/LICENSE\" \"${dest}/LICENSE\"\ncp -f \"${SRCROOT}/THIRD_PARTY_NOTICES.md\" \"${dest}/THIRD_PARTY_NOTICES.md\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		35FCBA842DB5526B00D39123 /* Sources */ = {
@@ -504,9 +531,14 @@
 				DEVELOPMENT_ASSET_PATHS = "\"devgentic/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				EXCLUDED_SOURCE_FILE_NAMES = (
+					"$(inherited)",
+					".devgentic/*",
+					"*/.devgentic/*",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = devgentic/Info.plist;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Raj Singh. Licensed under the GNU AGPL v3.";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2025-2026 Raj Singh. Licensed under the GNU AGPL v3.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Devgentic needs access to your microphone to capture audio for voice-to-text input.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Devgentic needs to send audio data to Apple's servers or process it on-device for speech recognition to convert your voice to text.";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -539,9 +571,14 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				EXCLUDED_SOURCE_FILE_NAMES = (
+					"$(inherited)",
+					".devgentic/*",
+					"*/.devgentic/*",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = devgentic/Info.plist;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Raj Singh. Licensed under the GNU AGPL v3.";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2025-2026 Raj Singh. Licensed under the GNU AGPL v3.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Devgentic needs access to your microphone to capture audio for voice-to-text input.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Devgentic needs to send audio data to Apple's servers or process it on-device for speech recognition to convert your voice to text.";
 				LD_RUNPATH_SEARCH_PATHS = (

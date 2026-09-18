@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  EmbeddingService.swift
 //  Devgentic
@@ -38,6 +38,13 @@ actor EmbeddingService {
     // MARK: - Private Properties
 
     /// The loaded Core ML sentence embedding model.
+    ///
+    /// Provenance (see `THIRD_PARTY_NOTICES.md` → "Bundled models"): `all-MiniLM-L6-v2` by the
+    /// sentence-transformers project, **Apache-2.0**, converted to Core ML with coremltools. It was
+    /// fine-tuned upstream from `nreimers/MiniLM-L6-H384-uncased` (MIT, a six-layer cut of Microsoft
+    /// MiniLM), which is also where the WordPiece tokenizer files under `Resources/AllMiniLMTokenizer`
+    /// come from. ⚠️ Not this project's own model — the `.mlpackage` metadata once claimed so; the
+    /// author and licence keys there are the attribution and must stay correct.
     private let model: All_MiniLM_L6_v2?
 
     /// The fixed sequence length the Core ML model expects.

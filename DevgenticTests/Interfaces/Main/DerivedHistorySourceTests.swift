@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  DerivedHistorySourceTests.swift
 //  DevgenticTests
@@ -15,7 +15,7 @@
 //  What it took history as a parameter FOR: the manager could not tell a resolved ascending
 //  merge from a descending store dump (`SchedulerCoordinator`) from a 20-message pagination
 //  window (`QuickAccessSessionViewModel`) from a private append-only transcript
-//  (`JarvisSessionController`). Every rule about that argument lived in a comment. That is why
+//  (`OrbSessionController`). Every rule about that argument lived in a comment. That is why
 //  invariant #8 ("ascending history only, from `BackendHistoryResolver`") was violated in live
 //  code by the scheduler.
 //

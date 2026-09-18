@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  VoiceLifecycleTests.swift
 //  DevgenticTests
@@ -51,7 +51,7 @@ final class VoiceSessionLedgerTests: XCTestCase {
         let first = ledger.begin(owner: .mainComposer)!
         XCTAssertEqual(ledger.end(first.id), .finalized)
 
-        let second = ledger.begin(owner: .jarvis)
+        let second = ledger.begin(owner: .orb)
         XCTAssertNotNil(second, "Ending the active session frees the slot")
         XCTAssertNotEqual(second?.id, first.id)
     }
@@ -176,7 +176,7 @@ final class SpeechServiceLifecycleTests: XCTestCase {
     }
 }
 
-// MARK: - Dead-mic detection (ported from Jarvis, 2026-07-19)
+// MARK: - Dead-mic detection (ported from Orb, 2026-07-19)
 
 final class DeadMicDetectorTests: XCTestCase {
 

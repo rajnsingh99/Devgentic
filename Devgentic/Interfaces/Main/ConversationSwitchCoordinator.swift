@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  ConversationSwitchCoordinator.swift
 //  Devgentic
@@ -132,7 +132,7 @@ final class ConversationSwitchCoordinator {
             // [QA revival P1e] Unload models only if NO stream is active anywhere AND the new
             // conversation uses a different backend profile. `streamingActive` covers only the
             // main window's slot; also consult the shared ActiveStreamManager so a QuickAccess or
-            // Jarvis run — which keep their own PRIVATE slots and never set the shared
+            // Orb run — which keep their own PRIVATE slots and never set the shared
             // streamingMessageID — isn't rug-pulled mid-generation. Re-read after the debounce so
             // a run that began during it counts.
             // ⚠️ CORRECTED 2026-08-17: this comment previously claimed ChatOps and scheduler runs

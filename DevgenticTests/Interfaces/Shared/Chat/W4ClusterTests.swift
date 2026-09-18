@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  W4ClusterTests.swift
 //  DevgenticTests
@@ -142,7 +142,7 @@ final class FileReferenceSpanReuseTests: XCTestCase {
 // MARK: - speech/sa-8
 
 /// Pressing Read Aloud called `SpeechService.stop()`, which silences the synthesizer and clears
-/// the session — but Jarvis's narration driver is STREAMING and went on ingesting the answer and
+/// the session — but Orb's narration driver is STREAMING and went on ingesting the answer and
 /// queueing utterances into a service it no longer owned, so the two interleaved.
 @MainActor
 final class ExternalNarrationHandoffTests: XCTestCase {

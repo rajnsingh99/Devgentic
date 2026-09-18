@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  MarkdownParser.swift
 //  Devgentic
@@ -271,7 +271,11 @@ func parseMarkdown(_ markdown: String) -> [ContentBlock] {
 /// (code blocks read `codeBlock.code`). That also let a code block whose *content*
 /// contained a file-marker line be mistaken for the marker and swallowed entirely.
 fileprivate func buildContentBlocks(
-    from document: Document,
+    // ⚠️ MODULE-QUALIFIED. The macOS 27 SDK added `SwiftUI.Document`, and this file imports both
+    // SwiftUI and Markdown — so a bare `Document` in TYPE position stopped resolving. The
+    // `Document(parsing:options:)` call sites still compile unqualified because the argument
+    // labels pick the overload, which is why this is the only line the upgrade broke.
+    from document: Markdown.Document,
     idOffset: Int,
     pendingFileName: inout PendingFileNameClaim?
 ) -> [ContentBlock] {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  ChatOpsCommandServiceTests.swift
 //  DevgenticTests
@@ -771,6 +771,22 @@ final class ChatOpsCommandServiceTests: XCTestCase {
         XCTAssertFalse(tier.emphasis)
     }
 
+    /// AGPL §13 — a user who reaches the app over a network must be offered its Corresponding
+    /// Source. The offer lives in `/help` so an operator running a modified build inherits it.
+    /// Cutting the field, or pointing it anywhere but the public repository, fails here; the
+    /// rendered golden below pins the exact line a Telegram user reads.
+    func testHelpOffersTheSourceRepositoryToRemoteUsers() throws {
+        guard case .notice(let notice) = service.help() else { return XCTFail("expected a notice") }
+        let source = try XCTUnwrap(notice.fields.first { $0.label == "Source" },
+                                   "/help no longer offers the source — the AGPL network offer is gone")
+        XCTAssertTrue(source.value.contains(GlobalConstants.sourceCodeURL),
+                      "the offer must be wired to the one constant, not a second copy of the URL")
+        XCTAssertTrue(source.value.hasPrefix("https://github.com/rajnsingh99/devgentic"),
+                      "the offer must name the public repository, not a mirror or a placeholder")
+        XCTAssertTrue(source.labelEmphasis, "bold LABEL, matching the Security Tier line above it")
+        XCTAssertFalse(source.emphasis)
+    }
+
     // MARK: - End to end, through the real renderer
 
     /// The service's output, rendered by the real Telegram renderer, must equal the shipping literal
@@ -825,6 +841,7 @@ final class ChatOpsCommandServiceTests: XCTestCase {
         3. The agent responds right here
 
         *Security Tier:* \(session.securityTier.rawValue)
+        *Source:* https://github.com/rajnsingh99/devgentic · GNU AGPL v3
         """)
     }
 

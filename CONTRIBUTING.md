@@ -32,7 +32,7 @@ Every new `.swift` file starts with exactly these two lines:
 
 ```swift
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 ```
 
 Keep them on files you touch. Files under `generated/` are produced by the ObjectBox generator and carry
@@ -67,3 +67,12 @@ Maintainer-only, but the rules live here so they are written down somewhere:
   date plus a two-digit sequence. It must **strictly increase** with every published build, because the
   in-app updater compares it; a release that reuses or lowers it will never be offered to anyone. The
   release script sets it; don't edit it by hand.
+
+## Naming and trademark
+
+**Devgentic** is a trademark of Raj Singh, and the AGPL grants no trademark rights. You are free to fork
+and redistribute the code; a redistributed or modified build must carry a different name and must not
+imply endorsement. See the [naming note in the README](README.md#trademark-and-naming).
+
+If you are contributing *to* this project rather than forking it, this does not affect you — it exists so
+that a build calling itself "Devgentic" is one users can trace back to here.

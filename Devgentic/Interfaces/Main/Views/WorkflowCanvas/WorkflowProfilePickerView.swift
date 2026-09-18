@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  WorkflowProfilePickerView.swift
 //  Devgentic
@@ -149,13 +149,13 @@ struct WorkflowProfilePickerView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         if !agentProfiles.isEmpty {
-                            profileSection(title: "Agents", icon: ProfileType.agent.iconName, color: .green, profiles: agentProfiles)
+                            profileSection(title: "Agents", type: .agent, color: .green, profiles: agentProfiles)
                         }
                         if !botProfiles.isEmpty {
-                            profileSection(title: "Bots", icon: ProfileType.bot.iconName, color: .blue, profiles: botProfiles)
+                            profileSection(title: "Bots", type: .bot, color: .blue, profiles: botProfiles)
                         }
                         if !workflowProfiles.isEmpty {
-                            profileSection(title: "Workflows", icon: ProfileType.workflow.iconName, color: .purple, profiles: workflowProfiles)
+                            profileSection(title: "Workflows", type: .workflow, color: .purple, profiles: workflowProfiles)
                         }
                         if filteredProfiles.isEmpty && !searchText.isEmpty {
                             Text("No matches for \"\(searchText)\"")
@@ -184,12 +184,15 @@ struct WorkflowProfilePickerView: View {
     }
 
     @ViewBuilder
-    private func profileSection(title: String, icon: String, color: Color, profiles: [BackendProfileModel]) -> some View {
+    private func profileSection(title: String, type: ProfileType, color: Color, profiles: [BackendProfileModel]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label(title, systemImage: icon)
-                .font(.subheadline)
-                .fontWeight(.semibold)
-                .foregroundColor(color)
+            HStack(spacing: 6) {
+                ProfileTypeIcon(type: type, size: 14, color: color)
+                Text(title)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(color)
+            }
 
             ForEach(profiles) { profile in
                 pickableProfileRow(profile: profile, color: color)
@@ -204,8 +207,7 @@ struct WorkflowProfilePickerView: View {
             dismiss()
         } label: {
             HStack(spacing: 12) {
-                Image(systemName: profile.profileType.iconName)
-                    .foregroundColor(color)
+                ProfileTypeIcon(type: profile.profileType, size: 18, color: color)
                     .frame(width: 24)
 
                 VStack(alignment: .leading, spacing: 2) {

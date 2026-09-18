@@ -32,7 +32,7 @@
 
 	<!-- [L3] Microphone. REQUIRED once the hardened runtime is enabled: without it,
 	     AVAudioApplication.requestRecordPermission() returns false and voice dictation (panel +
-	     main window) plus the Jarvis duplex engine silently die in the shipped build while working
+	     main window) plus the Orb duplex engine silently die in the shipped build while working
 	     in every dev build. Paired with NSMicrophoneUsageDescription. -->
 	<key>com.apple.security.device.audio-input</key>
 	<true/>

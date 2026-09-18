@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  WorkflowRunTraceResidencyTests.swift
 //  DevgenticTests
@@ -312,7 +312,7 @@ final class WorkflowRunTraceResidencyTests: XCTestCase {
         XCTAssertFalse(state.isRunning)
     }
 
-    /// ⚠️ A RUN IN FLIGHT IS UNTOUCHABLE. Scheduled, ChatOps, QuickAccess and Jarvis runs continue
+    /// ⚠️ A RUN IN FLIGHT IS UNTOUCHABLE. Scheduled, ChatOps, QuickAccess and Orb runs continue
     /// in conversations that are not on screen, appending to their trace as they go. Dropping it
     /// mid-flight deletes the evidence of a live run and makes whatever arrives after the drop look
     /// like the whole story.

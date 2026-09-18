@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  AgentConnect.swift
 //  Devgentic
@@ -566,7 +566,9 @@ class AgentConnect: @unchecked Sendable {
                             [EXEC_LIMITS] Execution timeout \(Int(executionTimeout))s armed for \
                             conversation \(conversationID.uuidString.prefix(8)) \
                             (\(profile.profileType.rawValue)). CONSEQUENCE: the run is aborted if it \
-                            exceeds this.
+                            exceeds this much COMPUTE — time parked awaiting a human (tool \
+                            confirmations, clarifications, plan review) is excluded and extends the \
+                            budget.
                             """)
                     } else {
                         logger.notice("""
@@ -589,14 +591,29 @@ class AgentConnect: @unchecked Sendable {
                         // Enforce execution timeout via Task race.
                         // The typed TaskGroup returns the accumulated output from whichever
                         // task completes first, avoiding shared mutable state across tasks.
+                        let timeoutConversationID = conversationID
+                        let timeoutSubject = "Conversation \(conversationID.uuidString.prefix(8)) (\(profile.profileType.rawValue))"
                         finalOutputAccumulator = try await withThrowingTaskGroup(of: String.self) { group in
-                            // Timeout sentinel
+                            // Timeout sentinel.
+                            //
+                            // ⚠️⚠️ This raced a bare `Task.sleep(for: .seconds(timeout))` until now,
+                            // which charged HITL wait time against the execution budget. Tool
+                            // confirmations park INSIDE this raced task (`ToolExecutionLoop` awaits
+                            // `ExecutionSuspensionService.suspend`), so the clock ran while the user
+                            // read an approval banner — a run could die at 300 s having computed for
+                            // 90. `WorkflowExecutor.computeTimeoutSentinel` fixed exactly this for
+                            // workflow nodes on 2026-08-13 and its own doc comment called the profile
+                            // path's plain sleep "a live defect", but the fix never crossed over.
+                            // Both paths now call the same sentinel, which bounds COMPUTE and extends
+                            // itself by whatever was parked.
                             group.addTask {
-                                try await Task.sleep(for: .seconds(timeout))
-                                throw AgentExecutionError(reason: .executionTimeout(
-                                    elapsed: timeout,
-                                    limit: timeout
-                                ))
+                                try await ComputeTimeoutSentinel.sleepUntilComputeExceeded(
+                                    limit: timeout,
+                                    conversationID: timeoutConversationID,
+                                    logTag: "EXEC_LIMITS",
+                                    subject: timeoutSubject,
+                                    consequence: "the run is aborted and the timeout surfaces to the user; time spent awaiting a human was excluded from the budget."
+                                )
                             }
                             // Actual execution — accumulates output and returns it
                             group.addTask {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  WorkflowToolbarView.swift
 //  Devgentic
@@ -425,44 +425,52 @@ struct ToolbarPillButton: View {
     @State private var isHovered = false
     @Environment(\.appTheme) private var theme
 
+    // ⚠️ EXTRACTED, EXPLICITLY TYPED, AND THEY MUST STAY THAT WAY. Inline these back into `body`
+    // and the Swift 6.3 type checker (Xcode 27) fails the file outright with "unable to type-check
+    // this expression in reasonable time" — five nested `Color` ternaries in one literal, three of
+    // them through `??`, is past what it will solve. Each annotation below closes one branch of the
+    // search. No behaviour changes: every expression is the one that was inline.
+    private var iconColor: Color { isPrimary ? .white : (color ?? theme.accentColor) }
+    private var titleColor: Color { isPrimary ? .white : (color ?? theme.primaryText) }
+
+    private var fillColor: Color {
+        if isPrimary { return isHovered ? theme.accentColor.opacity(0.9) : theme.accentColor }
+        return isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay
+    }
+
+    private var borderColor: Color {
+        if isPrimary { return isHovered ? Color.white.opacity(0.35) : theme.accentColor.opacity(0.5) }
+        return isHovered ? (color ?? theme.accentColor).opacity(0.45) : theme.secondaryText.opacity(0.18)
+    }
+
+    private var shadowColor: Color {
+        if isPrimary { return isHovered ? theme.accentColor.opacity(0.45) : theme.accentColor.opacity(0.25) }
+        return isHovered ? theme.shadowColor.opacity(0.18) : theme.shadowColor.opacity(0.08)
+    }
+
     var body: some View {
         Button(action: action) {
             HStack(spacing: 5) {
                 if let icon {
                     Image(systemName: icon)
                         .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(isPrimary ? .white : (color ?? theme.accentColor))
+                        .foregroundColor(iconColor)
                 }
                 Text(title)
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(isPrimary ? .white : (color ?? theme.primaryText))
+                    .foregroundColor(titleColor)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isPrimary
-                        ? (isHovered ? theme.accentColor.opacity(0.9) : theme.accentColor)
-                        : (isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
-                    )
+                    .fill(fillColor)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(
-                        isPrimary
-                        ? (isHovered ? Color.white.opacity(0.35) : theme.accentColor.opacity(0.5))
-                        : (isHovered ? (color ?? theme.accentColor).opacity(0.45) : theme.secondaryText.opacity(0.18)),
-                        lineWidth: 1
-                    )
+                    .strokeBorder(borderColor, lineWidth: 1)
             )
-            .shadow(
-                color: isPrimary
-                ? (isHovered ? theme.accentColor.opacity(0.45) : theme.accentColor.opacity(0.25))
-                : (isHovered ? theme.shadowColor.opacity(0.18) : theme.shadowColor.opacity(0.08)),
-                radius: isHovered ? 4 : 2,
-                x: 0,
-                y: 1
-            )
+            .shadow(color: shadowColor, radius: isHovered ? 4 : 2, x: 0, y: 1)
             .scaleEffect(isHovered ? 1.03 : 1.0)
         }
         .buttonStyle(.plain)

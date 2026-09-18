@@ -1,9 +1,10 @@
 {
-  "MLModelDescriptionKey" : "Embedding model for text to vector",
-  "MLModelCreatorDefinedKey" : {
-    "com.github.apple.coremltools.source_dialect" : "TorchScript",
-    "com.github.apple.coremltools.source" : "torch==2.1.2",
-    "com.github.apple.coremltools.version" : "7.1"
-  },
-  "MLModelAuthorKey" : "Raj Singh"
+  "MLModelDescriptionKey": "all-MiniLM-L6-v2 sentence-embedding model (384 dimensions), converted to Core ML for Devgentic's local RAG index.",
+  "MLModelAuthorKey": "sentence-transformers (Nils Reimers; Hugging Face JAX/Flax community week). Core ML conversion: Raj Singh.",
+  "MLModelLicenseKey": "Apache-2.0. Source: https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2 - fine-tuned from nreimers/MiniLM-L6-H384-uncased (MIT), derived from Microsoft MiniLM (MIT). See THIRD_PARTY_NOTICES.md in the app bundle.",
+  "MLModelCreatorDefinedKey": {
+    "com.github.apple.coremltools.source_dialect": "TorchScript",
+    "com.github.apple.coremltools.source": "torch==2.1.2",
+    "com.github.apple.coremltools.version": "7.1"
+  }
 }

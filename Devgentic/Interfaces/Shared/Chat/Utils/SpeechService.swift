@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  SpeechService.swift
 //  Devgentic
@@ -93,8 +93,8 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
 
     /// [V5] Created per playback session and RELEASED at stop/finish — not held for the
     /// app's lifetime. A live AVSpeechSynthesizer keeps a CoreAudio output context open,
-    /// which is exactly the pattern the Jarvis notes document as wedging the microphone
-    /// (`JarvisVoiceOutput` releases per-utterance for the same reason). Releasing when
+    /// which is exactly the pattern the Orb notes document as wedging the microphone
+    /// (`OrbVoiceOutput` releases per-utterance for the same reason). Releasing when
     /// idle costs one lazy re-creation on the next Read Aloud.
     @ObservationIgnored private var synthesizer: AVSpeechSynthesizer?
 
@@ -208,18 +208,18 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
     /// Cancels whatever OTHER driver is currently feeding this service, set by that driver while
     /// it holds the floor.
     ///
-    /// Today that is `JarvisStreamingSpeaker`, which registers on the same line it already calls
+    /// Today that is `OrbStreamingSpeaker`, which registers on the same line it already calls
     /// `stop()` to take the floor. The problem it solves: pressing Read Aloud called `stop()`,
-    /// which silences the synthesizer and clears the session — but Jarvis's speaker is a
+    /// which silences the synthesizer and clears the session — but Orb's speaker is a
     /// STREAMING driver that goes on ingesting the answer and queueing utterances into the
     /// service it no longer owns, so the two interleaved and the chat answer was read out with
-    /// fragments of Jarvis's narration spliced through it.
+    /// fragments of Orb's narration spliced through it.
     ///
-    /// A CLOSURE rather than a reference to the speaker: `JarvisSessionController` is
+    /// A CLOSURE rather than a reference to the speaker: `OrbSessionController` is
     /// constructed per panel and has no singleton, so there is nothing global to reach for, and
-    /// `SpeechService` must not learn about Jarvis types to do this.
+    /// `SpeechService` must not learn about Orb types to do this.
     ///
-    /// ⚠️ Narration ONLY. `JarvisVoiceOutput`'s short phrases (greeting, approval, completion)
+    /// ⚠️ Narration ONLY. `OrbVoiceOutput`'s short phrases (greeting, approval, completion)
     /// deliberately use a private synthesizer so chat Read Aloud does NOT hard-cancel them
     /// mid-sentence; that decision is documented on that type and this must not undo it.
     @ObservationIgnored private var externalNarrationCanceller: (() -> Void)?

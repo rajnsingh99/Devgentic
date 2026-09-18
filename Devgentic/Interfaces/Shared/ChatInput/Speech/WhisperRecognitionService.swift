@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  WhisperRecognitionService.swift
 //  Devgentic
@@ -124,11 +124,11 @@ class WhisperRecognitionService {
     private var ledger = VoiceSessionLedger()
     /// [Phase 4b] A BORROWED reference to the panel-scoped duplex engine — never owned here.
     ///
-    /// ⚠️ Its lifetime is the PANEL session (`JarvisDuplexAudio`), not the stream session. Tying
+    /// ⚠️ Its lifetime is the PANEL session (`OrbDuplexAudio`), not the stream session. Tying
     /// it to the stream session meant rebuilding voice processing after every answer, seconds
     /// after AVSpeechSynthesizer released its audio unit, and it captured nothing. Do not add a
     /// `stopEngine` call anywhere in this file.
-    private var jarvisDuplexProcessor: JarvisAudioProcessor?
+    private var orbDuplexProcessor: OrbAudioProcessor?
     private var currentModelName: String
     private var _currentLanguage: String?
     private var _isAutoStopEnabled: Bool
@@ -144,7 +144,7 @@ class WhisperRecognitionService {
     private var lastPartialText: String = ""
 
     /// Whether ANY energy sample arrived this session — "proof the engine is
-    /// actually delivering audio" (Jarvis's phrase). Logged at finalize so a
+    /// actually delivering audio" (Orb's phrase). Logged at finalize so a
     /// dead-mic session (`_StartIO error 35` class) is identifiable from the
     /// [VOICE] narrative alone, for every surface.
     private var sessionSawAudio = false
@@ -291,7 +291,7 @@ class WhisperRecognitionService {
 
         // [V2] Single-slot guard. Every surface-level guard is per-instance, so this is
         // the only place that can see a cross-surface collision (main composer recording
-        // while QuickAccess or Jarvis starts). Overwriting the live session here is what
+        // while QuickAccess or Orb starts). Overwriting the live session here is what
         // used to orphan a transcriber into a permanent decode loop.
         guard let session = ledger.begin(owner: owner) else {
             let holder = ledger.active?.owner ?? owner
@@ -326,16 +326,16 @@ class WhisperRecognitionService {
             options.usePrefillPrompt = false
         }
 
-        // ⚠️ BORROWED, never built here. The engine is owned by `JarvisDuplexAudio` for the whole
+        // ⚠️ BORROWED, never built here. The engine is owned by `OrbDuplexAudio` for the whole
         // panel session: building one per stream session meant constructing voice processing
         // seconds after AVSpeechSynthesizer released its audio unit, and it captured nothing.
         // A cold engine yields nil, which falls through to WhisperKit's own below — that fallback
         // is why a duplex failure never fails a session, and it must stay.
-        let duplexProcessor = JarvisDuplexAudio.shared.borrow(for: owner)
+        let duplexProcessor = OrbDuplexAudio.shared.borrow(for: owner)
         if duplexProcessor != nil {
-            logger.log("[VOICE] Session \(session.shortID) using the panel-scoped Jarvis DUPLEX engine (echo cancellation active).")
+            logger.log("[VOICE] Session \(session.shortID) using the panel-scoped Orb DUPLEX engine (echo cancellation active).")
         }
-        jarvisDuplexProcessor = duplexProcessor
+        orbDuplexProcessor = duplexProcessor
 
         logger.log("Creating AudioStreamTranscriber...")
         let transcriber = AudioStreamTranscriber(
@@ -344,9 +344,9 @@ class WhisperRecognitionService {
             segmentSeeker: whisperKit.segmentSeeker,
             textDecoder: whisperKit.textDecoder,
             tokenizer: tokenizer,
-            // [Phase 4a] Jarvis may supply its OWN engine with echo cancellation enabled, through
+            // [Phase 4a] Orb may supply its OWN engine with echo cancellation enabled, through
             // WhisperKit's public `AudioProcessing` seam — no fork. Everything else (composer,
-            // QuickAccess) keeps WhisperKit's engine untouched, and Jarvis falls back to it the
+            // QuickAccess) keeps WhisperKit's engine untouched, and Orb falls back to it the
             // moment the flag is off or the duplex engine refuses to start.
             audioProcessor: duplexProcessor ?? whisperKit.audioProcessor,
             decodingOptions: options,
@@ -376,7 +376,7 @@ class WhisperRecognitionService {
         // Post-return triage. Three ways the blocking call comes back:
         if Task.isCancelled {
             // Caller cancelled the owning task (QuickAccess stop(), main-composer
-            // cancelRecording(), Jarvis stopListening()) — realtimeLoop breaks on the
+            // cancelRecording(), Orb stopListening()) — realtimeLoop breaks on the
             // swallowed CancellationError WITHOUT stopping the recorder. Every canceller
             // pairs the cancel with an explicit stopStreaming(), which performs the real
             // teardown; doing it here too would race that call's finalize.
@@ -428,14 +428,14 @@ class WhisperRecognitionService {
         self.streamTranscriber = nil
         self.onStateChangeCallback = nil
         // ⚠️⚠️ THE ENGINE IS BORROWED — DO NOT STOP IT HERE. Its lifetime is the PANEL session,
-        // owned by `JarvisDuplexAudio`; stopping it per stream session is exactly the bug this
+        // owned by `OrbDuplexAudio`; stopping it per stream session is exactly the bug this
         // phase fixed, because rebuilding voice processing after every answer never captures.
         // Only the reference is dropped. Release is the panel's job and is wired at each of its
         // teardown paths: panel close, system sleep/lock, Repair Audio, profile switch, duplex
         // toggled off, recognizer switched to Apple Speech, and app termination.
         // ⚠️ A live AVAudioEngine at process death still wedges coreaudiod into `_StartIO error
         // 35` — that hazard is now wider, not gone.
-        jarvisDuplexProcessor = nil
+        orbDuplexProcessor = nil
         self.consecutiveSilenceCount = 0
         logger.log("[VOICE] Session \(session.shortID) FINALIZED (owner: \(session.owner.rawValue), reason: \(reason), transcript: \(finalText.count) chars, audio: \(sessionSawAudio ? "yes" : "NONE — engine likely failed to start")).")
         return finalText

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  ChatOpsCommandService.swift
 //  Devgentic
@@ -411,6 +411,10 @@ final class ChatOpsCommandService {
                 .init(value: "3. The agent responds right here"),
                 .spacer,
                 .init(label: "Security Tier", value: session.securityTier.rawValue, labelEmphasis: true),
+                // AGPL §13: everyone who reaches this app over a network is offered its source. It
+                // lives in the DEFAULT reply so an operator running a modified build inherits a
+                // compliant `/help` without editing anything. See `GlobalConstants.sourceCodeURL`.
+                .init(label: "Source", value: "\(GlobalConstants.sourceCodeURL) · GNU AGPL v3", labelEmphasis: true),
             ]
         ))
     }

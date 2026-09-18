@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  RemoteWindowIndependenceTests.swift
 //  devgenticTests
@@ -126,7 +126,7 @@ final class RemoteWindowIndependenceTests: XCTestCase {
         let seam = try ChatOpsSecurityTierMatrixTests.readSource("Devgentic/ChatOps/Services/ChatOpsHosting.swift")
         XCTAssertTrue(seam.contains("var defaultProfileID: UUID? { get }"), """
             `defaultProfileID` gained a setter. It is the app-global composer selection shared with \
-            the Mac window and Jarvis; a remote write retargets the local user's composer.
+            the Mac window and Orb; a remote write retargets the local user's composer.
             """)
     }
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  MirrorConsentGateTests.swift
 //  devgenticTests
@@ -85,8 +85,8 @@ final class MirrorConsentGateTests: XCTestCase {
         XCTAssertFalse(mirror.isMirroring(conversationID))
     }
 
-    func testQuickAccessAndJarvisRunsAreNotMirrored() {
-        for source in [MessageSource.quickAccess, .jarvis] {
+    func testQuickAccessAndOrbRunsAreNotMirrored() {
+        for source in [MessageSource.quickAccess, .orb] {
             _ = startRun(source)
             XCTAssertFalse(mirror.isMirroring(conversationID), "\(source.rawValue) run was mirrored")
         }
@@ -170,14 +170,14 @@ final class MirrorConsentGateTests: XCTestCase {
             """)
     }
 
-    /// ⚠️ Do not "simplify" this by stamping the agent message earlier — `JarvisAmbientRunWatcher`
+    /// ⚠️ Do not "simplify" this by stamping the agent message earlier — `OrbAmbientRunWatcher`
     /// reads that field at `didEndStream` and its classification is calibrated to today's timing.
     func testTheAgentMessageIsStillStampedByItsCallerNotByTheStreamManager() throws {
         let manager = try ChatOpsSecurityTierMatrixTests.readSource("Devgentic/Core/Utils/ActiveStreamManager.swift")
         XCTAssertFalse(manager.contains("agentMessage.messageSource = userMessage.messageSource"), """
             `startMessageStream` now stamps the agent message's source itself. \
-            `JarvisAmbientRunWatcher` reads that field at `didEndStream` to decide what to announce; \
-            moving the write changes which runs Jarvis speaks.
+            `OrbAmbientRunWatcher` reads that field at `didEndStream` to decide what to announce; \
+            moving the write changes which runs Orb speaks.
             """)
     }
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  ContextWindowGauge.swift
 //  Devgentic
@@ -25,6 +25,7 @@
 //
 
 import SwiftUI
+import AppKit
 import os
 
 private let logger = DGLogger(category: "ContextWindowGauge")
@@ -372,12 +373,16 @@ struct ContextWindowGauge: View {
     @Environment(\.appTheme) private var theme
     @State private var showBreakdown = false
     @State private var isHovered = false
+    @State private var showHoverCard = false
+    @State private var hoverTask: Task<Void, Never>?
 
     private let ringSize: CGFloat = 14
     private let ringWidth: CGFloat = 2.2
 
     var body: some View {
         Button {
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+            showHoverCard = false
             showBreakdown.toggle()
         } label: {
             ZStack {
@@ -405,10 +410,42 @@ struct ContextWindowGauge: View {
         .buttonStyle(.plain)
         .onHover { hovering in
             withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { isHovered = hovering }
+            hoverTask?.cancel()
+            if hovering && !showBreakdown {
+                hoverTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 140_000_000)
+                    guard !Task.isCancelled else { return }
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
+                        showHoverCard = true
+                    }
+                }
+            } else {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    showHoverCard = false
+                }
+            }
         }
-        .help(Text("Context window · \(usage.percent)% used (\(usage.usedDisplay) of \(usage.windowDisplay))"))
+        .onChange(of: showBreakdown) { _, newValue in
+            if newValue {
+                showHoverCard = false
+            }
+        }
         .accessibilityLabel(Text("Context window \(usage.percent) percent used, \(usage.usedDisplay) of \(usage.windowDisplay) tokens"))
         .accessibilityAddTraits(.isButton)
+        .overlay(alignment: .bottomTrailing) {
+            if showHoverCard && !showBreakdown {
+                ContextGaugeHoverCard(usage: usage)
+                    .offset(x: 6, y: -34)
+                    .transition(
+                        .asymmetric(
+                            insertion: .scale(scale: 0.90, anchor: .bottomTrailing)
+                                .combined(with: .opacity)
+                                .combined(with: .offset(y: 4)),
+                            removal: .opacity
+                        )
+                    )
+            }
+        }
         .popover(isPresented: $showBreakdown, arrowEdge: .top) {
             ContextWindowBreakdown(
                 usage: usage,
@@ -420,6 +457,120 @@ struct ContextWindowGauge: View {
             )
             .environment(\.appTheme, theme)
         }
+    }
+}
+
+// MARK: - Hover Micro-Card
+
+/// A sleek floating micro-card that appears smoothly above the context gauge on hover.
+/// Gives immediate visibility into exact tokens, headroom, and memory status without
+/// requiring a click or interrupting the user's typing flow.
+struct ContextGaugeHoverCard: View {
+    let usage: ContextWindowUsage
+    @Environment(\.appTheme) private var theme
+
+    private var statusInfo: (text: String, icon: String, color: Color) {
+        if usage.exceedsWindow {
+            return ("Compaction active", "arrow.triangle.2.circlepath", theme.warningColor)
+        } else if usage.level == .over {
+            return ("Low reply headroom", "exclamationmark.triangle.fill", theme.errorColor)
+        } else if usage.level == .high {
+            return ("Capacity warning", "gauge.with.dots.needle.bottom.100percent", theme.warningColor)
+        } else {
+            return ("Optimal capacity", "checkmark.circle.fill", theme.accentColor)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // Header: Model name & percentage
+            HStack(spacing: 5) {
+                Text(usage.modelName)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(theme.primaryText.opacity(0.9))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Spacer(minLength: 6)
+
+                Text("\(usage.percent)%")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundColor(usage.level.color(theme))
+            }
+
+            // Animated Progress Fill Bar
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.06))
+
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    usage.level.color(theme),
+                                    usage.level.color(theme).opacity(0.75)
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: max(4, geo.size.width * usage.displayFraction))
+                        .shadow(color: usage.level.color(theme).opacity(0.4), radius: 2, y: 0)
+                }
+            }
+            .frame(height: 4)
+
+            // Bottom row: Tokens used vs total & status badge
+            HStack(spacing: 6) {
+                Text("\(usage.usedDisplay) / \(usage.windowDisplay)")
+                    .font(.system(size: 9.5, weight: .medium, design: .rounded))
+                    .foregroundColor(theme.secondaryText)
+
+                Spacer(minLength: 4)
+
+                HStack(spacing: 3) {
+                    Image(systemName: statusInfo.icon)
+                        .font(.system(size: 7.5, weight: .bold))
+                        .foregroundColor(statusInfo.color)
+
+                    Text(statusInfo.text)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(statusInfo.color)
+                }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(
+                    Capsule()
+                        .fill(statusInfo.color.opacity(0.12))
+                )
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(width: 204)
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(theme.isDark ? Color.black.opacity(0.65) : Color.white.opacity(0.85))
+            }
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.24), Color.white.opacity(0.06)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 0.8
+                )
+        )
+        .shadow(color: Color.black.opacity(0.35), radius: 10, x: 0, y: 4)
+        .shadow(color: usage.level.color(theme).opacity(0.15), radius: 6, x: 0, y: 2)
+        .allowsHitTesting(false)
     }
 }
 

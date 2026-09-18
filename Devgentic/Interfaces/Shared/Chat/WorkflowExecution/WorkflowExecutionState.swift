@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  WorkflowExecutionState.swift
 //  Devgentic
@@ -175,7 +175,7 @@ final class WorkflowExecutionState {
     /// historical run.
     ///
     /// ⚠️ REFUSES WHILE RUNNING, and that is not defensive: a scheduled, ChatOps, QuickAccess or
-    /// Jarvis run continues in a conversation that is not on screen, and its trace is being
+    /// Orb run continues in a conversation that is not on screen, and its trace is being
     /// appended to as it goes. Dropping it mid-flight would delete the evidence of a run in
     /// progress and leave the events after the drop looking like the whole story.
     ///

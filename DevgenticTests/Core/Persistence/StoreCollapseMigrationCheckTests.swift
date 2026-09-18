@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  StoreCollapseMigrationCheckTests.swift
 //  devgenticTests
@@ -24,6 +24,7 @@
 
 import XCTest
 import SwiftData
+import SQLite3
 @testable import devgentic
 
 // ⚠️ The hypothetical "collapsed plan" this file used to define is GONE — it is
@@ -68,13 +69,62 @@ final class StoreCollapseMigrationCheckTests: XCTestCase {
     }
 
     /// A private copy, so a migration that rewrites the file cannot touch the investigation's copy.
+    ///
+    /// ⚠️ THE `-wal` AND `-shm` SIDECARS COME TOO. A SQLite database in WAL mode is the main file
+    /// PLUS its write-ahead log; copying only `DevgenticSD.store` stages whatever was last
+    /// checkpointed and silently drops everything committed since. This gate would then be reading a
+    /// stale snapshot of the live store while claiming to read the live store — and it got away with
+    /// it only because that WAL happened to be checkpointed. Copying them is also what lets the file
+    /// be opened at all: WAL mode needs its shared-memory file, and without the sidecars SQLite
+    /// fails with "unable to open database file". Absent sidecars are fine — a cleanly checkpointed
+    /// fixture has none, and `copyItem` is simply skipped.
     private func stagedCopy(of name: String) throws -> URL {
         let source = Self.fixtureRoot.appendingPathComponent(name)
         try XCTSkipUnless(FileManager.default.fileExists(atPath: source.path),
                           "fixture \(name) absent — this gate only runs where the copies were made")
         let destination = work.appendingPathComponent(name)
         try FileManager.default.copyItem(at: source, to: destination)
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = Self.fixtureRoot.appendingPathComponent(name + suffix)
+            guard FileManager.default.fileExists(atPath: sidecar.path) else { continue }
+            try FileManager.default.copyItem(at: sidecar, to: work.appendingPathComponent(name + suffix))
+        }
         return destination
+    }
+
+    private enum FixtureReadError: Error { case open(String), query(String) }
+
+    /// The profile row count read straight out of the file — no `ModelContainer`, no migration.
+    ///
+    /// ⚠️ THE BASELINE COMES FROM THE FIXTURE, NEVER FROM A NUMBER TYPED HERE. The two live-store
+    /// assertions below used to read `XCTAssertEqual(counts.profiles, 9)` — a snapshot of one
+    /// developer's database taken on the day it was written. `DevgenticSD.store` is that
+    /// developer's REAL store: it changes whenever they add or remove a profile, so the gate went
+    /// red for reasons with nothing to do with migration (it was red on the day this replaced it,
+    /// because an unrelated defect had minted two duplicate profiles) and correcting the literal
+    /// would only have re-armed it for the next profile — or, as it happened, for the fix that
+    /// removed the duplicates again.
+    ///
+    /// Reading the count from the same copy the container is about to open keeps the invariant that
+    /// was always the point — MIGRATION LOSES NOTHING — and drops the one that was never true.
+    /// It also makes the gate meaningful on a machine other than this one.
+    private func rawProfileRowCount(_ url: URL) throws -> Int {
+        var db: OpaquePointer?
+        defer { sqlite3_close(db) }
+        // ⚠️ READWRITE, on purpose. `url` is this test's private copy in its own temp directory, and
+        // a WAL-mode database cannot be opened read-only without write access to its shared-memory
+        // file. SwiftData is about to open the same copy read-write anyway. The fixture itself is
+        // never opened — see `stagedCopy` and `fixtureRoot`.
+        guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
+            throw FixtureReadError.open(String(cString: sqlite3_errmsg(db)))
+        }
+        var statement: OpaquePointer?
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM ZBACKENDPROFILE", -1, &statement, nil) == SQLITE_OK,
+              sqlite3_step(statement) == SQLITE_ROW else {
+            throw FixtureReadError.query(String(cString: sqlite3_errmsg(db)))
+        }
+        return Int(sqlite3_column_int64(statement, 0))
     }
 
     /// Opens a store and proves its CONTENT survived, not merely that the file opened.
@@ -104,24 +154,29 @@ final class StoreCollapseMigrationCheckTests: XCTestCase {
 
     // MARK: - The gate
 
-    /// Control. If this fails, the fixture or the harness is wrong and the other two prove nothing.
+    /// ⚠️⚠️ THE QUESTION THE COLLAPSE TURNED ON, and the control for the other two. Removing a
+    /// version from `schemas` is the documented route to `NSCocoaErrorDomain 134504 "Cannot use
+    /// staged migration with an unknown model version"` — so a store already stamped at V6 must
+    /// keep opening under a plan that no longer carries the intermediates. If this fails, the
+    /// fixture or the harness is wrong and the other two prove nothing.
+    ///
+    /// ⚠️ This absorbed `testTheLiveV6StoreStillOpensAfterV4AndV5AreRemoved`, which asked exactly
+    /// that question against a hypothetical collapsed plan. The collapse SHIPPED on 2026-09-15:
+    /// `DevgenticMigrationPlan` is that plan now and `DevgenticSchemaV4`/`V5` no longer exist as
+    /// types, so there was no second plan left to contrast with and the two tests had become the
+    /// same call on the same fixture with the same assertions. Do not re-split them — restoring the
+    /// contrast would mean resurrecting the deleted versions, which is the thing the collapse was
+    /// for.
     func testTheLiveV6StoreOpensUnderTheCurrentPlan() throws {
         let store = try stagedCopy(of: "DevgenticSD.store")
-        let counts = try openAndRead(store, plan: DevgenticMigrationPlan.self)
-        XCTAssertEqual(counts.profiles, 9, "the live store holds 9 profiles — pinned so a silent loss is visible")
-        XCTAssertEqual(counts.unreadable, [], "every profile blob must still decode")
-    }
+        let onDisk = try rawProfileRowCount(store)
+        XCTAssertGreaterThan(onDisk, 0, "an empty fixture would make the decode assertion below vacuous")
 
-    /// ⚠️⚠️ THE QUESTION THE COLLAPSE TURNED ON, now a permanent regression guard. Removing a
-    /// version from `schemas` is the documented route to `NSCocoaErrorDomain 134504 "Cannot use
-    /// staged migration with an unknown model version"`. A store stamped V6 must keep opening.
-    func testTheLiveV6StoreStillOpensAfterV4AndV5AreRemoved() throws {
-        let store = try stagedCopy(of: "DevgenticSD.store")
         let counts = try openAndRead(store, plan: DevgenticMigrationPlan.self)
-        XCTAssertEqual(counts.profiles, 9,
+
+        XCTAssertEqual(counts.profiles, onDisk,
                        "a store already at V6 must survive the intermediates being deleted, with every row")
-        XCTAssertEqual(counts.unreadable, [],
-                       "and with every configuration blob still decodable")
+        XCTAssertEqual(counts.unreadable, [], "every profile blob must still decode")
     }
 
     /// The real upgrade path a released user takes: a pre-skills store straight to V6, with no V4 or
@@ -135,7 +190,7 @@ final class StoreCollapseMigrationCheckTests: XCTestCase {
     }
 
     /// ⚠️ THE HARNESS MUST BE ABLE TO FAIL. Probed: a plan missing a version the store is actually
-    /// stamped at throws `loadIssueModelContainer`. Without this, all four results above would be
+    /// stamped at throws `loadIssueModelContainer`. Without this, every result above would be
     /// consistent with a harness that opens anything — and `preV3.store` being stamped at V3 (rather
     /// than V1 or V2) is precisely what makes keeping V3 in the collapsed plan load-bearing.
     func testAPlanMissingTheStoresOwnVersionIsRejected() throws {

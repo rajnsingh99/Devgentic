@@ -25,7 +25,7 @@ You create **backend profiles**. Each one binds a model to a set of capabilities
 
 **Tools.** Agent profiles can call 72 native macOS tools — filesystem, shell, git, code search and editing, Calendar/Reminders/Contacts, Safari, UI automation, network — plus anything exposed by a connected MCP server. Every tool call can be gated by a human-in-the-loop approval keyed to its risk tier.
 
-**Surfaces beyond the main window.** A global-hotkey QuickAccess panel; **Jarvis**, a floating voice orb with wake-word or push-to-talk activation that speaks its answers back; a cron scheduler for unattended runs; and remote bridges for Slack, Discord and Telegram.
+**Surfaces beyond the main window.** A global-hotkey QuickAccess panel; **Orb**, a floating voice orb with wake-word or push-to-talk activation that speaks its answers back; a cron scheduler for unattended runs; and remote bridges for Slack, Discord and Telegram.
 
 ## Requirements
 
@@ -57,7 +57,7 @@ You only need to re-run it after changing a property on an ObjectBox entity. Ski
 # build once, then run what you care about
 xcodebuild build-for-testing -project Devgentic.xcodeproj -scheme devgentic -destination 'platform=macOS'
 xcodebuild test-without-building -project Devgentic.xcodeproj -scheme devgentic -destination 'platform=macOS' \
-  -only-testing:devgenticTests/JarvisSegmentationTests
+  -only-testing:devgenticTests/OrbSegmentationTests
 ```
 
 > **Don't run the whole suite casually.** Parts of it load Whisper models and drive real embedding models, so a full run takes many minutes. Find the classes you need and target them — the two-phase `build-for-testing` / `test-without-building` split above lets you iterate on tests without rebuilding the app.
@@ -75,7 +75,7 @@ Devgentic/              the app target
     Main/               main window, sidebar, profile editor, workflow canvas, tool library
     Shared/             reusable chat surfaces: history, composer, code viewer
     Code/  QuickAccess/  Onboarding/
-  Jarvis/               the voice orb (self-contained)
+  Orb/               the voice orb (self-contained)
   ChatOps/              Slack, Discord and Telegram bridges
   Intelligence/         routing and model-capability analysis
   Observaliblity/       tracing and diagnostics — yes, the directory name is misspelled
@@ -104,14 +104,23 @@ Issues and discussion are welcome. Pull requests are welcome **after** a discuss
 
 Devgentic is free software, released under the **GNU Affero General Public License, version 3** (`AGPL-3.0-only`) — the full text is in [`LICENSE`](LICENSE), and every source file carries an SPDX header saying the same.
 
+Everything third-party is listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) with its licence text: the Swift packages, the tree-sitter grammars and highlight.js build they embed, and the one model the app ships — `all-MiniLM-L6-v2` (Apache-2.0), which powers the local RAG index. A copy of that file and of `LICENSE` is inside every built app at `Contents/Resources`, and the About panel links to both.
+
 In practice:
 
 - You can use it, read it, change it and run it — privately or at work, for any purpose.
 - If you **distribute a modified version**, or **run a modified version as a service** that other people use over a network, you must make your source available under this same licence. The network clause is the "Affero" part, and it is deliberate: the Slack, Discord and Telegram bridges make "run it as a service" a real way to deploy this app.
 - The licence does not forbid commerce; it forbids closing the source. You may charge for it, host it, or sell support, so long as what you ship stays open under AGPL.
 
-If those terms don't work for your organisation, a commercial licence is available on request from the copyright holder — that is what the [CLA](CLA.md) exists to keep possible.
+If those terms don't work for your organisation, alternative terms can be negotiated — see [`COMMERCIAL-LICENSE.md`](COMMERCIAL-LICENSE.md), which also explains the common cases where you **don't** need one (internal use, however heavily modified, is not distribution). That option exists because the copyright is held by one author and every contribution is covered by the [CLA](CLA.md).
+
+### Trademark and naming
+
+**Devgentic** is the name of this project and a trademark of Raj Singh. The AGPL grants copyright permissions, not trademark rights, and none are granted here.
+
+You may fork, modify and redistribute the code — that is the point of the licence. What you may not do is distribute your modified version under the name *Devgentic*, or in a way that suggests it is the official build or endorsed by the author. Pick your own name. This is the same position Mozilla takes on Firefox, and it protects users rather than restricting developers: someone installing a build called "Devgentic" should be able to rely on where it came from.
+
+Official builds are distributed only from [this repository's Releases](https://github.com/rajnsingh99/devgentic/releases) and are signed with the author's Apple Developer ID.
 
 This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for details.
 
-Third-party components and their licences: [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

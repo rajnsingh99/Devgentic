@@ -1,0 +1,371 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2025-2026 Raj Singh
+//
+//  CodeQuickSettingsTests.swift
+//  devgenticTests
+//
+//  Per-project execution settings for the Code interface.
+//
+//  ⚠️⚠️ THE LOAD-BEARING TEST IS `testSettingsSurviveResetSession`. Quick settings live in
+//  UserDefaults rather than on the `.code` BackendProfile for exactly one reason:
+//  `resetSession()` DELETES that profile row and runs on every Home-button press. Storing them on
+//  the profile compiles, passes a naive round-trip test, and then silently reverts the user's
+//  iteration cap to 20 the first time they click Home — with nothing reporting a change. If
+//  someone later "simplifies" this onto the profile, that test must go red.
+//
+//  These drive the REAL `CodeSessionManager` against a real in-memory store. A test that
+//  re-implemented the apply rule would stay green through a revert of the wiring.
+//
+
+import XCTest
+import SwiftData
+@testable import devgentic
+
+@MainActor
+final class CodeQuickSettingsTests: XCTestCase {
+
+    private var container: ModelContainer!
+    private var defaults: UserDefaults!
+    private var suiteName: String!
+    private var projectA: URL!
+    private var projectB: URL!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+
+        container = try ModelContainer(
+            for: BackendProfile.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        BackendProfileStore.shared.configureContainer(container)
+
+        // A private suite, never `.standard` — under the test host that IS the shipping app's
+        // domain, so this would rewrite the developer's own settings. Same reason as
+        // `CodeProfileSingletonTests`.
+        suiteName = "CodeQuickSettingsTests.\(UUID().uuidString)"
+        defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+
+        projectA = URL(fileURLWithPath: "/tmp/devgentic-tests/project-a")
+        projectB = URL(fileURLWithPath: "/tmp/devgentic-tests/project-b")
+    }
+
+    override func tearDownWithError() throws {
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults = nil
+        suiteName = nil
+        container = nil
+        projectA = nil
+        projectB = nil
+        try super.tearDownWithError()
+    }
+
+    /// Selects a model on the manager.
+    ///
+    /// ⚠️ Required, not incidental: `BackendProfileStore.saveProfile` rejects a profile with no
+    /// model ("A model must be selected"), so `refreshInstructionsOnProfile()` silently writes
+    /// nothing without one. A real send cannot reach that code path modelless either —
+    /// `ChatInputAreaView.attemptSend` intercepts on `modelName.isEmpty` — so a test without a
+    /// model is testing a state the app never sends in.
+    private func selectModel(on manager: CodeSessionManager) {
+        manager.updateModel(
+            "qwen2.5-coder:7b",
+            provider: .ollama,
+            cognitiveProfile: CognitiveProfile(capability: .parallelActions, dialect: .heuristicJson),
+            apiKey: nil,
+            baseURL: nil,
+            thinkingEnabled: false
+        )
+    }
+
+    // MARK: - Scope: per project
+
+    func testSettingsAreScopedToTheirProject() {
+        var a = CodeQuickSettings.default
+        a.maxIterations = 45
+        a.toolConfirmations["edit_code_single"] = false
+        CodeQuickSettingsStore.save(a, for: projectA.path, defaults: defaults, now: Date())
+
+        let readA = CodeQuickSettingsStore.settings(for: projectA.path, defaults: defaults)
+        let readB = CodeQuickSettingsStore.settings(for: projectB.path, defaults: defaults)
+
+        XCTAssertEqual(readA.maxIterations, 45)
+        XCTAssertEqual(readA.toolConfirmations["edit_code_single"], false)
+
+        XCTAssertEqual(readB, .default,
+                       "Project B inherited project A's settings. An auto-approve grant must never "
+                       + "follow the user into a folder they did not grant it for.")
+    }
+
+    func testAutoApproveDoesNotLeakToAnotherProject() {
+        // The sharpest form of the scope guarantee, asserted on its own so a failure is unambiguous.
+        var trusted = CodeQuickSettings.default
+        trusted.toolConfirmations["batch_command"] = false
+        CodeQuickSettingsStore.save(trusted, for: projectA.path, defaults: defaults, now: Date())
+
+        let other = CodeQuickSettingsStore.settings(for: projectB.path, defaults: defaults)
+
+        XCTAssertNil(other.toolConfirmations["batch_command"],
+                     "Shell auto-approve leaked to an unconfigured project.")
+    }
+
+    func testTrailingSlashIsTheSameProject() {
+        var settings = CodeQuickSettings.default
+        settings.maxIterations = 33
+        CodeQuickSettingsStore.save(settings, for: projectA.path, defaults: defaults, now: Date())
+
+        let viaSlash = CodeQuickSettingsStore.settings(for: projectA.path + "/", defaults: defaults)
+
+        XCTAssertEqual(viaSlash.maxIterations, 33,
+                       "A trailing slash keyed a second entry for the same folder, so the same "
+                       + "project would show different settings depending on how its path was built.")
+    }
+
+    func testNoProjectPathYieldsDefaults() {
+        XCTAssertEqual(CodeQuickSettingsStore.settings(for: nil, defaults: defaults), .default)
+        XCTAssertEqual(CodeQuickSettingsStore.settings(for: "  ", defaults: defaults), .default)
+    }
+
+    // MARK: - Applying onto AgentConfig
+
+    private func agentConfig() -> AgentConfig {
+        AgentConfig(
+            llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "qwen2.5-coder:7b"),
+            tools: CodeToolPreset.defaultTools,
+            maxIterations: 20,
+            executionTimeout: 300
+        )
+    }
+
+    func testApplyMapsEveryFieldOntoTheConfig() {
+        var settings = CodeQuickSettings.default
+        settings.maxIterations = 60
+        settings.executionTimeout = 900
+        settings.thinkingEnabled = true
+
+        var config = agentConfig()
+        CodeSessionManager.apply(settings, to: &config)
+
+        XCTAssertEqual(config.maxIterations, 60)
+        XCTAssertEqual(config.executionTimeout, 900)
+        XCTAssertTrue(config.llmConfig.thinkingEnabled)
+    }
+
+    func testUnsetFieldsLeaveThePresetAlone() {
+        // `nil` means "inherit", never "reset to zero". A settings struct that restated defaults
+        // would freeze them at whatever they were when it was written.
+        var config = agentConfig()
+        CodeSessionManager.apply(.default, to: &config)
+
+        XCTAssertEqual(config.maxIterations, 20)
+        XCTAssertEqual(config.executionTimeout, 300)
+        XCTAssertFalse(config.llmConfig.thinkingEnabled)
+    }
+
+    func testZeroTimeoutMeansNoLimitNotInstantTimeout() {
+        // The UI's "Remove" stores 0. If that reached the config as `.some(0)` the sentinel would
+        // fire immediately and every run would die at once.
+        var settings = CodeQuickSettings.default
+        settings.executionTimeout = 0
+
+        var config = agentConfig()
+        CodeSessionManager.apply(settings, to: &config)
+
+        XCTAssertNil(config.executionTimeout,
+                     "A 0 timeout must become nil (unbounded), never a zero-second budget.")
+    }
+
+    func testToolConfirmationOverrideReachesTheTool() {
+        var settings = CodeQuickSettings.default
+        settings.toolConfirmations["edit_code_single"] = false
+
+        var config = agentConfig()
+        CodeSessionManager.apply(settings, to: &config)
+
+        let tool = config.tools.first { $0.name == "edit_code_single" }
+        XCTAssertEqual(tool?.requiresConfirmation, false,
+                       "The override did not reach the tool the executor reads — the toggle would "
+                       + "move in the UI and change nothing about whether the banner appears.")
+    }
+
+    func testOverrideWinsOverTheValueCarriedFromTheProfile() {
+        // `mergePresetTools` carries requiresConfirmation from the existing profile tools. After a
+        // Home press the profile is freshly minted from the preset and has nothing useful to
+        // carry, so the override has to be authoritative or it is silently discarded.
+        var config = agentConfig()
+        if let idx = config.tools.firstIndex(where: { $0.name == "overwrite_file" }) {
+            config.tools[idx].requiresConfirmation = true
+        }
+
+        var settings = CodeQuickSettings.default
+        settings.toolConfirmations["overwrite_file"] = false
+        CodeSessionManager.apply(settings, to: &config)
+
+        XCTAssertEqual(config.tools.first { $0.name == "overwrite_file" }?.requiresConfirmation, false)
+    }
+
+    func testUnknownToolOverrideCannotResurrectATool() {
+        var settings = CodeQuickSettings.default
+        settings.toolConfirmations["a_tool_that_does_not_exist"] = false
+
+        var config = agentConfig()
+        CodeSessionManager.apply(settings, to: &config)
+
+        XCTAssertFalse(config.tools.contains { $0.name == "a_tool_that_does_not_exist" },
+                       "A stale override invented a tool. The preset is the authority on which "
+                       + "tools exist; overrides may only re-key ones already in it.")
+    }
+
+    func testApplyKeepsEveryPresetTool() {
+        var settings = CodeQuickSettings.default
+        settings.toolConfirmations["edit_code_batch"] = false
+
+        var config = agentConfig()
+        CodeSessionManager.apply(settings, to: &config)
+
+        XCTAssertEqual(Set(config.tools.map(\.name)),
+                       Set(CodeToolPreset.defaultTools.map(\.name)),
+                       "Applying settings dropped or added a preset tool.")
+    }
+
+    // MARK: - ⚠️⚠️ The reason storage is not on the profile
+
+    func testSettingsSurviveResetSession() throws {
+        let manager = CodeSessionManager(defaults: defaults)
+        manager.updateProjectPath(projectA)
+        _ = manager.ensureCodeProfile()
+        selectModel(on: manager)
+
+        var settings = CodeQuickSettings.default
+        settings.maxIterations = 50
+        settings.toolConfirmations["batch_command"] = false
+        manager.updateQuickSettings(settings)
+
+        // The Home button. Deletes the profile row outright — see
+        // `CodeProfileSingletonTests.testResetSessionDeletesTheRowAndClearsTheHandle`.
+        manager.resetSession()
+
+        manager.updateProjectPath(projectA)
+        let newProfileID = manager.ensureCodeProfile()
+        selectModel(on: manager)
+
+        XCTAssertEqual(manager.quickSettings.maxIterations, 50,
+                       "The iteration cap did not survive a Home press. This is the whole reason "
+                       + "quick settings live in UserDefaults instead of on the profile row.")
+        XCTAssertEqual(manager.quickSettings.toolConfirmations["batch_command"], false,
+                       "The auto-approve grant did not survive a Home press.")
+
+        // And they must reach the freshly minted profile, not just the store.
+        manager.refreshInstructionsOnProfile()
+        let profile = try XCTUnwrap(try BackendProfileStore.shared.fetchProfile(byId: newProfileID))
+        guard case .code(let config) = profile.details else {
+            return XCTFail("Expected a .code profile")
+        }
+
+        XCTAssertEqual(config.maxIterations, 50,
+                       "Settings survived in UserDefaults but never reached the new profile — the "
+                       + "run would still use the hardcoded 20.")
+        XCTAssertEqual(config.tools.first { $0.name == "batch_command" }?.requiresConfirmation, false)
+    }
+
+    func testSettingsReachTheProfileOnEverySend() throws {
+        // `refreshInstructionsOnProfile()` is the per-send hook. If settings are not applied there,
+        // a change made between sends never takes effect.
+        let manager = CodeSessionManager(defaults: defaults)
+        manager.updateProjectPath(projectA)
+        let profileID = manager.ensureCodeProfile()
+        selectModel(on: manager)
+
+        var settings = CodeQuickSettings.default
+        settings.maxIterations = 77
+        CodeQuickSettingsStore.save(settings, for: projectA.path, defaults: defaults, now: Date())
+
+        manager.refreshInstructionsOnProfile()
+
+        let profile = try XCTUnwrap(try BackendProfileStore.shared.fetchProfile(byId: profileID))
+        guard case .code(let config) = profile.details else {
+            return XCTFail("Expected a .code profile")
+        }
+        XCTAssertEqual(config.maxIterations, 77)
+    }
+
+    func testSwitchingProjectSwitchesSettings() {
+        let manager = CodeSessionManager(defaults: defaults)
+
+        manager.updateProjectPath(projectA)
+        var a = CodeQuickSettings.default
+        a.maxIterations = 40
+        manager.updateQuickSettings(a)
+
+        manager.updateProjectPath(projectB)
+
+        XCTAssertEqual(manager.quickSettings, .default,
+                       "Switching project carried the previous project's settings across.")
+
+        manager.updateProjectPath(projectA)
+        XCTAssertEqual(manager.quickSettings.maxIterations, 40,
+                       "Returning to a configured project did not restore its settings.")
+    }
+
+    // MARK: - Housekeeping
+
+    func testResettingToDefaultsRemovesTheEntry() {
+        var settings = CodeQuickSettings.default
+        settings.maxIterations = 25
+        CodeQuickSettingsStore.save(settings, for: projectA.path, defaults: defaults, now: Date())
+        CodeQuickSettingsStore.save(.default, for: projectA.path, defaults: defaults, now: Date())
+
+        XCTAssertEqual(CodeQuickSettingsStore.settings(for: projectA.path, defaults: defaults), .default)
+    }
+
+    func testIsDefaultTracksEveryField() {
+        XCTAssertTrue(CodeQuickSettings.default.isDefault)
+
+        var s = CodeQuickSettings.default
+        s.maxIterations = 20
+        XCTAssertFalse(s.isDefault, "maxIterations is not counted by isDefault.")
+
+        s = .default; s.executionTimeout = 300
+        XCTAssertFalse(s.isDefault, "executionTimeout is not counted by isDefault.")
+
+        s = .default; s.toolConfirmations["git_tool"] = true
+        XCTAssertFalse(s.isDefault, "toolConfirmations is not counted by isDefault.")
+
+        s = .default; s.thinkingEnabled = false
+        XCTAssertFalse(s.isDefault, "thinkingEnabled is not counted by isDefault.")
+    }
+
+    func testRetentionCapKeepsTheMostRecentlyChangedProjects() {
+        let overflow = CodeQuickSettingsStore.maxRetainedProjects + 10
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+
+        for i in 0..<overflow {
+            var s = CodeQuickSettings.default
+            s.maxIterations = i + 3
+            CodeQuickSettingsStore.save(
+                s,
+                for: "/tmp/devgentic-tests/p\(i)",
+                defaults: defaults,
+                now: base.addingTimeInterval(Double(i))
+            )
+        }
+
+        // Oldest evicted, newest kept.
+        XCTAssertEqual(CodeQuickSettingsStore.settings(for: "/tmp/devgentic-tests/p0", defaults: defaults),
+                       .default, "The oldest project should have been pruned.")
+        XCTAssertEqual(
+            CodeQuickSettingsStore.settings(for: "/tmp/devgentic-tests/p\(overflow - 1)", defaults: defaults).maxIterations,
+            overflow + 2,
+            "The most recently changed project was pruned."
+        )
+    }
+
+    func testCorruptStoredBlobFallsBackWithoutDestroyingIt() {
+        defaults.set(Data("not json".utf8), forKey: CodeQuickSettingsStore.defaultsKey)
+
+        XCTAssertEqual(CodeQuickSettingsStore.settings(for: projectA.path, defaults: defaults), .default,
+                       "An unreadable blob must degrade to defaults, not crash.")
+        XCTAssertNotNil(defaults.data(forKey: CodeQuickSettingsStore.defaultsKey),
+                        "The unreadable blob was deleted on a READ path. A later build that "
+                        + "understands it could have recovered it; clearing it makes the loss permanent.")
+    }
+}

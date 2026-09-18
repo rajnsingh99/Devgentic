@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  ComposerKit.swift
 //  Devgentic
@@ -68,7 +68,10 @@ struct ComposerIconButton: View {
     @State private var isHovered = false
 
     var body: some View {
-        Button(action: action) {
+        Button(action: {
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+            action()
+        }) {
             Image(systemName: systemName)
                 .font(.system(.body, weight: .medium))
                 .foregroundColor(isHovered && !disabled ? theme.primaryText : theme.secondaryText.opacity(0.85))
@@ -111,7 +114,10 @@ struct ComposerMicButton: View {
     @State private var pulseScale: CGFloat = 1.0
 
     var body: some View {
-        Button(action: action) {
+        Button(action: {
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+            action()
+        }) {
             ZStack {
                 if isRecording {
                     Circle()
@@ -139,7 +145,7 @@ struct ComposerMicButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hover in withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { isHovered = hover } }
-        .help(isRecording ? "Stop dictation" : "Dictate")
+        .help(isRecording ? "Stop dictation (⌘⇧V)" : "Start voice dictation (⌘⇧V)")
         .accessibilityLabel(isRecording ? "Stop dictation"
                             : (isReady ? "Start voice dictation"
                                : "Voice dictation unavailable — no speech model downloaded"))
@@ -158,7 +164,10 @@ struct ComposerSendStopButton: View {
     @State private var isHovered = false
 
     var body: some View {
-        Button(action: action) {
+        Button(action: {
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+            action()
+        }) {
             ZStack {
                 if isSending {
                     Circle()
@@ -206,7 +215,7 @@ struct ComposerSendStopButton: View {
         .buttonStyle(.plain)
         .disabled(isDisabled)
         .onHover { hover in withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { isHovered = hover } }
-        .help(isSending ? "Stop" : "Send")
+        .help(isSending ? "Stop generating (⌘.)" : "Send message (⏎)")
         .accessibilityLabel(isSending ? "Stop generating" : "Send")
     }
 }

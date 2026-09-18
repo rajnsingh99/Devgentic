@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  WorkflowNodeSkipStore.swift
 //  Devgentic
@@ -16,7 +16,7 @@
 //  used to be conversation-keyed on the one-root-run-per-conversation invariant (§0.5) with its
 //  own header warning "If that invariant ever falls, this store must move to run-ID keying in the
 //  same change" — and the invariant was never enforced on the inbound start paths (chat, ChatOps,
-//  scheduler, Jarvis carry no admission check; `RunAdmissionPolicy` is deliberately Redo/Resume-
+//  scheduler, Orb carry no admission check; `RunAdmissionPolicy` is deliberately Redo/Resume-
 //  only until increment 4). A scheduled re-run of the SAME workflow into the same conversation
 //  has IDENTICAL node IDs, so under conversation keying run 2's start-clear silently discarded
 //  the user's requests for run 1, run 2 could consume a request aimed at run 1 (skipping a node

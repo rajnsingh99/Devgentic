@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  SessionToolApprovals.swift
 //  Devgentic
@@ -71,20 +71,20 @@ actor SessionToolApprovals {
     private let defaults: UserDefaults
     private var allowed: [Scope: Set<String>] = [:]
 
-    /// Conversations the user put in a blanket "approve everything" mode — Jarvis's Autonomous
+    /// Conversations the user put in a blanket "approve everything" mode — Orb's Autonomous
     /// voice setting.
     ///
     /// ⚠️ IN-MEMORY ONLY, never persisted, unlike the per-tool grants above. A per-tool grant is
     /// a deliberate answer to a specific question the user read on a banner; a blanket grant is a
     /// standing mode, and one that survived relaunch would keep approving long after the intent
-    /// behind it was forgotten. It is re-established from the Jarvis setting each time a voice
+    /// behind it was forgotten. It is re-established from the Orb setting each time a voice
     /// conversation starts, so turning the setting off genuinely turns it off.
     ///
     /// ⚠️ Deliberately checked INSIDE `isAllowed` rather than short-circuiting at the call site,
     /// so it inherits the `canReachAHuman` gate below: a blanket grant given on a live voice
     /// session must not serve a scheduled run nobody can answer.
     /// ⚠️⚠️ KEYED ON (conversation, ORIGIN), NOT ON THE CONVERSATION ALONE. It used to be a bare
-    /// `Set<UUID>`, and Jarvis publishes its conversation to ChatOps on purpose — so a message from
+    /// `Set<UUID>`, and Orb publishes its conversation to ChatOps on purpose — so a message from
     /// a paired phone inherited an "approve everything" grant the user had made by VOICE, and ran
     /// `execute_shell` with no prompt on ANY surface: the banner is skipped, so no `PendingHITL`
     /// exists and the mirror has nothing to post either. Both halves were deliberate in isolation
@@ -142,7 +142,7 @@ actor SessionToolApprovals {
     /// relaunch, scoped to one conversation, and gated above on `canReachAHuman` so it can never
     /// serve a scheduled run. Do not add a risk filter here.
     ///
-    /// The spoken approval channel (`JarvisApprovalPolicy`) is a DIFFERENT question and is
+    /// The spoken approval channel (`OrbApprovalPolicy`) is a DIFFERENT question and is
     /// deliberately far narrower — see its header.
     /// - Parameter origin: the surface this grant is FOR. ⚠️ REQUIRED, not defaulted: a default
     ///   would let a new caller grant blanket approval to every surface by omission, which is the

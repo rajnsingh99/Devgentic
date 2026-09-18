@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  ChatOpsHosting.swift
 //  Devgentic
@@ -82,7 +82,7 @@ protocol RemoteConversationCommanding: AnyObject {
 
     /// The profile a new remote conversation falls back to when none is bound.
     ///
-    /// ⚠️ This is the app-global composer selection, shared with the Mac window and Jarvis. It is
+    /// ⚠️ This is the app-global composer selection, shared with the Mac window and Orb. It is
     /// exposed READ-ONLY on purpose: a remote write would retarget the local user's composer.
     var defaultProfileID: UUID? { get }
 

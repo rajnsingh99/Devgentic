@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  AddBackendProfileView.swift
 //  Devgentic
@@ -286,9 +286,13 @@ struct ProfileTypeCard: View {
                         .fill(isSelected ? color.opacity(0.2) : theme.dividerColor)
                         .frame(width: 44, height: 44)
                     
-                    Image(systemName: icon)
-                        .font(.system(.title3))
-                        .foregroundColor(isSelected ? color : theme.secondaryText)
+                    ProfileTypeIcon(
+                        type: type,
+                        size: 22,
+                        color: isSelected ? color : theme.secondaryText,
+                        isFilled: isSelected,
+                        isHovered: isHovering
+                    )
                 }
                 
                 VStack(alignment: .leading, spacing: 4) {

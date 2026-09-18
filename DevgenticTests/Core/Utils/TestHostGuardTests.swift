@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  TestHostGuardTests.swift
 //  devgenticTests
@@ -78,7 +78,7 @@ final class TestHostGuardTests: XCTestCase {
              "arms timers that outlive the test which provoked them"),
             ("Devgentic/AppDelegate.swift", "applyHotkeyConfig",
              "registers ⌥Space system-wide, stealing it from the developer's own running app"),
-            ("Devgentic/AppDelegate.swift", "applyJarvisHotkeyConfig",
+            ("Devgentic/AppDelegate.swift", "applyOrbHotkeyConfig",
              "registers ⌥J system-wide — and ⌥J opens the microphone"),
             ("Devgentic/AppDelegate.swift", "setupStatusItem",
              "puts a live menu-bar item in the developer's menu bar"),

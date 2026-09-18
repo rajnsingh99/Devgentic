@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  WorkflowRunBootstrapTests.swift
 //  DevgenticTests
@@ -8,7 +8,7 @@
 //
 //  The workflow-run bookkeeping (live state + `.running` stub + freeze/persist) lived inline in
 //  ONE of seven `startMessageStream` call sites. Scheduled runs, ChatOps, regenerate, QuickAccess
-//  and Jarvis started workflows with `workflowExecutionState == nil` — the run executed, but left
+//  and Orb started workflows with `workflowExecutionState == nil` — the run executed, but left
 //  no record at all, its HITL attributed to chat, and it rendered through the capability-card
 //  router that is deliberately disabled for workflows.
 //

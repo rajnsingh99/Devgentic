@@ -121,3 +121,16 @@ Planout/
 # ⚠️ The leading slash is deliberate: it anchors this to the repo ROOT only, so it can
 # never shadow a legitimate file or directory called `main` deeper in the tree.
 /main
+
+# 2026-09-18 — three more sweeps caught before the first public push. Shape-matched, per the rule above.
+# `.swift-cache/` is a clang/Swift module cache (`<hash>/*.pcm`, 62 MB); it was STAGED by a `git add -A`.
+.swift-cache/
+# ObjectBox's generator writes `model-<target>.json.bak` next to the model file it rewrites. The model
+# file itself MUST stay tracked (entity UIDs); the backup never should be.
+*.bak
+# One-off analysis pages belong in Planout/ (ignored above), not the repo root.
+/workflow_comparison.html
+# 2026-09-18 — Code mode's per-project memory file. Pointing Code mode at THIS folder wrote
+# `Devgentic/.devgentic/context.md`, which the synchronized group then copied into every built
+# app as `Contents/Resources/context.md`. Any project's `.devgentic/` is agent state, never source.
+**/.devgentic/

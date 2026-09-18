@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  RemoteMirrorService.swift
 //  Devgentic
@@ -628,7 +628,7 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
         case .telegram:                       return " from Telegram"
         case .discord:                        return " from Discord"
         case .slack:                          return " from Slack"
-        case .localUI, .quickAccess, .jarvis: return " from the Mac"
+        case .localUI, .quickAccess, .orb: return " from the Mac"
         case .scheduled:                      return ""
         }
     }

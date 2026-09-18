@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  WorkflowRunBootstrap.swift
 //  Devgentic
@@ -12,7 +12,7 @@
 //  ⚠️ THIS EXISTS BECAUSE IT WAS INLINE IN EXACTLY ONE CALL SITE.
 //
 //  `MessagingCoordinator.sendMessage` did all of it; the other six `startMessageStream` callers —
-//  scheduled runs, ChatOps, regenerate, QuickAccess, Jarvis, resume — did none of it. Those runs
+//  scheduled runs, ChatOps, regenerate, QuickAccess, Orb, resume — did none of it. Those runs
 //  EXECUTED correctly (the engine neither knows nor cares about this state), but everything
 //  downstream of `workflowExecutionState == nil` broke:
 //
@@ -67,7 +67,7 @@ enum WorkflowRunOrigin: String, Sendable {
     case chatOps
     case regenerate
     case quickAccess
-    case jarvis
+    case orb
     case resume
 }
 
@@ -276,9 +276,9 @@ final class WorkflowRunTicket {
     ///
     /// ⚠️ Reachable regardless of which object called `begin()`. None of the six call sites
     /// (`MessagingCoordinator` ×3, `SchedulerCoordinator`, `QuickAccessSessionViewModel`,
-    /// `JarvisSessionController`) register their ticket anywhere else — each keeps it only in a
+    /// `OrbSessionController`) register their ticket anywhere else — each keeps it only in a
     /// local `let` inside its own running `Task`. A type-level registry is what lets `AppDelegate`
-    /// find a Jarvis or QuickAccess run at quit without caring whether the session that started it
+    /// find an Orb or QuickAccess run at quit without caring whether the session that started it
     /// is still alive; the ticket's own presence in this dictionary is what keeps it (and the
     /// `WorkflowExecutionState` it wraps) retained.
     private(set) static var activeTickets: [UUID: WorkflowRunTicket] = [:]
@@ -289,7 +289,7 @@ final class WorkflowRunTicket {
     static var activeRunCount: Int { activeTickets.count }
 
     /// Display names of every still-active run, for the quit-time alert to name what it is about
-    /// to end — a bare count leaves a QuickAccess or Jarvis run (no visible window of its own)
+    /// to end — a bare count leaves a QuickAccess or Orb run (no visible window of its own)
     /// impossible to identify. No ordering guarantee beyond dictionary iteration; the alert caps
     /// how many it actually lists.
     static var activeRunNames: [String] { activeTickets.values.map(\.workflowName) }

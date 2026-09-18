@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  MainApplicationView.swift
 //  Devgentic
@@ -699,6 +699,7 @@ private struct ModeTabButton: View {
 
     var body: some View {
         Button {
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
             withAnimation(.spring(response: 0.32, dampingFraction: 0.72)) {
                 viewModel.switchInterfaceMode(to: mode)
             }
@@ -771,9 +772,7 @@ private struct ModeTabButton: View {
         // must NOT promise anything about the next run in particular. That per-run claim is
         // `WorkflowRunEditDisclosure`'s job, and it is scoped to one profile precisely so it can
         // make it truthfully.
-        .help(mode == .workflow && !viewModel.dirtyWorkflowCanvasIDs.isEmpty
-              ? "One or more workflow canvases have unsaved edits. They are kept safely, but a workflow always runs its last saved version — save a canvas to include its edits."
-              : "")
+        .help(modeHelpText)
         .accessibilityValue(mode == .workflow && !viewModel.dirtyWorkflowCanvasIDs.isEmpty
                             ? Text("Unsaved canvas edits")
                             : Text(""))
@@ -781,6 +780,17 @@ private struct ModeTabButton: View {
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovering = hovering
             }
+        }
+    }
+
+    private var modeHelpText: String {
+        if mode == .workflow && !viewModel.dirtyWorkflowCanvasIDs.isEmpty {
+            return "Workflow Canvas (⌃2) · One or more workflow canvases have unsaved edits."
+        }
+        switch mode {
+        case .chat:     return "Chat Mode (⌃1)"
+        case .workflow: return "Workflow Canvas (⌃2)"
+        case .code:     return "Code Workspace (⌃3)"
         }
     }
 }

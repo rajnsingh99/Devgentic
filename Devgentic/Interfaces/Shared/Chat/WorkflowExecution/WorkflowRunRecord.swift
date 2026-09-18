@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  WorkflowRunRecord.swift
 //  Devgentic
@@ -93,7 +93,7 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
     /// clearing that Set and the conversation's history is EMPTY until relaunch, a failure that
     /// file already records happening once. And `WorkflowRunTicket.finalize` inserts on a miss, so
     /// evicting mid-run silently rebuilds the key as a one-element array — with "not the selected
-    /// conversation" no help as a predicate, because scheduled, ChatOps, QuickAccess and Jarvis
+    /// conversation" no help as a predicate, because scheduled, ChatOps, QuickAccess and Orb
     /// runs all start in conversations that are not on screen. Dropping traces touches no key, so
     /// none of that applies.
     ///

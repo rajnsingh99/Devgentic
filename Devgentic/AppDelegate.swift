@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  AppDelegate.swift
 //  Devgentic
@@ -24,9 +24,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     var contentWindow: QuickAccessPanelView?
     var hotKey: HotKey?
-    /// Jarvis's global shortcut. Separate registration from QuickAccess's: push-to-talk needs
+    /// Orb's global shortcut. Separate registration from QuickAccess's: push-to-talk needs
     /// BOTH Carbon edges, and the two features must be independently enable-able.
-    var jarvisHotKey: HotKey?
+    var orbHotKey: HotKey?
 
     /// [QA revival P1a] The shared object graph, injected from DevgenticApp once the app is
     /// up (AppDelegate and the panel live outside the SwiftUI environment). Weak — both are
@@ -120,7 +120,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         UNUserNotificationCenter.current().delegate = self
         Self.logger.info("UNUserNotificationCenter delegate set.")
         applyHotkeyConfig()
-        applyJarvisHotkeyConfig()
+        applyOrbHotkeyConfig()
         setupStatusItem()
         setupNotificationObserver()
 
@@ -403,7 +403,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         alert.messageText = count == 1
             ? String(localized: "A workflow is still running")
             : String(localized: "\(count) workflows are still running")
-        // Name what's running — a bare count leaves a QuickAccess or Jarvis run, which has no
+        // Name what's running — a bare count leaves a QuickAccess or Orb run, which has no
         // visible window of its own, impossible to identify from this alert alone. Caps at 4 names
         // (a wall of titles stops being scannable) and falls back to the count above that.
         let names = WorkflowRunTicket.activeRunNames
@@ -699,7 +699,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // wrapping this method still bounds a hung write.
         await WorkflowRunTicket.drainPendingPersists()
 
-        // Stop any live Whisper capture (composer dictation or Jarvis listening) so the
+        // Stop any live Whisper capture (composer dictation or Orb listening) so the
         // HAL client closes cleanly. An AVAudioEngine still running at process death can
         // wedge coreaudiod into refusing this app's audio IO (`_StartIO error 35`) until
         // the daemon restarts — observed 2026-07-18 as "mic silently dead in-app while
@@ -724,12 +724,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     func applicationWillTerminate(_ notification: Notification) {
         Self.logger.info("Application will terminate.")
 
-        // ⚠️ LAST GRACEFUL CHANCE. The Jarvis duplex engine is panel-scoped, so it can still be
+        // ⚠️ LAST GRACEFUL CHANCE. The Orb duplex engine is panel-scoped, so it can still be
         // live here; an AVAudioEngine that reaches process death wedges coreaudiod into
         // `_StartIO error 35` — an app-wide dead microphone that survives relaunch and needs an
         // admin `killall coreaudiod`. Crashes and force-quits cannot be covered; Repair Audio in
         // Settings is the remedy for those.
-        JarvisDuplexAudio.shared.release(reason: "application terminating")
+        OrbDuplexAudio.shared.release(reason: "application terminating")
 
         // Mark this session cleanly exited (§12.1) — async teardown already ran via
         // applicationShouldTerminate. Crashes and force-quits never get here; the next
@@ -783,7 +783,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
-    /// (Re)register Jarvis's global shortcut from JarvisConfigManager. Called at launch and
+    /// (Re)register Orb's global shortcut from OrbConfigManager. Called at launch and
     /// whenever the settings pane changes the shortcut, the activation mode, or the enable flag.
     ///
     /// ⚠️ Registered ONLY in `.holdShortcut` mode. In the continuously-listening modes the
@@ -791,24 +791,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     /// holding a Carbon registration the user cannot see is exactly the kind of invisible state
     /// that makes a shortcut conflict impossible to diagnose.
     @MainActor
-    func applyJarvisHotkeyConfig() {
+    func applyOrbHotkeyConfig() {
         // ⚠️⚠️ WORSE THAN THE QUICKACCESS ONE, because ⌥J OPENS THE MICROPHONE. Registered
-        // system-wide from the developer's real defaults, where Jarvis push-to-talk is the default
+        // system-wide from the developer's real defaults, where Orb push-to-talk is the default
         // activation mode — so a keystroke during a test run could start capturing audio from a
         // process that is about to be killed.
-        guard TestHost.permits("register the system-wide Jarvis push-to-talk hotkey (it opens the microphone)", logger: Self.logger) else { return }
+        guard TestHost.permits("register the system-wide Orb push-to-talk hotkey (it opens the microphone)", logger: Self.logger) else { return }
 
-        let config = JarvisConfigManager.shared
-        jarvisHotKey = nil
+        let config = OrbConfigManager.shared
+        orbHotKey = nil
 
-        // The enable flag governs the WHOLE feature: close an open panel so turning Jarvis off
+        // The enable flag governs the WHOLE feature: close an open panel so turning Orb off
         // takes effect immediately rather than leaving a live microphone floating over every Space.
-        if !config.isEnabled, JarvisPanelController.shared.isOpen {
-            JarvisPanelController.shared.close(reason: "Jarvis disabled in Settings")
+        if !config.isEnabled, OrbPanelController.shared.isOpen {
+            OrbPanelController.shared.close(reason: "Orb disabled in Settings")
         }
 
         guard config.isEnabled, config.activationMode == .holdShortcut else {
-            Self.logger.info("[JARVIS] Global shortcut not registered (enabled: \(config.isEnabled), mode: \(config.activationMode.rawValue)). CONSEQUENCE: in this mode the orb is reached from the composer button or an already-open panel.")
+            Self.logger.info("[ORB] Global shortcut not registered (enabled: \(config.isEnabled), mode: \(config.activationMode.rawValue)). CONSEQUENCE: in this mode the orb is reached from the composer button or an already-open panel.")
             return
         }
 
@@ -819,42 +819,42 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         )
         let hk = HotKey(carbonKeyCode: config.carbonKeyCode, carbonModifiers: config.carbonModifiers)
         hk.keyDownHandler = { [weak self] in
-            DispatchQueue.main.async { self?.jarvisPushToTalkDown() }
+            DispatchQueue.main.async { self?.orbPushToTalkDown() }
         }
         hk.keyUpHandler = { [weak self] in
-            DispatchQueue.main.async { self?.jarvisPushToTalkUp() }
+            DispatchQueue.main.async { self?.orbPushToTalkUp() }
         }
-        jarvisHotKey = hk
+        orbHotKey = hk
 
         if canRegister {
-            Self.logger.info("[JARVIS] Push-to-talk shortcut registered: \(config.shortcutDescription)")
+            Self.logger.info("[ORB] Push-to-talk shortcut registered: \(config.shortcutDescription)")
         } else {
-            Self.logger.warning("[JARVIS] Push-to-talk shortcut \(config.shortcutDescription) could not be registered — another app likely holds it. CONSEQUENCE: the shortcut will never fire and, in hold-to-talk mode, the composer button is the only way in until the combo is changed.")
+            Self.logger.warning("[ORB] Push-to-talk shortcut \(config.shortcutDescription) could not be registered — another app likely holds it. CONSEQUENCE: the shortcut will never fire and, in hold-to-talk mode, the composer button is the only way in until the combo is changed.")
         }
     }
 
-    @MainActor private func jarvisPushToTalkDown() {
+    @MainActor private func orbPushToTalkDown() {
         guard let mainVM = quickAccessMainViewModel else {
-            Self.logger.warning("[JARVIS] Push-to-talk pressed before the shared view model was injected. CONSEQUENCE: this press does nothing; the shortcut works once the main window has finished mounting.")
+            Self.logger.warning("[ORB] Push-to-talk pressed before the shared view model was injected. CONSEQUENCE: this press does nothing; the shortcut works once the main window has finished mounting.")
             return
         }
-        // Opening the panel on first press is the point of the shortcut: Jarvis was otherwise
+        // Opening the panel on first press is the point of the shortcut: Orb was otherwise
         // reachable only from a composer button that exists in chat interface mode alone.
-        if !JarvisPanelController.shared.isOpen {
-            JarvisPanelController.shared.show(mainVM: mainVM)
+        if !OrbPanelController.shared.isOpen {
+            OrbPanelController.shared.show(mainVM: mainVM)
         }
-        JarvisPanelController.shared.beginPushToTalk()
+        OrbPanelController.shared.beginPushToTalk()
     }
 
-    @MainActor private func jarvisPushToTalkUp() {
-        JarvisPanelController.shared.endPushToTalk()
+    @MainActor private func orbPushToTalkUp() {
+        OrbPanelController.shared.endPushToTalk()
     }
 
     /// Pause/resume BOTH global shortcuts while a settings recorder is armed, so pressing a
     /// current combo to re-record it reaches the recorder instead of firing the feature.
     @MainActor
-    func setJarvisHotkeyPaused(_ paused: Bool) {
-        jarvisHotKey?.isPaused = paused
+    func setOrbHotkeyPaused(_ paused: Bool) {
+        orbHotKey?.isPaused = paused
     }
 
     /// [M3] Pause/resume the live global hotkey while the settings recorder is armed, so pressing

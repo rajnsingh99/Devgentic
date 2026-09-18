@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  AgentConfigDetailView.swift
 //  Devgentic
@@ -496,11 +496,7 @@ struct AgentConfigDetailView: View {
                     .overlay(Circle().stroke(theme.accentColor.opacity(0.35), lineWidth: 0.5))
                     .shadow(color: theme.accentColor.opacity(0.2), radius: 8)
 
-                Image(systemName: ProfileType.agent.iconNameFilled)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 26, height: 26)
-                    .foregroundColor(theme.accentColor)
+                AgentRobotIcon(size: 28, color: theme.accentColor, isFilled: true)
             }
 
             VStack(alignment: .leading) {

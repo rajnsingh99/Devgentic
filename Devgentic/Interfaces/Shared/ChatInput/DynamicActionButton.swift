@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  DynamicActionButton.swift
 //  Devgentic
@@ -220,6 +220,7 @@ struct DynamicActionButton: View {
     }
 
     private func performAction() {
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
         switch mode {
         case .send:
             if let textView = editorTextView {
@@ -307,13 +308,13 @@ struct DynamicActionButton: View {
 
     private var helpText: String {
         switch mode {
-        case .send: return String(localized: "Send message (Enter)")
-        case .stopVoice: return String(localized: "Stop recording and transcribe")
-        case .stopStreaming: return String(localized: "Stop generating response")
+        case .send: return String(localized: "Send message (⏎)")
+        case .stopVoice: return String(localized: "Stop dictation (⌘⇧V)")
+        case .stopStreaming: return String(localized: "Stop generating (⌘.)")
         case .mic:
             switch voiceInputState {
             case .available:
-                return String(localized: "Start voice input (\(inputViewModel.currentSpeechModelName)) — hold or right-click to change model")
+                return String(localized: "Start voice dictation (⌘⇧V) · \(inputViewModel.currentSpeechModelName) — hold or right-click to change model")
             case .idle:
                 return String(localized: "Choose a speech model to enable voice input")
             case .modelLoading:

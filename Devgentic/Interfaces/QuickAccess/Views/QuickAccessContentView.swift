@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  QuickAccessContentView.swift
 //  Devgentic
@@ -53,6 +53,7 @@ struct QuickAccessContentView: View {
     @State private var showingProfilePopup: Bool = false
     // [QA revival P2a] Files attached to the next message (panel-local; passed to send()).
     @State private var attachedFiles: [FileSystemItem] = []
+    @State private var isDropTargeted: Bool = false
 
     /// [Context gauge] Occupancy of the panel model's window for this conversation
     /// (nil = non-chat profile, so the ring self-hides). Recomputed on turn / model /
@@ -194,6 +195,13 @@ struct QuickAccessContentView: View {
         .background(.clear)
         .clipShape(RoundedRectangle(cornerRadius: isExpanded ? panelCornerRadius : 20, style: .continuous))
         .glassEffect(.regular.interactive(), in: .rect(cornerRadius: isExpanded ? panelCornerRadius : 20))
+        .overlay {
+            if isDropTargeted {
+                ComposerDropZoneOverlay(cornerRadius: isExpanded ? panelCornerRadius : 20)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            }
+        }
+        .animation(.spring(response: 0.32, dampingFraction: 0.78), value: isDropTargeted)
         // [L5] Match the window-frame animation (NSAnimationContext 0.3s ease in
         // resizePanelProgrammatically) with a non-overshooting ease of the SAME duration — a spring
         // here overshot the window bounds and clipped the glass edge mid-expand.
@@ -227,7 +235,7 @@ struct QuickAccessContentView: View {
         }
         .animation(.easeInOut(duration: 0.3), value: session.pendingInteraction?.id) // [L5] one clock
         // [QA revival P2a] Drop files anywhere on the panel to attach them.
-        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             handleFileDrop(providers)
         }
         .onAppear {
@@ -880,7 +888,8 @@ extension QuickAccessContentView {
     }
 
     private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
-        FileAttachmentPicker.handleDrop(providers) { item in appendAttachments([item]) }
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+        return FileAttachmentPicker.handleDrop(providers) { item in appendAttachments([item]) }
     }
 
     private func appendAttachments(_ items: [FileSystemItem]) {

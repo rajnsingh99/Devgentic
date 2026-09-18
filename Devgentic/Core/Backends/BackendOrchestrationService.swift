@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Copyright © 2026 Raj Singh
+// Copyright © 2025-2026 Raj Singh
 //
 //  BackendOrchestrationService.swift
 //  Devgentic
@@ -55,7 +55,7 @@ class BackendOrchestrationService {
     /// ⚠️ BY ID when the caller supplies one, and by SCANNING rather than peeking at `.last`.
     /// Both halves matter, and text-equality at `.last` failed on both:
     ///
-    ///   - IDENTITY. Jarvis sends the model a DECORATED query (command + a spoken-style hint)
+    ///   - IDENTITY. Orb sends the model a DECORATED query (command + a spoken-style hint)
     ///     while persisting the clean command, so the text comparison never matched, the message
     ///     survived, and `pairTurns` emitted it as an orphan marked wasCancelled / "Agent never
     ///     responded to this query" — every voice turn told the model its own question had
@@ -165,7 +165,7 @@ class BackendOrchestrationService {
                 case .strippedByID(let index, let count):
                     logger.debug("[HISTORY] Current message stripped from history BY ID at index \(index) of \(count). (Trace: \(context.traceID))")
                 case .strippedByText:
-                    logger.notice("[HISTORY] Current message stripped by TEXT — no message id was supplied by the caller. Every production caller passes one via `startMessageStream`; a text strip means a NEW call site is bypassing that, and text equality silently fails whenever the model-facing query differs from the persisted row (the Jarvis decoration case). (Trace: \(context.traceID))")
+                    logger.notice("[HISTORY] Current message stripped by TEXT — no message id was supplied by the caller. Every production caller passes one via `startMessageStream`; a text strip means a NEW call site is bypassing that, and text equality silently fails whenever the model-facing query differs from the persisted row (the Orb decoration case). (Trace: \(context.traceID))")
                 case .idNotFound(let id, let count):
                     // ⚠️ The id was supplied and did NOT match anything in history. Loud because the
                     // run proceeds and looks fine: the question is asked twice — once as the
