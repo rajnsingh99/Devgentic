@@ -95,7 +95,24 @@ final class ChatHistoryViewModel {
     var activeCodeViewerTabID: UUID? = nil
     /// Whether the panel is on screen. The panel shows when this is `true` AND there is at
     /// least one tab; when `false` with tabs open, the UI shows the floating reopen button.
-    var isCodeViewerVisible: Bool = false
+    var isCodeViewerVisible: Bool = false {
+        // ⚠️ MUTUAL EXCLUSION, enforced here rather than at the call sites. `isCodeViewerVisible`
+        // is assigned true from four different places; a rule spread across them is a rule that
+        // gets missed by the fifth. Both panels occupy the same trailing slot, so showing one has
+        // to hide the other or they overlap.
+        //
+        // The `if` is what stops this recursing: setting this true assigns the other false, whose
+        // own `didSet` then sees false and does nothing.
+        didSet { if isCodeViewerVisible { isBackgroundTasksVisible = false } }
+    }
+
+    /// Whether the Background Tasks panel is on screen. Deliberately NOT gated on having tasks —
+    /// unlike the Code Viewer, which hides itself when its last tab closes. An empty list that
+    /// says "nothing has run yet" is a useful answer; a panel that vanishes when the last task is
+    /// discarded looks broken.
+    var isBackgroundTasksVisible: Bool = false {
+        didSet { if isBackgroundTasksVisible { isCodeViewerVisible = false } }
+    }
     /// How the panel occupies the window (overlay / split / full — see
     /// `CodeViewerPresentation`). A MODE rather than a stored width so the panel keeps
     /// tracking the window through resizes — a "full" captured as points would stop being
@@ -145,6 +162,26 @@ final class ChatHistoryViewModel {
     /// the array here made every body that asks this question (`MainApplicationView.body`
     /// among them) a per-keystroke observer of the editor's draft write-through.
     var isCodeViewerPanelPresented: Bool { isCodeViewerVisible && hasCodeViewerTabs }
+
+    /// The Background Tasks panel is presented purely on its own flag — see the property.
+    var isBackgroundTasksPanelPresented: Bool { isBackgroundTasksVisible }
+
+    /// The task a card asked the panel to reveal, so opening from a specific row lands on that row
+    /// rather than at the top of a list of twenty. Cleared when the panel closes: a stale focus
+    /// would re-expand an unrelated task the next time the panel is opened from elsewhere.
+    var backgroundTasksFocusTaskID: String? = nil
+
+    /// Opens the task list, closing the Code Viewer. The `didSet` does the closing; this exists so
+    /// callers say what they MEAN rather than assigning a flag and relying on a side effect.
+    func showBackgroundTasks(focus taskID: String? = nil) {
+        backgroundTasksFocusTaskID = taskID
+        isBackgroundTasksVisible = true
+    }
+
+    func hideBackgroundTasks() {
+        isBackgroundTasksVisible = false
+        backgroundTasksFocusTaskID = nil
+    }
     /// The floating reopen button shows when the panel was minimized but tabs remain.
     /// Same `hasCodeViewerTabs` reasoning as above.
     var isCodeViewerMinimized: Bool { !isCodeViewerVisible && hasCodeViewerTabs }
@@ -818,6 +855,14 @@ final class ChatHistoryViewModel {
         codeViewerTabs[index].editedCode = content
     }
 
+    /// Updates the syntax language override for a specific tab.
+    func updateCodeViewerTabLanguage(tabID: UUID, language: String) {
+        guard let index = codeViewerTabs.firstIndex(where: { $0.id == tabID }) else { return }
+        guard codeViewerTabs[index].customLanguage != language else { return }
+        codeViewerTabs[index].customLanguage = language
+        logger.info("[CodeViewer] Language for tab \(tabID.uuidString.prefix(8)) updated to '\(language)'.")
+    }
+
     /// Closes one tab, pending a confirmation first when it holds unsaved edits.
     func closeCodeViewerTab(id: UUID) {
         if let tab = codeViewerTabs.first(where: { $0.id == id }), tab.isDirty {
@@ -859,6 +904,61 @@ final class ChatHistoryViewModel {
             activeCodeViewerTabID = codeViewerTabs[neighbour].id
         }
         logger.info("[CodeViewer] Closed tab \(id.uuidString.prefix(8)) — \(self.codeViewerTabs.count) tab(s) remain.")
+    }
+
+    /// Closes all tabs except the specified one, prompting for confirmation if any holds unsaved edits.
+    func closeOtherCodeViewerTabs(exceptID: UUID) {
+        let otherTabs = codeViewerTabs.filter { $0.id != exceptID }
+        guard !otherTabs.isEmpty else { return }
+
+        if let dirtyTab = otherTabs.first(where: \.isDirty) {
+            pendingCloseTabID = dirtyTab.id
+            logger.info("[CodeViewer] Close-others requested with dirty tab \(dirtyTab.id.uuidString.prefix(8)) — awaiting confirmation.")
+            return
+        }
+
+        forceCloseOtherCodeViewerTabs(exceptID: exceptID)
+    }
+
+    /// Closes all tabs except the specified one unconditionally.
+    func forceCloseOtherCodeViewerTabs(exceptID: UUID) {
+        guard let retained = codeViewerTabs.first(where: { $0.id == exceptID }) else { return }
+        let toRemove = codeViewerTabs.filter { $0.id != exceptID }
+        guard !toRemove.isEmpty else { return }
+        codeViewerEditorStates.forget(tabIDs: toRemove.map(\.id))
+        codeViewerTabs = [retained]
+        activeCodeViewerTabID = retained.id
+        logger.info("[CodeViewer] Closed \(toRemove.count) other tab(s) — retained \(retained.id.uuidString.prefix(8)).")
+    }
+
+    /// Closes all tabs situated to the right of the given tab ID, prompting if any holds unsaved edits.
+    func closeTabsToTheRight(ofID: UUID) {
+        guard let index = codeViewerTabs.firstIndex(where: { $0.id == ofID }) else { return }
+        let rightIndices = (index + 1)..<codeViewerTabs.count
+        guard !rightIndices.isEmpty else { return }
+        let rightTabs = Array(codeViewerTabs[rightIndices])
+
+        if let dirtyTab = rightTabs.first(where: \.isDirty) {
+            pendingCloseTabID = dirtyTab.id
+            logger.info("[CodeViewer] Close-tabs-to-right requested with dirty tab \(dirtyTab.id.uuidString.prefix(8)) — awaiting confirmation.")
+            return
+        }
+
+        forceCloseTabsToTheRight(ofID: ofID)
+    }
+
+    /// Closes all tabs situated to the right of the given tab ID unconditionally.
+    func forceCloseTabsToTheRight(ofID: UUID) {
+        guard let index = codeViewerTabs.firstIndex(where: { $0.id == ofID }) else { return }
+        let rightIndices = (index + 1)..<codeViewerTabs.count
+        guard !rightIndices.isEmpty else { return }
+        let toRemove = Array(codeViewerTabs[rightIndices])
+        codeViewerEditorStates.forget(tabIDs: toRemove.map(\.id))
+        codeViewerTabs.removeSubrange(rightIndices)
+        if let activeID = activeCodeViewerTabID, toRemove.contains(where: { $0.id == activeID }) {
+            activeCodeViewerTabID = ofID
+        }
+        logger.info("[CodeViewer] Closed \(toRemove.count) tab(s) to the right of \(ofID.uuidString.prefix(8)).")
     }
 
     /// Closes every tab and dismisses the viewer, pending a confirmation first when any
@@ -966,7 +1066,11 @@ final class ChatHistoryViewModel {
     /// `loadConversation` run. Reading identity from the messages therefore returned nil for a
     /// conversation that was still loaded. The message fallback stays for the pre-load window,
     /// where `loadedConversationID` is not yet set.
-    private var viewerOwningConversationID: UUID? {
+    ///
+    /// ⚠️ Internal since 2026-09-22: the Background Tasks panel needs the same identity, and the
+    /// paragraph above is precisely why it must READ this rather than derive its own. A second
+    /// expression would drift from this one in exactly the pre-load window described.
+    var viewerOwningConversationID: UUID? {
         loadedConversationID ?? currentChatMessages.first?.conversationId
     }
 
@@ -1960,6 +2064,26 @@ final class ChatHistoryViewModel {
             guard myEpoch == loadEpoch else {
                 logger.info("Stale load discarded for \(selectedID.uuidString) (epoch \(myEpoch), current: \(self.loadEpoch)).")
                 return
+            }
+
+            // ⚠️ PERSISTED ONLY. A row that came off disk keeps whatever status was last flushed,
+            // and `.running` renders as a spinner with a ticking clock — always a lie after a
+            // relaunch, since quit kills every task. Live streaming messages are excluded because
+            // the observer is already maintaining them; `reconcile` also asks the registry before
+            // touching anything, so a genuinely running task is left alone either way.
+            let reconciled = BackgroundTaskObserver.reconciledMessages(persistedMessages)
+            if reconciled.rows > 0 {
+                logger.info("[BGTASK] Reconciled \(reconciled.rows) background-task row(s) that loaded as 'running'. CONSEQUENCE: they now show their real outcome, or 'ended when the app restarted' — instead of a spinner and an elapsed time counting up from whenever they started.")
+                // ⚠️ SAVED, not just shown. A real outcome recovered from the registry exists only
+                // while this process remembers the task — unsaved, the next relaunch turns a task
+                // that exited 0 into "interrupted". Detached so the load does not wait on the write;
+                // the corrected rows are no longer `running`, so this never repeats for them.
+                let corrected = reconciled.messages
+                let persistence = persistenceService
+                Task { @MainActor in
+                    await persistence.addMessages(corrected, toConversation: selectedID)
+                    logger.info("[BGTASK] Saved \(corrected.count) reconciled message(s) in conversation \(selectedID.uuidString.prefix(8)). CONSEQUENCE: their background-task rows reload as corrected, including after a relaunch.")
+                }
             }
 
             let activeStreamingMessages = activeStreamManager.activeStreams.values

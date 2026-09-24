@@ -49,7 +49,10 @@ extension ActionEffect {
                 linesAdded: after.components(separatedBy: .newlines).count,
                 linesRemoved: 0,
                 diff: nil,
-                isTruncated: false
+                isTruncated: false,
+                // Taken even with no diff: the retrieval promise is what goes stale, and a
+                // bodyless effect still advertises the file as the agent left it.
+                fingerprint: .of(after)
             )
         }
 
@@ -79,7 +82,13 @@ extension ActionEffect {
             linesAdded: counts.added,
             linesRemoved: counts.deleted,
             diff: diff,
-            isTruncated: truncated
+            isTruncated: truncated,
+            // ⚠️ From `after`, which is ALREADY IN MEMORY — no syscall. This function runs on
+            // the main actor for every file write, and the note above about two direction tables
+            // blocking the main thread is the same hazard: a `stat` here cost the CodeViewer
+            // live-write suite ~40% (measured 2026-09-20). The comparison at render does the I/O,
+            // where it can short-circuit on size.
+            fingerprint: .of(after)
         )
     }
 

@@ -14,12 +14,11 @@ final class PPTXExtractorTests: XCTestCase {
 
     private let extractor = PPTXExtractor()
 
-    private func fixtureURL(_ name: String, ext: String) -> URL {
-        let bundle = Bundle(for: type(of: self))
-        guard let url = bundle.url(forResource: name, withExtension: ext) else {
-            fatalError("Missing test fixture: \(name).\(ext)")
-        }
-        return url
+    /// ⚠️ Shared loader — see `TestFixtures`. This was a local `fatalError`, which kills the
+    /// TEST HOST and so ended the whole run on one absent resource. It now skips this test
+    /// alone; `FixtureAvailabilityTests` is what fails when a fixture is genuinely missing.
+    private func fixtureURL(_ name: String, ext: String) throws -> URL {
+        try TestFixtures.url(name, ext: ext, in: self)
     }
 
     // MARK: - Tier 1: XML Parser — Unit Tests
@@ -111,7 +110,7 @@ final class PPTXExtractorTests: XCTestCase {
     // MARK: - Tier 1: Real Fixture — Full Pipeline
 
     func testExtract_SamplePPTX_ReturnsContent() async throws {
-        let url = fixtureURL("sample", ext: "pptx")
+        let url = try fixtureURL("sample", ext: "pptx")
         let result = try await extractor.extract(from: url, maxSize: 500_000)
 
         XCTAssertFalse(result.text.isEmpty, "Should extract text from sample.pptx")
@@ -120,7 +119,7 @@ final class PPTXExtractorTests: XCTestCase {
     }
 
     func testExtract_SamplePPTX_ReportsSlideCount() async throws {
-        let url = fixtureURL("sample", ext: "pptx")
+        let url = try fixtureURL("sample", ext: "pptx")
         let result = try await extractor.extract(from: url, maxSize: 500_000)
 
         XCTAssertNotNil(result.metadata.pageCount, "Should report slide count")
@@ -129,7 +128,7 @@ final class PPTXExtractorTests: XCTestCase {
     }
 
     func testExtract_SamplePPTX_ContainsSlideHeaders() async throws {
-        let url = fixtureURL("sample", ext: "pptx")
+        let url = try fixtureURL("sample", ext: "pptx")
         let result = try await extractor.extract(from: url, maxSize: 500_000)
 
         XCTAssertTrue(result.text.contains("## Slide"),

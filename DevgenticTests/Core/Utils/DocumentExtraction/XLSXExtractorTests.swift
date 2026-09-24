@@ -14,12 +14,11 @@ final class XLSXExtractorTests: XCTestCase {
 
     private let extractor = XLSXExtractor()
 
-    private func fixtureURL(_ name: String, ext: String) -> URL {
-        let bundle = Bundle(for: type(of: self))
-        guard let url = bundle.url(forResource: name, withExtension: ext) else {
-            fatalError("Missing test fixture: \(name).\(ext)")
-        }
-        return url
+    /// ⚠️ Shared loader — see `TestFixtures`. This was a local `fatalError`, which kills the
+    /// TEST HOST and so ended the whole run on one absent resource. It now skips this test
+    /// alone; `FixtureAvailabilityTests` is what fails when a fixture is genuinely missing.
+    private func fixtureURL(_ name: String, ext: String) throws -> URL {
+        try TestFixtures.url(name, ext: ext, in: self)
     }
 
     // MARK: - Tier 1: Routing
@@ -42,7 +41,7 @@ final class XLSXExtractorTests: XCTestCase {
     // MARK: - Tier 1: Real Fixture Extraction
 
     func testExtract_SampleXLSX_ReturnsContent() async throws {
-        let url = fixtureURL("sample", ext: "xlsx")
+        let url = try fixtureURL("sample", ext: "xlsx")
         let result = try await extractor.extract(from: url, maxSize: 500_000)
 
         XCTAssertFalse(result.text.isEmpty, "Should extract text from sample.xlsx")
@@ -51,7 +50,7 @@ final class XLSXExtractorTests: XCTestCase {
     }
 
     func testExtract_SampleXLSX_ProducesMarkdownTable() async throws {
-        let url = fixtureURL("sample", ext: "xlsx")
+        let url = try fixtureURL("sample", ext: "xlsx")
         let result = try await extractor.extract(from: url, maxSize: 500_000)
 
         XCTAssertTrue(result.text.contains("|"), "Output should contain markdown table pipe characters")
@@ -59,7 +58,7 @@ final class XLSXExtractorTests: XCTestCase {
     }
 
     func testExtract_SampleXLSX_ReportsSheetNames() async throws {
-        let url = fixtureURL("sample", ext: "xlsx")
+        let url = try fixtureURL("sample", ext: "xlsx")
         let result = try await extractor.extract(from: url, maxSize: 500_000)
 
         XCTAssertNotNil(result.metadata.sheetNames, "Should report sheet names")
@@ -67,7 +66,7 @@ final class XLSXExtractorTests: XCTestCase {
     }
 
     func testExtract_SampleXLSX_WordCountPositive() async throws {
-        let url = fixtureURL("sample", ext: "xlsx")
+        let url = try fixtureURL("sample", ext: "xlsx")
         let result = try await extractor.extract(from: url, maxSize: 500_000)
 
         XCTAssertGreaterThan(result.metadata.wordCount, 0, "Should have positive word count")
@@ -92,7 +91,7 @@ final class XLSXExtractorTests: XCTestCase {
     }
 
     func testExtract_MaxSizeTruncation() async throws {
-        let url = fixtureURL("sample", ext: "xlsx")
+        let url = try fixtureURL("sample", ext: "xlsx")
         let result = try await extractor.extract(from: url, maxSize: 50)
 
         XCTAssertLessThanOrEqual(result.text.count, 50, "Should truncate at maxSize")

@@ -129,6 +129,22 @@ struct ConversationExporter {
                 toolCallCount += 1
                 appendRow(toolRowLine(for: data))
 
+            case .backgroundTask(let data):
+                toolCallCount += 1
+                // The COMMAND and how it ended, never the output. An export is a transcript, and
+                // a background task's output is a 375 KB build log living in a temp file that a
+                // shared export would not carry anyway — `logPath` is meaningless on another
+                // machine, so it is deliberately omitted rather than exported as a dead path.
+                let verdict: String
+                switch data.status {
+                case .running:     verdict = "⏳ still running"
+                case .exited:      verdict = data.exitCode == 0 ? "✅ exit 0" : "⚠️ exit \(data.exitCode.map(String.init) ?? "?")"
+                case .timedOut:    verdict = "⛔️ killed at its timeout"
+                case .stopped:     verdict = "⛔️ stopped"
+                case .interrupted: verdict = "⚠️ interrupted by app restart"
+                }
+                appendRow("- \(verdict) `background` \(inlineArgument(data.command))")
+
             case .mediaGeneration(_, let toolName, let artifact, let isComplete):
                 toolCallCount += 1
                 let label = artifact?.label ?? artifact?.kind.rawValue ?? "media"

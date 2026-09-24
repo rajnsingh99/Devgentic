@@ -157,6 +157,24 @@ struct DevgenticApp: App {
                     )
                 }
 
+                // A profile saved before a built-in was WITHDRAWN keeps its name, and nothing in
+                // the UI can remove it — the Tool Library renders from `UnifiedToolStore`, so a name
+                // with no matching source has no row to un-tick. Measured on device 2026-09-23: it
+                // cost a ⚠️ NOT RESOLVED error AND an un-priced tool schema on every send, the
+                // latter making the context gauge over-report headroom.
+                //
+                // ⚠️ OUTSIDE the sweep gate, deliberately — same argument the workflow-run
+                // reconcile makes for itself. The gate guards against a botched migration having
+                // silently degraded stored rows; no migration can INVENT a tool name that the
+                // compiled catalogue lacks, so there is nothing here for one to have degraded.
+                //
+                // ⚠️ Built-ins only — see `WithdrawnToolSweep` for why an absent MCP tool, whose
+                // server may merely be offline or unauthenticated, must never be pruned.
+                let prunedProfiles = WithdrawnToolSweep.run()
+                if prunedProfiles > 0 {
+                    startupLogger.notice("[STARTUP] Pruned withdrawn built-in tool(s) from \(prunedProfiles) profile(s).")
+                }
+
                 // ⚠️ AFTER the sweep, never before. `reconcileOrphans()` is what flips last session's
                 // abandoned `.downloading` rows to `.interrupted`; priming first counts those dead
                 // rows as in-flight and the badge shows a phantom download for the whole session,
@@ -614,6 +632,18 @@ struct DevgenticApp: App {
             fileProcessorService: fileProcessor
         )
 
+        // A background task outlives the stream that started it, so its timeline row cannot be
+        // written by the stream. The observer holds the message directly instead — and it can only
+        // FIND that message while the run is still live, which is why the lookup is handed over
+        // here, once, rather than reached for later when `activeStreams` has already dropped it.
+        MainActor.assumeIsolated {
+            BackgroundTaskObserver.shared.start { conversationID in
+                streamManager.activeStreams.values.first {
+                    $0.conversationId == conversationID && $0.isStreaming
+                }
+            }
+        }
+
         // The main window owns the Code Viewer: live agent tabs + session persistence.
         // QuickAccess's view model deliberately does not (it mounts no viewer UI).
         let chatHistoryVM = ChatHistoryViewModel(
@@ -632,9 +662,36 @@ struct DevgenticApp: App {
         self._chatHistoryViewModel = State(wrappedValue: chatHistoryVM)
         self._mainApplicationViewModel = State(wrappedValue: mainVM)
 
-        // Late-inject CodeSessionManager so the VM can build ephemeral profiles on send.
-        let csm = self._codeSessionManager.wrappedValue
-        mainVM.configureCodeSession(csm)
+        // Tier 3: a background task whose caller set `notify_on_completion` gets a turn of its own
+        // when it finishes, instead of its result reaching nobody once the turn that started it
+        // ended. Report-only and unattended — see `BackgroundTaskWakeCoordinator`.
+        //
+        // ⚠️ Armed with the LOCAL `mainVM`, not `self._mainApplicationViewModel.wrappedValue`. The
+        // note below about reading a `@State` during `init()` applies here in full: that read can
+        // hand back an instance SwiftUI does not keep, and the coordinator would then drive a view
+        // model nothing renders.
+        MainActor.assumeIsolated {
+            BackgroundTaskWakeCoordinator.shared.start(viewModel: mainVM, persistence: persistence)
+        }
+
+        // ⚠️⚠️ CodeSessionManager is DELIBERATELY NOT injected here any more.
+        //
+        // This used to read `self._codeSessionManager.wrappedValue` during `init()` and hand that
+        // object to the view model. Reading a `@State`'s wrapped value from `init()` yields the
+        // initial value of THIS struct evaluation, which is not necessarily the instance SwiftUI
+        // installs as the persistent storage — and the app's launch log proved it, printing
+        // `[CODE_PROFILE] Initialized…` twice from the single construction site above.
+        //
+        // The result was two live managers: the one the views mutate through
+        // `.environment(codeSessionManager)` (folder picker, model picker, quick settings) and a
+        // second, permanently blank one held by the view model. `prepareCodeProfileForSend` read
+        // the blank one, saw `isConfigured == false`, and returned early — so the Code system
+        // prompt was NEVER applied. The model then received only the generic
+        // "You are a helpful AI assistant." fallback plus the `<environment>` block naming the
+        // user's home directory, and did what it was told: it walked `/Users/<name>`.
+        //
+        // The binding now happens in `body` via `.task`, where reading the property (not the
+        // projected `_` value) returns the instance SwiftUI actually kept.
 
         // Cascade a profile delete into the view model's per-profile canvas cache. Without this a
         // deleted workflow's DIRTY canvas survives in memory and the quit-time drain re-creates its
@@ -699,6 +756,9 @@ struct DevgenticApp: App {
                 .environment(backendProfileService)
                 .environment(toastManager)
                 .environment(codeSessionManager)
+                // Binds the SAME instance the environment hands the views. See the note in
+                // `init()` for why this cannot be done there.
+                .task { mainApplicationViewModel.configureCodeSession(codeSessionManager) }
                 .environment(destinationCoordinator)
                 .environment(chatInputViewModel)
                 .modelContainer(swiftDataContainer)
@@ -855,8 +915,8 @@ struct DevgenticApp: App {
                     }
                     .keyboardShortcut("7", modifiers: [.command, .option])
 
-                    Button("Downloads") {
-                        NotificationCenter.default.post(name: .selectSidebarTab, object: SidebarTab.downloads)
+                    Button("Settings") {
+                        NotificationCenter.default.post(name: .selectSidebarTab, object: SidebarTab.settings)
                     }
                     .keyboardShortcut("8", modifiers: [.command, .option])
                 }

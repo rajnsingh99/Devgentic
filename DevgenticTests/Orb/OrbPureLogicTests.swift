@@ -25,13 +25,15 @@ final class OrbWakeWordTests: XCTestCase {
     func testCanonicalWakeWordIsLiveNotDeadCode() {
         // Regression: `wakeWord` was unreferenced while all matching went through the
         // variant list, so editing it changed nothing. The variants now derive from it.
-        XCTAssertEqual(OrbSessionController.wakeWordVariants.first, OrbSessionController.wakeWord)
+        XCTAssertEqual(OrbSessionController.wakeWordVariants(for: "zephyr").first, "zephyr")
     }
 
     func testMatchesEveryAcceptedHomophone() {
-        for variant in OrbSessionController.wakeWordVariants {
-            XCTAssertNotNil(OrbSessionController.wakeWordRange(in: "hey \(variant) do the thing"),
-                            "variant \"\(variant)\" must match")
+        let word = OrbConfigManager.defaultWakeWord
+        for variant in OrbSessionController.wakeWordVariants(for: word) {
+            XCTAssertNotNil(
+                OrbSessionController.wakeWordRange(in: "hey \(variant) do the thing", wakeWord: word),
+                "variant \"\(variant)\" must match")
         }
     }
 
@@ -46,7 +48,7 @@ final class OrbWakeWordTests: XCTestCase {
     func testEarliestVariantWins() {
         // Documents the known hazard: the FIRST match anchors extraction, so a false positive
         // early in a cumulative transcript prefixes everything spoken after it onto the command.
-        let text = "travis said hello then orb run the tests"
+        let text = "orba said hello then orb run the tests"
         let command = OrbSessionController.extractCommand(from: text)
         XCTAssertEqual(command, "said hello then orb run the tests")
     }
@@ -83,7 +85,148 @@ final class OrbWakeWordTests: XCTestCase {
         // text. Falling back to the whole transcript is what keeps the command from being lost.
         XCTAssertEqual(OrbSessionController.extractCommand(from: "run the tests"), "run the tests")
     }
+
+    func testNoHomophoneOfTheOldNameSurvives() {
+        // Regression (2026-09-19): the wake word was renamed from a six-letter name to "orb", and
+        // the OLD name's Whisper homophones stayed in `wakeWordVariants` because none contained the
+        // old name literally — so "Travis" armed the orb while the new name's own mishearing was
+        // mangled. Pinned so the next rename cannot repeat it.
+        for stale in ["jarvis", "jarvus", "jervis", "javis", "jarves", "charvis", "travis"] {
+            XCTAssertNil(OrbSessionController.wakeWordRange(in: "hey \(stale) do the thing"),
+                         "\"\(stale)\" is a homophone of the OLD wake word and must not match")
+        }
+    }
+
+    func testWakeWordIsMatchedAsAWholeWordNotASubstring() {
+        // A three-letter wake word matched by bare substring fires inside ordinary words.
+        for sentence in ["absorb the cost", "that is forbidden", "put it in orbit", "a morbid thought"] {
+            XCTAssertNil(OrbSessionController.wakeWordRange(in: sentence), "\"\(sentence)\" must not wake the orb")
+        }
+        for sentence in ["orb", "Orb.", "ORB, run the tests", "hey orb", "Orba"] {
+            XCTAssertNotNil(OrbSessionController.wakeWordRange(in: sentence), "\"\(sentence)\" must wake the orb")
+        }
+    }
+
+    func testHomophoneWithATrailingLetterIsStrippedWhole() {
+        // ⚠️ Observed on device 2026-09-19: Whisper rendered "Orb. Orb." as "Orba. Orba.", the
+        // substring "orb" matched INSIDE "Orba", extraction sliced after the substring, and the
+        // model received "a. Orba" — which it answered as a question about a puzzle game.
+        XCTAssertEqual(OrbSessionController.extractCommand(from: "Orba. Orba."), "")
+        XCTAssertEqual(OrbSessionController.extractCommand(from: "Orba, write an essay on technology."),
+                       "write an essay on technology")
+    }
+
+    func testClickArmedCaptureAlsoDropsLeadingWakeWords() {
+        // ⚠️ Observed on device 2026-09-19: the user said the wake word three times with no visible
+        // response, clicked the orb, and finished the sentence. The click path only stripped the
+        // pre-arm baseline — and Whisper had rewritten that baseline out of the final transcript —
+        // so "Orba, Orba, Orba. Write in essay, you know" reached the model in full.
+        let rewritten = OrbSessionController.commandPreview(
+            liveTranscript: "Orba, Orba, Orba. Write in essay, you know.",
+            manualBaseline: "Or, or, or"
+        )
+        XCTAssertEqual(rewritten, "Write in essay, you know")
+
+        // Baseline intact: text after the arm point, then any wake word repeated after the click.
+        let kept = OrbSessionController.commandPreview(
+            liveTranscript: "Orba, Orba, Orba. Write in essay, you know.",
+            manualBaseline: "Orba, Orba,"
+        )
+        XCTAssertEqual(kept, "Write in essay, you know")
+
+        // No baseline = armed by the wake word — the existing path, unchanged.
+        XCTAssertEqual(
+            OrbSessionController.commandPreview(liveTranscript: "Orb, run the tests", manualBaseline: nil),
+            "run the tests"
+        )
+    }
 }
+
+// MARK: - A configurable wake word
+
+/// ⚠️ These pin the SETTING, not just the matcher. The wake word was a `static let` derived once
+/// at type-initialization until 2026-09-19 — a word typed in Settings could never have reached a
+/// running orb, and no test would have noticed, because every test used the default.
+@MainActor
+final class OrbWakeWordConfigurationTests: XCTestCase {
+
+    func testTheConfiguredWordIsWhatMatches() {
+        XCTAssertNotNil(OrbSessionController.wakeWordRange(in: "zephyr run the tests", wakeWord: "zephyr"))
+        // ...and the shipped default is NOT still quietly in force alongside it.
+        XCTAssertNil(OrbSessionController.wakeWordRange(in: "orb run the tests", wakeWord: "zephyr"))
+    }
+
+    func testACustomWordGetsNoInventedHomophones() {
+        // Homophones are observations, not derivations: only a word someone has heard mis-heard
+        // gets alternatives. Inventing them would widen every custom user's match on a hunch.
+        XCTAssertEqual(OrbSessionController.wakeWordVariants(for: "zephyr"), ["zephyr"])
+        XCTAssertEqual(OrbSessionController.wakeWordVariants(for: OrbConfigManager.defaultWakeWord),
+                       [OrbConfigManager.defaultWakeWord, "orba", "orbs"])
+    }
+
+    func testAMultiWordWakePhraseMatchesAndIsStripped() {
+        // The documented escape hatch from a short word the recognizer keeps missing.
+        XCTAssertEqual(
+            OrbSessionController.extractCommand(from: "Hey orb, write an essay on technology.",
+                                                wakeWord: "hey orb"),
+            "write an essay on technology"
+        )
+        XCTAssertNil(OrbSessionController.wakeWordRange(in: "the orb is glowing", wakeWord: "hey orb"),
+                     "a two-word phrase must not match on its second word alone")
+    }
+
+    func testACustomWordIsStrippedOnTheClickPathToo() {
+        // The device case: Whisper REWROTE the pre-arm text, so the baseline is no longer a prefix
+        // of the final transcript, `strippingPrefix` correctly falls back to the whole thing — and
+        // the wake words the user said before clicking are still sitting at the front of it.
+        XCTAssertEqual(
+            OrbSessionController.commandPreview(liveTranscript: "Zephyr. Zephyr. Run the tests.",
+                                                manualBaseline: "Zeph, zeph",
+                                                wakeWord: "zephyr"),
+            "Run the tests"
+        )
+
+        // Baseline intact: everything after the arm point, with nothing left to strip.
+        XCTAssertEqual(
+            OrbSessionController.commandPreview(liveTranscript: "Zephyr. Zephyr. Run the tests.",
+                                                manualBaseline: "Zephyr. Zephyr.",
+                                                wakeWord: "zephyr"),
+            "Run the tests"
+        )
+    }
+
+    // MARK: Sanitizing
+
+    func testSanitizingLowercasesAndDropsPunctuation() {
+        XCTAssertEqual(OrbConfigManager.sanitizedWakeWord("  Zephyr!  "), "zephyr")
+        XCTAssertEqual(OrbConfigManager.sanitizedWakeWord("Hey,   Orb."), "hey orb")
+    }
+
+    func testSanitizingRejectsWhatCannotBeMatched() {
+        // Below the floor, or nothing left after stripping — the getter falls back to the default,
+        // so the orb stays usable rather than going deaf or matching every sentence in the room.
+        for unusable in ["", "   ", "a", "!", "...", "?"] {
+            XCTAssertNil(OrbConfigManager.sanitizedWakeWord(unusable), "\(unusable.debugDescription) must be rejected")
+        }
+    }
+
+    func testARegexMetacharacterEntryCannotBecomeAPattern() {
+        // ⚠️ The entry is compiled into a regular expression. ".*" would match every transcript
+        // and arm capture on silence; it must never survive sanitizing as metacharacters.
+        XCTAssertNil(OrbConfigManager.sanitizedWakeWord(".*"))
+        XCTAssertEqual(OrbConfigManager.sanitizedWakeWord("or(b)"), "or b")
+
+        // And a word that merely CONTAINS metacharacters is matched literally, not as a pattern.
+        XCTAssertNil(OrbSessionController.wakeWordRange(in: "anything at all", wakeWord: "a.b"))
+        XCTAssertNotNil(OrbSessionController.wakeWordRange(in: "say a.b now", wakeWord: "a.b"))
+    }
+
+    func testTheWakeWordSettingIsCoveredByReset() {
+        // The Phase 6 keys escaped `resetAll` unnoticed; this is the same guard for this one.
+        XCTAssertTrue(OrbConfigManager.allResettableKeys.contains(AppSettings.orbWakeWordKey))
+    }
+}
+
 
 // MARK: - Stability normalization
 

@@ -4,7 +4,13 @@
 //  CodeToolsGuideView.swift
 //  Devgentic
 //
-//  Premium macOS split-view guide highlighting the 16 built-in tools assigned to the Code interface.
+//  Premium macOS split-view guide highlighting the built-in tools assigned to the Code interface.
+//
+//  ⚠️ `tools` below is a HAND-MAINTAINED SECOND LIST of what `CodeToolPreset` grants — the shape
+//  `NativeToolCatalog` exists to remove. It stays hand-written because it carries prose the
+//  catalogue has no room for (`whySplit`, per-parameter detail), but it is `static` and internal
+//  so `CodeToolsGuideDriftTests` can assert every preset tool has an entry. It had neither when
+//  three tools were added on 2026-09-21 and the guide silently kept describing sixteen.
 //  Details each tool's domain, description, parameters, and confirmation safety policy.
 //
 
@@ -94,7 +100,7 @@ struct CodeToolsGuideView: View {
         let whySplit: String?
     }
 
-    private let tools: [CodeToolItem] = [
+    static let tools: [CodeToolItem] = [
         // MARK: - Read & Navigate
         CodeToolItem(
             id: "read_file",
@@ -268,18 +274,30 @@ struct CodeToolsGuideView: View {
 
         // MARK: - Shell & VCS
         CodeToolItem(
-            id: "batch_command",
-            name: "batch_command",
+            id: "run_command",
+            name: "run_command",
             category: .vcs,
-            description: "Executes terminal commands with working directory scoping, execution timeout (up to 300s), and traceback preservation.",
+            description: "Runs a terminal command and WAITS for it, returning the output. Builds, tests, linters — anything whose result you need.",
             parameters: [
-                ("command", "string", true, "Shell command or script to execute"),
-                ("working_directory", "string", false, "Working directory path"),
-                ("timeout_seconds", "integer", false, "Max execution seconds (default 30)"),
-                ("background", "boolean", false, "Run in background and return job ID")
+                ("command", "string", true, "Shell command or script to run"),
+                ("working_directory", "string", true, "Working directory path"),
+                ("timeout_seconds", "integer", false, "Max seconds to wait, up to 900 (default 30)")
             ],
             requiresConfirmation: true,
-            whySplit: "Supersedes generic shell execution with timeout guarantees and safety policy checks."
+            whySplit: "Split from batch_command: a `background` boolean made one tool serve two intents, and the mode had to be explained in 270 characters of prose the tool name now carries for free."
+        ),
+        CodeToolItem(
+            id: "start_background_task",
+            name: "start_background_task",
+            category: .vcs,
+            description: "Starts a command and returns immediately with a task id, without waiting. For something left running — a dev server, a watcher.",
+            parameters: [
+                ("command", "string", true, "Shell command to start"),
+                ("working_directory", "string", true, "Working directory path"),
+                ("timeout_seconds", "integer", false, "Seconds before the task is killed, up to 900 (default 900)")
+            ],
+            requiresConfirmation: true,
+            whySplit: "The other half of the batch_command split. It runs unattended, so its timeout is the only thing that stops a runaway."
         ),
         CodeToolItem(
             id: "git_tool",
@@ -305,11 +323,36 @@ struct CodeToolsGuideView: View {
             ],
             requiresConfirmation: false,
             whySplit: nil
+        ),
+
+        // MARK: - Background tasks
+        CodeToolItem(
+            id: "command_output",
+            name: "command_output",
+            category: .vcs,
+            description: "Reads what a background command has written so far. Pass since_line to get only what is new since the last read.",
+            parameters: [
+                ("task_id", "string", true, "Task whose output to read (e.g. 'bg_1')"),
+                ("since_line", "integer", false, "Start from this line, as reported by the previous read")
+            ],
+            requiresConfirmation: false,
+            whySplit: "Background output used to go to /dev/null; it is captured to a log file now and read through here."
+        ),
+        CodeToolItem(
+            id: "command_stop",
+            name: "command_stop",
+            category: .vcs,
+            description: "Ends a background command early. Output up to that point is kept and can still be read.",
+            parameters: [
+                ("task_id", "string", true, "Task to end (e.g. 'bg_1')")
+            ],
+            requiresConfirmation: false,
+            whySplit: "Only ends work this agent itself started, unlike kill_process which takes any target."
         )
     ]
 
     private var filteredTools: [CodeToolItem] {
-        var list = tools
+        var list = Self.tools
 
         switch selectedFilter {
         case .all:
@@ -429,7 +472,7 @@ struct CodeToolsGuideView: View {
                     sidebarSectionHeader("DOMAINS")
 
                     ForEach(ToolCategory.allCases) { cat in
-                        let catCount = tools.filter { $0.category == cat }.count
+                        let catCount = Self.tools.filter { $0.category == cat }.count
                         sidebarRow(
                             title: cat.rawValue,
                             icon: cat.icon,
@@ -622,7 +665,7 @@ struct CodeToolsGuideView: View {
     private var detailSubtitle: String {
         switch selectedFilter {
         case .all:
-            return "16 deterministic tools pre-configured for code analysis, editing, and execution."
+            return "\(Self.tools.count) deterministic tools pre-configured for code analysis, editing, and execution."
         case .domain(let cat):
             switch cat {
             case .read:   return "File reading, recursive directory traversal, codebase maps & definition finding."

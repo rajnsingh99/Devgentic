@@ -24,6 +24,31 @@ import XCTest
 
 final class ToolRegistryDriftTests: XCTestCase {
 
+    /// ⚠️⚠️ THE CATALOGUE'S DUPLICATE GUARD WAS UNTESTED, and found by mutation on 2026-09-23
+    /// while withdrawing `command_status`: adding a second entry for an existing tool passed every
+    /// suite, including this one.
+    ///
+    /// `byName` detects it and calls `assertionFailure` — which this build configuration compiles
+    /// OUT, exactly as that code's own comment warns ("`assert` is compiled OUT of release builds,
+    /// so a duplicate name would silently drop a tool in exactly the builds users run"). The
+    /// `logger.error` fires and nothing fails.
+    ///
+    /// The consequence it describes is real: the map collapses, THE LATER ENTRY WINS, and the
+    /// earlier tool becomes unreachable while still appearing in the source as if it were offered.
+    func testNoTwoCatalogueEntriesShareAName() {
+        let names = NativeToolCatalog.entries.map(\.name)
+        let duplicates = Dictionary(grouping: names, by: { $0 })
+            .filter { $0.value.count > 1 }
+            .keys
+            .sorted()
+        XCTAssertTrue(duplicates.isEmpty,
+                      "duplicate catalogue name(s) \(duplicates) — the byName map collapses and the "
+                      + "LATER entry wins, so the earlier tool is unreachable while still reading "
+                      + "as offered in the source. assertionFailure does not catch this here.")
+        XCTAssertEqual(Set(names).count, names.count,
+                       "entry count and unique-name count disagree")
+    }
+
     /// Tools constructed directly by `AgentConnect` rather than from the catalogue, each built
     /// with run-scoped data a startup catalogue could not supply: `ask_user` and `final_answer`
     /// drive the ReAct loop itself, `get_conversation_history` carries the run's chat history,
@@ -33,9 +58,12 @@ final class ToolRegistryDriftTests: XCTestCase {
     /// `get_conversation_history` was missing from this list until 2026-07-31: its
     /// `var name: String { … }` is computed, so it was invisible to the `let name = "…"` greps
     /// used to enumerate tools. Prefer the compiler over a regex when you need a complete list.
-    private static let injectedOutsideCatalog: Set<String> = [
-        "ask_user", "final_answer", "get_conversation_history", "load_skill", "update_project_context",
-    ]
+    ///
+    /// ⚠️ DERIVED from `NativeToolCatalog.injectedTools` since 2026-09-20, not restated. This was
+    /// the only declaration of these five anywhere, and because it lived in a test, production
+    /// could not price them — all five cost 0 in the fit gauge. Moving the list into the
+    /// catalogue and reading it here removes a duplicate rather than adding one.
+    private static let injectedOutsideCatalog: Set<String> = NativeToolCatalog.injectedToolNames
 
     // MARK: - The catalogue is the only source
 

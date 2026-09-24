@@ -50,6 +50,37 @@ final class ActiveStreamManager {
     // MARK: - Dependencies
     @ObservationIgnored private var activeTasks: [UUID: Task<Void, Never>] = [:]
 
+    // MARK: - Conversation admission
+
+    /// One run at a time, per conversation. See `ConversationAdmission` for the whole argument —
+    /// briefly: two concurrent runs in one conversation were reachable and unguarded, because the
+    /// only thing stopping them was the composer's send button greying out, and the scheduler, Orb
+    /// and the ChatOps bridge never touch a button.
+    ///
+    /// ⚠️ The busy test is injected rather than owned by that type, so `activeStreams` stays the
+    /// single source of "what is running" — the `streamingMessageID`/`streamingMessage` pair this
+    /// dictionary already replaced is what a second copy of that state turns into.
+    @ObservationIgnored private lazy var admission = ConversationAdmission { [weak self] conversationID, messageID in
+        guard let self else { return false }
+        return Self.isConversationBusy(self.activeStreams, conversationID: conversationID, excluding: messageID)
+    }
+
+    /// Whether some OTHER run is live in `conversationID`.
+    ///
+    /// ⚠️ `excluding` IS THE WHOLE SUBJECT. A waiting run is already in `activeStreams` — it is
+    /// registered before its task starts so Stop and the sidebar can see it — so without this every
+    /// run would find ITSELF busy and park forever, and no conversation would ever run anything
+    /// again.
+    ///
+    /// ⚠️ A pure static over the dictionary rather than a closure body, because the closure body
+    /// was unreachable from tests: they inject their own `isBusy` to exercise the queue, so the
+    /// REAL predicate had no coverage at all and mutation removing `excluding` survived.
+    static func isConversationBusy(_ streams: [UUID: ChatMessage],
+                                   conversationID: UUID,
+                                   excluding messageID: UUID) -> Bool {
+        streams.values.contains { $0.conversationId == conversationID && $0.id != messageID }
+    }
+
     /// When each live run CLAIMED its stream. Written and removed in lockstep with
     /// `activeStreams` (the only two sites are the insert below and `finalizeMessage`), so it
     /// cannot outlive the run it describes.
@@ -521,9 +552,58 @@ final class ActiveStreamManager {
         // ⚠️ Bound around the Task's CREATION, not inside its body: an unstructured `Task {}`
         // inherits the task-local values of the context that creates it, which is the same mechanism
         // `$hasRemoteResponder` and `$isAttended` already rely on at their binding site.
-        let streamTask = WorkflowRunAttendance.$origin.withValue(userMessage.messageSource) {
+        //
+        // ⚠️ A WOKEN RUN IS UNATTENDED BY CONSTRUCTION, and binding that HERE — rather than at
+        // whatever eventually triggers one — is the same argument `$origin` makes just above: a
+        // surface cannot forget what it never had to remember. `.backgroundTask` exists only for a
+        // run that a FINISHED PROCESS started. Nobody typed it and nobody is watching.
+        //
+        // ⚠️⚠️ NOT COSMETIC. `SessionToolApprovals.isAllowed` reads `canReachAHuman` off this
+        // before serving a standing "Allow for this chat" grant. Left at its `true` default, a build
+        // finishing overnight would spend approvals the user granted while sitting at the keyboard —
+        // and the per-tool grant is keyed on `(conversation, node)` with NO surface, so
+        // `MessageSource.backgroundTask` alone does not close it. `ToolExecutionLoop`'s two arms
+        // (WF-SE11) key on the same predicate: with nobody reachable, `ask_user` and a tool
+        // confirmation are refused with an honest observation instead of parking until a deadline
+        // cancels the run.
+        //
+        // ⚠️ ADDITIVE ON PURPOSE. Every other source re-binds whatever the CALLER already bound, so
+        // this cannot contradict ChatOps (`isAttended = false` AND `hasRemoteResponder = true`) or
+        // `SchedulerCoordinator`. Deriving attendance from the source for ALL sources was the
+        // obvious version and is wrong: it would have flipped a ChatOps run back to attended and
+        // deleted the Router's first-match behaviour (WF-EX5), which exists because an arbitration
+        // park there has no deadline to end it.
+        let attended = userMessage.messageSource == .backgroundTask
+            ? false
+            : WorkflowRunAttendance.isAttended
+        // ⚠️ THE UNATTENDED CASE IS SAID OUT LOUD; the attended one is not, so this is a signal
+        // rather than noise on every send. Three behaviours hang off this value and all three are
+        // silent refusals — a standing grant not served, `ask_user` refused, a tool confirmation
+        // refused — so without this line an unattended run's behaviour looks like a bug.
+        if !attended {
+            logger.notice("[ATTENDANCE] Run \(agentMessage.id.uuidString.prefix(8)) in conversation \(conversationID.uuidString.prefix(8)) is UNATTENDED (started by \(userMessage.messageSource.rawValue), remote responder: \(WorkflowRunAttendance.hasRemoteResponder)). CONSEQUENCE: standing 'allow for this chat' grants are NOT served to it, and ask_user plus any tool confirmation are refused with an honest observation instead of parking for an answer nobody will give.")
+        }
+        let streamTask = WorkflowRunAttendance.$isAttended.withValue(attended) {
+            WorkflowRunAttendance.$origin.withValue(userMessage.messageSource) {
             Task { [weak self] in
             guard let self = self else { return }
+
+            // ⚠️ ONE RUN PER CONVERSATION, enforced HERE because this is the send path's single
+            // chokepoint — all seven call sites are covered by one line, including any future one.
+            // The task is created (so Stop and `activeTasks` work immediately) but does no work
+            // until the conversation is free. See `admissionQueue`.
+            let waited = await self.admission.awaitTurn(
+                conversationID: conversationID, messageID: agentMessage.id,
+                // ⚠️ Said on screen, not just in the log. A queued run otherwise shows the ordinary
+                // thinking indicator, so a ChatOps message sent while the user is typing locally
+                // looks like the app has stalled rather than like it is second in line.
+                onWait: { agentMessage.agentState = .thinking(.queued) })
+            if waited { agentMessage.agentState = .thinking(.reasoning) }
+            if Task.isCancelled {
+                logger.info("[ADMISSION] Run \(agentMessage.id.uuidString.prefix(8)) was cancelled while waiting for conversation \(conversationID.uuidString.prefix(8)).")
+                await self.finalizeMessage(agentMessage, conversationID: conversationID, error: CancellationError())
+                return
+            }
 
             // Structured Plan & Execute / Reflexion cards (chat + code agents only).
             // Workflow runs keep the legacy flat milestone chips: their capability
@@ -699,7 +779,8 @@ final class ActiveStreamManager {
                                 params: params,
                                 risk: riskResolution.risk,
                                 arguments: JSONValue.parseStructured(params),
-                                riskIsServerDeclared: riskResolution.serverDeclared
+                                riskIsServerDeclared: riskResolution.serverDeclared,
+                                previewPath: Self.previewPath(forTool: toolName, profile: config.profile)
                             )),
                             conversationID: conversationID,
                             profileType: config.profile.profileType,
@@ -1225,6 +1306,7 @@ final class ActiveStreamManager {
             onComplete()
         }
         }
+        }
         
         activeTasks[agentMessage.id] = streamTask
         
@@ -1306,6 +1388,22 @@ final class ActiveStreamManager {
     /// of truth across chat / code / workflow / scheduled. Builds the source-attributed origin
     /// (interface + workflow node identity + banner title). Replaces the retired per-message
     /// `ChatMessage.pendingInteraction` and per-workflow `WorkflowExecutionState.pendingInteractions`.
+    /// The file a confirmation will write when its ARGUMENTS do not name one.
+    ///
+    /// ⚠️ Derived from the profile THIS RUN is using, not from any current-session global. A
+    /// parked confirmation can outlive the user switching projects; reading a shared
+    /// `CodeSessionManager` here would preview the change against whichever folder happens to be
+    /// open when the banner renders, which is a different file than the one being approved.
+    ///
+    /// Returns nil for every other tool, which is the overwhelming majority — their target is in
+    /// their arguments and `FileChange.parse` reads it from there.
+    private static func previewPath(forTool toolName: String, profile: BackendProfileModel) -> String? {
+        guard toolName == "update_project_context",
+              case .code(let codeConfig) = profile.details,
+              let projectPath = codeConfig.projectPath else { return nil }
+        return UpdateProjectContextTool.contextFilePath(inProject: projectPath)
+    }
+
     private func enqueueHITL(
         operationID: UUID,
         kind: PendingInteraction,
@@ -1518,6 +1616,8 @@ final class ActiveStreamManager {
         for messageID in messageIDs {
             cancelStream(for: messageID)
         }
+        // A parked waiter holds a continuation that nothing else will resume — see the method.
+        admission.releaseAll(inConversation: conversationID)
     }
     
     
@@ -1710,6 +1810,10 @@ final class ActiveStreamManager {
         activeStreams.removeValue(forKey: message.id)
         liveRunQuestionIDs.removeValue(forKey: message.id)   // in lockstep with activeStreams
         streamStartedAt.removeValue(forKey: message.id)
+        // ⚠️ AFTER the removal, never before: `isConversationBusy` reads `activeStreams`, so
+        // admitting first would hand the next run a conversation that still looks occupied by the
+        // one just finishing — and it would park again with nothing left to wake it.
+        admission.admitNext(inConversation: conversationID)
         for delegate in liveMirrorDelegates {
             delegate.activeStreamManager(self, didEndStream: message)
         }

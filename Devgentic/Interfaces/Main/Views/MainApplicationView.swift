@@ -144,6 +144,44 @@ struct MainApplicationView: View {
     private let inputAreaCornerRadius: CGFloat = 12
     
     // MARK: - Body
+    /// ⚠️ Hoisted out of `body`. Inline, this tipped the ZStack past the type-checker's budget
+    /// ("unable to type-check this expression in reasonable time") — that body is already large
+    /// enough that one more conditional branch is not free.
+    @ViewBuilder
+    private var backgroundTasksPanel: some View {
+        if chatHistoryViewModel.isBackgroundTasksPanelPresented {
+            BackgroundTasksPanelView(conversationID: chatHistoryViewModel.viewerOwningConversationID)
+                .environment(chatHistoryViewModel)
+                .zIndex(2)
+        }
+    }
+
+    /// The floating pills, STACKED so they can never overlap.
+    ///
+    /// Both want the same top-trailing corner. They were separate mounts while only the Code Viewer
+    /// had one; a second independent mount in the same corner would draw on top of the first.
+    ///
+    /// ⚠️ Hoisted for the same reason `backgroundTasksPanel` is — see its note.
+    @ViewBuilder
+    private var floatingPills: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            // Shown only when the viewer was minimized with tabs still open and no background tasks panel is covering the area.
+            if chatHistoryViewModel.isCodeViewerMinimized && !chatHistoryViewModel.isBackgroundTasksPanelPresented {
+                CodeViewerFloatingButton()
+                    .environment(chatHistoryViewModel)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+            // The panel's second door, and for most of a task's life its only one — the timeline
+            // card that opens it scrolls away. Hides itself when it has nothing to offer.
+            BackgroundTasksFloatingButton(conversationID: chatHistoryViewModel.viewerOwningConversationID)
+                .environment(chatHistoryViewModel)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+        .padding(.top, 14)
+        .padding(.trailing, 18)
+        .zIndex(3)
+    }
+
     var body: some View {
         ZStack(alignment: .leading) {
             ZStack {
@@ -235,17 +273,13 @@ struct MainApplicationView: View {
                     .zIndex(2)
             }
 
-            // Floating reopen pill — shown only when the viewer was minimized with tabs still
-            // open (mutually exclusive with the panel above, so they never overlap).
-            if chatHistoryViewModel.isCodeViewerMinimized {
-                CodeViewerFloatingButton()
-                    .environment(chatHistoryViewModel)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                    .padding(.top, 14)
-                    .padding(.trailing, 18)
-                    .zIndex(3)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-            }
+            // The task list occupies the SAME trailing slot as the Code Viewer, which is why the
+            // two flags exclude each other in `ChatHistoryViewModel` rather than here — a rule
+            // enforced at the mount site would be a rule this `if` could silently disagree with.
+            backgroundTasksPanel
+
+            // Floating pills — reopen-code-viewer and background-tasks. See `floatingPills`.
+            floatingPills
 
             // Hidden shortcut button for Explorer (IDE standard Cmd+Shift+E)
             Button(action: {
@@ -273,6 +307,13 @@ struct MainApplicationView: View {
         }
         .preferredColorScheme(theme.colorScheme)
         .onAppear {
+             viewModel.explorerViewModel.onOpenFileRequested = { [weak chatHistoryViewModel, weak explorerVM = viewModel.explorerViewModel] item in
+                 if let chatHistoryViewModel {
+                     FileOpenCoordinator.open(item: item, in: chatHistoryViewModel, fallbackViewModel: explorerVM)
+                 } else {
+                     explorerVM?.openWithSystemApp(item)
+                 }
+             }
              if viewModel.selectedConversationID != nil && router.isShowingChat {
                  DispatchQueue.main.async { isInputFocused = true }
              }
@@ -638,42 +679,31 @@ private struct InterfaceModePicker: View {
     @Namespace private var modeAnimation
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 3) {
             ForEach(MainApplicationViewModel.InterfaceMode.allCases, id: \.self) { mode in
                 ModeTabButton(mode: mode, namespace: modeAnimation)
             }
         }
-        .padding(4)
+        .padding(3)
         .background(
             Capsule()
                 .fill(
                     surfaceStyle == .solid
-                        ? (theme.isDark ? Color(hex: "#1E1E22") : Color.white)
-                        : theme.secondaryBackground.opacity(0.65)
+                        ? (theme.isDark ? Color(hex: "#18181B") : Color.white)
+                        : theme.secondaryBackground.opacity(0.75)
                 )
         )
         .overlay(
             Capsule()
-                .strokeBorder(
-                    surfaceStyle == .solid
-                        ? AnyShapeStyle(theme.isDark ? Color.white.opacity(0.1) : Color.black.opacity(0.08))
-                        : AnyShapeStyle(
-                            LinearGradient(
-                                colors: [Color.white.opacity(0.16), Color.white.opacity(0.04)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        ),
-                    lineWidth: 1
-                )
+                .strokeBorder(theme.dividerColor.opacity(0.35), lineWidth: 0.5)
         )
         .shadow(
-            color: Color.black.opacity(surfaceStyle == .solid ? (theme.isDark ? 0.3 : 0.08) : 0.22),
-            radius: surfaceStyle == .solid ? 6 : 10,
+            color: Color.black.opacity(theme.isDark ? 0.2 : 0.06),
+            radius: 8,
             x: 0,
-            y: surfaceStyle == .solid ? 2 : 4
+            y: 3
         )
-        .animation(.spring(response: 0.35, dampingFraction: 0.75), value: viewModel.interfaceMode)
+        .animation(.spring(response: 0.3, dampingFraction: 0.78), value: viewModel.interfaceMode)
     }
 }
 
@@ -685,36 +715,36 @@ private struct ModeTabButton: View {
     var namespace: Namespace.ID
     @Environment(MainApplicationViewModel.self) private var viewModel
     @Environment(\.appTheme) private var theme
+    @Environment(\.buttonAccentStyle) private var buttonAccentStyle
     @State private var isHovering = false
 
     private var isActive: Bool { viewModel.interfaceMode == mode }
 
-    private var modeColor: Color {
-        switch mode {
-        case .chat:     return Color(hex: "#0A84FF") // Ocean Blue
-        case .workflow: return Color(hex: "#8B5CF6") // Royal Violet
-        case .code:     return Color(hex: "#06B6D4") // Cosmic Cyan
+    private var activeIconColor: Color {
+        if buttonAccentStyle == .accent && !theme.isAccentLight {
+            return theme.accentColor
         }
+        return theme.primaryText
     }
 
     var body: some View {
         Button {
             NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.72)) {
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
                 viewModel.switchInterfaceMode(to: mode)
             }
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: mode.icon)
-                    .font(.system(size: 11, weight: isActive ? .bold : .medium))
-                    .foregroundColor(isActive ? modeColor : (isHovering ? theme.primaryText : theme.secondaryText))
+                    .font(.system(size: 11, weight: isActive ? .semibold : .medium))
+                    .foregroundColor(isActive ? activeIconColor : (isHovering ? theme.primaryText : theme.secondaryText))
 
                 Text(mode.localizedTitle)
                     .font(.system(size: 12, weight: isActive ? .semibold : .medium))
                     .foregroundColor(isActive ? theme.primaryText : (isHovering ? theme.primaryText : theme.secondaryText))
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 13)
+            .padding(.vertical, 5.5)
             .background {
                 if isActive {
                     Capsule()
@@ -722,15 +752,13 @@ private struct ModeTabButton: View {
                         .overlay(
                             Capsule()
                                 .strokeBorder(
-                                    LinearGradient(
-                                        colors: [modeColor.opacity(0.65), modeColor.opacity(0.25)],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    ),
-                                    lineWidth: 1
+                                    buttonAccentStyle == .accent && !theme.isAccentLight
+                                        ? theme.accentColor.opacity(0.35)
+                                        : theme.dividerColor.opacity(0.4),
+                                    lineWidth: 0.5
                                 )
                         )
-                        .shadow(color: modeColor.opacity(0.22), radius: 6, x: 0, y: 1)
+                        .shadow(color: Color.black.opacity(theme.isDark ? 0.22 : 0.05), radius: 4, x: 0, y: 1.5)
                         .matchedGeometryEffect(id: "activeModeIndicator", in: namespace)
                 } else if isHovering {
                     Capsule()
@@ -749,8 +777,8 @@ private struct ModeTabButton: View {
                 if mode == .workflow && !viewModel.dirtyWorkflowCanvasIDs.isEmpty {
                     Circle()
                         .fill(Color.orange)
-                        .frame(width: 6, height: 6)
-                        .offset(x: 2, y: -1)
+                        .frame(width: 5, height: 5)
+                        .offset(x: 1, y: -1)
                         .transition(.scale.combined(with: .opacity))
                         // Purely decorative — the meaning is announced on the BUTTON below, not
                         // here. A label on this Circle would sit inside the Button's own label

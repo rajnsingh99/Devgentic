@@ -133,6 +133,21 @@ struct KillProcessTool: DevgenticTool {
             // a *target* instead of a malformed signal. The separator that fixes option injection
             // is what arms this, so the two belong together: keep `--`, and reject the pids that
             // are not one process. `target: "-1"` was a session-wide SIGKILL. (2026-07-31)
+            //
+            // ⚠️⚠️ A SPEED-BUMP AGAINST THE ACCIDENT, **NOT A BOUNDARY** — and the distinction is
+            // load-bearing, because the comment above reads like one. Tools are granted per
+            // profile, and any profile that also grants `batch_command`, `execute_shell` or
+            // `run_applescript` reaches `kill -9 -1` directly: neither `ShellCommandGuard`
+            // .refusalReason nor `BatchCommandTool.destructivePatterns` mentions `kill` at all.
+            // Those three are `.destructive` for the same reason this tool is, so the refusal
+            // below buys no extra gating either — `HITLRiskTier.classify` returns `.destructive`
+            // for anything in `ToolCapability.arbitraryCodeExecution`.
+            //
+            // What it does buy is real, and worth keeping: a model that meant one process and
+            // typed a signal spec does not take down the login session, and a profile granted
+            // this tool WITHOUT a shell genuinely cannot. What it must not do is read as the
+            // reason a shell-bearing profile is safe. `destructivePatterns` carries the same
+            // disclaimer for the same reason; the two were written apart and only one said it.
             guard pid > 0 else {
                 logger.error("[KILLPROC] ⚠️ refused non-positive pid '\(target)' — this would have signalled a process GROUP (0 = this app's own group, -1 = every process the user owns), not one process. No signal sent.")
                 return "Error: '\(target)' is not a process id. A pid must be positive — "

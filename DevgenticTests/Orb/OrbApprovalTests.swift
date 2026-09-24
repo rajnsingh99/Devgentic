@@ -191,9 +191,9 @@ final class OrbToolApprovalSettingTests: XCTestCase {
 
     func testDefaultIsAskNotAutonomous() {
         // The safe default has to be the one that stops and shows you the arguments.
-        let saved = UserDefaults.standard.object(forKey: AppSettings.orbToolApprovalsKey)
-        UserDefaults.standard.removeObject(forKey: AppSettings.orbToolApprovalsKey)
-        defer { if let saved { UserDefaults.standard.set(saved, forKey: AppSettings.orbToolApprovalsKey) } }
+        let saved = TestHost.defaults.object(forKey: AppSettings.orbToolApprovalsKey)
+        TestHost.defaults.removeObject(forKey: AppSettings.orbToolApprovalsKey)
+        defer { if let saved { TestHost.defaults.set(saved, forKey: AppSettings.orbToolApprovalsKey) } }
         XCTAssertEqual(OrbConfigManager.shared.toolApprovals, .ask)
         XCTAssertFalse(OrbConfigManager.shared.toolApprovals.isAutonomous)
     }

@@ -35,9 +35,9 @@ final class OrbFollowUpTests: XCTestCase {
         // On by default: re-uttering the wake word before every sentence is the single most
         // conspicuous thing separating a voice trigger from a voice assistant. Short by default
         // because the microphone is open for the whole window.
-        let saved = UserDefaults.standard.object(forKey: AppSettings.orbFollowUpKey)
-        UserDefaults.standard.removeObject(forKey: AppSettings.orbFollowUpKey)
-        defer { if let saved { UserDefaults.standard.set(saved, forKey: AppSettings.orbFollowUpKey) } }
+        let saved = TestHost.defaults.object(forKey: AppSettings.orbFollowUpKey)
+        TestHost.defaults.removeObject(forKey: AppSettings.orbFollowUpKey)
+        defer { if let saved { TestHost.defaults.set(saved, forKey: AppSettings.orbFollowUpKey) } }
         XCTAssertEqual(OrbConfigManager.shared.followUp, .short)
     }
 }

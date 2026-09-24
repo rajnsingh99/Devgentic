@@ -636,6 +636,21 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
                     && existing.ownerWorkflowID == snapshot.ownerWorkflowID
                     && existing.ownerNodeID == snapshot.ownerNodeID
 
+                // ⚠️⚠️ THE NO-OP IS NOT SKIPPED HERE, and that is deliberate — a store-level
+                // early return was written and REVERTED on 2026-09-20. Assigning `details` is not
+                // a plain field write: its setter moves the API key to the Keychain, refuses to
+                // overwrite an undecodable blob, suppresses a Keychain clear after a failed read,
+                // and rewrites every denormalized column. Returning before it runs skips all of
+                // that.
+                //
+                // The case that killed the idea: if `encodeDetails` ever fails, `_cachedDetails`
+                // holds the NEW value while `configData` still holds the OLD one. `unchanged`
+                // compares through the getter, so the next identical save looks like a no-op —
+                // and the blob would never be repaired. Today that save repairs it.
+                //
+                // Redundant saves are therefore fixed at the CALLER, where the knowledge of what
+                // changed actually lives (see `CodeSessionManager.refreshInstructionsOnProfile`).
+                // This warning stays because it is how such a caller gets found.
                 existing.displayName = snapshot.displayName
                 existing.lastSelected = now
                 existing.details = snapshot.details

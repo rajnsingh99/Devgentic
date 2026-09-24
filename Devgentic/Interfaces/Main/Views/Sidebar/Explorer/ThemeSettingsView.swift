@@ -310,7 +310,6 @@ struct ThemeSettingsView: View {
                         ForEach(CodeViewerThemeOverride.allCases, id: \.self) { override in
                             CodeViewerPreviewCard(
                                 override: override,
-                                currentAppTheme: themeManager.currentTheme,
                                 isSelected: themeManager.codeViewerThemeOverride == override,
                                 appTheme: theme
                             ) {
@@ -435,7 +434,6 @@ struct ThemePreviewCard: View {
 
 struct CodeViewerPreviewCard: View {
     let override: CodeViewerThemeOverride
-    let currentAppTheme: any Theme
     let isSelected: Bool
     let appTheme: any Theme
     let action: () -> Void
@@ -444,7 +442,6 @@ struct CodeViewerPreviewCard: View {
 
     var previewTheme: any Theme {
         switch override {
-        case .default: return currentAppTheme
         case .material: return AppThemes.MaterialTheme()
         case .cosmicDark: return AppThemes.CosmicDarkTheme()
         case .oneLight: return AppThemes.OneLightTheme()
@@ -764,11 +761,6 @@ struct InteractiveMiniChatPreviewView: View {
                                 strokeColor: theme.accentColor.opacity(0.2),
                                 solidFillOverride: theme.surfaceOverlayStrong
                             )
-
-                        Image(systemName: "person.circle.fill")
-                            .font(.system(size: 24))
-                            .foregroundColor(theme.accentColor.opacity(0.85))
-                            .padding(.top, 2)
                     }
 
                     // 2. Assistant Message (Leading)

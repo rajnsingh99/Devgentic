@@ -154,14 +154,65 @@ struct ComposerMicButton: View {
 
 // MARK: - Send / stop button
 
-/// Accent-filled send button that flips to a stop control while a response is streaming.
+/// Tactile Dark Glass send button that respects ButtonAccentStyle and flips to a stop control while streaming.
 struct ComposerSendStopButton: View {
     let isSending: Bool
     let isDisabled: Bool
     let action: () -> Void
 
     @Environment(\.appTheme) private var theme
+    @Environment(\.buttonAccentStyle) private var buttonAccentStyle
     @State private var isHovered = false
+
+    private var isThemeContrast: Bool {
+        buttonAccentStyle == .themeContrast
+    }
+
+    private var sendForegroundColor: Color {
+        if isDisabled {
+            return theme.secondaryText.opacity(0.35)
+        }
+        if isThemeContrast {
+            // Dark theme: White button -> Dark icon
+            // Light theme: Dark button -> White icon
+            return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+        }
+        return theme.isAccentLight ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+    }
+
+    private var sendBackgroundColor: Color {
+        if isDisabled {
+            return theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.05)
+        }
+        if isThemeContrast {
+            return theme.isDark
+                ? Color.white.opacity(isHovered ? 1.0 : 0.94)
+                : Color(red: 0.12, green: 0.12, blue: 0.14).opacity(isHovered ? 1.0 : 0.94)
+        }
+        return theme.accentColor.opacity(isHovered ? 1.0 : 0.92)
+    }
+
+    private var sendBorderColor: Color {
+        if isDisabled {
+            return theme.dividerColor.opacity(0.25)
+        }
+        if isThemeContrast {
+            return theme.isDark
+                ? Color.white.opacity(isHovered ? 0.9 : 0.7)
+                : Color.black.opacity(isHovered ? 0.9 : 0.7)
+        }
+        return theme.accentColor.opacity(isHovered ? 0.8 : 0.4)
+    }
+
+    private var sendShadowColor: Color {
+        if isDisabled {
+            return .clear
+        }
+        if isThemeContrast {
+            return Color.black.opacity(theme.isDark ? (isHovered ? 0.35 : 0.20) : (isHovered ? 0.15 : 0.08))
+        }
+        return theme.accentColor.opacity(isHovered ? 0.35 : 0.18)
+    }
 
     var body: some View {
         Button(action: {
@@ -171,50 +222,39 @@ struct ComposerSendStopButton: View {
             ZStack {
                 if isSending {
                     Circle()
-                        .fill(Color.red.opacity(0.12))
+                        .fill(Color.red.opacity(isHovered ? 0.18 : 0.10))
                         .frame(width: 28, height: 28)
                         .overlay(
                             Circle()
-                                .stroke(Color.red.opacity(0.3), lineWidth: 1)
+                                .strokeBorder(Color.red.opacity(isHovered ? 0.45 : 0.25), lineWidth: 0.5)
                         )
+                        .shadow(color: Color.red.opacity(isHovered ? 0.25 : 0.08), radius: 3, x: 0, y: 1)
                     Image(systemName: "stop.fill")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundColor(.red)
                 } else {
                     Circle()
-                        .fill(
-                            !isDisabled
-                                ? LinearGradient(
-                                    colors: [
-                                        theme.accentColor,
-                                        isHovered ? theme.accentColor.opacity(0.85) : theme.accentColor.opacity(0.95)
-                                    ],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                  )
-                                : LinearGradient(
-                                    colors: [theme.surfaceOverlay],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                  )
-                        )
+                        .fill(sendBackgroundColor)
                         .frame(width: 28, height: 28)
+                        .overlay(
+                            Circle()
+                                .strokeBorder(sendBorderColor, lineWidth: 0.5)
+                        )
                         .shadow(
-                            color: !isDisabled ? theme.accentColor.opacity(isHovered ? 0.5 : 0.3) : .clear,
-                            radius: isHovered ? 5 : 3,
+                            color: sendShadowColor,
+                            radius: isHovered ? 4 : 2,
                             x: 0,
                             y: 1
                         )
                     Image(systemName: "arrow.up")
                         .font(.system(size: 12, weight: .bold))
-                        .foregroundColor(!isDisabled ? .white : theme.secondaryText.opacity(0.35))
+                        .foregroundColor(sendForegroundColor)
                 }
             }
-            .scaleEffect(!isDisabled && isHovered ? 1.07 : 1.0)
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
-        .onHover { hover in withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { isHovered = hover } }
+        .onHover { hover in withAnimation(.easeInOut(duration: 0.15)) { isHovered = hover } }
         .help(isSending ? "Stop generating (⌘.)" : "Send message (⏎)")
         .accessibilityLabel(isSending ? "Stop generating" : "Send")
     }

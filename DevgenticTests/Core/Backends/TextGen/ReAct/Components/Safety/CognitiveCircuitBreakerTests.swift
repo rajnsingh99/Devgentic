@@ -87,9 +87,9 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
         if case .proceedWithWarning = action2 {} else { XCTFail("Expected .proceedWithWarning on 2nd occurrence, got \(action2)") }
 
         // 3rd identical iteration should abort
-        if case .abort(let reason) = action3 {
-            XCTAssertTrue(reason.contains("fs_smart_search"), "Abort reason should mention the tool name")
-            XCTAssertTrue(reason.contains("3"), "Abort reason should mention the count")
+        if case .abort(let trigger) = action3 {
+            XCTAssertTrue(trigger.reason.contains("fs_smart_search"), "Abort reason should mention the tool name")
+            XCTAssertTrue(trigger.reason.contains("3"), "Abort reason should mention the count")
         } else {
             XCTFail("Expected .abort on 3rd identical iteration, got \(action3)")
         }
@@ -148,9 +148,9 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
 
         // Back to obs1: 3rd global occurrence → abort despite the interruption
         let action4 = breaker.evaluateRepetitiveActions(obs1)
-        if case .abort(let reason) = action4 {
-            XCTAssertTrue(reason.contains("fs_smart_search"), "Abort should name the repeated tool, got: \(reason)")
-            XCTAssertTrue(reason.contains("3"), "Abort should mention the global count, got: \(reason)")
+        if case .abort(let trigger) = action4 {
+            XCTAssertTrue(trigger.reason.contains("fs_smart_search"), "Abort should name the repeated tool, got: \(trigger.reason)")
+            XCTAssertTrue(trigger.reason.contains("3"), "Abort should mention the global count, got: \(trigger.reason)")
         } else {
             XCTFail("Expected .abort via global frequency cap on 3rd occurrence, got \(action4)")
         }
@@ -170,9 +170,9 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
         _ = breaker.evaluateRepetitiveActions([coreObs, extraObs])  // core global 2, new fingerprint (counter 1)
         let action3 = breaker.evaluateRepetitiveActions([coreObs, extraObs]) // core global 3, fingerprint counter 2 (warning tier)
 
-        if case .abort(let reason) = action3 {
-            XCTAssertTrue(reason.contains("read_file"), "Abort should mention the capped tool, got: \(reason)")
-            XCTAssertTrue(reason.contains("3"), "Abort should mention the count, got: \(reason)")
+        if case .abort(let trigger) = action3 {
+            XCTAssertTrue(trigger.reason.contains("read_file"), "Abort should mention the capped tool, got: \(trigger.reason)")
+            XCTAssertTrue(trigger.reason.contains("3"), "Abort should mention the count, got: \(trigger.reason)")
         } else {
             XCTFail("Expected global-cap .abort to outrank the fingerprint warning, got \(action3)")
         }
@@ -199,8 +199,8 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
         breaker.primeReplayedIteration(obs)   // count 2 (silent)
 
         let action = breaker.evaluateRepetitiveActions(obs)   // count 3 → abort
-        if case .abort(let reason) = action {
-            XCTAssertTrue(reason.contains("read_file"), "Abort should mention the capped tool, got: \(reason)")
+        if case .abort(let trigger) = action {
+            XCTAssertTrue(trigger.reason.contains("read_file"), "Abort should mention the capped tool, got: \(trigger.reason)")
         } else {
             XCTFail("Expected .abort after 2 primed + 1 live identical call, got \(action)")
         }
@@ -237,8 +237,8 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
         _ = breaker.recordToolResult(isSuccess: false)
         let action = breaker.recordToolResult(isSuccess: false)
 
-        if case .abort(let reason) = action {
-            XCTAssertTrue(reason.contains("3") || reason.contains("consecutive"),
+        if case .abort(let trigger) = action {
+            XCTAssertTrue(trigger.reason.contains("3") || trigger.reason.contains("consecutive"),
                           "Abort reason should mention failure count")
         } else {
             XCTFail("Expected .abort on 3rd consecutive failure, got \(action)")

@@ -309,7 +309,10 @@ private struct PermissionInteractionBanner: View {
 
     /// A2: a parsed file operation, when this confirmation is a file-mutating tool.
     private var fileChange: FileChange? {
-        FileChange.parse(toolName: confirmation.toolName, arguments: effectiveArguments)
+        FileChange.parse(
+            toolName: confirmation.toolName,
+            arguments: effectiveArguments,
+            previewPath: confirmation.previewPath)
     }
 
     /// A3: top-level string arguments the user can correct before approving.

@@ -33,6 +33,7 @@ struct MCPStatusBanner: View {
             // for the majority of users who have never added one.
             if status.hasAny {
                 content
+                    .padding(.horizontal, 4)
             }
         }
         .task(id: pollKey) {

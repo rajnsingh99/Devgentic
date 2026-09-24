@@ -174,10 +174,10 @@ final class OrbSpokenResponseModeTests: XCTestCase {
     func testAutomaticIsTheDefaultMode() {
         // Not `.preferSilent`: shipping Phase 1 with narration off by default would make the
         // whole phase invisible to anyone who never opens Settings.
-        let saved = UserDefaults.standard.object(forKey: AppSettings.orbSpokenResponsesKey)
-        UserDefaults.standard.removeObject(forKey: AppSettings.orbSpokenResponsesKey)
+        let saved = TestHost.defaults.object(forKey: AppSettings.orbSpokenResponsesKey)
+        TestHost.defaults.removeObject(forKey: AppSettings.orbSpokenResponsesKey)
         defer {
-            if let saved { UserDefaults.standard.set(saved, forKey: AppSettings.orbSpokenResponsesKey) }
+            if let saved { TestHost.defaults.set(saved, forKey: AppSettings.orbSpokenResponsesKey) }
         }
         XCTAssertEqual(OrbConfigManager.shared.spokenResponses, .automatic)
     }

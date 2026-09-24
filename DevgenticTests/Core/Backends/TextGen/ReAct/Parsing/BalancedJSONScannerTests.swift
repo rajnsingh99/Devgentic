@@ -74,26 +74,86 @@ final class BalancedJSONScannerTests: XCTestCase {
     // MARK: - splitProseAndBlock
 
     func testSplit_ObjectAfterProse() {
-        let (prose, block) = BalancedJSONScanner.splitProseAndBlock(in: #"prose here {"k":1} tail"#)
+        // ⚠️ `tail` asserted. This test fed exactly this string and checked only `prose` and
+        // `block`, so it stayed green while `" tail"` was silently discarded — which is how the
+        // content loss survived review.
+        let (prose, block, tail) = BalancedJSONScanner.splitProseAndBlock(in: #"prose here {"k":1} tail"#)
         XCTAssertEqual(String(prose), "prose here ")
         XCTAssertEqual(block.map(String.init), #"{"k":1}"#)
+        XCTAssertEqual(String(tail), " tail", "text after the block must be returned, not dropped")
     }
 
-    func testSplit_ArrayOpenerFirst() {
-        let (_, block) = BalancedJSONScanner.splitProseAndBlock(in: "x [1,2] y")
-        XCTAssertEqual(block.map(String.init), "[1,2]")
+    func testSplit_ArrayOfScalarsIsNotABlock() {
+        // ⚠️ CHANGED BEHAVIOUR, deliberately. `[1,2]` is valid JSON but cannot be a tool call, and
+        // treating it as one is what let `[1]` in ordinary prose swallow the rest of a sentence.
+        let (prose, block, tail) = BalancedJSONScanner.splitProseAndBlock(in: "x [1,2] y")
+        XCTAssertNil(block, "an array of scalars is prose, not a leaked tool call")
+        XCTAssertEqual(String(prose), "x [1,2] y", "the whole text must survive as prose")
+        XCTAssertTrue(tail.isEmpty)
+    }
+
+    func testSplit_ArrayOfObjectsIsABlock() {
+        // The shape a real leaked tool call takes when a model emits several at once.
+        let (_, block, _) = BalancedJSONScanner.splitProseAndBlock(in: #"go [{"name":"ls"}] now"#)
+        XCTAssertEqual(block.map(String.init), #"[{"name":"ls"}]"#)
     }
 
     func testSplit_NoBlock() {
-        let (prose, block) = BalancedJSONScanner.splitProseAndBlock(in: "just prose")
+        let (prose, block, tail) = BalancedJSONScanner.splitProseAndBlock(in: "just prose")
         XCTAssertEqual(String(prose), "just prose")
         XCTAssertNil(block)
+        XCTAssertTrue(tail.isEmpty)
+    }
+
+    // MARK: - Bracketed prose is prose (F4)
+
+    /// ⚠️⚠️ THE REGRESSION TABLE. Every one of these lost most of its text to the old splitter,
+    /// measured against the real implementation before the fix. Balanced brackets are everywhere
+    /// in ordinary model output; none of these is JSON.
+    func testSplit_BracketedProseIsNeverTreatedAsABlock() {
+        let prose = [
+            "I read the file but the output was [truncated] so I could not see the end of it.",
+            "See [the docs](https://example.com) for details on the retry policy.",
+            "This follows the approach in [1] which uses exponential backoff.",
+            "Use the pattern [a-z]+ to match lowercase words in the input.",
+            "The log line [INFO] startup complete confirms the service booted.",
+            "The set {alpha, beta} is unordered.",
+        ]
+        for text in prose {
+            let (before, block, tail) = BalancedJSONScanner.splitProseAndBlock(in: text)
+            XCTAssertNil(block, "treated as a JSON block: \(text)")
+            XCTAssertEqual(String(before), text, "text was split: \(text)")
+            XCTAssertTrue(tail.isEmpty)
+        }
+    }
+
+    /// The other direction — the fix must not stop finding real leaked tool calls, which is the
+    /// entire reason the split exists (G7).
+    func testSplit_StillFindsALeakedToolCallAfterBracketedProse() {
+        let text = #"The output was [truncated]. Retrying: {"name":"read_file","arguments":{"path":"a"}} done."#
+        let (before, block, tail) = BalancedJSONScanner.splitProseAndBlock(in: text)
+
+        XCTAssertEqual(block.map(String.init), #"{"name":"read_file","arguments":{"path":"a"}}"#,
+                       "rejecting the bracketed word must not abandon the search for a real block")
+        XCTAssertTrue(String(before).contains("[truncated]"), "the bracketed prose stays in the prose")
+        XCTAssertEqual(String(tail), " done.")
+    }
+
+    func testIsToolCallShaped_Discriminates() {
+        // Pinned directly so a future relaxation to "any valid JSON" is visible as a decision.
+        XCTAssertTrue(BalancedJSONScanner.isToolCallShaped(#"{"name":"x"}"#[...]))
+        XCTAssertTrue(BalancedJSONScanner.isToolCallShaped(#"[{"name":"x"}]"#[...]))
+        XCTAssertFalse(BalancedJSONScanner.isToolCallShaped("[1]"[...]), "valid JSON, but not a tool call")
+        XCTAssertFalse(BalancedJSONScanner.isToolCallShaped("[truncated]"[...]))
+        XCTAssertFalse(BalancedJSONScanner.isToolCallShaped("[]"[...]), "an empty array carries no call")
+        XCTAssertFalse(BalancedJSONScanner.isToolCallShaped(#"["a","b"]"#[...]))
     }
 
     func testSplit_EscapedBackslashBlock() {
         // The escape-bug case in the prose-split context.
-        let (_, block) = BalancedJSONScanner.splitProseAndBlock(in: #"pre {"k":"x\\"} post"#)
+        let (_, block, tail) = BalancedJSONScanner.splitProseAndBlock(in: #"pre {"k":"x\\"} post"#)
         XCTAssertEqual(block.map(String.init), #"{"k":"x\\"}"#)
+        XCTAssertEqual(String(tail), " post")
     }
 
     // MARK: - from: start index

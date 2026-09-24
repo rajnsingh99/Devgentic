@@ -24,12 +24,11 @@ final class CSVExtractorTests: XCTestCase {
         try? FileManager.default.removeItem(at: tempDir)
     }
 
-    private func fixtureURL(_ name: String, ext: String) -> URL {
-        let bundle = Bundle(for: type(of: self))
-        guard let url = bundle.url(forResource: name, withExtension: ext) else {
-            fatalError("Missing test fixture: \(name).\(ext)")
-        }
-        return url
+    /// ⚠️ Shared loader — see `TestFixtures`. This was a local `fatalError`, which kills the
+    /// TEST HOST and so ended the whole run on one absent resource. It now skips this test
+    /// alone; `FixtureAvailabilityTests` is what fails when a fixture is genuinely missing.
+    private func fixtureURL(_ name: String, ext: String) throws -> URL {
+        try TestFixtures.url(name, ext: ext, in: self)
     }
 
     private func makeTempCSV(_ content: String, ext: String = "csv") -> URL {
@@ -41,7 +40,7 @@ final class CSVExtractorTests: XCTestCase {
     // MARK: - Tier 1: Real Fixture
 
     func testExtract_SampleCSV_ReturnsMarkdownTable() async throws {
-        let url = fixtureURL("sample", ext: "csv")
+        let url = try fixtureURL("sample", ext: "csv")
         let result = try await extractor.extract(from: url, maxSize: 500_000)
 
         XCTAssertFalse(result.text.isEmpty, "Should extract content from sample.csv")

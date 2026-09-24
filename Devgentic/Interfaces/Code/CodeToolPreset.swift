@@ -54,10 +54,36 @@ enum CodeToolPreset {
         preset("create_new_file", confirms: true),
         preset("overwrite_file", confirms: true),
         // MARK: - Shell / VCS / Compare
-        preset("batch_command", confirms: true),
+        preset("run_command", confirms: true),
+        preset("start_background_task", confirms: true),
+        // Reading a task's state is not a side effect, and stopping one only ends work this agent
+        // itself started — unlike `batch_command`, which runs arbitrary code. Confirming these
+        // would teach the user to approve without reading, which is what the 2026-07-31
+        // manage_processes/kill_process split was about.
+        preset("command_output"),
+        preset("command_stop"),
         preset("git_tool"),
         preset("diff_files"),
     ].compactMap { $0 }
+
+    /// Whether a tool the Code pipeline INJECTS at run time must park on an approval banner.
+    ///
+    /// `defaultTools` above declares this for every user-visible preset tool. `update_project_context`
+    /// is not in that list — `AgentConnect` appends it per run, with the project path baked in —
+    /// so its answer lived as a bare `false` literal at that call site and nothing here showed
+    /// that Code mode had a mutating tool the user never saw.
+    ///
+    /// ⚠️⚠️ It writes `.devgentic/context.md`, which is injected into the system prompt of every
+    /// FUTURE conversation for the project. That makes it the longest-lived write in the app, and
+    /// it was the only one that ran unreviewed. Field-observed 2026-09-20: a model wrote that a
+    /// class "contains methods like `greeting()` and `farewell()`" about a file containing
+    /// neither, and that sentence went on to steer a later edit to the wrong anchor.
+    static func injectedToolRequiresConfirmation(_ toolName: String) -> Bool {
+        switch toolName {
+        case "update_project_context": return true
+        default:                       return false
+        }
+    }
 
     /// Builds a preset entry from the catalogue.
     ///

@@ -22,6 +22,12 @@ import SwiftData
 
 final class StoreOpenDiagnosticsTests: XCTestCase {
 
+    /// The 2026-08-04 artifact — written before versioning, when `CodeViewerSessionSD` still
+    /// existed, with a pre-freeze `ConversationSD` shape. It survived the 2026-09-23 schema-history
+    /// reset for THIS file alone: it is a real store whose shape matches nothing the code declares,
+    /// which is exactly the input the diagnostics must name. Irreplaceable — the retired type is gone.
+    static let legacyFixtureBaseName = "devgentic-pre-v1-legacy-fixture"
+
     private var workDirectory: URL!
 
     override func setUpWithError() throws {
@@ -98,12 +104,11 @@ final class StoreOpenDiagnosticsTests: XCTestCase {
     /// `.entityShapeChanged` from a store whose entity SET now matches the code's.
     func testEntityPresentInStoreButNotInCodeIsNamed() throws {
         guard let fixture = Bundle(for: StoreOpenDiagnosticsTests.self)
-            .url(forResource: SchemaMigrationTests.legacyFixtureBaseName, withExtension: "store") else {
-            // Same convention as testPreV1StoreIsRefusedLoudlyUnderStagedMigration: the legacy
-            // artifact is irreplaceable by design (the retired type is gone), so its absence is
-            // "not checked", never a red suite.
+            .url(forResource: Self.legacyFixtureBaseName, withExtension: "store") else {
+            // The legacy artifact is irreplaceable by design (the retired type is gone), so its
+            // absence is "not checked", never a red suite.
             throw XCTSkip("No checked-in pre-V1 legacy fixture found "
-                          + "(\(SchemaMigrationTests.legacyFixtureBaseName).store).")
+                          + "(\(Self.legacyFixtureBaseName).store).")
         }
 
         let diagnosis = StoreOpenDiagnostics.classify(
@@ -132,7 +137,7 @@ final class StoreOpenDiagnosticsTests: XCTestCase {
     func testEntityAddedInCodeIsNamed() throws {
         let fixture = try XCTUnwrap(
             Bundle(for: StoreOpenDiagnosticsTests.self)
-                .url(forResource: "devgentic-schema-v1-fixture", withExtension: "store")
+                .url(forResource: SchemaMigrationTests.allEntitiesFixtureBaseName, withExtension: "store")
         )
         var expected = Set(DevgenticSchema.schema.entities.map(\.name))
         expected.insert("SomeBrandNewEntitySD")
@@ -155,9 +160,9 @@ final class StoreOpenDiagnosticsTests: XCTestCase {
     /// insides" case this diagnosis exists for.
     func testMatchingEntitySetsReportShapeChange() throws {
         guard let fixture = Bundle(for: StoreOpenDiagnosticsTests.self)
-            .url(forResource: SchemaMigrationTests.legacyFixtureBaseName, withExtension: "store") else {
+            .url(forResource: Self.legacyFixtureBaseName, withExtension: "store") else {
             throw XCTSkip("No checked-in pre-V1 legacy fixture found "
-                          + "(\(SchemaMigrationTests.legacyFixtureBaseName).store).")
+                          + "(\(Self.legacyFixtureBaseName).store).")
         }
         // The legacy fixture's own entity set = today's entities, MINUS everything added since it
         // was recorded, PLUS the retired one.

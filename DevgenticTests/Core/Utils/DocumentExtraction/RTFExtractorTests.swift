@@ -24,12 +24,11 @@ final class RTFExtractorTests: XCTestCase {
         try? FileManager.default.removeItem(at: tempDir)
     }
 
-    private func fixtureURL(_ name: String, ext: String) -> URL {
-        let bundle = Bundle(for: type(of: self))
-        guard let url = bundle.url(forResource: name, withExtension: ext) else {
-            fatalError("Missing test fixture: \(name).\(ext)")
-        }
-        return url
+    /// ⚠️ Shared loader — see `TestFixtures`. This was a local `fatalError`, which kills the
+    /// TEST HOST and so ended the whole run on one absent resource. It now skips this test
+    /// alone; `FixtureAvailabilityTests` is what fails when a fixture is genuinely missing.
+    private func fixtureURL(_ name: String, ext: String) throws -> URL {
+        try TestFixtures.url(name, ext: ext, in: self)
     }
 
     private func makeTempRTF(_ text: String, bold: Bool = false) -> URL {
@@ -48,7 +47,7 @@ final class RTFExtractorTests: XCTestCase {
     // MARK: - Tier 1: Real Fixture
 
     func testExtract_SampleRTF_ReturnsContent() async throws {
-        let url = fixtureURL("sample", ext: "rtf")
+        let url = try fixtureURL("sample", ext: "rtf")
         let result = try await extractor.extract(from: url, maxSize: 500_000)
 
         XCTAssertFalse(result.text.isEmpty, "Should extract text from sample.rtf")

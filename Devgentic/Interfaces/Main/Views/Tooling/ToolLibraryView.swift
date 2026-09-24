@@ -1217,6 +1217,28 @@ private struct ToolSettingsPopover: View {
 
                 Divider()
 
+                // What survives when this tool's result is larger than the model's room. Nil =
+                // follow the global setting in the context gauge.
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("If the result doesn't fit, keep", systemImage: "scissors")
+                        .font(theme.fontSubheadline)
+                    Picker("", selection: Binding(
+                        get: { configuredTools[idx].cutStrategy?.rawValue ?? "" },
+                        set: { configuredTools[idx].cutStrategy = ContextCutStrategy(rawValue: $0) }
+                    )) {
+                        Text("Default (\(ContextCutStrategy.globalDefault.label))").tag("")
+                        ForEach(ContextCutStrategy.allCases, id: \.rawValue) { strategy in
+                            Text(strategy.label).tag(strategy.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .controlSize(.small)
+                    .fixedSize()
+                }
+
+                Divider()
+
                 // Timeout
                 VStack(alignment: .leading, spacing: 6) {
                     Toggle(isOn: Binding(

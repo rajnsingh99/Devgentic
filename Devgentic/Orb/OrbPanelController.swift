@@ -232,7 +232,7 @@ final class OrbPanelController {
     }
 
     private func restoredOrigin(for size: NSSize) -> NSPoint {
-        let defaults = UserDefaults.standard
+        let defaults = TestHost.defaults
         guard let screen = Self.activeScreen() else { return .zero }
         guard defaults.object(forKey: Self.originXKey) != nil else {
             // First ever open: centered on the active screen.
@@ -251,8 +251,8 @@ final class OrbPanelController {
     }
 
     private func persistOrigin(_ origin: NSPoint) {
-        UserDefaults.standard.set(origin.x, forKey: Self.originXKey)
-        UserDefaults.standard.set(origin.y, forKey: Self.originYKey)
+        TestHost.defaults.set(origin.x, forKey: Self.originXKey)
+        TestHost.defaults.set(origin.y, forKey: Self.originYKey)
     }
 
     private static func clamped(origin: NSPoint, size: NSSize, on screen: NSScreen) -> NSPoint {

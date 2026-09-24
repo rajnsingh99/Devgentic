@@ -12,10 +12,8 @@ import SwiftUI
 // MARK: - Code Viewer Theme Override
 
 /// Defines the theme override options for the Code Viewer panel.
-/// When set to `.default`, the code viewer follows the global app theme.
-/// Selecting a specific theme overrides the global theme for the code viewer only.
+/// Specialized syntax highlighting theme for code blocks and the editor.
 enum CodeViewerThemeOverride: String, CaseIterable {
-    case `default` = "default"
     case material = "material"
     case cosmicDark = "cosmic_dark"
     case oneLight = "one_light"
@@ -23,8 +21,7 @@ enum CodeViewerThemeOverride: String, CaseIterable {
 
     init?(rawValue: String) {
         switch rawValue {
-        case "default": self = .default
-        case "material", "dracula", "one_dark": self = .material // Backward-compatible migration
+        case "default", "material", "dracula", "one_dark": self = .material // Backward-compatible migration
         case "cosmic_dark": self = .cosmicDark
         case "one_light", "github_light": self = .oneLight // One Light (renamed GitHub Light)
         case "solarized_light": self = .solarizedLight
@@ -34,7 +31,6 @@ enum CodeViewerThemeOverride: String, CaseIterable {
 
     var displayName: String {
         switch self {
-        case .default: return "Default (Follow App Theme)"
         case .material: return "Material Darker"
         case .cosmicDark: return "Cosmic Dark"
         case .oneLight: return "One Light"
@@ -201,7 +197,7 @@ enum ButtonAccentStyle: String, CaseIterable, Identifiable {
 
         // Load the saved code viewer override.
         let savedOverride = UserDefaults.standard.string(forKey: Self.codeViewerThemeKey)
-        let codeOverride = savedOverride.flatMap { CodeViewerThemeOverride(rawValue: $0) } ?? .default
+        let codeOverride = savedOverride.flatMap { CodeViewerThemeOverride(rawValue: $0) } ?? .material
         self.codeViewerThemeOverride = codeOverride
 
         // Load the saved accent color.

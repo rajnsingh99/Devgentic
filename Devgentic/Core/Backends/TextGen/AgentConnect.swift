@@ -187,7 +187,8 @@ class AgentConnect: @unchecked Sendable {
                     // sizing compaction and native-turn budgets to a 128K assumption on
                     // a ~4-8K local allocation meant turn arrays never compacted and
                     // Ollama truncated silently mid-run.
-                    let contextWindow = EffectiveContextWindow.resolve(for: llmConfig)
+                    let contextWindow = EffectiveContextWindow.resolve(
+                        for: llmConfig, flavour: isBotFlow ? .chat : .agent)
                     // Empty (not a sentinel) when nothing was retrieved — PromptBuilder
                     // skips the <semantic_context> layer for empty grounding, so non-RAG
                     // turns no longer carry a hollow "No static context provided." block.
@@ -242,7 +243,7 @@ class AgentConnect: @unchecked Sendable {
                     ))
 
                     var activeTools = await self.resolveExecutableTools(
-                        profileTools: rawTools,
+                        profileTools: ReportOnlyRun.allowedProfileTools(rawTools),
                         conversationID: conversationID,
                         longTermMemory: longTermMemory,
                         agentCapabilities: agentCapabilities,
@@ -273,9 +274,17 @@ class AgentConnect: @unchecked Sendable {
                     // 5.6 Code mode: inject project context tool.
                     if case .code(let codeConfig) = profile.details, let projectPath = codeConfig.projectPath {
                         let contextTool = UpdateProjectContextTool(projectPath: projectPath)
-                        activeTools.append(self.wrapTool(contextTool, requiresConfirmation: false))
-                        let toolNames = activeTools.map(\.name).joined(separator: ", ")
-                        logger.info("[CODE] Tool resolution complete — \(activeTools.count) tools (incl. final_answer, update_project_context): [\(toolNames)]")
+                        // ⚠️⚠️ `true` since 2026-09-20. This was the ONE write in Code mode that
+                        // ran unreviewed, and it is the only write that outlives the conversation:
+                        // `.devgentic/context.md` is injected into the system prompt of every
+                        // future conversation for this project. A small model asserting something
+                        // false about the code therefore contaminated every later run, with no
+                        // banner, no diff and no undo. The banner previews it as a real diff
+                        // against the file on disk — see `FileChange.parse`.
+                        activeTools.append(self.wrapTool(
+                            contextTool,
+                            requiresConfirmation: CodeToolPreset.injectedToolRequiresConfirmation(contextTool.name)))
+                        logger.info("[CODE] Code tool set assembled — \(activeTools.count) tools so far, incl. final_answer and update_project_context. CONSEQUENCE: this is NOT the final loadout — get_conversation_history is appended later, once the history is known. The authoritative list is the [TOOLS] line below.")
                     }
 
                     // 6. Initialize Evaluation Session (Metrics)
@@ -308,10 +317,6 @@ class AgentConnect: @unchecked Sendable {
                     var activeState: SessionGraph? = nil
                     var recentHistory: String? = nil
                     
-                    // Provision budget-aware Working Memory Strategy
-                    let memoryConfig = MemoryBudgetConfig.derive(contextWindow: contextWindow, tier: modelTier)
-                    let workingMemory: any WorkingMemoryStrategy = WindowedLinearMemory(config: memoryConfig)
-
                     // #22: native turn-payload budget (~75% of context window as chars).
                     // Distinct from the small scratchpad budget above — the native path
                     // sends the full conversation, so it gets the larger slice; the ReAct
@@ -432,7 +437,13 @@ class AgentConnect: @unchecked Sendable {
                             includeImageNames: profile.supportsVisionInput,
                             effectBudget: ActionEffect.diffBudget(forHistoryCharBudget: charBudget),
                             correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)",
-                            toolsAvailable: !isBotFlow
+                            toolsAvailable: !isBotFlow,
+                            // ⚠️ `.live` HERE and nowhere else. It stats each effect's file to
+                            // decide whether the stored diff still describes it. This is the
+                            // request path — once per send. `ContextWindowGauge` builds the same
+                            // XML to SIZE it, on every recompute, and takes the `.unknown`
+                            // default so the composer never touches the filesystem.
+                            staleness: .live
                         )
 
                         if isNativeProvider {
@@ -441,7 +452,12 @@ class AgentConnect: @unchecked Sendable {
                                 from: effectiveHistory,
                                 charBudget: charBudget,
                                 includeImages: historyImagesEnabled,
-                                correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)"
+                                correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)",
+                                // Same value the episodic build above is given. These two are the
+                                // only emitters of the `get_conversation_history(N)` instruction,
+                                // and they must agree — one gated and one not is how a prompt
+                                // comes to contradict itself.
+                                toolsAvailable: !isBotFlow
                             )
                         }
 
@@ -465,6 +481,17 @@ class AgentConnect: @unchecked Sendable {
                             )
                         }
                     }
+
+                    // ⚠️⚠️ THE authoritative tool list, and the only one logged after the last
+                    // thing that can append. Both earlier lines — `[CODE] Code tool set
+                    // assembled` and the `Tools Enabled` row in the configuration block — fire
+                    // BEFORE `get_conversation_history` is added, and both used to read as
+                    // complete. Field-observed 2026-09-20: a Code run logged "Tool resolution
+                    // complete — 19 tools" with `get_conversation_history` absent, while the
+                    // prompt it built told the model "Call get_conversation_history(N) for
+                    // details." Delivery was fine — `activeTools` is consumed further down — so
+                    // the only thing wrong was the log, which is the thing an operator has.
+                    logger.info("[TOOLS] Final loadout for \(profile.profileType.rawValue) run — \(activeTools.count) tool(s): [\(activeTools.map(\.name).joined(separator: ", "))]. CONSEQUENCE: this is exactly what the model is offered; anything named in the prompt but missing here cannot be called.")
                     
                     // Extract resilience config from agent profile
                     // ⚠️ register B44 — THE live defect, and it sat 85 lines above A7's own
@@ -501,6 +528,45 @@ class AgentConnect: @unchecked Sendable {
                     let responseSynthesisEnabled = synthDecision.optedIn
                     logger.info("[SYNTH] provider-family: \(synthDecision.family.rawValue), opted-in: \(synthDecision.optedIn) (\(synthDecision.reason)) → \(synthDecision.optedIn ? "IC synthesis pass" : "raw passthrough"), traceID: \(traceContext.traceID), conversationID: \(conversationID.uuidString.prefix(8))")
 
+                    // Only a `.code` profile has a user-chosen folder, so only it is confined.
+                    // Every other type resolves to nil, which `WorkspaceBoundaryDecision` reads as
+                    // "no boundary" and leaves behaving exactly as before.
+                    let codeWorkspaceRoot: String? = {
+                        guard case .code(let codeConfig) = profile.details else { return nil }
+                        return codeConfig.projectPath
+                    }()
+                    if let codeWorkspaceRoot {
+                        logger.info("[WORKSPACE] Code run confined to \(codeWorkspaceRoot) — conv \(conversationID.uuidString.prefix(8)). CONSEQUENCE: relative tool paths resolve against this folder instead of the home directory; writes outside it are refused and reads outside it ask the user first.")
+                    } else if case .code = profile.details {
+                        // ⚠️ The state the original escape ran in. A Code profile with no folder is
+                        // UNCONFINED — every filesystem tool sees the whole disk and relative paths
+                        // fall back to the home directory. It should be unreachable now
+                        // (`prepareCodeProfileForSend` refuses, and the composer blocks on a missing
+                        // folder), so if this ever prints, one of those guards has a hole.
+                        logger.error("[WORKSPACE] Code run has NO project folder — conv \(conversationID.uuidString.prefix(8)). CONSEQUENCE: this run is UNCONFINED — no path is checked, nothing is refused, and a relative path resolves against the home directory. A send should have been refused before reaching here.")
+                    }
+
+                    // Working memory (the scratchpad the text-tools path carries — MLX, and Ollama
+                    // models without tool calling) gets WHATEVER ROOM THE FIXED PROMPT LEAVES. Built
+                    // here, after history and every context block exist, because those are exactly
+                    // what it must be sized around. See `MemoryBudgetConfig.derive`.
+                    let reservedPromptChars = (instructions?.count ?? 0)
+                        + (recentHistory?.count ?? 0)
+                        + (attachmentContext?.count ?? 0)
+                        + (knowledgeBaseContext?.count ?? 0)
+                        + (toolGuidanceContext?.count ?? 0)
+                        + userInput.count
+                        + ToolSchemaSizes.chars(for: activeTools.map(\.name))
+                    let memoryConfig = MemoryBudgetConfig.derive(
+                        contextWindow: contextWindow, tier: modelTier, reservedChars: reservedPromptChars)
+                    // Which part of an oversized result survives: the gauge's global setting plus this
+                    // profile's per-tool overrides. One policy for both paths.
+                    let cutPolicy = ToolCutPolicy.forRun(tools: rawTools)
+                    var windowed = WindowedLinearMemory(config: memoryConfig)
+                    windowed.cutPolicy = cutPolicy
+                    let workingMemory: any WorkingMemoryStrategy = windowed
+                    logger.info("[MEMORY] Scratchpad sized to \(memoryConfig.totalBudgetChars) chars (payload budget \(nativeContextBudgetChars) − fixed prompt \(reservedPromptChars)); one result may use all of it. CONSEQUENCE: on the text-tools path, tool results are cut only when they exceed the room actually left.")
+
                     let input = AgentInput(
                         userInput: userInput,
                         userPayload: userPayload,
@@ -517,6 +583,7 @@ class AgentConnect: @unchecked Sendable {
                         conversationID: conversationID,
                         tools: activeTools,
                         longTermMemory: longTermMemory,
+                        workspaceRoot: codeWorkspaceRoot,
                         activeState: activeState,
                         recentHistory: recentHistory,
                         generatorStrategy: generatorStrategy,
@@ -533,7 +600,8 @@ class AgentConnect: @unchecked Sendable {
                         resumeState: resumeState,
                         traceContext: traceContext,
                         modelTier: llmConfig.modelMetadata?.tier,
-                        nativeContextBudgetChars: nativeContextBudgetChars
+                        nativeContextBudgetChars: nativeContextBudgetChars,
+                        cutPolicy: cutPolicy
                     )
 
                     // 8. Execute & Stream
@@ -775,7 +843,7 @@ class AgentConnect: @unchecked Sendable {
                     ))
 
                     var activeTools = await self.resolveExecutableTools(
-                        profileTools: rawTools,
+                        profileTools: ReportOnlyRun.allowedProfileTools(rawTools),
                         conversationID: conversationID,
                         longTermMemory: longTermMemory,
                         agentCapabilities: agentCapabilities,
@@ -808,9 +876,9 @@ class AgentConnect: @unchecked Sendable {
 
                     // EFFECTIVE window — see the main-path note; workflow nodes get the
                     // same num_ctx-aware sizing so per-node budgets match reality.
-                    let contextWindow = EffectiveContextWindow.resolve(for: llmConfig)
+                    let contextWindow = EffectiveContextWindow.resolve(
+                        for: llmConfig, flavour: isBotFlow ? .chat : .agent)
                     let modelTier = llmConfig.modelMetadata?.tier ?? .medium
-                    let memoryConfig = MemoryBudgetConfig.derive(contextWindow: contextWindow, tier: modelTier)
                     // #22: native turn-payload budget (~75% of context window as chars) —
                     // bounds liveConversationTurns growth on workflow agent nodes too.
                     let nativeContextBudgetChars = PromptFitCheck.nativePayloadCharBudget(forContextWindow: contextWindow)
@@ -849,6 +917,8 @@ class AgentConnect: @unchecked Sendable {
                         logger.debug("[MCP-INSTRUCTIONS] node '\(workflowContext.nodeName)': \(text.count) chars of guidance from \(nodeToolSourceIDs.count) tool source(s). CONSEQUENCE: servers whose tools this node does not hold contribute nothing to its prompt.")
                     }
 
+                    // The node's own per-tool overrides plus the gauge's global setting.
+                    let nodeCutPolicy = ToolCutPolicy.forRun(tools: rawTools)
                     let input = AgentInput(
                         userInput: userInputForNode,
                         userPayload: workflowImagePayload,
@@ -864,7 +934,18 @@ class AgentConnect: @unchecked Sendable {
                         longTermMemory: longTermMemory,
                         recentHistory: nil,
                         generatorStrategy: generator,
-                        workingMemory: WindowedLinearMemory(config: memoryConfig),
+                        workingMemory: {
+                            var memory = WindowedLinearMemory(config: MemoryBudgetConfig.derive(
+                                contextWindow: contextWindow, tier: modelTier,
+                                // Same rule as the main path: the room the node's fixed prompt leaves.
+                                reservedChars: (instructions?.count ?? 0)
+                                    + (workflowContext.attachmentContext?.count ?? 0)
+                                    + (nodeToolGuidance?.count ?? 0)
+                                    + userInputForNode.count
+                                    + ToolSchemaSizes.chars(for: activeTools.map(\.name))))
+                            memory.cutPolicy = nodeCutPolicy
+                            return memory
+                        }(),
                         rateLimitKey: rateLimitKey,
                         rateLimitCategory: rateLimitCategory,
                         instructions: instructions,
@@ -883,7 +964,8 @@ class AgentConnect: @unchecked Sendable {
                         workflowContext: workflowContext,
                         traceContext: traceContext,
                         modelTier: llmConfig.modelMetadata?.tier,
-                        nativeContextBudgetChars: nativeContextBudgetChars
+                        nativeContextBudgetChars: nativeContextBudgetChars,
+                        cutPolicy: nodeCutPolicy
                     )
 
                     // ⚠️ Tool NAMES, not just a count. This said only "tools=3" — which cannot
@@ -1162,52 +1244,43 @@ class AgentConnect: @unchecked Sendable {
                 throw NSError(domain: "AgentConnect", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid Base URL: \(baseURLString)"])
             }
             
-            // Extract options for Ollama
-            var options: [String: JSONValue]? = nil
-            if let advConfig = llmConfig.advancedConfiguration {
-                options = advConfig
-            } else {
-                // [advanced-config default] The Advanced panel DISPLAYS a preset whenever a profile
-                // has no stored configuration — temperature 0.10, seed 42 and the rest for an agent.
-                // Nothing persisted it, so the request carried no options at all and Ollama ran at
-                // its own ~0.8 default with random sampling: the agent produced exactly the loose,
-                // non-deterministic tool calls the preset exists to prevent, while the UI insisted
-                // it was at 0.10. Same shape as the [num_ctx auto-default] below — resolve the
-                // value the user was shown rather than inheriting a server default they never saw.
-                //
-                // ⚠️ `isBotFlow` picks the ladder. `OllamaAdvancedConfig.default()` is the AGENT
-                // preset; handing it to a Bot pins a conversational profile to temperature 0.1 with
-                // a fixed seed, so every repeated prompt returns a byte-identical reply.
-                let profile: OllamaConfigDefaultProfile = isBotFlow ? .chat : .agent
-                let fallback: OllamaAdvancedConfig = llmConfig.modelMetadata.map {
-                    .recommended(for: $0, profile: profile)
-                } ?? (profile == .agent ? .default() : .botPreset(for: .smallMedium))
+            // Extract options for Ollama.
+            //
+            // ⚠️⚠️ Delegated to `OllamaRequestOptions` rather than resolved here. The preset
+            // fallback and the num_ctx auto-default used to live inline in this function, which
+            // meant `EffectiveContextWindow` — the resolver behind the gauge, the compaction
+            // budget, the native-turn budget and the pre-send fit check — could not see them. It
+            // read `advancedConfiguration` (nil for any profile whose Advanced panel was never
+            // opened) and answered 16384 while this block sent 8192. Everything downstream priced
+            // a window twice the real one. Whatever this block decides, the budgets now decide
+            // identically, because they call the same function.
+            //
+            // `isBotFlow` picks the ladder: `OllamaAdvancedConfig.default()` is the AGENT preset,
+            // and handing it to a Bot pins a conversational profile to temperature 0.1 with a
+            // fixed seed, so every repeated prompt returns a byte-identical reply.
+            let flavour: OllamaConfigDefaultProfile = isBotFlow ? .chat : .agent
+            let resolvedOptions = OllamaRequestOptions.resolve(
+                stored: llmConfig.advancedConfiguration,
+                metadata: llmConfig.modelMetadata,
+                modelName: llmConfig.modelName,
+                flavour: flavour
+            )
+            let options = resolvedOptions.options
 
-                options = AdvancedConfigEncoder.encode(fallback)
+            if let applied = resolvedOptions.presetApplied {
                 logger.info("""
                     [PROFILE] No stored advanced configuration for Ollama model \
-                    '\(llmConfig.modelName)' — applying the \(profile == .agent ? "agent" : "chat") \
+                    '\(llmConfig.modelName)' — applying the \(applied == .agent ? "agent" : "chat") \
                     preset the Advanced panel displays. CONSEQUENCE: the request now matches what \
                     the UI shows instead of falling back to Ollama's own sampling defaults.
                     """)
             }
-
-            // [num_ctx auto-default] When the user hasn't configured a context
-            // window, send one sized to the model instead of inheriting Ollama's
-            // ~4K server default — which silently HEAD-truncates oversized prompts
-            // (system prompt, with the knowledge/retrieval layers, goes first).
-            // min(trained max, cap) keeps KV-cache memory bounded; the value flows
-            // through the provider's existing numCtx → num_ctx mapping.
-            if OllamaContextWindowPolicy.configuredNumCtx(in: options) == nil,
-               let autoNumCtx = OllamaContextWindowPolicy.autoNumCtx(
-                   trainedContextWindow: llmConfig.modelMetadata?.contextWindow
-                       ?? KnownModelContextWindows.lookup(llmConfig.modelName)
-               ) {
-                var merged = options ?? [:]
-                merged["numCtx"] = .number(Double(autoNumCtx))
-                options = merged
-                logger.info("[num_ctx] Auto-defaulting num_ctx=\(autoNumCtx) for '\(llmConfig.modelName)' (no user-configured value).")
+            if let auto = resolvedOptions.autoNumCtx {
+                logger.info("[num_ctx] Auto-defaulting num_ctx=\(auto) for '\(llmConfig.modelName)' (no user-configured value).")
             }
+            // The window every budget in this run will be sized against — logged so a truncated
+            // prompt can be diagnosed from the log alone instead of inferred from a short reply.
+            logger.info("[num_ctx] '\(llmConfig.modelName)' runs under num_ctx=\(OllamaContextWindowPolicy.configuredNumCtx(in: options).map(String.init) ?? "server default (~\(OllamaContextWindowPolicy.assumedServerDefault))") — source: \(resolvedOptions.presetApplied != nil ? "\(flavour == .agent ? "agent" : "chat") preset" : (llmConfig.advancedConfiguration != nil ? "profile Advanced settings" : "auto-default")). CONSEQUENCE: the context gauge, the compaction budget and the native-turn budget all price against this exact number; a prompt exceeding it is HEAD-truncated by Ollama, system instructions first, with no error.")
 
             let config = LLMProviderConfig(baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options, rateLimitKey: rlKey, thinkingEnabled: llmConfig.thinkingEnabled)
             return OllamaLLMProvider(config: config)
@@ -1483,6 +1556,12 @@ class AgentConnect: @unchecked Sendable {
             // matching arguments making the swap invisible. "The source you chose is unavailable,
             // so run something else with the same name" is never the safe default for a tool call.
             // Dropping the capability is, and the drop is reported loudly below.
+            // ⚠️ BUILT-INS RESOLVE THROUGH THE RENAME MAP, which is NOT the cross-source fallback
+            // removed above. That one guessed at an implementation by NAME and let an MCP server
+            // shadow a built-in. This is a DECLARED mapping between two versions of our own
+            // catalogue — `batch_command` → `run_command` + `start_background_task` — where the
+            // replacement is known because we performed the split. Without it, withdrawing a name
+            // silently removes the capability from every profile that had it.
             let resolved: AgentTool? = isBuiltIn
                 ? self.resolveNativeTool(toolName: toolConfig.name, conversationID: conversationID, requiresConfirmation: toolConfig.requiresConfirmation, timeout: toolConfig.timeout, timeoutMessage: toolConfig.timeoutMessage)
                 : self.resolveMCPTool(toolConfig: toolConfig, availableSources: allToolSources, conversationID: conversationID)
@@ -1733,7 +1812,7 @@ class AgentConnect: @unchecked Sendable {
         Capabilities: \(config.cognitiveCapability.rawValue) (Dialect: \(effectiveDialect(config)))
         Metadata: \(metadata)
         Advanced Options: \(advConfig)
-        Tools Enabled: [\(toolNames)]
+        Tools Enabled (pre-flight — see the [TOOLS] line for the final loadout): [\(toolNames)]
         System Instructions: \(instructions?.prefix(100) ?? "None")\( (instructions?.count ?? 0) > 100 ? "..." : "") (\(instructions?.count ?? 0) chars)
         -----------------------------------------
         """

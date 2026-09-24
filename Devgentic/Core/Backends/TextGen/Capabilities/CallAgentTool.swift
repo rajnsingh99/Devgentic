@@ -125,9 +125,16 @@ enum CallAgentTool {
                     // Build minimal AgentInput — no history, no instructions.
                     // Conservative memory budget: spawned agents are short-lived leaf nodes.
                     let traceContext = TraceContext(subAgentName: "spawned-agent", provider: parentProvider)
-                    let spawnedMemory = WindowedLinearMemory(
-                        config: MemoryBudgetConfig.derive(contextWindow: spawnedContextWindow, tier: .small, maxIterations: maxIterations)
+                    // Sized like every other run: the room its fixed prompt (task + tool text) leaves.
+                    var spawnedMemory = WindowedLinearMemory(
+                        config: MemoryBudgetConfig.derive(
+                            contextWindow: spawnedContextWindow, tier: .small,
+                            reservedChars: taskDescription.count + ToolSchemaSizes.chars(for: parentTools.map(\.name)))
                     )
+                    // Delegated runs follow the gauge's global cut setting (they have no profile of
+                    // their own to carry per-tool overrides).
+                    let spawnedCutPolicy = ToolCutPolicy(defaultStrategy: ContextCutStrategy.globalDefault)
+                    spawnedMemory.cutPolicy = spawnedCutPolicy
                     var input = AgentInput(
                         userInput: taskDescription,
                         chatHistory: [],
@@ -145,6 +152,7 @@ enum CallAgentTool {
                     // this they'd default to cloud-class transport policy and lose
                     // e.g. Ollama's fast-fail "is the server running?" handling.
                     input.resiliencePolicy = .resolved(for: ProviderClass(apiProvider: parentProvider))
+                    input.cutPolicy = spawnedCutPolicy
                     // #22: bound the spawned agent's native turn payload too (it runs the
                     // same G12 native path on cloud/Ollama providers). Without this the
                     // field defaults to 0 = compaction disabled, reintroducing unbounded

@@ -254,7 +254,9 @@ class BackendOrchestrationService {
                 // check reads this variable, so widening it cannot affect the request path.
                 let primaryConfig = config.profile.resolvedLLMConfig
                 let trainedWindow = EffectiveContextWindow.trainedWindow(for: primaryConfig)
-                let contextWindowTokens = EffectiveContextWindow.resolve(for: primaryConfig)
+                let contextWindowTokens = EffectiveContextWindow.resolve(
+                    for: primaryConfig,
+                    flavour: .forProfileType(config.profile.profileType))
 
                 var ragContextString: String? = nil
                 let profileUsesConversationRAG = config.profile.profileType == .bot
@@ -494,7 +496,8 @@ class BackendOrchestrationService {
                         in: conversationHistory,
                         carriesProse: config.profile.carriesHistoryProse,
                         strategy: config.profile.resolvedHistoryStrategy,
-                        contextWindow: contextWindowTokens
+                        contextWindow: contextWindowTokens,
+                        toolsAvailable: config.profile.profileType != .bot
                     )
                     let episodicChars = PromptFitCheck.estimatedEpisodicChars(
                         in: conversationHistory,
@@ -1549,18 +1552,25 @@ enum PromptFitCheck {
     ///
     /// - Parameter carriesProse: `BackendProfileModel.carriesHistoryProse`. Passed as a Bool
     ///   rather than a profile, matching `estimatedHistoryImageTokens(shipsHistoryImages:)`.
+    /// - Parameter toolsAvailable: mirrors `estimatedEpisodicChars`, and defaulted for the same
+    ///   reason — so sizing call sites that have not been updated keep their current arithmetic.
+    ///   The difference is only a few chars per pointer turn (the withheld wording replaces the
+    ///   retrieval instruction), so a stale `true` misprices rather than misinforms. The EMITTER
+    ///   takes no default, which is where it matters.
     static func estimatedHistoryProseChars(
         in history: [ChatMessage],
         carriesProse: Bool,
         strategy: HistoryStrategy?,
-        contextWindow: Int
+        contextWindow: Int,
+        toolsAvailable: Bool = true
     ) -> Int {
         guard carriesProse, !history.isEmpty else { return 0 }
         return NativeHistoryConverter.build(
             strategy: strategy ?? .recentHistory,
             from: history,
             charBudget: historyCharBudget(forContextWindow: contextWindow),
-            includeImages: false
+            includeImages: false,
+            toolsAvailable: toolsAvailable
         ).reduce(0) { $0 + $1.text.count }
     }
 
@@ -1864,16 +1874,66 @@ extension BackendProfileModel {
     /// the single largest fixed difference between a bot and an agent on the same model, and
     /// the flat `layerOverheadChars` charged them identically.
     ///
-    /// Known under-count: `AgentConnect` also appends `ask_user`, the long-term-memory
-    /// capabilities, `final_answer` (non-bot) and — when the history has pointers —
-    /// `get_conversation_history`. Those are request-time additions this can't see.
+    /// ⚠️⚠️ Includes the CONTROL-PLANE tools since 2026-09-20. `AgentConnect` appends
+    /// `final_answer`, `ask_user` and — conditionally — `update_project_context`, `load_skill`
+    /// and `get_conversation_history` at request time. This returned only `config.tools`, so
+    /// those were never submitted for pricing at all, on top of costing 0 in the snapshot.
+    ///
+    /// Measured on a pointer-history Code run: 2,102 chars invisible here (576 + 195 + 517 +
+    /// 814), against a reported tool payload of 3,168. Together with the code-only tools the
+    /// gauge was seeing 30% of the real total.
+    ///
+    /// The conditions are evaluated from what the PROFILE knows, which is not quite what the
+    /// run knows — see each line. Where they differ the estimate errs high, which is the right
+    /// direction for a budget: an over-read costs the user a little headroom, an under-read
+    /// costs them a silently HEAD-truncated system prompt.
     var schemaBearingToolNames: [String] {
         switch details {
         case .agent(let config), .code(let config):
-            return config.tools.filter(\.isEnabled).map(\.name)
+            let configured = config.tools.filter(\.isEnabled).map(\.name)
+            // An MCP server is free to publish a tool called `ask_user`; the injected one would
+            // then lose the name clash at registration, so charging for both would double-count.
+            let alreadyCounted = Set(configured)
+            return configured + controlPlaneToolNames(for: config).filter { !alreadyCounted.contains($0) }
         case .bot, .workflow, .imageGen:
             return []
         }
+    }
+
+    /// The control-plane tools this profile's next request will carry.
+    ///
+    /// ⚠️ Every name here must exist in `NativeToolCatalog.injectedTools` or it prices at 0 and
+    /// this whole property is back to under-reading silently — `ToolSchemaSizingTests` asserts
+    /// that, because a typo would otherwise be invisible.
+    private func controlPlaneToolNames(for config: AgentConfig) -> [String] {
+        // Unconditional on every tool-running flow: `final_answer` is the only clean exit from
+        // the ReAct loop, and `ask_user` is always appended by `resolveExecutableTools`.
+        var names = ["final_answer", "ask_user"]
+
+        // Code profiles get the project-memory tool, gated at runtime behind a successful read.
+        // Charged unconditionally: the gate decides WHEN it becomes callable, not whether its
+        // schema rides the request.
+        if case .code = details { names.append("update_project_context") }
+
+        // ⚠️ An UPPER BOUND. `AgentConnect` injects `load_skill` only once the manifests actually
+        // resolve and come back non-empty; the profile can only see that skills are referenced.
+        // A profile whose skill folder has gone missing is over-charged by 518 chars.
+        if config.skillConfig != nil || !(config.skillSelections ?? []).isEmpty {
+            names.append("load_skill")
+        }
+
+        // Injected only when the episodic skeleton actually contains `get_conversation_history(`
+        // pointers, which `EpisodicHistoryFormatter.renderPointerTurn` emits.
+        //
+        // ⚠️ `.hybrid` TOO, not just `.pointer` — it renders its older turns through the same
+        // `renderPointerTurn`, so it carries the marker and the tool comes with it. Matching only
+        // `.pointer` would have left the default-ish middle strategy under-charged by 814 chars,
+        // which is the same bug in a narrower place.
+        if resolvedHistoryStrategy == .pointer || resolvedHistoryStrategy == .hybrid {
+            names.append("get_conversation_history")
+        }
+
+        return names
     }
 
     /// Whether PRIOR-TURN PROSE actually reaches the model on this profile.

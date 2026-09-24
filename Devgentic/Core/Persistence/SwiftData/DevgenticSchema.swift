@@ -42,7 +42,8 @@ enum DevgenticSchema {
     /// Delegates to the CURRENT schema version so there is exactly one list in the codebase.
     /// ⚠️ **THE SINGLE SYMBOL A NEW SCHEMA VERSION REPOINTS.** Everything else here derives from it,
     /// so there is exactly one edit and no way for the entity list and the opened container to
-    /// disagree. Do NOT edit `DevgenticSchemaV1` itself — it is a frozen historical record. Full
+    /// disagree. Do NOT edit a shipped version's `models` — once released it is a frozen historical
+    /// record. Full
     /// procedure in `DevgenticSchemaVersions.swift`.
     ///
     /// This indirection is not decoration. `schema` used to name `DevgenticSchemaV1` directly while
@@ -52,18 +53,12 @@ enum DevgenticSchema {
     /// `structuralFingerprint` unchanged, so the launch-sweep gate would have reported `.run` on
     /// precisely the launch a schema change happened. Guarded by
     /// `SchemaMigrationTests.testProductionSchemaTracksTheDeclaredCurrentVersion`.
-    static var currentVersion: any VersionedSchema.Type { DevgenticSchemaV6.self }
+    static var currentVersion: any VersionedSchema.Type { DevgenticSchemaV1.self }
 
     /// The entity list of the CURRENT schema version.
     ///
     /// ⚠️ Order is not load-bearing for the model hash, but membership is: omitting an entity
     /// is one of the drifts that makes an existing store un-openable.
-    ///
-    /// RETIRED 2026-08-04: `CodeViewerSessionSD`. Code Viewer tabs are in-memory only
-    /// (`ChatHistoryViewModel.tabsByConversation`); the entity, its cascade relationship on
-    /// `ConversationSD`, and the launch purge are all gone. Entity deletion is lightweight-safe —
-    /// verified against a real store that CONTAINED a linked row, in
-    /// `SchemaMigrationTests.testRetiredCodeViewerEntityDropsWithoutLosingConversations`.
     static var models: [any PersistentModel.Type] { currentVersion.models }
 
     /// The production `Schema` — what `DevgenticApp` actually opens the container with.
@@ -80,9 +75,8 @@ enum DevgenticSchema {
 
     /// The migration plan passed to the container.
     ///
-    /// ⚠️ THREE versions and TWO lightweight stages (V1 → V2 → V3) — staged migration is engaged.
-    /// This said "one version and ZERO stages" until 2026-08-29, pointing readers at a comment that
-    /// repeated the same stale claim.
+    /// ⚠️ ONE version and ZERO stages since the 2026-09-23 history reset, so staged migration is
+    /// NOT engaged until a V2 and its stage are added. See `DevgenticMigrationPlan`.
     static var migrationPlan: any SchemaMigrationPlan.Type { DevgenticMigrationPlan.self }
 
     /// Filename of the on-disk store, in Application Support.

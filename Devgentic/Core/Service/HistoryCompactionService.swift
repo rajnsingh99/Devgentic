@@ -161,6 +161,101 @@ actor HistoryCompactionService {
 
     private init() {}
 
+    // MARK: - Manual compaction (the context gauge's "Compact now")
+
+    /// What a manual compaction did, in words the gauge can show as-is.
+    enum ManualOutcome: Equatable, Sendable {
+        case compacted(turnPairs: Int, originalChars: Int, summaryChars: Int, usedIntelligenceCore: Bool)
+        case nothingToCompact
+        case alreadyRunning
+        case failed(String)
+
+        var message: String {
+            switch self {
+            case let .compacted(pairs, original, summary, usedIC):
+                return "Summarized \(pairs) earlier turn(s): \(PromptFitCheck.roundedK(ContextOccupancy.tokens(original))) → \(PromptFitCheck.roundedK(ContextOccupancy.tokens(summary))) tokens"
+                    + (usedIC ? " (Intelligence Core)." : " (this conversation's model).")
+            case .nothingToCompact:
+                return "Nothing to compact yet — the 5 most recent messages are always kept, and at least 4 older ones are needed."
+            case .alreadyRunning:
+                return "A compaction is already running for this conversation."
+            case let .failed(reason):
+                return "Compaction failed: \(reason)"
+            }
+        }
+    }
+
+    /// Compacts NOW, at the user's request, regardless of the automatic trigger.
+    ///
+    /// ⚠️ Added 2026-09-24 for the context gauge. Automatic compaction only runs through the
+    /// Intelligence Core — with it off, which is the default, a long conversation could never be
+    /// summarized at all, only trimmed. So this summarizes with the IC when it is on and has a
+    /// model, and otherwise with the CONVERSATION'S OWN MODEL (`fallbackModel`), which is always
+    /// available because it is the one the user is already talking to.
+    ///
+    /// The planner is the automatic one with the trigger ratio at 0: same batch rules (the 5
+    /// most recent messages are kept, at least 4 are needed), same prompt, same checkpoint card,
+    /// delivered through the same sink. The transcript itself is untouched — the checkpoint only
+    /// changes what is SENT from the next turn on.
+    func compactNow(
+        chatHistory: [ChatMessage],
+        conversationID: UUID,
+        contextWindow: Int,
+        fallbackModel: ProviderConfig,
+        // Test seams: a stand-in summarizer and delivery, so a test neither loads a model nor
+        // replaces the app-wide checkpoint sink. Production passes neither.
+        summarizerOverride: (@Sendable ([[String: String]]) async throws -> String)? = nil,
+        deliverOverride: (@Sendable (ChatMessage, UUID) async -> Void)? = nil
+    ) async -> ManualOutcome {
+        let icEnabled = UserDefaults.standard.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
+        let icModelSelected = await IntelligenceCoreService.shared.hasModelSelected
+        let useIC = icEnabled && icModelSelected
+        let summarizerWindow = useIC ? await resolveICContextWindow() : contextWindow
+
+        guard let plan = Self.planCompaction(
+            chatHistory: chatHistory,
+            charBudget: PromptFitCheck.historyCharBudget(forContextWindow: contextWindow),
+            icContextWindow: summarizerWindow,
+            charBudgetTriggerRatio: 0,
+            icPromptOverheadChars: icPromptOverheadChars
+        ) else {
+            logger.info("[COMPACTION] Manual compaction for \(conversationID.uuidString.prefix(8)) found nothing to compact (\(chatHistory.count) messages). CONSEQUENCE: nothing changed.")
+            return .nothingToCompact
+        }
+        guard beginBackgroundRun(conversationID: conversationID) else { return .alreadyRunning }
+        defer { endBackgroundRun(conversationID: conversationID) }
+
+        logger.notice("[COMPACTION] Manual compaction for \(conversationID.uuidString.prefix(8)) — \(plan.turnPairsInBatch) turn pairs, summarizer: \(useIC ? "Intelligence Core" : "conversation model '\(fallbackModel.modelName)'").")
+        do {
+            let result: CompactionResult
+            if let summarizerOverride {
+                result = try await execute(plan: plan, conversationID: conversationID, summarize: summarizerOverride)
+            } else if useIC {
+                result = try await execute(plan: plan, conversationID: conversationID)
+            } else {
+                let model = try await AgentConnect().initializeModel(config: fallbackModel, isBotFlow: true)
+                result = try await execute(plan: plan, conversationID: conversationID) { messages in
+                    try await model.generate(messages: messages, tools: nil, responseSchema: nil)
+                }
+            }
+            guard let sink = deliverOverride ?? checkpointSink else {
+                logger.error("[COMPACTION] No checkpoint sink registered — the manual checkpoint for \(conversationID.uuidString.prefix(8)) is LOST.")
+                return .failed("the summary could not be saved")
+            }
+            await sink(result.checkpointMessage, conversationID)
+            let original = plan.turnsToCompact.reduce(0) { $0 + ($1.content.textContent?.count ?? 0) }
+            let summaryChars: Int = {
+                if case .checkpoint(let summary) = result.checkpointMessage.content { return summary.count }
+                return 0
+            }()
+            return .compacted(turnPairs: result.turnsCompacted, originalChars: original,
+                              summaryChars: summaryChars, usedIntelligenceCore: useIC)
+        } catch {
+            logger.warning("[COMPACTION] Manual compaction failed for \(conversationID.uuidString.prefix(8)): \(error.localizedDescription). CONSEQUENCE: history is unchanged.")
+            return .failed(error.localizedDescription)
+        }
+    }
+
     // MARK: - Public API
 
     /// Evaluates whether compaction is needed and produces a checkpoint if so.
@@ -286,13 +381,31 @@ actor HistoryCompactionService {
     /// This is the expensive half — a model load plus inference. ⚠️ It is NOT bounded by
     /// `icTimeoutSeconds`; see the note on that property.
     func execute(plan: CompactionPlan, conversationID: UUID) async throws -> CompactionResult {
+        try await execute(plan: plan, conversationID: conversationID) { messages in
+            try await self.callIC(messages: messages)
+        }
+    }
+
+    /// `execute` with the summarizing model supplied by the caller — the Intelligence Core for
+    /// automatic compaction, and for a manual "Compact" with the IC off, the conversation's own
+    /// model. Same prompt, same checkpoint, same metrics either way.
+    func execute(
+        plan: CompactionPlan,
+        conversationID: UUID,
+        summarize: @Sendable ([[String: String]]) async throws -> String
+    ) async throws -> CompactionResult {
         let turnsToCompact = plan.turnsToCompact
         let checkpointNumber = plan.checkpointNumber
         let turnPairsInBatch = plan.turnPairsInBatch
 
-        // Step 7: Build the IC prompt and call generate().
+        // Step 7: Build the summarization prompt and call the model.
         let turnRecords = formatTurnsForIC(turnsToCompact)
-        let summary = try await callIC(turnRecords: turnRecords, priorSummary: plan.priorSummary)
+        let summary = try await summarize(Self.summaryMessages(turnRecords: turnRecords, priorSummary: plan.priorSummary))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !summary.isEmpty else {
+            throw NSError(domain: "HistoryCompactionService", code: 500,
+                          userInfo: [NSLocalizedDescriptionKey: "The model returned an empty summary. Compaction skipped."])
+        }
 
         // Step 8: Create the checkpoint ChatMessage.
         // Timestamp is set just after the last compacted message for correct ordering.
@@ -466,9 +579,8 @@ actor HistoryCompactionService {
     /// synchronous request path.
     private let icTimeoutSeconds: UInt64 = 30
 
-    /// Calls the Intelligence Core to produce the checkpoint summary.
-    /// Enforces a timeout to prevent blocking the agent pipeline indefinitely.
-    private func callIC(turnRecords: String, priorSummary: String) async throws -> String {
+    /// The summarization prompt — shared by the Intelligence Core and the conversation's own model.
+    static func summaryMessages(turnRecords: String, priorSummary: String) -> [[String: String]] {
         let systemPrompt = """
         You are a conversation history summarizer for an AI agent system. Produce a structured \
         summary that preserves critical operational details. Use bullet points.
@@ -497,7 +609,12 @@ actor HistoryCompactionService {
             ["role": "system", "content": systemPrompt],
             ["role": "user", "content": userContent]
         ]
+        return messages
+    }
 
+    /// Calls the Intelligence Core to produce the checkpoint summary.
+    /// Enforces a timeout to prevent blocking the agent pipeline indefinitely.
+    private func callIC(messages: [[String: String]]) async throws -> String {
         // Release our hold however this ends (success, empty summary, timeout, cancellation).
         // Compaction was the ONLY IC consumer that never did this, so once it ran the model
         // stayed resident for the app's lifetime unless some other feature happened to free

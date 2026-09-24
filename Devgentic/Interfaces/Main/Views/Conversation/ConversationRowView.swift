@@ -36,6 +36,18 @@ struct ConversationRowView: View {
     /// rendered once. Same live-flag pattern as `needsInput` [F2].
     var isStreamingLive: Bool = false
 
+    /// [B] This conversation has a background task that will add a turn to it when it ends.
+    ///
+    /// ⚠️ THE POINT IS THE CONVERSATIONS YOU ARE NOT LOOKING AT. The in-transcript footer and the
+    /// tasks pill are both scoped to the displayed conversation, so switching away takes the fact
+    /// with it — and switching away is the common case, because starting something long and going
+    /// elsewhere is what background tasks are FOR. Without this the sidebar is the only surface
+    /// that could have told you, and it said nothing.
+    ///
+    /// Computed at the call site from `PendingBackgroundReports`, the same predicate the footer
+    /// uses — same live-flag pattern as `needsInput` [F2] and `isStreamingLive` [P8].
+    var hasPendingBackgroundReport: Bool = false
+
     var body: some View {
         HStack(spacing: 0) {
             if isSelectionMode {
@@ -110,6 +122,21 @@ struct ConversationRowView: View {
                         .accessibilityLabel("Generating a response")
                 } else if isHovering && !isSelectionMode {
                     hoverActionsView
+                } else if hasPendingBackgroundReport {
+                    // ⚠️ Deliberately NOT a pulse. The two pulses above mean "this is happening
+                    // right now, in this conversation"; this means "something will speak here
+                    // later, on its own" — a different promise, and a pulse would overstate it
+                    // into looking like a live run.
+                    //
+                    // ⚠️ Placed AFTER the hover branch, so it takes the TIMESTAMP's slot rather
+                    // than the delete button's. Ambient information belongs where ambient
+                    // information already is, and a conversation must stay deletable while a task
+                    // it started is still running.
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(.caption2))
+                        .foregroundColor(theme.accentColor)
+                        .help("A background task will report here when it finishes")
+                        .accessibilityLabel("A background task will report here when it finishes")
                 } else {
                     Text(conversation.relativeTimestamp)
                         .font(.system(.caption2))

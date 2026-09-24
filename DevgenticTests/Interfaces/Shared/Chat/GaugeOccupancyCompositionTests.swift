@@ -88,6 +88,21 @@ final class GaugeOccupancyCompositionTests: XCTestCase {
         XCTAssertEqual(occupancy(), 0)
     }
 
+    // MARK: - The breakdown rows (2026-09-24)
+
+    /// ⚠️ The "what's using it" rows must add up to the headline number. If they drift, the user
+    /// sees rows that do not explain the total — the exact confusion the rows exist to remove.
+    func testTheBreakdownRowsAddUpToTheTotal() throws {
+        let messages = turn(0, text: String(repeating: "detail ", count: 400))
+        let result = try XCTUnwrap(ContextWindowUsage.estimatedOccupancy(
+            config: cloudConfig(), profile: profile(), messages: messages, attachedFiles: [],
+            historyStrategy: .recentHistory, contextWindow: 128_000))
+        let b = result.breakdown
+        let rowChars = b.toolChars + b.historyChars + b.knowledgeChars + b.attachmentChars + b.overheadChars
+        XCTAssertEqual(ContextOccupancy.tokens(rowChars) + b.imageTokens, result.totalTokens)
+        XCTAssertGreaterThan(b.historyChars, 0, "history is in the total but not in its row")
+    }
+
     // MARK: - Each term is actually in the sum
 
     func testHistoryRaisesOccupancy() {

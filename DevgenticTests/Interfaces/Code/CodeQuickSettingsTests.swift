@@ -99,12 +99,12 @@ final class CodeQuickSettingsTests: XCTestCase {
     func testAutoApproveDoesNotLeakToAnotherProject() {
         // The sharpest form of the scope guarantee, asserted on its own so a failure is unambiguous.
         var trusted = CodeQuickSettings.default
-        trusted.toolConfirmations["batch_command"] = false
+        trusted.toolConfirmations["run_command"] = false
         CodeQuickSettingsStore.save(trusted, for: projectA.path, defaults: defaults, now: Date())
 
         let other = CodeQuickSettingsStore.settings(for: projectB.path, defaults: defaults)
 
-        XCTAssertNil(other.toolConfirmations["batch_command"],
+        XCTAssertNil(other.toolConfirmations["run_command"],
                      "Shell auto-approve leaked to an unconfigured project.")
     }
 
@@ -150,15 +150,57 @@ final class CodeQuickSettingsTests: XCTestCase {
         XCTAssertTrue(config.llmConfig.thinkingEnabled)
     }
 
-    func testUnsetFieldsLeaveThePresetAlone() {
-        // `nil` means "inherit", never "reset to zero". A settings struct that restated defaults
-        // would freeze them at whatever they were when it was written.
+    func testUnsetFieldsRestoreThePreset() {
+        // `nil` means "inherit the preset" — and it must ASSIGN that preset, not skip.
         var config = agentConfig()
         CodeSessionManager.apply(.default, to: &config)
 
-        XCTAssertEqual(config.maxIterations, 20)
-        XCTAssertEqual(config.executionTimeout, 300)
+        XCTAssertEqual(config.maxIterations, CodeSessionManager.presetMaxIterations)
+        XCTAssertEqual(config.executionTimeout, CodeSessionManager.presetExecutionTimeout)
         XCTAssertFalse(config.llmConfig.thinkingEnabled)
+    }
+
+    func testClearingAnOverrideRestoresThePreset() {
+        // ⚠️⚠️ THE ONE-WAY DOOR. `apply` used to skip on nil, so this sequence was unrecoverable:
+        // the user pressed Remove in the limits panel (stored 0 → written as nil = unbounded), then
+        // reset the setting back to "inherit", and nothing ever rewrote 300 s. A run observed
+        // 2026-09-20 logged "[EXEC_LIMITS] No execution timeout configured" from exactly this.
+        var config = agentConfig()
+
+        var noLimit = CodeQuickSettings.default
+        noLimit.executionTimeout = 0
+        CodeSessionManager.apply(noLimit, to: &config)
+        XCTAssertNil(config.executionTimeout, "0 must mean explicitly unbounded.")
+
+        CodeSessionManager.apply(.default, to: &config)
+        XCTAssertEqual(config.executionTimeout, CodeSessionManager.presetExecutionTimeout,
+                       "Clearing the override must restore the preset budget. Without this, "
+                       + "'Reset to defaults' silently leaves the run unbounded forever.")
+    }
+
+    func testLoweringThenClearingMaxIterationsRestoresThePreset() {
+        var config = agentConfig()
+        var raised = CodeQuickSettings.default
+        raised.maxIterations = 60
+        CodeSessionManager.apply(raised, to: &config)
+        XCTAssertEqual(config.maxIterations, 60)
+
+        CodeSessionManager.apply(.default, to: &config)
+        XCTAssertEqual(config.maxIterations, CodeSessionManager.presetMaxIterations)
+    }
+
+    func testApplyIsIdempotent() {
+        // Applying twice must not drift — the per-send hook runs it on every message.
+        var a = agentConfig(), b = agentConfig()
+        var s = CodeQuickSettings.default
+        s.maxIterations = 42
+        s.executionTimeout = 900
+        CodeSessionManager.apply(s, to: &a)
+        CodeSessionManager.apply(s, to: &b)
+        CodeSessionManager.apply(s, to: &b)
+
+        XCTAssertEqual(a.maxIterations, b.maxIterations)
+        XCTAssertEqual(a.executionTimeout, b.executionTimeout)
     }
 
     func testZeroTimeoutMeansNoLimitNotInstantTimeout() {
@@ -237,7 +279,7 @@ final class CodeQuickSettingsTests: XCTestCase {
 
         var settings = CodeQuickSettings.default
         settings.maxIterations = 50
-        settings.toolConfirmations["batch_command"] = false
+        settings.toolConfirmations["run_command"] = false
         manager.updateQuickSettings(settings)
 
         // The Home button. Deletes the profile row outright — see
@@ -251,7 +293,7 @@ final class CodeQuickSettingsTests: XCTestCase {
         XCTAssertEqual(manager.quickSettings.maxIterations, 50,
                        "The iteration cap did not survive a Home press. This is the whole reason "
                        + "quick settings live in UserDefaults instead of on the profile row.")
-        XCTAssertEqual(manager.quickSettings.toolConfirmations["batch_command"], false,
+        XCTAssertEqual(manager.quickSettings.toolConfirmations["run_command"], false,
                        "The auto-approve grant did not survive a Home press.")
 
         // And they must reach the freshly minted profile, not just the store.
@@ -264,7 +306,7 @@ final class CodeQuickSettingsTests: XCTestCase {
         XCTAssertEqual(config.maxIterations, 50,
                        "Settings survived in UserDefaults but never reached the new profile — the "
                        + "run would still use the hardcoded 20.")
-        XCTAssertEqual(config.tools.first { $0.name == "batch_command" }?.requiresConfirmation, false)
+        XCTAssertEqual(config.tools.first { $0.name == "run_command" }?.requiresConfirmation, false)
     }
 
     func testSettingsReachTheProfileOnEverySend() throws {

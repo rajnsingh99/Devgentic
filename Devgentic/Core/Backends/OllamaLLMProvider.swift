@@ -302,16 +302,23 @@ struct OllamaLLMProvider: LLMProvider {
     /// If no balanced JSON block is found, returns `(content, "")` so callers
     /// can fall back to passing the original content to the parser.
     static func splitProseAndJSON(_ content: String) -> (prose: String, jsonBlock: String) {
-        // String/escape-aware balanced-block split (#15). Replaces the old `prevChar != "\\"`
-        // scan, which mishandled `\\"` — an escaped backslash before a real closing quote.
-        let (proseSlice, blockSlice) = BalancedJSONScanner.splitProseAndBlock(in: content)
+        // String/escape-aware balanced-block split (#15). Replaces the old `prevChar != "\\"` scan,
+        // which mishandled `\\"` — an escaped backslash before a real closing quote.
+        let (proseSlice, blockSlice, tailSlice) = BalancedJSONScanner.splitProseAndBlock(in: content)
         guard let block = blockSlice else {
             return (stripOrphanFences(content.trimmingCharacters(in: .whitespacesAndNewlines)), "")
         }
-        let prose = String(proseSlice).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // ⚠️⚠️ THE TAIL IS REJOINED, not dropped. The scanner used to return only the text BEFORE
+        // the block, so every character after it was discarded — a 474-byte answer reached the
+        // user as its first 34 bytes. The block itself is excluded on purpose: it is a leaked tool
+        // call, and echoing its JSON back as the model's reasoning is what the G7 split exists to
+        // prevent.
+        let before = String(proseSlice).trimmingCharacters(in: .whitespacesAndNewlines)
+        let after = String(tailSlice).trimmingCharacters(in: .whitespacesAndNewlines)
+        let prose = [before, after].filter { !$0.isEmpty }.joined(separator: " ")
         return (stripOrphanFences(prose), String(block))
     }
-
     /// Removes a leading ` ```json `/` ``` ` opener and trailing ` ``` ` closer
     /// when they frame the string as wrapping syntax. Real reasoning that
     /// happens to mention backticks inside the prose is preserved — the

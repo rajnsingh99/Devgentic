@@ -51,7 +51,7 @@ final class WindowedLinearMemoryEdgeCaseTests: XCTestCase {
         memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", params: "", result: overResult, artifacts: [])
 
         let compiled = memory.compileForPrompt()
-        XCTAssertTrue(compiled.contains("...[truncated]"), "Result one over cap should be truncated")
+        XCTAssertTrue(compiled.contains("truncated") || compiled.contains("omitted"), "Result one over cap should be cut, and say so")
     }
 
     // MARK: - Boundary: perEntryCap Smaller Than Truncation Suffix
@@ -205,11 +205,6 @@ final class WindowedLinearMemoryEdgeCaseTests: XCTestCase {
     func testDerive_NegativeContextWindow_FloorsAt2048() {
         let config = MemoryBudgetConfig.derive(contextWindow: -1000, tier: .tiny)
         XCTAssertGreaterThan(config.totalBudgetChars, 0, "Negative context window should not produce negative budget")
-    }
-
-    func testDerive_NegativeMaxIterations_FloorsAtOne() {
-        let config = MemoryBudgetConfig.derive(contextWindow: 4096, tier: .small, maxIterations: -5)
-        XCTAssertGreaterThan(config.perEntryCap, 0, "Negative maxIterations should not crash")
     }
 
     // MARK: - Eviction: All Entries Identical Size

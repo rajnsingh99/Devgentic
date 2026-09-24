@@ -629,7 +629,10 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
         case .discord:                        return " from Discord"
         case .slack:                          return " from Slack"
         case .localUI, .quickAccess, .orb: return " from the Mac"
-        case .scheduled:                      return ""
+        // Neither was answered by a human, and naming a surface for one would be the same lie
+        // this method exists to stop. `.scheduled` fires from a timer; `.backgroundTask` fires
+        // because a command finished.
+        case .scheduled, .backgroundTask:     return ""
         }
     }
 

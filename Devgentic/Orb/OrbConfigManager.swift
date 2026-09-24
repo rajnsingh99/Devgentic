@@ -48,7 +48,9 @@ enum OrbActivationMode: String, CaseIterable, Identifiable {
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .holdShortcut: return "Hold a shortcut"
-        case .wakeWord:     return "Say “Orb”"
+        // ⚠️ Interpolated, not the literal "Orb": the wake word is user-configurable, and a label
+        // naming a word the matcher is not listening for is the one mistake this pane cannot make.
+        case .wakeWord:     return "Say “\(OrbConfigManager.shared.wakeWord)”"
         case .clickOrb:     return "Click the orb"
         }
     }
@@ -340,7 +342,15 @@ final class OrbConfigManager {
     /// features fighting for one combo is a support ticket.
     static let defaultCombo = KeyCombo(key: .j, modifiers: .option)
 
-    private let defaults = UserDefaults.standard
+    /// ⚠️⚠️ COMPUTED and routed through `TestHost.defaults`, not `let defaults = .standard`.
+    ///
+    /// Two reasons, both load-bearing. Under an XCTest host `UserDefaults.standard` is the
+    /// SHIPPING APP's domain, so this singleton read — and WROTE — the developer's real Orb
+    /// settings during an ordinary `test-without-building` run; `OrbWakeWordTests` failed on the
+    /// author's machine and nowhere else because of it. And it is computed rather than stored
+    /// because a stored property would resolve when this singleton is first touched, which can be
+    /// during app launch — before the test bundle loads — pinning the real domain for the run.
+    private var defaults: UserDefaults { TestHost.defaults }
 
     private init() {}
 
@@ -605,6 +615,58 @@ final class OrbConfigManager {
         }
     }
 
+    // MARK: Wake word
+
+    /// The word the wake-word mode listens for. User-configurable.
+    ///
+    /// ⚠️ SANITIZED on the way in, because it is compiled into a regular expression and matched
+    /// against ASR output. `sanitizedWakeWord` is the whole contract: no regex metacharacters, no
+    /// empty string, no one-letter word. A one-letter wake word would fire on nearly every
+    /// utterance; an unsanitized one could not be escaped into a pattern safely.
+    ///
+    /// ⚠️ Read at USE time by `OrbSessionController.wakeWord`, never cached — so a change here
+    /// reaches a RUNNING orb with no other plumbing, exactly like `endpointing`.
+    /// ⚠️ Stored VERBATIM and sanitized on READ, the same shape as `approvalKeywordsRaw`, and for
+    /// the same reason: the text field binds to this. Sanitizing in the setter would rewrite the
+    /// field under the user's cursor — "O" is below the two-character floor, so typing a fresh
+    /// word one letter at a time would snap the field back to "orb" on the first keystroke.
+    var wakeWordRaw: String {
+        get {
+            access(keyPath: \.wakeWordRaw)
+            return defaults.string(forKey: AppSettings.orbWakeWordKey) ?? ""
+        }
+        set {
+            assertMainThread()
+            withMutation(keyPath: \.wakeWordRaw) {
+                defaults.set(newValue, forKey: AppSettings.orbWakeWordKey)
+            }
+        }
+    }
+
+    /// What the matcher listens for: the sanitized entry, or the default when it is unusable.
+    /// An empty or one-letter field therefore leaves a WORKING orb, never a deaf one.
+    var wakeWord: String { Self.sanitizedWakeWord(wakeWordRaw) ?? Self.defaultWakeWord }
+
+    /// The shipped wake word. Also the only one whose mishearings are known — see
+    /// `OrbSessionController.wakeWordHomophones`.
+    static let defaultWakeWord = "orb"
+
+    /// `raw` reduced to something safe to match, or nil when nothing usable is left. Pure.
+    ///
+    /// Lowercased (matching is case-insensitive anyway, and storing one form keeps the homophone
+    /// lookup honest); everything that is not a letter, number or space is dropped; runs of
+    /// whitespace collapse to one, so a multi-word phrase like "hey orb" is preserved — that is
+    /// the intended escape hatch from a short word the recognizer keeps missing.
+    static func sanitizedWakeWord(_ raw: String) -> String? {
+        let collapsed = String(raw.lowercased().map { $0.isLetter || $0.isNumber ? $0 : " " })
+            .split(separator: " ")
+            .joined(separator: " ")
+        // ⚠️ Two characters is the floor. Below it the word is a fragment of ordinary speech and
+        // every sentence in the room arms command capture.
+        guard collapsed.count >= 2 else { return nil }
+        return collapsed
+    }
+
     // MARK: Apple Speech locale
 
     /// Locale identifier for Apple Speech. Empty means "follow the system".
@@ -763,6 +825,7 @@ final class OrbConfigManager {
         assertMainThread()
         withMutation(keyPath: \.isEnabled) {
         withMutation(keyPath: \.activationMode) {
+        withMutation(keyPath: \.wakeWordRaw) {
         withMutation(keyPath: \.endpointing) {
         withMutation(keyPath: \.spokenResponses) {
         withMutation(keyPath: \.followUp) {
@@ -782,7 +845,7 @@ final class OrbConfigManager {
             for key in Self.allResettableKeys {
                 defaults.removeObject(forKey: key)
             }
-        }}}}}}}}}}}}}}}}}}
+        }}}}}}}}}}}}}}}}}}}
         Self.logger.notice("[ORB_CONFIG] All \(Self.allResettableKeys.count) Orb setting(s) reset to defaults. CONSEQUENCE: observers are notified, so the composer button, the global shortcut and an open panel all pick this up without a relaunch.")
     }
 
@@ -790,6 +853,7 @@ final class OrbConfigManager {
     /// future phase cannot silently escape the reset the way the Phase 6 keys did.
     static let allResettableKeys: [String] = [
         AppSettings.orbEnabledKey, AppSettings.orbActivationModeKey,
+        AppSettings.orbWakeWordKey,
         AppSettings.orbShortcutCodeKey, AppSettings.orbShortcutModifiersKey,
         AppSettings.orbEndpointingKey, AppSettings.orbSpokenResponsesKey,
         AppSettings.orbFollowUpKey, AppSettings.orbEarconsKey,

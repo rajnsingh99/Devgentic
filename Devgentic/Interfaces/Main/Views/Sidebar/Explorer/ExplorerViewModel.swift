@@ -13,8 +13,15 @@ import UniformTypeIdentifiers
 
 @Observable @MainActor
 final class ExplorerViewModel {
+    private(set) var treeVersion: Int = 0
+    @ObservationIgnored var onNodeReloadRequired: ((URL) -> Void)?
+    @ObservationIgnored var onOpenFileRequested: ((FileSystemItem) -> Void)?
+
     var rootItems: [FileSystemItem] = [] {
-        didSet { recomputeFilteredRootItems() }
+        didSet {
+            recomputeFilteredRootItems()
+            treeVersion &+= 1
+        }
     }
     var selectedRootURL: URL? = nil {
         willSet {
@@ -43,19 +50,24 @@ final class ExplorerViewModel {
             }
 
             if let newURL = selectedRootURL {
-                if newURL.startAccessingSecurityScopedResource() {
+                let hasSecurityScope = newURL.startAccessingSecurityScopedResource()
+                if hasSecurityScope {
                     logger.info("Successfully started accessing security-scoped resource (didSet for selectedRootURL) for: \(newURL.path)")
                     saveBookmark(for: newURL)
-                    
-                    // **NEW**: Trigger the deep search and start monitoring.
+                } else {
+                    logger.info("Selected URL is not security-scoped or does not require scoped access: \(newURL.path)")
+                }
+
+                if FileManager.default.isReadableFile(atPath: newURL.path) {
+                    // Trigger deep search and start monitoring.
                     Task {
                         await indexAllFiles(from: newURL)
                     }
                     startMonitoring(path: newURL.path)
 
-                    loadDirectoryContents(for: newURL) // This can remain for the visual explorer view
+                    loadDirectoryContents(for: newURL)
                 } else {
-                    logger.error("Failed to start accessing security-scoped resource (didSet for selectedRootURL) for: \(newURL.path). Files might not be accessible.")
+                    logger.error("Folder at path is not readable: \(newURL.path). Files might not be accessible.")
                     self.errorMessage = "Could not gain permission to access this folder. Please try selecting it again. If the issue persists, check app permissions in System Settings (Privacy & Security -> Files and Folders)."
                     self.rootItems = []
                     self.isLoading = false
@@ -63,7 +75,7 @@ final class ExplorerViewModel {
                     clearLastOpenedFolderBookmark()
                 }
             } else {
-                // **NEW**: Stop monitoring when the folder is closed.
+                // Stop monitoring when the folder is closed.
                 stopMonitoring()
                 self.rootItems = []
                 self.errorMessage = nil
@@ -76,7 +88,10 @@ final class ExplorerViewModel {
     }
     
     var searchText: String = "" {
-        didSet { recomputeFilteredRootItems() }
+        didSet {
+            recomputeFilteredRootItems()
+            treeVersion &+= 1
+        }
     }
     private(set) var filteredRootItems: [FileSystemItem] = []
     var isLoading: Bool = false
@@ -87,7 +102,8 @@ final class ExplorerViewModel {
     var renameErrorMessage: String? = nil
 
     var expandedItemIDs: Set<URL> = []
-    @ObservationIgnored private var loadingIDs: Set<URL> = []
+    var loadingIDs: Set<URL> = []
+    @ObservationIgnored private var preSearchExpandedItemIDs: Set<URL>? = nil
 
     // The in-memory cache for all files in the directory.
     var allSuggestableFiles: [FileSystemItem] = []
@@ -113,26 +129,43 @@ final class ExplorerViewModel {
         let items = rootItems
         guard !searchText.isEmpty else {
             filteredRootItems = items
+            if let preSearch = preSearchExpandedItemIDs {
+                expandedItemIDs = preSearch
+                preSearchExpandedItemIDs = nil
+            }
             return
         }
+
+        if preSearchExpandedItemIDs == nil {
+            preSearchExpandedItemIDs = expandedItemIDs
+        }
+
         let query = searchText.lowercased()
+        var matchingAncestors: Set<URL> = []
+
         func filterItems(_ items: [FileSystemItem]) -> [FileSystemItem] {
             var result: [FileSystemItem] = []
             for item in items {
                 if item.name.lowercased().contains(query) {
                     result.append(item)
+                    if item.isDirectory {
+                        matchingAncestors.insert(item.id)
+                    }
                 } else if let children = item.children {
                     let filteredChildren = filterItems(children)
                     if !filteredChildren.isEmpty {
                         var copy = item
                         copy.children = filteredChildren
                         result.append(copy)
+                        matchingAncestors.insert(item.id)
                     }
                 }
             }
             return result
         }
+
         filteredRootItems = filterItems(items)
+        expandedItemIDs.formUnion(matchingAncestors)
     }
 
     deinit {
@@ -149,8 +182,7 @@ final class ExplorerViewModel {
             guard !Task.isCancelled, let self else { return }
             self.logger.info("Debounced file system event triggered for \(url.path). Refreshing contents.")
 
-            // PERFORMANCE FIX: Root or Incremental?
-            if url == self.selectedRootURL {
+            if url == self.selectedRootURL || url.resolvingSymlinksInPath().path == self.selectedRootURL?.resolvingSymlinksInPath().path {
                 await self.indexAllFiles(from: url)
                 self.loadDirectoryContents(for: url)
             } else {
@@ -399,11 +431,27 @@ final class ExplorerViewModel {
             logger.debug("Folder '\(item.name)' children already loaded. UI expansion handled by DisclosureGroup binding.")
         }
     }
+
+    func collapseAll() {
+        expandedItemIDs.removeAll()
+        treeVersion &+= 1
+        if let root = selectedRootURL {
+            onNodeReloadRequired?(root)
+        }
+    }
+
+    func refresh() {
+        if let root = selectedRootURL {
+            loadDirectoryContents(for: root)
+        }
+    }
         
     private func updateChildren(for parentId: URL, with children: [FileSystemItem]) {
+        let parentStandardized = parentId.resolvingSymlinksInPath().path
         func findAndUpdate(items: inout [FileSystemItem]) -> Bool {
             for i in 0..<items.count {
-                if items[i].id == parentId {
+                let itemStandardized = items[i].id.resolvingSymlinksInPath().path
+                if items[i].id == parentId || items[i].id.path == parentId.path || itemStandardized == parentStandardized {
                     items[i].children = children
                     return true
                 }
@@ -420,6 +468,8 @@ final class ExplorerViewModel {
         if findAndUpdate(items: &rootItems) {
             // @Observable tracks rootItems mutation automatically
             recomputeFilteredRootItems()
+            treeVersion &+= 1
+            onNodeReloadRequired?(parentId)
         }
     }
 
@@ -428,11 +478,12 @@ final class ExplorerViewModel {
         let fileManager = FileManager.default
         let resourceKeys: Set<URLResourceKey> = [.nameKey, .isDirectoryKey, .isHiddenKey]
 
-        guard url.startAccessingSecurityScopedResource() else {
-            logger.warning("fetchItems: Could not start accessing security-scoped resource for \(url.path).")
-            throw NSError(domain: "ExplorerViewModel.fetchItems", code: 1001, userInfo: [NSLocalizedDescriptionKey: "Permission denied to access \(url.lastPathComponent)."])
+        let hasSecurityScope = url.startAccessingSecurityScopedResource()
+        defer {
+            if hasSecurityScope {
+                url.stopAccessingSecurityScopedResource()
+            }
         }
-        defer { url.stopAccessingSecurityScopedResource() }
         
         let contents = try fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: Array(resourceKeys), options: [])
         
@@ -454,14 +505,25 @@ final class ExplorerViewModel {
     func openFile(_ item: FileSystemItem) {
         logger.info("openFile called for: \(item.name) at \(item.url.path)")
         
-        // If it's a directory, we usually just toggle expansion, 
-        // but if specifically asked to "open", we reveal in Finder or do nothing.
-        // For files, we use NSWorkspace to open with the default app.
         guard !item.isDirectory else {
-            logger.info("openFile: Item is a directory, skipping system open.")
+            logger.info("openFile: Item is a directory, skipping open.")
             return
         }
         
+        if let onOpenFileRequested {
+            onOpenFileRequested(item)
+            return
+        }
+        
+        openWithSystemApp(item)
+    }
+
+    func openWithSystemApp(_ item: FileSystemItem) {
+        guard !item.isDirectory else {
+            logger.info("openWithSystemApp: Item is a directory, skipping.")
+            return
+        }
+
         // Ensure we have access if it's security-scoped
         let url = item.url
         let accessStarted = url.startAccessingSecurityScopedResource()
@@ -484,12 +546,12 @@ final class ExplorerViewModel {
         }
     }
     func revealInFinder(_ item: FileSystemItem) {
-        guard item.url.startAccessingSecurityScopedResource() else {
-            logger.error("Could not gain access to reveal in Finder: \(item.url.path)")
-            self.errorMessage = "Could not reveal '\(item.name)': Permission denied."
-            return
+        let hasScope = item.url.startAccessingSecurityScopedResource()
+        defer {
+            if hasScope {
+                item.url.stopAccessingSecurityScopedResource()
+            }
         }
-        defer { item.url.stopAccessingSecurityScopedResource() }
         NSWorkspace.shared.activateFileViewerSelecting([item.url])
         logger.info("Revealing item in Finder: \(item.url.path)")
     }
@@ -528,18 +590,20 @@ final class ExplorerViewModel {
             renameErrorMessage = "An item named \"\(newName)\" already exists."; logger.warning("Rename failed: item with new name already exists at \(newURL.path)"); return
         }
         logger.info("Attempting to rename '\(itemToRename.name)' to '\(newName)' (URL: \(oldURL.path) -> \(newURL.path))")
-        guard oldURL.deletingLastPathComponent().startAccessingSecurityScopedResource() else {
-            logger.error("CommitRename: Could not gain access to parent directory of \(oldURL.path)")
-            self.renameErrorMessage = "Permission denied to modify items in this folder."; return
+        let parentURL = oldURL.deletingLastPathComponent()
+        let hasScope = parentURL.startAccessingSecurityScopedResource()
+        defer {
+            if hasScope {
+                parentURL.stopAccessingSecurityScopedResource()
+            }
         }
-        defer { oldURL.deletingLastPathComponent().stopAccessingSecurityScopedResource() }
         Task {
             do {
                 try fileManager.moveItem(at: oldURL, to: newURL)
-                logger.info("Successfully renamed item.")
+                logger.info("Successfully renamed item: \(oldURL.lastPathComponent) -> \(newName)")
                 await MainActor.run {
                     self.cancelRename()
-                    if let rootToLoad = self.selectedRootURL { self.loadDirectoryContents(for: rootToLoad) }
+                    self.replaceItemInTree(oldURL: oldURL, newURL: newURL, newName: newName)
                 }
             } catch {
                 logger.error("Failed to rename item: \(error.localizedDescription)")
@@ -553,16 +617,231 @@ final class ExplorerViewModel {
         currentEditName = ""
         renameErrorMessage = nil
     }
-    // TODO: Implement file operations
-    func deleteItem(_ item: FileSystemItem) { logger.warning("Delete not yet implemented for: \(item.name).") }
-    func createNewFile(in parent: FileSystemItem?) { logger.warning("Create New File not yet implemented.") }
-    func createNewFolder(in parent: FileSystemItem?) { logger.warning("Create New Folder not yet implemented.") }
-    private func findItem(by id: URL, in items: [FileSystemItem]) -> FileSystemItem? {
+
+    private func replaceItemInTree(oldURL: URL, newURL: URL, newName: String) {
+        let oldStandardized = oldURL.resolvingSymlinksInPath().path
+        func updateInItems(_ items: inout [FileSystemItem]) -> Bool {
+            for i in 0..<items.count {
+                let itemPath = items[i].id.resolvingSymlinksInPath().path
+                if items[i].id == oldURL || items[i].id.path == oldURL.path || itemPath == oldStandardized {
+                    items[i] = FileSystemItem(
+                        id: newURL,
+                        name: newName,
+                        url: newURL,
+                        isDirectory: items[i].isDirectory,
+                        children: items[i].children
+                    )
+                    return true
+                }
+                if items[i].isDirectory, items[i].children != nil {
+                    var childItems = items[i].children!
+                    if updateInItems(&childItems) {
+                        items[i].children = childItems
+                        return true
+                    }
+                }
+            }
+            return false
+        }
+        if updateInItems(&rootItems) {
+            recomputeFilteredRootItems()
+            treeVersion &+= 1
+            onNodeReloadRequired?(oldURL.deletingLastPathComponent())
+        }
+    }
+
+    func deleteItem(_ item: FileSystemItem) {
+        logger.info("Deleting item: \(item.name) at \(item.url.path)")
+        let url = item.url
+        let parentURL = url.deletingLastPathComponent()
+        
+        let hasScope = parentURL.startAccessingSecurityScopedResource()
+        defer {
+            if hasScope {
+                parentURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        Task {
+            do {
+                var resultingURL: NSURL?
+                try FileManager.default.trashItem(at: url, resultingItemURL: &resultingURL)
+                logger.info("Successfully moved item to Trash: \(item.name)")
+                await MainActor.run {
+                    self.removeItemFromTree(item.id)
+                }
+            } catch {
+                logger.error("Failed to move item to Trash \(item.name): \(error.localizedDescription)")
+                await MainActor.run {
+                    self.errorMessage = "Failed to delete '\(item.name)': \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func removeItemFromTree(_ itemID: URL) {
+        let targetPath = itemID.resolvingSymlinksInPath().path
+        let parentURL = itemID.deletingLastPathComponent()
+
+        func removeFromItems(_ items: inout [FileSystemItem]) -> Bool {
+            if let index = items.firstIndex(where: {
+                $0.id == itemID || $0.id.path == itemID.path || $0.id.resolvingSymlinksInPath().path == targetPath
+            }) {
+                items.remove(at: index)
+                return true
+            }
+            for i in 0..<items.count {
+                if items[i].isDirectory, items[i].children != nil {
+                    var childItems = items[i].children!
+                    if removeFromItems(&childItems) {
+                        items[i].children = childItems
+                        return true
+                    }
+                }
+            }
+            return false
+        }
+
+        if removeFromItems(&rootItems) {
+            expandedItemIDs.remove(itemID)
+            allSuggestableFiles.removeAll { $0.id == itemID || $0.url.path.hasPrefix(itemID.path) }
+            recomputeFilteredRootItems()
+            treeVersion &+= 1
+            onNodeReloadRequired?(parentURL)
+        }
+    }
+
+    func createNewFile(in parent: FileSystemItem?) {
+        guard let targetFolderURL = (parent?.isDirectory == true ? parent?.url : selectedRootURL) else { return }
+
+        let fileManager = FileManager.default
+        var newFileName = "untitled.txt"
+        var counter = 2
+        var newFileURL = targetFolderURL.appendingPathComponent(newFileName)
+        while fileManager.fileExists(atPath: newFileURL.path) {
+            newFileName = "untitled \(counter).txt"
+            newFileURL = targetFolderURL.appendingPathComponent(newFileName)
+            counter += 1
+        }
+
+        let hasScope = targetFolderURL.startAccessingSecurityScopedResource()
+        defer {
+            if hasScope {
+                targetFolderURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        Task {
+            do {
+                try "".write(to: newFileURL, atomically: true, encoding: .utf8)
+                logger.info("Created new file at: \(newFileURL.path)")
+                let newItem = FileSystemItem(id: newFileURL, name: newFileName, url: newFileURL, isDirectory: false)
+                await MainActor.run {
+                    self.addItemToTree(newItem, inParentURL: targetFolderURL)
+                    self.startRename(newItem)
+                }
+            } catch {
+                logger.error("Failed to create file: \(error.localizedDescription)")
+                await MainActor.run {
+                    self.errorMessage = "Failed to create file: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func createNewFolder(in parent: FileSystemItem?) {
+        guard let targetFolderURL = (parent?.isDirectory == true ? parent?.url : selectedRootURL) else { return }
+
+        let fileManager = FileManager.default
+        var newFolderName = "untitled folder"
+        var counter = 2
+        var newFolderURL = targetFolderURL.appendingPathComponent(newFolderName)
+        while fileManager.fileExists(atPath: newFolderURL.path) {
+            newFolderName = "untitled folder \(counter)"
+            newFolderURL = targetFolderURL.appendingPathComponent(newFolderName)
+            counter += 1
+        }
+
+        let hasScope = targetFolderURL.startAccessingSecurityScopedResource()
+        defer {
+            if hasScope {
+                targetFolderURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        Task {
+            do {
+                try fileManager.createDirectory(at: newFolderURL, withIntermediateDirectories: true)
+                logger.info("Created new folder at: \(newFolderURL.path)")
+                let newItem = FileSystemItem(id: newFolderURL, name: newFolderName, url: newFolderURL, isDirectory: true, children: [])
+                await MainActor.run {
+                    self.addItemToTree(newItem, inParentURL: targetFolderURL)
+                    self.startRename(newItem)
+                }
+            } catch {
+                logger.error("Failed to create folder: \(error.localizedDescription)")
+                await MainActor.run {
+                    self.errorMessage = "Failed to create folder: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func addItemToTree(_ item: FileSystemItem, inParentURL: URL) {
+        let parentPath = inParentURL.resolvingSymlinksInPath().path
+        
+        func addUnderParent(items: inout [FileSystemItem]) -> Bool {
+            for i in 0..<items.count {
+                let itemPath = items[i].id.resolvingSymlinksInPath().path
+                if items[i].id == inParentURL || items[i].id.path == inParentURL.path || itemPath == parentPath {
+                    if items[i].children != nil {
+                        items[i].children?.append(item)
+                        items[i].children?.sort {
+                            if $0.isDirectory && !$1.isDirectory { return true }
+                            if !$0.isDirectory && $1.isDirectory { return false }
+                            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+                        }
+                    } else {
+                        items[i].children = [item]
+                    }
+                    return true
+                }
+                if items[i].isDirectory, items[i].children != nil {
+                    var childItems = items[i].children!
+                    if addUnderParent(items: &childItems) {
+                        items[i].children = childItems
+                        return true
+                    }
+                }
+            }
+            return false
+        }
+
+        if addUnderParent(items: &rootItems) {
+            expandedItemIDs.insert(inParentURL)
+            if !item.isDirectory {
+                allSuggestableFiles.append(item)
+            }
+            recomputeFilteredRootItems()
+            treeVersion &+= 1
+            onNodeReloadRequired?(inParentURL)
+        }
+    }
+    func findItem(by id: URL, in items: [FileSystemItem]) -> FileSystemItem? {
+        let targetStandardized = id.resolvingSymlinksInPath().path
         for item in items {
-            if item.id == id { return item }
+            let itemStandardized = item.id.resolvingSymlinksInPath().path
+            if item.id == id || item.id.path == id.path || itemStandardized == targetStandardized { return item }
             if let children = item.children, let foundInChildren = findItem(by: id, in: children) { return foundInChildren }
         }
         return nil
+    }
+
+    func findItem(by id: URL) -> FileSystemItem? {
+        if let item = findItem(by: id, in: filteredRootItems) {
+            return item
+        }
+        return findItem(by: id, in: rootItems)
     }
 
     // MARK: - File Suggestion Logic
@@ -670,19 +949,38 @@ final class ExplorerViewModel {
     private func refreshSubfolder(at url: URL) async {
         logger.info("Starting incremental refresh for subfolder: \(url.path)")
         
+        var folderURL = url
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) {
+            if !isDir.boolValue {
+                folderURL = url.deletingLastPathComponent()
+            }
+        } else {
+            folderURL = url.deletingLastPathComponent()
+        }
+
         // Scan only the specific subfolder
-        let subfolderFiles = await fetchAllFiles(under: url)
+        let subfolderFiles = await fetchAllFiles(under: folderURL)
+        let freshChildren = try? await fetchItems(at: folderURL)
         
         await MainActor.run {
             // Remove old entries for this subfolder path
-            let subfolderPath = url.path
+            let subfolderPath = folderURL.path
             self.allSuggestableFiles.removeAll { item in
                 item.url.path.hasPrefix(subfolderPath)
             }
             
             // Add new entries
             self.allSuggestableFiles.append(contentsOf: subfolderFiles)
-            self.logger.info("Incremental refresh complete for \(url.lastPathComponent). Updated cache with \(subfolderFiles.count) files.")
+            
+            // Update visual tree if this folder is loaded in rootItems
+            if let freshChildren = freshChildren,
+               let existingItem = self.findItem(by: folderURL),
+               existingItem.children != nil {
+                self.updateChildren(for: folderURL, with: freshChildren)
+            }
+
+            self.logger.info("Incremental refresh complete for \(folderURL.lastPathComponent). Updated cache with \(subfolderFiles.count) files.")
         }
     }
     

@@ -20,7 +20,7 @@
 //      data it reads, asserted below — the same disclosure `WorkflowCanvasStateLifetimeTests` makes.
 //    • PERSISTENCE. There is none: the disclosure is LIVE-ONLY by owner decision (2026-08-24).
 //      `WorkflowRunRecord` is rebuilt field-by-field from promoted `WorkflowRunRecordSD` columns, so
-//      carrying it would need a new column plus a `DevgenticSchemaV3` stage. `from(record:)`
+//      carrying it would need a new column plus (once a build has shipped) a schema-version stage. `from(record:)`
 //      therefore leaves the flag false, and `testHistoricalRunsDoNotDisclose` pins that as the
 //      intended behaviour rather than leaving it to be discovered as a bug.
 //    • ⚠️ THE TRANSITIVE-SET COMPUTATION INSIDE `begin`. The POLICY's handling of a nested set is

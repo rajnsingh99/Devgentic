@@ -41,18 +41,15 @@ struct ReportInspectorView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider().background(theme.dividerColor)
-            RunReportView(
-                messageID: messageID,
-                conversationID: conversationID,
-                traceID: traceID,
-                answerPreview: answerPreview
-            ) { feedback in
-                pendingExportFeedback = feedback
-                showBundleExport = true
-            }
+        RunReportView(
+            messageID: messageID,
+            conversationID: conversationID,
+            traceID: traceID,
+            answerPreview: answerPreview,
+            onClose: { onClose?() ?? dismiss() }
+        ) { feedback in
+            pendingExportFeedback = feedback
+            showBundleExport = true
         }
         .frame(minWidth: 850, idealWidth: 1000, maxWidth: .infinity,
                minHeight: 520, idealHeight: 700, maxHeight: .infinity)
@@ -60,13 +57,13 @@ struct ReportInspectorView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(
+                .strokeBorder(
                     LinearGradient(
-                        colors: [theme.dividerColor, theme.dividerColor.opacity(0.3)],
+                        colors: [theme.dividerColor.opacity(0.4), theme.dividerColor.opacity(0.15)],
                         startPoint: .top,
                         endPoint: .bottom
                     ),
-                    lineWidth: 1.5
+                    lineWidth: 1
                 )
         )
         .sheet(isPresented: $showBundleExport) {
@@ -77,32 +74,5 @@ struct ReportInspectorView: View {
                 )
             }
         }
-    }
-
-    // MARK: - Header
-
-    private var header: some View {
-        HStack {
-            Text("Run Report")
-                .font(.system(.title3, design: .rounded, weight: .bold))
-                .foregroundStyle(theme.primaryText)
-
-            Spacer()
-
-            Button(action: { onClose?() ?? dismiss() }) {
-                Image(systemName: "xmark")
-                    .font(.system(.caption, weight: .bold))
-                    .foregroundStyle(theme.secondaryText)
-                    .frame(width: 26, height: 26)
-                    .background(theme.surfaceOverlayStrong)
-                    .clipShape(Circle())
-                    .overlay(Circle().stroke(theme.dividerColor, lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-            .help("Close")
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
-        .background(theme.secondaryBackground.opacity(0.6))
     }
 }

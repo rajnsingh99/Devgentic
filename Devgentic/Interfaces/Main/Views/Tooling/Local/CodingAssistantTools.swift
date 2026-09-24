@@ -9,6 +9,9 @@
 //
 
 import Foundation
+import os
+
+private let logger = DGLogger(category: "CodingAssistantTools")
 
 // MARK: - Edit Code Tool (Search & Replace Blocks)
 
@@ -816,13 +819,29 @@ struct FindDefinitionTool: DevgenticTool {
 struct BatchCommandTool: DevgenticTool {
     let name = "batch_command"
     let category = "Coding Assistant"
-    let description = "Executes a shell command with advanced options: configurable timeout, background execution, working directory, and intelligent output truncation (preserves first and last lines for tracebacks)."
+    let description = "Executes a shell command with advanced options: configurable timeout, background execution, and working directory. Output is returned in full; if it is larger than the room left in the model's context, the middle is omitted (start and end kept) with a note saying so."
+
+    /// Scopes background tasks to the conversation that started them, so `bg_1` means one thing
+    /// per conversation and one conversation cannot poll or stop another's build. `TerminalTool`
+    /// is constructed the same way.
+    ///
+    /// ⚠️ Optional because the catalogue builds every tool once with `nil` for Library metadata
+    /// (`NativeToolEntry.make` probes a instance for its name and category). A nil id means there
+    /// is nothing to register a background task AGAINST — see the refusal in `call`, which is
+    /// deliberately a refusal rather than a launch, because an unregistered background process is
+    /// exactly the orphan this work exists to remove.
+    let conversationID: UUID?
+
+    init(conversationID: UUID? = nil) {
+        self.conversationID = conversationID
+    }
 
     struct Arguments: Decodable, Sendable {
         let command: String
         let working_directory: String?
         let timeout_seconds: Int?
         let background: Bool?
+        let task_name: String?
 
         private struct DynamicKey: CodingKey {
             var stringValue: String
@@ -847,6 +866,7 @@ struct BatchCommandTool: DevgenticTool {
             self.working_directory = try? container.decodeIfPresent(String.self, forKey: DynamicKey(stringValue: "working_directory")!)
             self.timeout_seconds = try? container.decodeIfPresent(Int.self, forKey: DynamicKey(stringValue: "timeout_seconds")!)
             self.background = try? container.decodeIfPresent(Bool.self, forKey: DynamicKey(stringValue: "background")!)
+            self.task_name = try? container.decodeIfPresent(String.self, forKey: DynamicKey(stringValue: "task_name")!)
         }
     }
 
@@ -855,33 +875,76 @@ struct BatchCommandTool: DevgenticTool {
             properties: [
                 ("command", "string", "The shell command to execute."),
                 ("working_directory", "string", "Working directory for command execution. Required — pass the project root or a specific subpath."),
-                ("timeout_seconds", "integer", "Maximum execution time in seconds (default 30, max 300). Process is killed on timeout."),
-                ("background", "boolean", "Run in background and return immediately with a job ID (default false).")
+                ("timeout_seconds", "integer", "Maximum execution time in seconds, max 900. Defaults to 30 in the foreground and 900 in the background. The process is killed on timeout, but any output it produced first is still returned."),
+                // ⚠️ The model chooses the mode, and it was choosing blind: this said only "run in
+                // background and return immediately", with nothing about WHEN that is right. A
+                // device run on 2026-09-21 backgrounded a build whose result it wanted one second
+                // later, then spent 9 iterations polling for it. The correct answer was a
+                // foreground call with a raised timeout, and nothing told it so.
+                //
+                // Worth the ~250 extra chars in every request: it is read at the moment of the
+                // decision, which a system-prompt paragraph is not.
+                ("task_name", "string", "Optional short label shown to the user instead of the raw command."),
+                ("background", "boolean", "Default false. Keep it false for anything whose result you need — the call waits and returns the output, and timeout_seconds goes up to 900 for a slow build. Set it true ONLY to leave something running that you will not wait for, such as a dev server; it returns a task id instead of output, and you must call command_output to see anything.")
             ],
             required: ["command", "working_directory"]
         )
     }
 
+    // MARK: - Timeout Bounds
+
+    /// Applied to a FOREGROUND call that names no timeout. Deliberately short: most are a build
+    /// probe or a `git status`, and a caller that expects to run long should say so.
+    static let defaultTimeoutSeconds = 30
+
+    /// Applied to a BACKGROUND call that names no timeout.
+    ///
+    /// ⚠️ NOT 30. Device test 2026-09-21: the model backgrounded a real `xcodebuild` without
+    /// naming a timeout, inherited the foreground default, and the build was killed at 30 seconds
+    /// having barely started — then correctly reported as failed. A 30 s ceiling on the mode that
+    /// exists FOR long work makes the common case "killed before it began".
+    ///
+    /// The ceiling is the right default here because `background: true` is already the caller
+    /// saying "this takes a while and I am not waiting for it". Requiring `timeout_seconds`
+    /// instead was considered and rejected: it converts a bad default into a hard failure for the
+    /// smaller models that omitted the argument in the first place.
+    static let defaultBackgroundTimeoutSeconds = maxTimeoutSeconds
+
+    /// The ceiling a caller cannot exceed. Raised 300 → 900 on 2026-09-21: 5 minutes sat just
+    /// under this project's own `build-for-testing` + `test-without-building` cycle (~266 s
+    /// measured), so the one command a coding agent most needs to run was the one it could not
+    /// finish. The bound exists to stop a hang, not to rule out a slow build.
+    ///
+    /// ⚠️ This ceiling is NOT the effective limit on its own. A `batch_command` call is compute,
+    /// and the run-level `executionTimeout` sentinel (`AgentConnect`) bounds the compute of the
+    /// WHOLE turn. If that budget is smaller than the command's timeout, the sentinel fires
+    /// first and aborts the entire run — and unlike the bound here it returns no partial output.
+    /// `CodeSessionManager.presetExecutionTimeout` is sized to keep room above this value.
+    static let maxTimeoutSeconds = 900
+
+    /// The bound actually applied to a call. Extracted so the clamp is assertable without
+    /// spawning a shell — `isDestructiveCommand` is static for the same
+    /// reason. A model that asks for an hour gets the ceiling, not an hour.
+    ///
+    /// A non-positive request is treated as "unspecified" rather than "no limit": this tool has
+    /// no unbounded mode, and silently granting one to `timeout_seconds: 0` would be the worst
+    /// way to acquire it.
+    static func effectiveTimeout(_ requested: Int?, background: Bool = false) -> Int {
+        guard let requested, requested > 0 else {
+            return background ? defaultBackgroundTimeoutSeconds : defaultTimeoutSeconds
+        }
+        return min(requested, maxTimeoutSeconds)
+    }
+
     // MARK: - Testable Safety Guard
 
-    /// Intelligent output truncation: keeps head + tail lines for tracebacks, then hard char cap.
-    static func truncateOutput(_ output: String, maxLines: Int = 1000, maxChars: Int = 8000) -> String {
-        var result = output
-        let outputLines = result.components(separatedBy: "\n")
-        if outputLines.count > maxLines {
-            let headCount = maxLines / 2
-            let tailCount = maxLines / 2
-            let headLines = Array(outputLines.prefix(headCount))
-            let tailLines = Array(outputLines.suffix(tailCount))
-            result = headLines.joined(separator: "\n")
-                + "\n\n[... \(outputLines.count - maxLines) lines truncated ...]\n\n"
-                + tailLines.joined(separator: "\n")
-        }
-        if result.count > maxChars {
-            result = String(result.prefix(maxChars)) + "\n...[Truncated at \(maxChars) chars]"
-        }
-        return result
-    }
+    // ⚠️⚠️ `truncateOutput` (8,000 chars / 1,000 lines) WAS REMOVED 2026-09-24 — user decision: no
+    // limit below what fits. A tool cannot know how much room the model has, so it cut a build log
+    // to 8K on a 200K-window model as readily as on an 8K one, and the DB then stored only that
+    // (the rest existed nowhere). Output now leaves this tool whole; `ToolResultBudget.fit` cuts it
+    // to the room actually free, keeping BOTH ends on line boundaries — the properties this function
+    // was hardened for after the 2026-09-21 xcodebuild regression, and whose tests moved with them
+    // to `ToolResultBudgetTests`.
 
     /// A speed-bump against the best-known ways to destroy a machine by accident. **Not a
     /// security boundary, and it cannot become one.**
@@ -913,101 +976,157 @@ struct BatchCommandTool: DevgenticTool {
         return false
     }
 
-    func call(arguments: Arguments) async throws -> String {
-        // The refusals `execute_shell` has always enforced. This tool is the same capability —
-        // `/bin/zsh -c` with the caller's command — and enforced none of them until 2026-07-31,
-        // so `less`, a bare `python3` REPL and `sudo -s` all hung or stalled here while being
-        // refused there. Shared list, so the two shells cannot drift.
-        if let refusal = ShellCommandGuard.refusalReason(for: arguments.command) {
-            return refusal
-        }
+    // MARK: - Shared execution core
+    //
+    // ⚠️ ONE implementation, three callers: `batch_command` (Chat/Workflow, still flag-driven),
+    // `run_command` and `start_background_task` (the Code splits). `ShellCommandGuard` exists
+    // because a guard attached to ONE shell tool is a guard on a NAME rather than a capability;
+    // the same reasoning applies to the execution itself, so it lives here rather than being
+    // reinvented per tool.
 
-        // Safety: block destructive commands. A speed-bump, not a boundary — see the comment
-        // on `destructivePatterns`.
-        if Self.isDestructiveCommand(arguments.command) {
-            return "Error: Command blocked by safety filter. Destructive system commands are not permitted."
-        }
+    enum Precheck {
+        case ready(workingDirectory: String)
+        case refused(String)
+    }
 
-        guard let rawWD = arguments.working_directory, !rawWD.isEmpty else {
-            return "Error: 'working_directory' is required. Pass the project root or a specific subpath."
+    /// The refusals every shell path shares, and the resolved working directory.
+    static func precheck(command: String, workingDirectory: String?) -> Precheck {
+        if let refusal = ShellCommandGuard.refusalReason(for: command) {
+            return .refused(refusal)
         }
-        let expandedWD = FilePathResolver.resolve(rawWD)
-        guard FileManager.default.fileExists(atPath: expandedWD) else {
-            return "Error: working_directory '\(expandedWD)' does not exist."
+        if isDestructiveCommand(command) {
+            return .refused("Error: Command blocked by safety filter. Destructive system commands are not permitted.")
         }
+        guard let raw = workingDirectory, !raw.isEmpty else {
+            return .refused("Error: 'working_directory' is required. Pass the project root or a specific subpath.")
+        }
+        let expanded = FilePathResolver.resolve(raw)
+        guard FileManager.default.fileExists(atPath: expanded) else {
+            return .refused("Error: working_directory '\(expanded)' does not exist.")
+        }
+        return .ready(workingDirectory: expanded)
+    }
 
-        let timeout = min(arguments.timeout_seconds ?? 30, 300)
-
+    private static func shell(_ command: String, in workingDirectory: String) -> Process {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-c", arguments.command]
-        process.currentDirectoryURL = URL(fileURLWithPath: expandedWD)
+        process.arguments = ["-c", command]
+        process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory)
+        return process
+    }
 
-        if arguments.background ?? false {
-            do {
-                // No pipes on the background path. Nothing ever reads them, so attaching one
-                // guarantees the child wedges the moment it writes ~64 KB — a "launched in
-                // background" command that silently stops making progress. Discarding is the
-                // honest expression of "the caller is not collecting this output".
-                process.standardOutput = FileHandle.nullDevice
-                process.standardError = FileHandle.nullDevice
-                try process.run()
-                return "Command launched in background (PID: \(process.processIdentifier))."
-            } catch {
-                return "Error launching background command: \(error.localizedDescription)"
-            }
-        }
-
-        // This site used to wait on `waitUntilExit()` and read the two pipes afterwards, which
-        // is the deadlock `ProcessRunner` exists to remove — and the timeout below hid it:
-        // any command producing more than ~64 KB blocked in `write()`, never exited, and was
-        // then reported as "timed out", which is a false statement about a command that had
-        // finished. `ProcessRunner.run(_:timeout:)` drains both streams concurrently, so the
-        // bound now applies to genuinely slow commands only.
-        // Off the cooperative pool. `ProcessRunner.run` is synchronous by design, and the 27
-        // sites it replaced were synchronous already — but this one was not, and `timeout`
-        // here goes up to 300s. Calling it inline would park a Swift-concurrency worker thread
-        // for five minutes; with a small fixed-width pool, a few concurrent `batch_command`
-        // calls would stall unrelated async work across the app.
+    /// Runs `command` and WAITS, returning its output.
+    static func runForeground(command: String,
+                              workingDirectory: String,
+                              timeout: Int,
+                              conversationID: UUID?,
+                              name: String? = nil) async -> String {
+        let process = shell(command, in: workingDirectory)
         nonisolated(unsafe) let target = process
         let seconds = TimeInterval(timeout)
+
+        // ⚠️ Adoption happens in `onStarted`, INSIDE ProcessRunner. The pipes must be attached
+        // before `run()` or the output is lost, and there is no pid before it — so the instant
+        // after launch is the only moment a handle can be taken. Without it a foreground run is
+        // unstoppable and is orphaned to launchd at quit.
+        nonisolated(unsafe) var adopted: BackgroundProcessRegistry.Snapshot?
+        let adopt: ((Process) -> Void)? = conversationID.map { id in
+            { running in
+                adopted = BackgroundProcessRegistry.shared.adopt(
+                    process: running, command: command,
+                    workingDirectory: workingDirectory, conversationID: id, name: name)
+            }
+        }
+        func settle(_ output: String, _ status: BackgroundProcessRegistry.Status) {
+            guard let adopted, let conversationID else { return }
+            BackgroundProcessRegistry.shared.complete(
+                conversationID: conversationID, taskID: adopted.id, output: output, status: status)
+        }
+
+        // Off the cooperative pool. `ProcessRunner.run` is synchronous by design and `timeout`
+        // here goes up to 900s; calling it inline would park a Swift-concurrency worker thread for
+        // a quarter of an hour. A GCD thread is cheap to hold, a cooperative-pool worker is not.
         let run: ProcessRunner.TimedResult
         do {
             run = try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async {
-                    do { continuation.resume(returning: try ProcessRunner.run(target, timeout: seconds)) }
+                    do { continuation.resume(returning: try ProcessRunner.run(target, timeout: seconds, onStarted: adopt)) }
                     catch { continuation.resume(throwing: error) }
                 }
             }
         } catch {
+            settle("Error: \(error.localizedDescription)", .exited(code: -1))
             return "Error: \(error.localizedDescription)"
         }
 
-        var output = Self.truncateOutput(run.result.combinedOutput)
+        var output = run.result.combinedOutput
 
-        // The command backgrounded something that still held the pipe when we stopped reading.
-        // Said in the observation, not just the log: from the agent's side an incomplete
-        // capture is indistinguishable from a command that simply printed less, and it would
-        // otherwise conclude the daemon produced nothing and try again.
+        // Said in the observation, not just the log: an incomplete capture is indistinguishable
+        // from a command that printed less, and the agent would conclude the daemon produced
+        // nothing and try again.
         if !run.result.outputComplete {
             output += "\n\n[note] This command left a background process holding its output stream. "
                 + "Reading stopped when the command itself finished, so anything written after that is NOT shown above, "
                 + "and the background process loses its output stream. Redirect it to keep its output: `cmd > log 2>&1 &`."
         }
 
+        settle(run.result.combinedOutput,
+               run.timedOut ? .timedOut : .exited(code: run.result.exitCode))
+
         if run.timedOut {
             // Partial output is returned rather than discarded: a command killed at the bound
             // usually produced the evidence for WHY it was slow before it was killed.
-            //
-            // Deliberately NOT `ShellExitStatus.annotate`-d. `terminationStatus` after a kill
-            // is the signal number, and annotating it would put `exit="9"` into episodic
-            // memory as though the command had chosen to exit 9 — the two are different facts.
             return output.isEmpty
                 ? "Error: Command timed out after \(timeout)s and was killed. It produced no output."
                 : "Error: Command timed out after \(timeout)s and was killed. Output before the kill:\n\(output)"
         }
-
         return ShellExitStatus.annotate(output, exitCode: run.result.exitCode)
+    }
+
+    /// Starts `command` and returns immediately with a task id.
+    static func startBackground(command: String,
+                                workingDirectory: String,
+                                timeout: Int,
+                                conversationID: UUID?,
+                                name: String? = nil,
+                                notifyOnCompletion: Bool = false) -> String {
+        guard let conversationID else {
+            logger.error("[BGPROC] A background start was requested for '\(command)' with no conversation id, so the task could not be registered. CONSEQUENCE: refused rather than launched — an unregistered background process has no bound, no collectable output and no owner at quit.")
+            return "Error: background execution is unavailable here (no conversation to own the task). Run the command in the foreground instead, raising timeout_seconds if it needs longer."
+        }
+        do {
+            let task = try BackgroundProcessRegistry.shared.launch(
+                command: command, workingDirectory: workingDirectory,
+                timeout: TimeInterval(timeout), conversationID: conversationID, name: name,
+                notifyOnCompletion: notifyOnCompletion)
+            return """
+                Started background task \(task.id): \(command)
+                It will be killed automatically after \(timeout)s if it has not finished.
+                Read its output with command_output, end it early with command_stop.\
+                Do not poll in a loop — set notify_on_completion next time if you need the result.
+                """
+        } catch {
+            return "Error launching background command: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Execution (dispatch)
+
+    func call(arguments: Arguments) async throws -> String {
+        switch Self.precheck(command: arguments.command, workingDirectory: arguments.working_directory) {
+        case .refused(let reason):
+            return reason
+        case .ready(let workingDirectory):
+            let isBackground = arguments.background ?? false
+            let timeout = Self.effectiveTimeout(arguments.timeout_seconds, background: isBackground)
+            return isBackground
+                ? Self.startBackground(command: arguments.command, workingDirectory: workingDirectory,
+                                       timeout: timeout, conversationID: conversationID,
+                                       name: arguments.task_name)
+                : await Self.runForeground(command: arguments.command, workingDirectory: workingDirectory,
+                                           timeout: timeout, conversationID: conversationID,
+                                           name: arguments.task_name)
+        }
     }
 }
 

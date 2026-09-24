@@ -56,7 +56,7 @@ struct InputToolbarView: View {
     @State private var showingFolderPopover = false
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             if interfaceMode == .code {
                 // Code mode gets a dedicated folder pill with its own "Select file..."
                 // entry in the popover — the generic paperclip would be redundant.
@@ -238,30 +238,37 @@ struct InputToolbarView: View {
         let label = hasFolder
             ? codeSessionManager.projectPath!.lastPathComponent
             : "Project"
-        return HStack(spacing: 6) {
-            Image(systemName: "folder")
+        return HStack(spacing: 7) {
+            Image(systemName: hasFolder ? "folder.fill" : "folder")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundColor(hasFolder ? theme.primaryText : theme.secondaryText)
+                .frame(width: 12, height: 12)
+                .foregroundColor(hasFolder ? theme.accentColor : theme.secondaryText.opacity(0.85))
+
             Text(label)
-                .font(theme.fontSubheadline.weight(.medium))
-                .foregroundColor(hasFolder ? theme.primaryText : theme.secondaryText)
+                .font(theme.fontCaption.weight(.medium))
+                .foregroundColor(theme.primaryText)
                 .lineLimit(1)
                 .truncationMode(.middle)
+
             Image(systemName: "chevron.down")
-                .font(.system(size: 9, weight: .bold))
-                .foregroundColor(theme.secondaryText.opacity(0.8))
+                .font(.system(size: 8.5, weight: .semibold))
+                .foregroundColor(theme.secondaryText.opacity(isFolderButtonHovering ? 0.9 : 0.65))
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 6)
         .background(
             Capsule()
                 .fill(isFolderButtonHovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
         )
         .overlay(
             Capsule()
-                .strokeBorder(theme.secondaryText.opacity(isFolderButtonHovering ? 0.35 : 0.15), lineWidth: 1)
+                .strokeBorder(
+                    isFolderButtonHovering
+                        ? theme.dividerColor.opacity(0.55)
+                        : theme.dividerColor.opacity(0.30),
+                    lineWidth: 0.5
+                )
         )
-        .scaleEffect(isFolderButtonHovering ? 1.03 : 1.0)
     }
 
     // MARK: - Shared Icon Builder

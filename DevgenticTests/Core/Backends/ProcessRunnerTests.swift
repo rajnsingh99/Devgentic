@@ -216,6 +216,120 @@ final class ProcessRunnerTests: XCTestCase {
         XCTAssertFalse(result.outputComplete, "and we must SAY we did not")
     }
 
+    // MARK: - The bound reaches the whole job
+
+    /// The foreground twin of the background defect. `zsh -c "xcodebuild …"` puts the compiler in
+    /// a SEPARATE process, so signalling only the shell left the build running past a bound that
+    /// had already expired — a 900 s `batch_command` timeout that stopped nothing.
+    func testTheBoundKillsSubProcessesNotJustTheShell() throws {
+        let pidFile = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("procrunner-\(UUID().uuidString).pid")
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+
+        // `wait` keeps the shell alive, so the bound is what ends this — not the command finishing.
+        let run = try ProcessRunner.run(
+            zshProcess("sleep 60 & echo $! > \(pidFile.path); wait"), timeout: 1)
+        XCTAssertTrue(run.timedOut, "precondition: the bound fired rather than the command ending")
+
+        let text = try XCTUnwrap(try? String(contentsOf: pidFile, encoding: .utf8),
+                                 "the shell never recorded its background pid")
+        let child = try XCTUnwrap(pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)))
+
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, kill(child, 0) == 0 { usleep(20_000) }
+        XCTAssertNotEqual(kill(child, 0), 0,
+                          "the sub-process outlived the bound — the caller was told the command "
+                          + "was killed while its real work kept running")
+    }
+
+    /// ⚠️ THE COUNTERWEIGHT to the tree kill: "kill the tree on timeout" must not grow into
+    /// "kill anything the command ever started". When the command's own process FINISHED,
+    /// nothing was being bounded, and `cmd &` is a deliberate launch.
+    ///
+    /// ⚠️⚠️ This pins the BEHAVIOUR, not the mechanism, and the distinction was found by
+    /// mutation: removing the watchdog's `isRunning` guard leaves this test GREEN. The daemon
+    /// survives because the shell exits, `exited.wait` returns, and the watchdog is CANCELLED
+    /// before its deadline — the guard is never reached on this path. Do not read a pass here as
+    /// evidence that the guard works; `testTheWatchdogChecksLivenessBeforeActing` covers that.
+    func testADeliberatelyBackgroundedDescendantOfAFinishedCommandSurvives() throws {
+        let pidFile = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("procrunner-\(UUID().uuidString).pid")
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+
+        // No `wait`: the shell exits immediately and the descendant is deliberately left running.
+        let run = try ProcessRunner.run(
+            zshProcess("sleep 5 & echo $! > \(pidFile.path); echo done"), timeout: 1)
+        XCTAssertFalse(run.timedOut, "precondition: the command finished on its own")
+
+        let text = try XCTUnwrap(try? String(contentsOf: pidFile, encoding: .utf8))
+        let child = try XCTUnwrap(pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)))
+
+        // Past the bound, and the watchdog has had its chance to fire and no-op.
+        usleep(1_500_000)
+        XCTAssertEqual(kill(child, 0), 0,
+                       "a descendant the command deliberately backgrounded was killed. The bound "
+                       + "had nothing to enforce — the command itself had already finished.")
+        kill(child, SIGKILL)
+    }
+
+    /// ⚠️ A STRUCTURAL GUARD, for a race a behavioural test cannot reach.
+    ///
+    /// `DispatchWorkItem.cancel()` only prevents a start, so an item that had already begun when
+    /// the command finished runs to completion. If it acts before checking liveness, a run that
+    /// SUCCEEDED at its bound is reported as `timedOut` and has its descendants killed — a false
+    /// statement plus a real side effect. Mutation-tested: deleting the guard passes every other
+    /// test in this file, which is precisely why the order is asserted here.
+    func testTheWatchdogChecksLivenessBeforeActing() throws {
+        let source = try Self.readProcessRunnerSource()
+        let body = try XCTUnwrap(Self.watchdogBody(in: source),
+                                 "could not find the timeout DispatchWorkItem — this checks nothing")
+
+        let liveness = try XCTUnwrap(body.range(of: "process.isRunning"),
+                                     "the watchdog no longer checks whether the child is alive")
+        let firstAction = try XCTUnwrap(
+            [body.range(of: "killed.set()"), body.range(of: "ProcessTree.")]
+                .compactMap { $0 }.map(\.lowerBound).min(),
+            "the watchdog no longer does anything")
+
+        XCTAssertLessThan(liveness.lowerBound, firstAction,
+            "the watchdog acts before checking `process.isRunning`. A command that finished right "
+            + "at its bound would be reported as timed out and have its sub-processes killed, on "
+            + "a run that actually succeeded.")
+    }
+
+    private static func readProcessRunnerSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // Backends
+            .deletingLastPathComponent()   // Core
+            .deletingLastPathComponent()   // DevgenticTests
+            .deletingLastPathComponent()   // repo root
+        let path = "Devgentic/Interfaces/Main/Views/Tooling/Local/utils/ProcessRunner.swift"
+        guard let text = try? String(contentsOf: root.appendingPathComponent(path), encoding: .utf8) else {
+            throw XCTSkip("ProcessRunner.swift not reachable — running outside a checkout")
+        }
+        return text
+    }
+
+    /// The timeout `DispatchWorkItem`'s body, comments stripped so the prose explaining the
+    /// ordering cannot be mistaken for the code implementing it.
+    private static func watchdogBody(in source: String) -> String? {
+        let lines = source.components(separatedBy: "\n")
+        guard let start = lines.firstIndex(where: { $0.contains("let item = DispatchWorkItem {") }) else {
+            return nil
+        }
+        var depth = 0
+        var started = false
+        var body: [String] = []
+        for line in lines[start...] {
+            depth += line.filter { $0 == "{" }.count
+            depth -= line.filter { $0 == "}" }.count
+            if depth > 0 { started = true }
+            if !line.trimmingCharacters(in: .whitespaces).hasPrefix("//") { body.append(line) }
+            if started && depth == 0 { break }
+        }
+        return body.joined(separator: "\n")
+    }
+
     /// Guards the flag against degrading into always-false, which would make it useless noise.
     func testCompleteOutputReportsComplete() throws {
         let result = try ProcessRunner.zsh("seq 1 40000; seq 1 40000 >&2")

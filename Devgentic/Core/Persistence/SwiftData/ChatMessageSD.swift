@@ -22,6 +22,21 @@ final class ChatMessageSD {
     var traceID: String?
     var profileTypeRaw: String?
 
+    /// The rawValue of `MessageSource` — what CAUSED this turn (typed here, sent from Telegram,
+    /// fired by the scheduler, woken by a finished background task).
+    ///
+    /// ⚠️ Optional so rows written before the column decode as nil → `.localUI`, which is the
+    /// honest answer: those rows never recorded a source. Added when the UI began to branch on
+    /// it; before that the field was in-memory only and nothing but logging read it.
+    var messageSourceRaw: String?
+
+    /// True for a machine-authored stub that exists so the exchange PAIRS — see
+    /// `ChatMessage.isSyntheticPrompt` for why an unpaired assistant row is silently dropped.
+    ///
+    /// ⚠️ Optional, not `Bool = false`, to match every other column added to this model after
+    /// the fact. Legacy rows decode as nil → false.
+    var isSyntheticPrompt: Bool?
+
     // Content stored as JSON Data — no ValueTransformer needed
     var contentData: Data
     var agentResponseData: Data?
@@ -106,6 +121,11 @@ final class ChatMessageSD {
 
         message.traceID = traceID
         message.profileType = profileTypeRaw.flatMap { ProfileType(rawValue: $0) }
+        // ⚠️ `?? .localUI` rather than leaving the default in place: identical result, but it
+        // states that an unreadable or absent source is DELIBERATELY read as local, so a future
+        // rename of a `MessageSource` case degrades to "typed here" instead of crashing.
+        message.messageSource = messageSourceRaw.flatMap { MessageSource(rawValue: $0) } ?? .localUI
+        message.isSyntheticPrompt = isSyntheticPrompt ?? false
 
         if let data = agentResponseData {
             do {
@@ -373,7 +393,9 @@ final class ChatMessageSD {
             parkedOperationID: message.lifecycleState.parkedOperationID?.uuidString,
             apiProvider: message.apiProvider,
             modelName: message.modelName,
-            modelDialect: message.modelDialect
+            modelDialect: message.modelDialect,
+            messageSourceRaw: message.messageSource.rawValue,
+            isSyntheticPrompt: message.isSyntheticPrompt
         )
 
         if let textFiles = message.attachedTextFiles {
@@ -391,7 +413,8 @@ final class ChatMessageSD {
          agentResponseData: Data?, timelineEventsData: Data?, tokenUsageData: Data? = nil,
          terminalOutcomeRaw: String? = nil, terminalReason: String? = nil,
          lifecycleStateRaw: String? = nil, parkedOperationID: String? = nil,
-         apiProvider: String? = nil, modelName: String? = nil, modelDialect: String? = nil) {
+         apiProvider: String? = nil, modelName: String? = nil, modelDialect: String? = nil,
+         messageSourceRaw: String? = nil, isSyntheticPrompt: Bool? = nil) {
         self.id = id
         self.conversationId = conversationId
         self.timestamp = timestamp
@@ -409,5 +432,7 @@ final class ChatMessageSD {
         self.apiProvider = apiProvider
         self.modelName = modelName
         self.modelDialect = modelDialect
+        self.messageSourceRaw = messageSourceRaw
+        self.isSyntheticPrompt = isSyntheticPrompt
     }
 }

@@ -41,22 +41,16 @@ protocol WorkingMemoryStrategy: Sendable {
     /// Strategies without a budget concept should return 0.0.
     var budgetUtilization: Double { get }
 
-    /// Applies the strategy's per-entry cap to a raw tool output string. Used by the
-    /// native-turn path, which serializes tool results directly into provider messages
-    /// and needs the same budget policy as `recordObservation`'s stored results —
-    /// without going through the full scratchpad compile pipeline.
-    ///
-    /// Default implementation returns the input unchanged (strategies without a cap
-    /// concept). `WindowedLinearMemory` overrides to apply its `perEntryCap`.
-    func truncatedResult(for raw: String) -> String
+    /// The most characters one recorded result keeps. `Int.max` for strategies that never cut —
+    /// the executor compares against it to report scratchpad-path cuts to `ContextCutLog`.
+    var perResultLimit: Int { get }
 
     /// Resets the memory.
     mutating func clear()
 }
 
 extension WorkingMemoryStrategy {
-    /// Default: no truncation. Strategies that track a budget should override.
-    func truncatedResult(for raw: String) -> String { raw }
+    var perResultLimit: Int { Int.max }
 }
 
 // MARK: - Memory Budget Configuration
@@ -73,39 +67,35 @@ struct MemoryBudgetConfig: Sendable {
     /// Max system alerts retained in compiled output.
     let maxSystemAlerts: Int
 
-    /// Derives a budget configuration from the model's context window and tier.
+    /// Never size the scratchpad below this, even when the fixed prompt has already eaten the budget.
+    static let minimumTotalChars = 2_000
+
+    /// Derives the scratchpad budget: WHATEVER ROOM THE PROMPT LEAVES, and one result may use all of it.
     ///
-    /// Budget allocation by tier (as percentage of context window tokens, converted to chars at ~4 chars/token):
-    /// - tiny/small (2-14B): 8% — leaves room in constrained context windows
-    /// - medium (30-40B): 10%
-    /// - large/ultra (70B+): 15% — generous allocation, context is plentiful
+    /// The room is the same payload budget the native path works to (`PromptFitCheck
+    /// .nativePayloadCharBudget` — 75% of the window, the rest reserved for the reply) minus
+    /// `reservedChars`, the prompt parts that do not change during a run: instructions, history,
+    /// context blocks, tool text, the task. The scratchpad is the only part that grows.
     ///
-    /// Per-entry cap is derived as `totalBudget / maxIterations`, floored at 200 chars.
-    static func derive(contextWindow: Int, tier: ModelTier, maxIterations: Int = 15) -> MemoryBudgetConfig {
+    /// ⚠️⚠️ THIS WAS A FIXED 8–15% OF THE WINDOW until 2026-09-24, with a per-entry cap of that ÷
+    /// `maxIterations` — 200 characters on an 8K model — on every MLX run in Chat, Code and
+    /// workflows, whatever room was actually free. The user's rule since then: no limit below what
+    /// fits. So `perEntryCap == totalBudgetChars`; when entries outgrow the total, older ones are
+    /// compressed to one line (the scratchpad's equivalent of native compaction), not cut short.
+    ///
+    /// The native tool-call path is sized by `ToolResultBudget` instead.
+    static func derive(contextWindow: Int, tier: ModelTier, reservedChars: Int = 0) -> MemoryBudgetConfig {
         // Guard against corrupted metadata: floor contextWindow at 2048 tokens.
         let safeContextWindow = max(2048, contextWindow)
-        let safeMaxIterations = max(1, maxIterations)
-
-        let budgetFraction: Double = switch tier {
-        case .tiny, .small: 0.08
-        case .medium:       0.10
-        case .large, .ultra: 0.15
-        }
-
-        // Convert token budget to approximate character budget (~4 chars per token).
-        let tokenBudget = Int(Double(safeContextWindow) * budgetFraction)
-        let totalBudgetChars = tokenBudget * 4
-
-        // Per-entry cap: divide total by expected iterations.
-        // Floor at 200 chars so even tiny models get useful observation content.
-        let perEntryCap = max(200, totalBudgetChars / safeMaxIterations)
+        let room = PromptFitCheck.nativePayloadCharBudget(forContextWindow: safeContextWindow) - max(0, reservedChars)
+        let totalBudgetChars = max(minimumTotalChars, room)
 
         // Full-fidelity window: frontier models keep more recent entries intact.
         let fullFidelityWindow: Int = tier.isFrontier ? 5 : 3
 
         return MemoryBudgetConfig(
             totalBudgetChars: totalBudgetChars,
-            perEntryCap: perEntryCap,
+            perEntryCap: totalBudgetChars,
             fullFidelityWindow: fullFidelityWindow,
             maxSystemAlerts: 3
         )
@@ -131,6 +121,11 @@ struct MemoryBudgetConfig: Sendable {
 /// **Thread safety**: This is a value type (struct). Each executor/capability receives its own
 /// copy via Swift's value semantics. No shared mutable state across actor boundaries.
 struct WindowedLinearMemory: WorkingMemoryStrategy {
+
+    var perResultLimit: Int { config.perEntryCap }
+
+    /// Which part of an oversized result is kept — the same policy the native path uses.
+    var cutPolicy = ToolCutPolicy()
 
     // MARK: - Internal Types
 
@@ -257,17 +252,12 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
     // MARK: - Protocol Conformance
 
     mutating func recordObservation(stepId: Int, toolCallId: String, toolName: String, params: String, result: String, artifacts: [MediaArtifact]) {
-        // Truncate at recording time to bound per-entry storage cost.
-        // Account for truncation suffix length so the total stored size stays within perEntryCap.
         let suffixLen = Self.truncationSuffix.count
 
-        let cappedResult: String
-        if result.count > config.perEntryCap {
-            let prefixLen = max(0, config.perEntryCap - suffixLen)
-            cappedResult = String(result.prefix(prefixLen)) + Self.truncationSuffix
-        } else {
-            cappedResult = result
-        }
+        // Same cut as the native path: the MIDDLE goes, with a note naming what was removed and how
+        // to get it — a head-only cut dropped a build's final error.
+        let cappedResult = ToolResultBudget.fit(result, limit: config.perEntryCap,
+                                                strategy: cutPolicy.strategy(forTool: toolName))
 
         // Params get an independent, smaller cap. Large params (e.g. write_file
         // content) shouldn't crowd out the result they produced.
@@ -587,16 +577,6 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
 
     mutating func clear() {
         entries.removeAll()
-    }
-
-    /// Applies the same per-entry cap logic used by `recordObservation`. Exposed so the
-    /// native-turn path can truncate tool_result content consistently without going
-    /// through `compileForPrompt`'s full render pipeline.
-    func truncatedResult(for raw: String) -> String {
-        let suffixLen = Self.truncationSuffix.count
-        guard raw.count > config.perEntryCap else { return raw }
-        let prefixLen = max(0, config.perEntryCap - suffixLen)
-        return String(raw.prefix(prefixLen)) + Self.truncationSuffix
     }
 
     // MARK: - Helpers

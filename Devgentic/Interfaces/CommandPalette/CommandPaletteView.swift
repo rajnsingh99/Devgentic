@@ -350,8 +350,7 @@ struct CommandPaletteView: View {
                 category: .action,
                 keywords: ["downloads", "clear", "clean", "history", "purge"]
             ) {
-                selectedTabRawValue = SidebarTab.downloads.rawValue
-                isSidebarVisible = true
+                router.navigateToSettings(.downloads)
                 NotificationCenter.default.post(name: .clearDownloadHistory, object: nil)
             }
         )
@@ -472,10 +471,9 @@ struct CommandPaletteView: View {
                 subtitle: "Check model and asset download progress",
                 icon: "arrow.down.circle",
                 category: .navigation,
-                shortcutBadge: ["⌘", "⌥", "8"],
                 keywords: ["downloads", "manager", "progress", "history"]
             ) {
-                router.navigate(to: .downloadManager)
+                router.navigateToSettings(.downloads)
             }
         )
         items.append(
@@ -554,6 +552,17 @@ struct CommandPaletteView: View {
                 keywords: ["settings", "orb", "voice", "assistant", "listening", "speech"]
             ) {
                 router.navigateToSettings(.orb)
+            }
+        )
+        items.append(
+            CommandPaletteItem(
+                title: "Settings: Downloads",
+                subtitle: "Model and asset download progress and history",
+                icon: "arrow.down.circle",
+                category: .navigation,
+                keywords: ["settings", "downloads", "manager", "progress", "history"]
+            ) {
+                router.navigateToSettings(.downloads)
             }
         )
         items.append(

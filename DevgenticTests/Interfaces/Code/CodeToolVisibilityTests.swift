@@ -20,9 +20,17 @@ import XCTest
 
 final class CodeToolVisibilityTests: XCTestCase {
 
-    /// The five tools the preset supersedes, as the removed `Set` literal spelled them. Pinned
+    /// The tools the preset supersedes. Five, as the removed `Set` literal spelled them. Pinned
     /// verbatim: this is the one assertion that would catch the derivation silently changing what
     /// a Code profile sees.
+    ///
+    /// ⚠️ `batch_command` was briefly a sixth. It was hidden from Code on 2026-09-22 when the split
+    /// landed, then WITHDRAWN from the catalogue entirely later the same day — `run_command` was a
+    /// literal duplicate of `batch_command(background: false)` (both call
+    /// `BatchCommandTool.runForeground`), so chat and Code were being offered different names for
+    /// identical work. A withdrawn tool cannot be "superseded for Code profiles": it is not in the
+    /// Library for anyone. Profiles that stored the name resolve through
+    /// `NativeToolCatalog.renamedTools`.
     private static let supersededByPreset: Set<String> = [
         "edit_code", "code_search", "create_file", "write_file", "execute_shell",
     ]

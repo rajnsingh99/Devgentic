@@ -69,15 +69,15 @@ extension MessageSource {
     /// The provider a remote-originated message came from, or nil for a local surface.
     ///
     /// ⚠️ `RemoteSessionInfo` stores a `MessageSource` rather than a provider, so the mirror needs
-    /// this to address a channel. Deliberately optional: `.localUI`, `.quickAccess`, `.orb` and
-    /// `.scheduled` are real sources with no remote channel, and forcing them to a default would
-    /// silently address the wrong platform.
+    /// this to address a channel. Deliberately optional: `.localUI`, `.quickAccess`, `.orb`,
+    /// `.scheduled` and `.backgroundTask` are real sources with no remote channel, and forcing
+    /// them to a default would silently address the wrong platform.
     var remoteProvider: RemoteChannel.Provider? {
         switch self {
         case .telegram: return .telegram
         case .discord:  return .discord
         case .slack:    return .slack
-        case .localUI, .quickAccess, .orb, .scheduled: return nil
+        case .localUI, .quickAccess, .orb, .scheduled, .backgroundTask: return nil
         }
     }
 }

@@ -195,11 +195,18 @@ struct CodeViewerTab: Identifiable, Equatable {
         self.originBlockIndex = originBlockIndex
     }
 
+    /// An explicit language override chosen by the user in the editor status bar.
+    /// When set, takes precedence over `snippet.language`.
+    var customLanguage: String? = nil
+
+    /// The effective language for syntax highlighting and display.
+    var effectiveLanguage: String? { customLanguage ?? snippet.language }
+
     /// Label shown on the tab: the linked filename if present, else the capitalized
     /// language, else a generic fallback. Kept here so the tab bar reads one property.
     var title: String {
         if let fileName, !fileName.isEmpty { return fileName }
-        if let language = snippet.language, !language.isEmpty { return language.capitalized }
+        if let language = effectiveLanguage, !language.isEmpty { return language.capitalized }
         return String(localized: "Snippet")
     }
 }

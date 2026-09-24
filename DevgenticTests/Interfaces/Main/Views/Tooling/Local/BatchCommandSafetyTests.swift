@@ -84,41 +84,8 @@ final class BatchCommandSafetyTests: XCTestCase {
         XCTAssertFalse(BatchCommandTool.isDestructiveCommand("dd if=input.img of=output.img"))
     }
 
-    // MARK: - Output Truncation
+    // Output-truncation tests moved to `ToolResultBudgetTests` with the cut itself (2026-09-24).
 
-    func testTruncateOutput_ShortOutput_Unchanged() {
-        let output = "line1\nline2\nline3"
-        let result = BatchCommandTool.truncateOutput(output)
-        XCTAssertEqual(result, output)
-    }
-
-    func testTruncateOutput_OverMaxLines_TruncatesMiddle() {
-        // Create 20 lines, set maxLines to 10 (5 head + 5 tail)
-        let lines = (1...20).map { "line \($0)" }
-        let output = lines.joined(separator: "\n")
-        let result = BatchCommandTool.truncateOutput(output, maxLines: 10)
-
-        XCTAssertTrue(result.contains("line 1"), "Should preserve first lines")
-        XCTAssertTrue(result.contains("line 5"), "Should preserve head")
-        XCTAssertTrue(result.contains("line 20"), "Should preserve last lines")
-        XCTAssertTrue(result.contains("[... 10 lines truncated ...]"))
-    }
-
-    func testTruncateOutput_OverMaxChars_TruncatesWithNote() {
-        let output = String(repeating: "x", count: 100)
-        let result = BatchCommandTool.truncateOutput(output, maxChars: 50)
-
-        XCTAssertTrue(result.count < 100)
-        XCTAssertTrue(result.contains("[Truncated at 50 chars]"))
-    }
-
-    func testTruncateOutput_ExactlyMaxLines_NoTruncation() {
-        let lines = (1...10).map { "line \($0)" }
-        let output = lines.joined(separator: "\n")
-        let result = BatchCommandTool.truncateOutput(output, maxLines: 10)
-
-        XCTAssertEqual(result, output)
-    }
 
     // MARK: - Parity with execute_shell
     //
@@ -173,5 +140,47 @@ final class BatchCommandSafetyTests: XCTestCase {
                            "if this ever starts returning true, update the comment — the list "
                            + "still cannot bound a shell, and pretending otherwise is the risk")
         }
+    }
+
+    // MARK: - Timeout Bounds
+
+    func testTimeout_DefaultsWhenUnspecified() {
+        XCTAssertEqual(BatchCommandTool.effectiveTimeout(nil), 30)
+    }
+
+    func testTimeout_HonoursARequestUnderTheCeiling() {
+        XCTAssertEqual(BatchCommandTool.effectiveTimeout(600), 600,
+                       "a 10-minute build must not be quietly cut to the default")
+    }
+
+    func testTimeout_ClampsARequestAboveTheCeiling() {
+        XCTAssertEqual(BatchCommandTool.effectiveTimeout(7200), BatchCommandTool.maxTimeoutSeconds)
+    }
+
+    /// There is no unbounded mode here, and `0` must not become one by accident — a shell with
+    /// no bound is the hang this tool's timeout exists to end.
+    func testTimeout_NonPositiveIsUnspecifiedNotUnbounded() {
+        XCTAssertEqual(BatchCommandTool.effectiveTimeout(0), 30)
+        XCTAssertEqual(BatchCommandTool.effectiveTimeout(-1), 30)
+    }
+
+    /// ⚠️⚠️ THE INVARIANT, not the number. These two bounds were both 300 s and neither knew
+    /// about the other: the tool advertised a timeout the run could never reach, because the
+    /// run-level compute sentinel hit the same value first and aborted the WHOLE turn — and it
+    /// returns no partial output, where the tool's own timeout does. Whichever value moves, the
+    /// run budget has to stay clear of the command ceiling with room for the turn around it.
+    func testTheRunBudgetLeavesRoomAboveTheCommandCeiling() {
+        let command = TimeInterval(BatchCommandTool.maxTimeoutSeconds)
+        let run = CodeSessionManager.presetExecutionTimeout
+
+        XCTAssertGreaterThan(run, command, """
+            the Code preset's execution budget (\(Int(run))s) is not above `batch_command`'s \
+            ceiling (\(Int(command))s), so a command running to its own limit is killed by the \
+            run sentinel first — losing the partial output and the rest of the turn with it
+            """)
+        XCTAssertGreaterThanOrEqual(run - command, command, """
+            only \(Int(run - command))s of budget remains after one full-length command. A turn \
+            that runs a build to the ceiling still has to read the failure, edit, and re-run
+            """)
     }
 }

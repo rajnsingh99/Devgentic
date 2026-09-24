@@ -30,4 +30,18 @@ enum MessageSource: String, Codable, Sendable {
     /// and must stay silent about the latter — announcing "the task you started just finished"
     /// for a task nobody started is the failure mode of that whole feature.
     case scheduled
+
+    /// [Tier 3] An UNATTENDED run started because a BACKGROUND TASK finished, not typed by anyone.
+    ///
+    /// ⚠️⚠️ NOT `.localUI`, and the reason is grant isolation rather than logging.
+    /// `SessionToolApprovals` keys a standing "allow for this chat" grant on the SURFACE precisely
+    /// so one cannot cross a boundary — `WorkflowRunAttendance.origin` documents the incident that
+    /// forced it, where a grant made by voice let a message from a paired phone run `execute_shell`
+    /// with no prompt on any surface. A woken run stamped `.localUI` would inherit every grant the
+    /// user made while typing, and then spend them with nobody watching.
+    ///
+    /// ⚠️ It is also not `.scheduled`. That case exists so Orb's ambient announcements can stay
+    /// silent about runs nobody started; a finished build is a different question and deserves its
+    /// own answer rather than inheriting the scheduler's.
+    case backgroundTask
 }

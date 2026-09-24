@@ -104,7 +104,7 @@ struct ThemeDecorator: Theme {
     let accentColorOverride: AppAccentColor
     let codeThemeOverride: CodeViewerThemeOverride
 
-    init(base: any Theme, accentColorOverride: AppAccentColor, codeThemeOverride: CodeViewerThemeOverride = .default) {
+    init(base: any Theme, accentColorOverride: AppAccentColor, codeThemeOverride: CodeViewerThemeOverride = .material) {
         self.base = base
         self.accentColorOverride = accentColorOverride
         self.codeThemeOverride = codeThemeOverride
@@ -115,7 +115,6 @@ struct ThemeDecorator: Theme {
     /// The theme from which code blocks and syntax highlighting derive their styling.
     var effectiveCodeTheme: any Theme {
         switch codeThemeOverride {
-        case .default: return base
         case .material: return AppThemes.MaterialTheme()
         case .cosmicDark: return AppThemes.CosmicDarkTheme()
         case .oneLight: return AppThemes.OneLightTheme()
@@ -535,8 +534,8 @@ extension Theme {
     var userBubbleBackground: Color { Color(hex: "#388E8E") }
     var inlineCodeHighlight: Color { accentColor }
     var accentMuted: Color { accentColor.opacity(0.7) }
-    var codeBlockHeaderBackground: Color { Color(red: 0.15, green: 0.15, blue: 0.17) }
-    var codeBlockEditorBackground: Color { Color(red: 0.11, green: 0.11, blue: 0.13) }
+    var codeBlockHeaderBackground: Color { Color(hex: "#1E1F24") }
+    var codeBlockEditorBackground: Color { Color(hex: "#16171B") }
     var codeBlockHeaderText: Color {
         codeHighlightThemeName.contains("light") ? Color(hex: "#383a42") : Color(hex: "#f8f8f2")
     }
@@ -695,8 +694,8 @@ extension AppThemes {
         var controlAccent: Color { Color(hex: "#80cbc4") }
         var userBubbleBackground: Color { Color(hex: "#80cbc4") }
         var inlineCodeHighlight: Color { Color(hex: "#c792ea") }    // Material Lilac
-        var codeBlockHeaderBackground: Color { Color(hex: "#1a1a1a") }
-        var codeBlockEditorBackground: Color { Color(hex: "#212121") }
+        var codeBlockHeaderBackground: Color { Color(hex: "#1a1a1d") }
+        var codeBlockEditorBackground: Color { Color(hex: "#141416") }
         var surfaceOverlay: Color { Color.white.opacity(0.06) }
         var surfaceOverlayStrong: Color { Color.white.opacity(0.1) }
         var streamingIndicator: Color { Color(hex: "#80cbc4") }
@@ -704,8 +703,8 @@ extension AppThemes {
         // Syntax — Material Darker palette (matching highlight.js material-darker)
         var syntaxTheme: SyntaxTheme {
             SyntaxTheme(
-                background: NSColor(hex: "#212121"),
-                lineHighlight: NSColor(hex: "#1a1a1a"),
+                background: NSColor(hex: "#141416"),
+                lineHighlight: NSColor(hex: "#1a1a1d"),
                 selection: NSColor(hex: "#353535"),
                 text: NSColor(hex: "#eeffff"),
                 keywords: NSColor(hex: "#c792ea"),
@@ -717,7 +716,7 @@ extension AppThemes {
                 numbers: NSColor(hex: "#f78c6c"),
                 strings: NSColor(hex: "#c3e88d"),
                 characters: NSColor(hex: "#c3e88d"),
-                comments: NSColor(hex: "#546e7a"),
+                comments: NSColor(hex: "#78909c"),
                 bracketHighlight: NSColor(hex: "#80cbc4").withAlphaComponent(0.4)
             )
         }
@@ -734,9 +733,8 @@ extension AppThemes {
         let id = "cosmic_dark"
         let displayName = "Cosmic Dark"
         let colorScheme: ColorScheme? = .dark
-        /// No Cosmic style ships with Highlightr; Nord is the closest bundled match for
-        /// its cool, desaturated palette.
-        let codeHighlightThemeName = "nord"
+        /// Highlightr bundles Dracula with vibrant neon cyans, mints, and pinks.
+        let codeHighlightThemeName = "dracula"
 
         // Tier 1 — Core (Spotify Palette)
         let primaryBackground: Color = Color(hex: "#121212")        // Pure Spotify Dark
@@ -762,29 +760,29 @@ extension AppThemes {
         var controlAccent: Color { Color(hex: "#1DB954") }
         var userBubbleBackground: Color { Color(hex: "#1DB954") }
         var inlineCodeHighlight: Color { Color(hex: "#1DB954") }    // Spotify Green
-        var codeBlockHeaderBackground: Color { Color(hex: "#181818") }
-        var codeBlockEditorBackground: Color { Color(hex: "#0c0c0c") } // Even darker for contrast
+        var codeBlockHeaderBackground: Color { Color(hex: "#1f222e") }
+        var codeBlockEditorBackground: Color { Color(hex: "#171922") }
         var surfaceOverlay: Color { Color.white.opacity(0.05) }
         var surfaceOverlayStrong: Color { Color.white.opacity(0.1) }
         var streamingIndicator: Color { Color(hex: "#1DB954") }
 
-        // Syntax — Modern Dark palette
+        // Syntax — Vibrant Cosmic / Dracula palette
         var syntaxTheme: SyntaxTheme {
             SyntaxTheme(
-                background: NSColor(hex: "#0c0c0c"),
-                lineHighlight: NSColor(hex: "#181818"),
-                selection: NSColor(hex: "#282828"),
+                background: NSColor(hex: "#171922"),
+                lineHighlight: NSColor(hex: "#1f222e"),
+                selection: NSColor(hex: "#2e344a"),
                 text: NSColor(hex: "#f8f8f2"),
-                keywords: NSColor(hex: "#1DB954"),          // Green for keywords
-                commands: NSColor(hex: "#8be9fd"),
-                types: NSColor(hex: "#50fa7b"),
-                attributes: NSColor(hex: "#ff79c6"),
+                keywords: NSColor(hex: "#50fa7b"),          // Mint green for keywords
+                commands: NSColor(hex: "#8be9fd"),          // Vibrant cyan
+                types: NSColor(hex: "#ff79c6"),             // Neon pink
+                attributes: NSColor(hex: "#bd93f9"),        // Royal purple
                 variables: NSColor(hex: "#f8f8f2"),
                 values: NSColor(hex: "#bd93f9"),
                 numbers: NSColor(hex: "#bd93f9"),
-                strings: NSColor(hex: "#f1fa8c"),
+                strings: NSColor(hex: "#f1fa8c"),           // Soft yellow
                 characters: NSColor(hex: "#f1fa8c"),
-                comments: NSColor(hex: "#b3b3b3"),          // Gray for comments
+                comments: NSColor(hex: "#7982a9"),          // Cool slate lavender
                 bracketHighlight: NSColor(hex: "#1DB954").withAlphaComponent(0.4)
             )
         }
@@ -825,8 +823,8 @@ extension AppThemes {
         var controlAccent: Color { Color(hex: "#0969da") }
         var userBubbleBackground: Color { Color(hex: "#0969da") }
         var inlineCodeHighlight: Color { Color(hex: "#0969da") }
-        var codeBlockHeaderBackground: Color { Color(hex: "#f6f8fa") }
-        var codeBlockEditorBackground: Color { Color(hex: "#ffffff") }
+        var codeBlockHeaderBackground: Color { Color(hex: "#eaeef2") }
+        var codeBlockEditorBackground: Color { Color(hex: "#f6f8fa") }
         var codeBlockHeaderText: Color { Color(hex: "#1f2328") }
         var codeBlockHeaderSecondaryText: Color { Color(hex: "#656d76") }
         var surfaceOverlay: Color { Color.black.opacity(0.04) }
@@ -837,8 +835,8 @@ extension AppThemes {
         // Syntax — GitHub Light palette (matching highlight.js github.min.css)
         var syntaxTheme: SyntaxTheme {
             SyntaxTheme(
-                background: NSColor(hex: "#ffffff"),
-                lineHighlight: NSColor(hex: "#f6f8fa"),
+                background: NSColor(hex: "#f6f8fa"),
+                lineHighlight: NSColor(hex: "#eaeef2"),
                 selection: NSColor(hex: "#c8c8fa"),
                 text: NSColor(hex: "#24292f"),
                 keywords: NSColor(hex: "#a71d5d"),          // Purple
@@ -891,8 +889,8 @@ extension AppThemes {
         var controlAccent: Color { Color(hex: "#2aa198") }
         var userBubbleBackground: Color { Color(hex: "#2aa198") }
         var inlineCodeHighlight: Color { Color(hex: "#268bd2") }   // Blue
-        var codeBlockHeaderBackground: Color { Color(hex: "#eee8d5") }
-        var codeBlockEditorBackground: Color { Color(hex: "#fdf6e3") }
+        var codeBlockHeaderBackground: Color { Color(hex: "#e0d8c3") }
+        var codeBlockEditorBackground: Color { Color(hex: "#eee8d5") }
         var codeBlockHeaderText: Color { Color(hex: "#586e75") }
         var codeBlockHeaderSecondaryText: Color { Color(hex: "#839496") }
         var surfaceOverlay: Color { Color.black.opacity(0.04) }
@@ -903,8 +901,8 @@ extension AppThemes {
         // Syntax — Solarized Light palette (matching highlight.js solarized-light.min.css)
         var syntaxTheme: SyntaxTheme {
             SyntaxTheme(
-                background: NSColor(hex: "#fdf6e3"),
-                lineHighlight: NSColor(hex: "#eee8d5"),
+                background: NSColor(hex: "#eee8d5"),
+                lineHighlight: NSColor(hex: "#e0d8c3"),
                 selection: NSColor(hex: "#93a1a1"),
                 text: NSColor(hex: "#586e75"),
                 keywords: NSColor(hex: "#6c71c4"),          // Violet

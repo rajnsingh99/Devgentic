@@ -144,7 +144,10 @@ final class HistoryProseSizingTests: XCTestCase {
                 strategy: strategy,
                 from: history,
                 charBudget: PromptFitCheck.historyCharBudget(forContextWindow: window),
-                includeImages: false
+                includeImages: false,
+                // Matches the gauge call above, which takes the default. If these ever diverge
+                // the assertion below is comparing two different renderings and proves nothing.
+                toolsAvailable: true
             ).reduce(0) { $0 + $1.text.count }
 
             XCTAssertEqual(measured, shipped, "\(strategy.rawValue): gauge and request must agree")

@@ -1303,6 +1303,9 @@ struct Tool: Codable, Hashable, Identifiable, Sendable {
     var timeout: TimeInterval? = nil
     var timeoutMessage: String? = nil
     var isFavorite: Bool = false
+    /// What to keep when this tool's result is larger than the model's room. Nil = the global
+    /// default set in the context gauge. Optional so profiles saved before it decode unchanged.
+    var cutStrategy: ContextCutStrategy? = nil
 }
 
 /// Represents a source of knowledge for a profile, currently limited to local files.

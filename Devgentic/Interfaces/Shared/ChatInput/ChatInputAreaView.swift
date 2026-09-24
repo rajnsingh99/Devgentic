@@ -433,6 +433,31 @@ struct ChatInputAreaView: View {
         }
     }
 
+    /// The gauge's "Compact history": summarize this conversation's older turns now, with the
+    /// Intelligence Core if it is on and otherwise this conversation's own model. Same profile
+    /// resolution as `recomputeContextGauge`, so it summarizes with the model the gauge describes.
+    private func compactHistoryNow() async -> String {
+        let profile: BackendProfileModel?
+        if mainViewModel.interfaceMode == .code, let codeID = codeSessionManager.codeProfileID {
+            profile = try? BackendProfileStore.shared.fetchProfile(byId: codeID)
+        } else {
+            profile = selectedProfile
+        }
+        guard let conversationID = mainViewModel.selectedConversationID,
+              let config = profile?.resolvedLLMConfig else {
+            return "Nothing to compact — this conversation has no history yet."
+        }
+        let history = await chatHistoryViewModel.resolveContextHistory(for: conversationID)
+        let outcome = await HistoryCompactionService.shared.compactNow(
+            chatHistory: history,
+            conversationID: conversationID,
+            contextWindow: contextUsage?.windowTokens ?? 8_192,
+            fallbackModel: config
+        )
+        recomputeContextGauge()
+        return outcome.message
+    }
+
     // MARK: - Main Input Area
     private var mainInputArea: some View {
         let isFocused = isInputFocused.wrappedValue
@@ -624,22 +649,23 @@ struct ChatInputAreaView: View {
             // not of the chosen backend — gating it here meant the banner vanished on the
             // launch screen, which is exactly when the launch sweep has just run and its
             // result is most worth seeing. The banner hides itself when no servers exist.
-            MCPStatusBanner {
-                // The Tool Library is per-profile (it edits that profile's tool selection),
-                // so navigation needs *a* profile: the selected one, else the first that
-                // exists. `ToolLibraryContainerView` renders nothing for an id it cannot
-                // find, so an invented UUID would be a dead button.
-                if let profileID = backendConfiguration.selectedProfileID ?? profileService.sharedProfiles.first?.id {
-                    router.navigate(to: .toolLibrary(profileID: profileID))
-                } else {
-                    logger.warning("""
-                        [MCP-STATUS] Tool Library requested from the composer banner but NO backend \
-                        profile exists to open it against — the Tool Library is per-profile. \
-                        Navigation skipped; the user sees no response to the tap.
-                        """)
+            if !MCPToolStore.shared.sources.isEmpty {
+                MCPStatusBanner {
+                    // The Tool Library is per-profile (it edits that profile's tool selection),
+                    // so navigation needs *a* profile: the selected one, else the first that
+                    // exists. `ToolLibraryContainerView` renders nothing for an id it cannot
+                    // find, so an invented UUID would be a dead button.
+                    if let profileID = backendConfiguration.selectedProfileID ?? profileService.sharedProfiles.first?.id {
+                        router.navigate(to: .toolLibrary(profileID: profileID))
+                    } else {
+                        logger.warning("""
+                            [MCP-STATUS] Tool Library requested from the composer banner but NO backend \
+                            profile exists to open it against — the Tool Library is per-profile. \
+                            Navigation skipped; the user sees no response to the tap.
+                            """)
+                    }
                 }
             }
-            .padding(.horizontal, 4)
 
             InputToolbarView(
                 isInputEnabled: isInputEnabled,
@@ -670,7 +696,12 @@ struct ChatInputAreaView: View {
             // context window is for this conversation. Tap for the breakdown. Self-hides
             // for non-chat profiles (workflow / imageGen have no single window).
             if let contextUsage {
-                ContextWindowGauge(usage: contextUsage) { profileID in
+                ContextWindowGauge(
+                    usage: contextUsage,
+                    onOpenTools: { profileID in router.navigate(to: .toolLibrary(profileID: profileID)) },
+                    onCompact: { await compactHistoryNow() },
+                    canCompact: isInputEnabled
+                ) { profileID in
                     router.navigate(to: .profileDetail(profileID: profileID))
                 }
             }

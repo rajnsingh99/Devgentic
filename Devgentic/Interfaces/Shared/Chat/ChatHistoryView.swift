@@ -221,13 +221,36 @@ struct ChatHistoryView: View {
                                 ForEach(displayMessages) { message in
                                     let isLast = message.id == chatHistoryViewModel.currentChatMessages.first?.id
 
-                                    ChatBubbleView(message: message)
-                                        .id(message.id)
-                                        .frame(
-                                            minHeight: isLast ? (geometry.size.height - 115) : nil,
-                                            alignment: .top
-                                        )
+                                    // ⚠️ A synthetic row is a turn NOBODY TYPED — the stub a woken
+                                    // background-task run persists so its report pairs. Rendering
+                                    // it through ChatBubbleView would draw a user bubble and put
+                                    // words in the user's mouth; see BackgroundTaskDividerView for
+                                    // why it is not simply hidden either.
+                                    if message.isSyntheticPrompt {
+                                        BackgroundTaskDividerView(message: message)
+                                            .id(message.id)
+                                    } else {
+                                        ChatBubbleView(message: message)
+                                            .id(message.id)
+                                            // ⚠️ The tail-spacer stays on the BUBBLE branch. A
+                                            // divider is never the last thing in a conversation —
+                                            // the report it announces follows it — and giving a
+                                            // 0.5px rule a near-viewport minHeight would strand it
+                                            // in the middle of an empty screen.
+                                            .frame(
+                                                minHeight: isLast ? (geometry.size.height - 115) : nil,
+                                                alignment: .top
+                                            )
+                                    }
                                 }
+
+                                // [B] Says the conversation is not finished: a task is still
+                                // running that asked to report here when it ends. Distinct from
+                                // the tasks pill, which counts EVERY task in this conversation —
+                                // this is only the subset that will speak unprompted.
+                                PendingBackgroundReportFooter(
+                                    conversationID: mainAppViewModel.selectedConversationID
+                                )
                             }
                         }
                         .frame(maxWidth: ViewLayout.maxContentWidth)

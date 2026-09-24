@@ -8,7 +8,14 @@
 //  hold-to-talk as the DEFAULT, and endpointing as named steps whose floor is real — plus the
 //  corrupt-defaults hardening that the QuickAccess config manager learned the hard way.
 //
-//  These touch UserDefaults.standard because that IS the backing store under test; every suite
+//  ⚠️⚠️ These now go through `TestHost.defaults`, NOT `TestHost.defaults`. Under a test host
+//  `.standard` is the shipping app's own domain: this file cleared, rewrote and restored the
+//  developer's real Orb settings on every run, and `OrbWakeWordTests` — which has no such
+//  save/restore — read them and failed on the author's machine while passing everywhere else.
+//  `TestHost.defaults` is an isolated suite under XCTest and `.standard` in the app, so the
+//  manager and these tests still share one backing store; it is simply no longer the user's.
+//
+//  These touch the defaults store directly because that IS the backing store under test; every suite
 //  snapshots and restores the exact keys it writes.
 //
 
@@ -68,6 +75,7 @@ final class OrbConfigManagerTests: XCTestCase {
 
     private let keys = [
         AppSettings.orbEnabledKey, AppSettings.orbActivationModeKey,
+        AppSettings.orbWakeWordKey,
         AppSettings.orbShortcutCodeKey, AppSettings.orbShortcutModifiersKey,
         AppSettings.orbEndpointingKey, AppSettings.orbNarratorVoiceKey,
         AppSettings.orbNarratorRateKey, AppSettings.orbProfileIDKey,
@@ -79,14 +87,14 @@ final class OrbConfigManagerTests: XCTestCase {
         super.setUp()
         saved = [:]
         for key in keys {
-            if let value = UserDefaults.standard.object(forKey: key) { saved[key] = value }
-            UserDefaults.standard.removeObject(forKey: key)
+            if let value = TestHost.defaults.object(forKey: key) { saved[key] = value }
+            TestHost.defaults.removeObject(forKey: key)
         }
     }
 
     override func tearDown() {
-        for key in keys { UserDefaults.standard.removeObject(forKey: key) }
-        for (key, value) in saved { UserDefaults.standard.set(value, forKey: key) }
+        for key in keys { TestHost.defaults.removeObject(forKey: key) }
+        for (key, value) in saved { TestHost.defaults.set(value, forKey: key) }
         super.tearDown()
     }
 
@@ -110,8 +118,46 @@ final class OrbConfigManagerTests: XCTestCase {
     func testUnsetBooleanDefaultsToTrueRatherThanFalse() {
         // `defaults.bool(forKey:)` cannot distinguish unset from false, which is why the manager
         // uses `object(forKey:) as? Bool ?? true`. Pin it: a fresh install must have Orb on.
-        XCTAssertNil(UserDefaults.standard.object(forKey: AppSettings.orbEnabledKey))
+        XCTAssertNil(TestHost.defaults.object(forKey: AppSettings.orbEnabledKey))
         XCTAssertTrue(OrbConfigManager.shared.isEnabled)
+    }
+
+    // MARK: The wake word reaches the matcher
+
+    /// ⚠️⚠️ THE WIRING TEST. Every other wake-word test passes the word explicitly, so all of them
+    /// would still pass if `OrbSessionController.wakeWord` went back to being a hardcoded
+    /// `static let` — which is exactly what it was until 2026-09-19, and exactly why the setting
+    /// could not have existed before. These four go through the NO-ARGUMENT call shape the
+    /// controller itself uses, so cutting the wire fails the build.
+
+    func testAConfiguredWakeWordReachesTheMatcherWithNoArgument() {
+        OrbConfigManager.shared.wakeWordRaw = "zephyr"
+        XCTAssertEqual(OrbSessionController.wakeWord, "zephyr")
+        XCTAssertNotNil(OrbSessionController.wakeWordRange(in: "zephyr run the tests"))
+        XCTAssertNil(OrbSessionController.wakeWordRange(in: "orb run the tests"),
+                     "the shipped default must not still be listening alongside the configured word")
+    }
+
+    func testExtractionUsesTheConfiguredWordWithNoArgument() {
+        // End to end through the exact call the controller makes on every transcript update.
+        OrbConfigManager.shared.wakeWordRaw = "Hey Orb"
+        XCTAssertEqual(OrbSessionController.extractCommand(from: "Hey orb, write an essay on technology."),
+                       "write an essay on technology")
+    }
+
+    func testTheDefaultIsInForceWhenNothingIsStored() {
+        XCTAssertNil(TestHost.defaults.object(forKey: AppSettings.orbWakeWordKey))
+        XCTAssertEqual(OrbSessionController.wakeWord, OrbConfigManager.defaultWakeWord)
+        XCTAssertNotNil(OrbSessionController.wakeWordRange(in: "orb run the tests"))
+    }
+
+    func testAnUnusableEntryLeavesAWorkingOrbNotADeafOne() {
+        // A half-typed word must never leave the user with an orb that cannot be woken at all.
+        OrbConfigManager.shared.wakeWordRaw = "z"
+        XCTAssertEqual(OrbSessionController.wakeWord, OrbConfigManager.defaultWakeWord)
+        XCTAssertNotNil(OrbSessionController.wakeWordRange(in: "orb run the tests"))
+        // ...and the raw text is kept verbatim, so the field does not fight the user mid-word.
+        XCTAssertEqual(OrbConfigManager.shared.wakeWordRaw, "z")
     }
 
     // MARK: Round-trips
@@ -138,25 +184,25 @@ final class OrbConfigManagerTests: XCTestCase {
     func testCorruptShortcutDefaultFallsBackInsteadOfTrapping() {
         // `defaults write … -1` must not crash-loop the app: this is read at launch and there is
         // no in-app recovery. The manager uses UInt32(exactly:) plus a fallback.
-        UserDefaults.standard.set(-1, forKey: AppSettings.orbShortcutCodeKey)
-        UserDefaults.standard.set(Int(UInt32.max) + 5, forKey: AppSettings.orbShortcutModifiersKey)
+        TestHost.defaults.set(-1, forKey: AppSettings.orbShortcutCodeKey)
+        TestHost.defaults.set(Int(UInt32.max) + 5, forKey: AppSettings.orbShortcutModifiersKey)
         XCTAssertEqual(OrbConfigManager.shared.carbonKeyCode, OrbConfigManager.defaultCombo.carbonKeyCode)
         XCTAssertEqual(OrbConfigManager.shared.carbonModifiers, OrbConfigManager.defaultCombo.carbonModifiers)
     }
 
     func testUnknownStoredEnumValuesFallBackToDefaults() {
-        UserDefaults.standard.set("teleportation", forKey: AppSettings.orbActivationModeKey)
-        UserDefaults.standard.set("instant", forKey: AppSettings.orbEndpointingKey)
+        TestHost.defaults.set("teleportation", forKey: AppSettings.orbActivationModeKey)
+        TestHost.defaults.set("instant", forKey: AppSettings.orbEndpointingKey)
         XCTAssertEqual(OrbConfigManager.shared.activationMode, .holdShortcut)
         XCTAssertEqual(OrbConfigManager.shared.endpointing, .normal)
     }
 
     func testNarratorRateIsClampedToASpeakableRange() {
-        UserDefaults.standard.set(Float(99), forKey: AppSettings.orbNarratorRateKey)
+        TestHost.defaults.set(Float(99), forKey: AppSettings.orbNarratorRateKey)
         XCTAssertEqual(OrbConfigManager.shared.narratorRate, 2.0, accuracy: 0.001)
-        UserDefaults.standard.set(Float(0.01), forKey: AppSettings.orbNarratorRateKey)
+        TestHost.defaults.set(Float(0.01), forKey: AppSettings.orbNarratorRateKey)
         XCTAssertEqual(OrbConfigManager.shared.narratorRate, 0.5, accuracy: 0.001)
-        UserDefaults.standard.set(Float(-3), forKey: AppSettings.orbNarratorRateKey)
+        TestHost.defaults.set(Float(-3), forKey: AppSettings.orbNarratorRateKey)
         XCTAssertEqual(OrbConfigManager.shared.narratorRate, 0, "a negative rate must read as the sentinel, never as speech")
     }
 
@@ -166,14 +212,14 @@ final class OrbConfigManagerTests: XCTestCase {
         // The reason Reset is user-facing at all: the panel is borderless with no titlebar, so a
         // position saved from a since-disconnected display cannot be dragged back.
         OrbConfigManager.shared.activationMode = .wakeWord
-        UserDefaults.standard.set(9999.0, forKey: OrbPanelController.originXKey)
-        UserDefaults.standard.set(9999.0, forKey: OrbPanelController.originYKey)
+        TestHost.defaults.set(9999.0, forKey: OrbPanelController.originXKey)
+        TestHost.defaults.set(9999.0, forKey: OrbPanelController.originYKey)
 
         OrbConfigManager.shared.resetAll()
 
         XCTAssertEqual(OrbConfigManager.shared.activationMode, .holdShortcut)
-        XCTAssertNil(UserDefaults.standard.object(forKey: OrbPanelController.originXKey))
-        XCTAssertNil(UserDefaults.standard.object(forKey: OrbPanelController.originYKey))
+        XCTAssertNil(TestHost.defaults.object(forKey: OrbPanelController.originXKey))
+        XCTAssertNil(TestHost.defaults.object(forKey: OrbPanelController.originYKey))
     }
 }
 
@@ -187,9 +233,9 @@ final class OrbExperimentalDefaultsTests: XCTestCase {
     /// transcribes zero results because a hand-rolled format conversion was wrong. A default that
     /// drifted to the experimental path would hand every user a silently broken microphone.
     func testDuplexAudioDefaultsOff() {
-        let saved = UserDefaults.standard.object(forKey: AppSettings.orbDuplexAudioKey)
-        UserDefaults.standard.removeObject(forKey: AppSettings.orbDuplexAudioKey)
-        defer { if let saved { UserDefaults.standard.set(saved, forKey: AppSettings.orbDuplexAudioKey) } }
+        let saved = TestHost.defaults.object(forKey: AppSettings.orbDuplexAudioKey)
+        TestHost.defaults.removeObject(forKey: AppSettings.orbDuplexAudioKey)
+        defer { if let saved { TestHost.defaults.set(saved, forKey: AppSettings.orbDuplexAudioKey) } }
         XCTAssertFalse(OrbConfigManager.shared.duplexAudioEnabled)
     }
 
@@ -198,11 +244,11 @@ final class OrbExperimentalDefaultsTests: XCTestCase {
         // choice: Apple ships one model per locale and `SpeechTranscriber` runs DEGRADED, without
         // erroring, when that model was never installed — which is exactly how the 2026-09-04
         // device test produced "write an SM technology" from "write an essay on technology".
-        let saved = UserDefaults.standard.object(forKey: AppSettings.orbSpeechLocaleKey)
-        UserDefaults.standard.removeObject(forKey: AppSettings.orbSpeechLocaleKey)
+        let saved = TestHost.defaults.object(forKey: AppSettings.orbSpeechLocaleKey)
+        TestHost.defaults.removeObject(forKey: AppSettings.orbSpeechLocaleKey)
         defer {
-            UserDefaults.standard.removeObject(forKey: AppSettings.orbSpeechLocaleKey)
-            if let saved { UserDefaults.standard.set(saved, forKey: AppSettings.orbSpeechLocaleKey) }
+            TestHost.defaults.removeObject(forKey: AppSettings.orbSpeechLocaleKey)
+            if let saved { TestHost.defaults.set(saved, forKey: AppSettings.orbSpeechLocaleKey) }
         }
         XCTAssertEqual(OrbConfigManager.shared.speechLocaleIdentifier, "")
         XCTAssertEqual(OrbConfigManager.shared.speechLocale.identifier, Locale.current.identifier)
@@ -212,19 +258,19 @@ final class OrbExperimentalDefaultsTests: XCTestCase {
     }
 
     func testRecognizerDefaultsToTheDeviceProvenOne() {
-        let saved = UserDefaults.standard.object(forKey: AppSettings.orbRecognizerKey)
-        UserDefaults.standard.removeObject(forKey: AppSettings.orbRecognizerKey)
-        defer { if let saved { UserDefaults.standard.set(saved, forKey: AppSettings.orbRecognizerKey) } }
+        let saved = TestHost.defaults.object(forKey: AppSettings.orbRecognizerKey)
+        TestHost.defaults.removeObject(forKey: AppSettings.orbRecognizerKey)
+        defer { if let saved { TestHost.defaults.set(saved, forKey: AppSettings.orbRecognizerKey) } }
         XCTAssertEqual(OrbConfigManager.shared.recognizer, .whisperKit)
         XCTAssertFalse(OrbConfigManager.shared.recognizer.isAppleSpeech)
     }
 
     func testAnUnknownStoredRecognizerFallsBackToWhisperKit() {
-        let saved = UserDefaults.standard.object(forKey: AppSettings.orbRecognizerKey)
-        UserDefaults.standard.set("nextGenThing", forKey: AppSettings.orbRecognizerKey)
+        let saved = TestHost.defaults.object(forKey: AppSettings.orbRecognizerKey)
+        TestHost.defaults.set("nextGenThing", forKey: AppSettings.orbRecognizerKey)
         defer {
-            UserDefaults.standard.removeObject(forKey: AppSettings.orbRecognizerKey)
-            if let saved { UserDefaults.standard.set(saved, forKey: AppSettings.orbRecognizerKey) }
+            TestHost.defaults.removeObject(forKey: AppSettings.orbRecognizerKey)
+            if let saved { TestHost.defaults.set(saved, forKey: AppSettings.orbRecognizerKey) }
         }
         XCTAssertEqual(OrbConfigManager.shared.recognizer, .whisperKit)
     }

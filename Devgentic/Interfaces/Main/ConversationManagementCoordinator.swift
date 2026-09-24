@@ -245,6 +245,20 @@ final class ConversationManagementCoordinator {
             await SessionToolApprovals.shared.clear(conversationID: conversationID)
             logger.info("[DELETE] \(short) — cleared 'Allow for this chat' tool grants.")
         }
+        // Background tasks: kill anything still running and remove the log directory.
+        //
+        // ⚠️ HERE rather than in `deleteConversation`, deliberately. `deleteMultipleConversations`
+        // is a SECOND teardown that re-lists the same side stores by hand — draft, origin store,
+        // remote bindings, traces, workflow state — and a cleanup added to one path and not the
+        // other is the standard way this file grows a leak. Both paths call this function; only
+        // one of them calls the other's body.
+        //
+        // A running build outliving the conversation that started it is not merely untidy: it
+        // holds CPU, keeps writing to a log nobody can now reach (the list view is keyed by
+        // conversation), and is killed at quit by `terminateAll` rather than by anything the user
+        // can see. `discard` terminates the whole process tree and takes the directory with it.
+        BackgroundProcessRegistry.shared.discard(conversationID: conversationID)
+        logger.info("[DELETE] \(short) — background tasks terminated and their logs removed. CONSEQUENCE: any build or dev server this conversation started is stopped now, rather than running on with no surface left that can list or stop it.")
     }
 
 

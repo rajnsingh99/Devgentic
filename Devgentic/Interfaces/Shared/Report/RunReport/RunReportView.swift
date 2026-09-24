@@ -31,7 +31,7 @@ final class RunReportViewModel {
     private(set) var isLoading = false
     var selectedRowID: String?
     var filter: StreamFilter = .everything
-    var showDetails = false
+    var showDetails = true
     var searchText = ""
     var feedback = UserFeedback()
 
@@ -165,92 +165,132 @@ private let reportLogger = DGLogger(category: "RunReport")
 struct RunReportView: View {
     @State private var viewModel: RunReportViewModel
     @Environment(\.appTheme) private var theme
+    /// Callback to trigger when the view wants to close
+    let onClose: (() -> Void)?
     /// Opens the shared, sanitized bundle-export sheet with the entered feedback.
     let onExport: (UserFeedback?) -> Void
 
-    init(messageID: UUID, conversationID: UUID, traceID: String?, answerPreview: String?,
-         onExport: @escaping (UserFeedback?) -> Void) {
+    init(
+        messageID: UUID,
+        conversationID: UUID,
+        traceID: String?,
+        answerPreview: String?,
+        onClose: (() -> Void)? = nil,
+        onExport: @escaping (UserFeedback?) -> Void
+    ) {
         _viewModel = State(initialValue: RunReportViewModel(
             messageID: messageID, conversationID: conversationID,
             traceID: traceID, answerPreview: answerPreview))
+        self.onClose = onClose
         self.onExport = onExport
     }
 
     var body: some View {
-        Group {
-            if viewModel.isLoading && viewModel.projection == nil {
-                ProgressView("Loading run report…")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let projection = viewModel.projection {
-                if projection.unavailability != .none {
-                    UnavailableStateView(cause: projection.unavailability)
+        VStack(spacing: 0) {
+            topBar(viewModel.projection)
+            hairlineDivider
+
+            Group {
+                if viewModel.isLoading && viewModel.projection == nil {
+                    ProgressView("Loading run report…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let projection = viewModel.projection {
+                    if projection.unavailability != .none {
+                        UnavailableStateView(cause: projection.unavailability)
+                    } else {
+                        reportContent(projection)
+                    }
                 } else {
-                    reportBody(projection)
+                    ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-            } else {
-                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .task { await viewModel.loadAndObserve() }
     }
 
-    // MARK: Layout
-
-    private func reportBody(_ p: RunReportProjection) -> some View {
-        VStack(spacing: 0) {
-            header(p)
-            Divider()
-            if !p.lanes.isEmpty { ribbon(p); Divider() }
-            HSplitView {
-                stream(p)
-                    .frame(minWidth: 380, idealWidth: 560)
-                inspector
-                    .frame(minWidth: 300, idealWidth: 400, maxWidth: .infinity)
-            }
-        }
+    private var hairlineDivider: some View {
+        Rectangle()
+            .fill(theme.dividerColor.opacity(0.35))
+            .frame(height: 0.5)
     }
 
-    // MARK: Header — the verdict, first
+    // MARK: - Header & Navigation
 
-    private func header(_ p: RunReportProjection) -> some View {
-        VStack(alignment: .leading, spacing: theme.spacingSmall) {
-            HStack(spacing: theme.spacingMedium) {
-                verdictPill(p.verdict)
-                Spacer()
-                Button {
-                    onExport(viewModel.feedback.isEmpty ? nil : viewModel.feedback)
-                } label: {
-                    Label("Export Report", systemImage: "square.and.arrow.up")
-                        .font(.system(.caption, weight: .semibold))
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(theme.accentColor)
-                .controlSize(.small)
-                .help("Export a sanitized diagnostic bundle for this run")
-            }
-            if !p.verdict.sentence.isEmpty {
-                Text(p.verdict.sentence)
-                    .font(theme.fontFootnote)
-                    .foregroundStyle(theme.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if !p.headerFacts.isEmpty {
-                HStack(spacing: theme.spacingMedium) {
-                    ForEach(Array(p.headerFacts.enumerated()), id: \.offset) { i, fact in
-                        if i > 0 {
-                            Rectangle().fill(theme.dividerColor).frame(width: 1, height: 11)
-                        }
-                        Text(fact)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(theme.secondaryText)
+    private func topBar(_ projection: RunReportProjection?) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            // Main Top Navigation Row
+            HStack(spacing: 12) {
+                HStack(spacing: 9) {
+                    Image(systemName: "chart.bar.doc.horizontal")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(theme.secondaryText)
+
+                    Text("Run Report")
+                        .font(.system(.title3, design: .rounded, weight: .bold))
+                        .foregroundStyle(theme.primaryText)
+
+                    if let p = projection, p.unavailability == .none {
+                        verdictPill(p.verdict)
                     }
-                    Spacer()
+                }
+
+                Spacer()
+
+                HStack(spacing: 8) {
+                    if let projection, projection.unavailability == .none {
+                        TactileButton(
+                            title: "Export Report",
+                            icon: "square.and.arrow.up",
+                            variant: .secondary,
+                            size: .compact
+                        ) {
+                            onExport(viewModel.feedback.isEmpty ? nil : viewModel.feedback)
+                        }
+                        .help("Export a sanitized diagnostic bundle for this run")
+                    }
+
+                    if let onClose {
+                        TactileIconButton(
+                            icon: "xmark",
+                            tooltip: "Close",
+                            variant: .secondary,
+                            size: 26
+                        ) {
+                            onClose()
+                        }
+                    }
+                }
+            }
+
+            // Sub-row: Verdict sentence & Facts (when run data exists)
+            if let p = projection, p.unavailability == .none {
+                if !p.verdict.sentence.isEmpty {
+                    Text(p.verdict.sentence)
+                        .font(theme.fontFootnote)
+                        .foregroundStyle(theme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if !p.headerFacts.isEmpty {
+                    HStack(spacing: 10) {
+                        ForEach(Array(p.headerFacts.enumerated()), id: \.offset) { i, fact in
+                            if i > 0 {
+                                Rectangle()
+                                    .fill(theme.dividerColor.opacity(0.4))
+                                    .frame(width: 1, height: 10)
+                            }
+                            Text(fact)
+                                .font(.system(size: 11.5, design: .monospaced))
+                                .foregroundStyle(theme.secondaryText.opacity(0.9))
+                        }
+                        Spacer()
+                    }
                 }
             }
         }
-        .padding(.horizontal, theme.spacingXLarge)
-        .padding(.vertical, theme.spacing12)
-        .background(theme.secondaryBackground.opacity(0.5))
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .background(theme.secondaryBackground.opacity(0.45))
     }
 
     private func verdictPill(_ v: RunReportVerdict) -> some View {
@@ -261,29 +301,48 @@ struct RunReportView: View {
         case .running: theme.streamingIndicator
         case .neutral: theme.secondaryText
         }
-        return HStack(spacing: 6) {
-            Circle().fill(color).frame(width: 7, height: 7)
+        return HStack(spacing: 5) {
+            Circle()
+                .fill(color)
+                .frame(width: 6, height: 6)
             Text(v.label)
-                .font(.system(.caption, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
         }
         .foregroundStyle(color)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
         .background(Capsule().fill(color.opacity(0.12)))
-        .overlay(Capsule().stroke(color.opacity(0.3), lineWidth: 1))
+        .overlay(Capsule().strokeBorder(color.opacity(0.28), lineWidth: 0.5))
+    }
+
+    // MARK: - Content Layout
+
+    private func reportContent(_ p: RunReportProjection) -> some View {
+        VStack(spacing: 0) {
+            if !p.lanes.isEmpty {
+                ribbon(p)
+                hairlineDivider
+            }
+            HSplitView {
+                stream(p)
+                    .frame(minWidth: 380, idealWidth: 560)
+                inspector
+                    .frame(minWidth: 300, idealWidth: 400, maxWidth: .infinity)
+            }
+        }
     }
 
     // MARK: Ribbon — where the time went
 
     private func ribbon(_ p: RunReportProjection) -> some View {
-        VStack(alignment: .leading, spacing: theme.spacingSmall) {
+        VStack(alignment: .leading, spacing: 9) {
             Text("WHERE THE TIME WENT")
-                .font(.system(size: 10, weight: .bold))
+                .font(.system(size: 9.5, weight: .bold))
                 .tracking(0.6)
                 .foregroundStyle(theme.tertiaryText)
 
             GeometryReader { geo in
-                HStack(spacing: 1) {
+                HStack(spacing: 1.5) {
                     ForEach(p.lanes) { seg in
                         Rectangle()
                             .fill(laneColor(seg.category))
@@ -291,17 +350,21 @@ struct RunReportView: View {
                             .help("\(seg.label): \(DurationFormat.format(ms: seg.durationMs))")
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusChip, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             }
-            .frame(height: 18)
+            .frame(height: 10)
 
-            HStack(spacing: theme.spacing16) {
+            HStack(spacing: 14) {
                 ForEach(p.lanes) { seg in
                     HStack(spacing: 5) {
-                        RoundedRectangle(cornerRadius: 2).fill(laneColor(seg.category)).frame(width: 8, height: 8)
-                        Text(seg.label).font(theme.fontCaption2).foregroundStyle(theme.secondaryText)
+                        Circle()
+                            .fill(laneColor(seg.category))
+                            .frame(width: 6, height: 6)
+                        Text(seg.label)
+                            .font(theme.fontCaption2)
+                            .foregroundStyle(theme.secondaryText)
                         Text(DurationFormat.format(ms: seg.durationMs))
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(.system(size: 10.5, design: .monospaced))
                             .foregroundStyle(theme.tertiaryText)
                     }
                 }
@@ -314,8 +377,9 @@ struct RunReportView: View {
                 }
             }
         }
-        .padding(.horizontal, theme.spacingXLarge)
-        .padding(.vertical, theme.spacingMedium)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(theme.primaryBackground)
     }
 
     /// Muted lane fills — the ribbon is a background instrument, not a highlight.
@@ -344,15 +408,16 @@ struct RunReportView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(maxWidth: 280)
+                .frame(maxWidth: 260)
 
-                HStack(spacing: 5) {
+                HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 11))
                         .foregroundStyle(theme.tertiaryText)
-                    TextField("Search this run", text: $viewModel.searchText)
+                    TextField("", text: $viewModel.searchText, prompt: Text("Search this run").foregroundColor(theme.placeholderText))
                         .textFieldStyle(.plain)
                         .font(theme.fontFootnote)
+                        .foregroundStyle(theme.primaryText)
                     if !viewModel.searchText.isEmpty {
                         Button {
                             viewModel.searchText = ""
@@ -365,9 +430,13 @@ struct RunReportView: View {
                     }
                 }
                 .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(theme.secondaryBackground)
-                .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusChip, style: .continuous))
+                .padding(.vertical, 4.5)
+                .background(theme.controlBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(theme.dividerColor.opacity(0.35), lineWidth: 0.5)
+                )
                 .frame(maxWidth: 220)
 
                 Spacer()
@@ -377,10 +446,12 @@ struct RunReportView: View {
                     .controlSize(.mini)
                     .help("Show timing metadata on every row")
             }
-            .padding(.horizontal, theme.spacing16)
-            .padding(.vertical, theme.spacingSmall)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
 
-            Divider()
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.25))
+                .frame(height: 0.5)
 
             ScrollView {
                 LazyVStack(spacing: 0, pinnedViews: .sectionHeaders) {
@@ -415,27 +486,29 @@ struct RunReportView: View {
     private func groupHeader(_ group: RunReportGroup) -> some View {
         HStack(spacing: theme.spacingSmall) {
             Text(group.label)
-                .font(.system(size: 11, weight: .bold))
-                .tracking(0.4)
+                .font(.system(size: 10.5, weight: .bold))
+                .tracking(0.5)
                 .foregroundStyle(theme.secondaryText)
             if !group.kindTag.isEmpty {
                 Text(group.kindTag)
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(theme.tertiaryText)
-                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .padding(.horizontal, 5).padding(.vertical, 1.5)
                     .background(theme.surfaceOverlay)
                     .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             }
-            Rectangle().fill(theme.dividerColor).frame(height: 1)
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.25))
+                .frame(height: 0.5)
             if !group.durationLabel.isEmpty {
                 Text(group.durationLabel)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 10.5, design: .monospaced))
                     .foregroundStyle(theme.tertiaryText)
             }
         }
-        .padding(.horizontal, theme.spacing16)
-        .padding(.vertical, 7)
-        .background(theme.primaryBackground)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .background(theme.primaryBackground.opacity(0.95))
     }
 
     private var emptyFilterState: some View {
@@ -458,32 +531,64 @@ struct RunReportView: View {
     private var inspector: some View {
         VStack(spacing: 0) {
             DetailPaneView(detail: viewModel.selectedDetail)
-            Divider()
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.25))
+                .frame(height: 0.5)
             feedbackStrip
         }
         .background(theme.secondaryBackground.opacity(0.35))
     }
 
-    /// Feedback lives IN the report — see what happened and say it went wrong, one place.
+    /// Feedback lives IN the report — attached to diagnostic bundle export.
     private var feedbackStrip: some View {
-        VStack(alignment: .leading, spacing: theme.spacingSmall) {
-            HStack(spacing: theme.spacingSmall) {
-                Text("HOW DID IT GO?")
-                    .font(.system(size: 10, weight: .bold))
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("RUN FEEDBACK & NOTES")
+                    .font(.system(size: 9.5, weight: .bold))
                     .tracking(0.5)
                     .foregroundStyle(theme.tertiaryText)
+
+                Image(systemName: "info.circle")
+                    .font(.system(size: 10))
+                    .foregroundStyle(theme.tertiaryText)
+                    .help("Personal notes and rating entered here are bundled into the diagnostic zip file when you click Export Report.")
+
                 Spacer()
+
                 ratingButton(.positive, "hand.thumbsup", theme.successColor)
                 ratingButton(.negative, "hand.thumbsdown", theme.errorColor)
             }
-            TextField("What went wrong, or what could be better? (bundled into the export)",
-                      text: $viewModel.feedback.messageText, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(1...3)
-                .font(theme.fontFootnote)
+
+            Text("Optional notes attached to the diagnostic export (not sent to an LLM).")
+                .font(theme.fontCaption2)
+                .foregroundStyle(theme.tertiaryText)
+
+            ZStack(alignment: .topLeading) {
+                if viewModel.feedback.messageText.isEmpty {
+                    Text("Add notes for the export bundle (e.g. model hallucinated tool params)...")
+                        .font(theme.fontFootnote)
+                        .foregroundStyle(theme.placeholderText)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .allowsHitTesting(false)
+                }
+                TextField("", text: $viewModel.feedback.messageText, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(theme.fontFootnote)
+                    .foregroundStyle(theme.primaryText)
+                    .lineLimit(1...3)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+            }
+            .background(theme.controlBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(theme.dividerColor.opacity(0.35), lineWidth: 0.5)
+            )
         }
-        .padding(.horizontal, theme.spacing16)
-        .padding(.vertical, theme.spacing12)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
     }
 
     private func ratingButton(_ rating: FeedbackRating, _ icon: String, _ color: Color) -> some View {
@@ -492,7 +597,17 @@ struct RunReportView: View {
             viewModel.feedback.rating = selected ? nil : rating
         } label: {
             Image(systemName: selected ? icon + ".fill" : icon)
+                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(selected ? color : theme.secondaryText)
+                .frame(width: 24, height: 24)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(selected ? color.opacity(0.15) : theme.surfaceOverlay.opacity(0.5))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .strokeBorder(selected ? color.opacity(0.3) : theme.dividerColor.opacity(0.2), lineWidth: 0.5)
+                )
         }
         .buttonStyle(.plain)
         .help(rating == .positive ? "This run went well" : "This run needs work")
@@ -511,11 +626,12 @@ private struct StreamRowView: View {
 
     var body: some View {
         Button(action: onSelect) {
-            HStack(alignment: .top, spacing: theme.spacingSmall) {
+            HStack(alignment: .top, spacing: 8) {
                 Text(RunReportProjection.timeString(row.timestamp))
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: 10, design: .monospaced).monospacedDigit())
                     .foregroundStyle(theme.tertiaryText)
-                    .frame(width: 66, alignment: .leading)
+                    .lineLimit(1)
+                    .frame(width: 78, alignment: .leading)
                     .padding(.top, 2)
 
                 Text(row.kind.rawValue)
@@ -524,8 +640,12 @@ private struct StreamRowView: View {
                     .foregroundStyle(kindColor)
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(kindColor.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusChip, style: .continuous))
-                    .frame(width: 74, alignment: .leading)
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .strokeBorder(kindColor.opacity(0.25), lineWidth: 0.5)
+                    )
+                    .frame(width: 72, alignment: .center)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(row.title)
@@ -551,15 +671,21 @@ private struct StreamRowView: View {
                         .padding(.top, 2)
                 }
             }
-            .padding(.vertical, 6)
-            .padding(.leading, row.isIndented ? 34 : theme.spacing16)
-            .padding(.trailing, theme.spacing16)
-            .background(isSelected ? theme.surfaceOverlayStrong : (isHovering ? theme.surfaceOverlay : Color.clear))
+            .padding(.vertical, 5)
+            .padding(.horizontal, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isSelected ? theme.surfaceOverlayStrong : (isHovering ? theme.surfaceOverlay : Color.clear))
+            )
             .overlay(alignment: .leading) {
                 if isSelected {
-                    Rectangle().fill(kindColor).frame(width: 2)
+                    RoundedRectangle(cornerRadius: 2, style: .continuous)
+                        .fill(kindColor)
+                        .frame(width: 2.5, height: 16)
+                        .offset(x: 2)
                 }
             }
+            .padding(.horizontal, 4)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -610,7 +736,9 @@ private struct DetailPaneView: View {
                                 .font(.system(size: 10, weight: .bold))
                                 .tracking(0.6)
                                 .foregroundStyle(theme.tertiaryText)
-                            Rectangle().fill(theme.dividerColor).frame(height: 1)
+                            Rectangle()
+                                .fill(theme.dividerColor.opacity(0.25))
+                                .frame(height: 0.5)
                         }
                         sectionBody(section.body)
                     }
@@ -640,7 +768,7 @@ private struct DetailPaneView: View {
                 .background(theme.primaryBackground)
                 .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusChip, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: theme.cornerRadiusChip, style: .continuous)
-                    .stroke(theme.dividerColor, lineWidth: 1))
+                    .strokeBorder(theme.dividerColor.opacity(0.35), lineWidth: 0.5))
         case .pairs(let list):
             VStack(alignment: .leading, spacing: 5) {
                 ForEach(list.pairs) { pair in

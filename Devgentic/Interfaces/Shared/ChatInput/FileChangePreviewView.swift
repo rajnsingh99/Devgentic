@@ -23,10 +23,30 @@ enum FileChange: Equatable {
     case move(source: String, destination: String)
     case copy(source: String, destination: String)
     case createFolder(path: String)
+    /// A search-and-replace edit — `edit_code_single` / `edit_code_batch`.
+    ///
+    /// ⚠️⚠️ ADDED 2026-09-20 because the Code interface had NO file preview at all. Every tool
+    /// this enum understood (`write_file`, `delete_file`, `move_file`, `copy_file`,
+    /// `create_folder`) is a `.library` tool, and `write_file` is `.libraryExceptCode` — hidden
+    /// from Code profiles. So a Code-mode approval banner fell back to raw JSON for every edit it
+    /// ever showed. Field-observed: a user approved an `edit_code_batch` whose `old_string` was a
+    /// whole method body, because serialized JSON does not look destructive. It deleted
+    /// `greetRaj()`, duplicated another method, and left the file uncompilable.
+    case replace(path: String, hunks: [ReplacementHunk])
+
+    /// One search-and-replace pair. Kept as a type (not a tuple) so `FileChange` stays `Equatable`.
+    struct ReplacementHunk: Equatable {
+        let oldString: String
+        let newString: String
+    }
 
     /// Parse a file operation from a confirmation's tool name + structured arguments (A1).
     /// Returns nil for non-file tools or unparseable args (banner falls back to the JSON view).
-    static func parse(toolName: String, arguments: JSONValue?) -> FileChange? {
+    ///
+    /// `previewPath` is the destination for tools whose arguments do NOT name a file — today only
+    /// `update_project_context`, which takes `content` and writes a path fixed by the project.
+    /// Nil for everything else; those read their target out of `arguments` as they always have.
+    static func parse(toolName: String, arguments: JSONValue?, previewPath: String? = nil) -> FileChange? {
         guard case .object(let dict)? = arguments else { return nil }
         func value(_ keys: [String]) -> String? {
             for key in keys { if case .string(let v)? = dict[key] { return v } }
@@ -73,6 +93,66 @@ enum FileChange: Equatable {
         case "create_folder":
             guard let p = value(folderKeys), !p.isEmpty else { return nil }
             return .createFolder(path: p)
+
+        // ── Code preset ────────────────────────────────────────────────────────────────────
+        // ⚠️ These four are `.codeOnly`, so they reach ONLY the Code interface — the one place
+        // that had no preview. `create_new_file` / `overwrite_file` are full-content writes and
+        // reuse `.write` unchanged; only search-and-replace needed a new shape.
+
+        // ⚠️ `file_path` EXACTLY — not the `writeKeys` alias list. Those aliases exist because
+        // the library tools have lenient hand-written decoders; these four declare
+        // `let file_path: String` with a synthesized `Decodable`, so any other spelling fails to
+        // decode and the tool never runs. Previewing a looser key would draw a confident diff for
+        // a call that is about to error. (Caught by `CodeEditPreviewTests` — `writeKeys` contains
+        // `filepath` and `filePath` but not `file_path`, so reusing it previewed nothing at all.)
+        case "create_new_file", "overwrite_file":
+            guard case .string(let p)? = dict["file_path"], !p.isEmpty else { return nil }
+            return .write(path: p, content: value(contentKeys) ?? "", append: false)
+
+        // ⚠️⚠️ THE ONLY UNREVIEWED WRITE IN CODE MODE, until 2026-09-20. Every other mutating
+        // tool parked on a banner; this one dispatched silently — and it is the write with the
+        // LARGEST blast radius, because `.devgentic/context.md` is injected into the system
+        // prompt of every future conversation for the project, not just this one.
+        //
+        // Field-observed: the model wrote "These classes contain methods like `greeting()` and
+        // `farewell()`" about a file containing neither. That sentence then steered a later edit
+        // to the wrong anchor. Rendered as a diff against the file on disk, a false claim about
+        // the user's own code is obvious at a glance — which is the whole control.
+        //
+        // The target comes from `previewPath`, never from `dict`: the tool derives its own
+        // destination from the run's project, so a path taken from model-supplied arguments could
+        // preview a different file than the one about to be overwritten.
+        case "update_project_context":
+            guard let path = previewPath, !path.isEmpty else { return nil }
+            // ⚠️ This tool's OWN alias list, not `contentKeys`. The two overlap but differ at
+            // both ends: `contentKeys` carries `string`, which this decoder rejects, and omits
+            // `markdown`/`context`, which it accepts. Previewing a key the tool cannot decode
+            // draws a diff for a call that is about to fail.
+            return .write(
+                path: path,
+                content: value(UpdateProjectContextTool.contentArgumentAliases) ?? "",
+                append: false)
+
+        case "edit_code_single":
+            guard case .string(let p)? = dict["file_path"], !p.isEmpty,
+                  case .string(let oldStr)? = dict["old_string"],
+                  case .string(let newStr)? = dict["new_string"] else { return nil }
+            return .replace(path: p, hunks: [ReplacementHunk(oldString: oldStr, newString: newStr)])
+
+        case "edit_code_batch":
+            guard case .string(let p)? = dict["file_path"], !p.isEmpty,
+                  case .array(let raw)? = dict["edits"] else { return nil }
+            let hunks: [ReplacementHunk] = raw.compactMap { entry in
+                guard case .object(let e) = entry,
+                      case .string(let oldStr)? = e["old_string"],
+                      case .string(let newStr)? = e["new_string"] else { return nil }
+                return ReplacementHunk(oldString: oldStr, newString: newStr)
+            }
+            // A batch whose edits could not be decoded is NOT previewable — fall through to the
+            // JSON view rather than showing a confident "no changes" diff.
+            guard hunks.count == raw.count, !hunks.isEmpty else { return nil }
+            return .replace(path: p, hunks: hunks)
+
         default:
             return nil
         }
@@ -126,6 +206,8 @@ struct FileChangePreviewView: View {
             FilePathTransition(icon: "doc.on.doc", verb: "Copy", from: s, to: d)
         case .createFolder(let path):
             FileOpSummary(icon: "folder.badge.plus", tint: theme.warningColor, verb: "Create folder", path: path)
+        case .replace(let path, let hunks):
+            ReplaceFilePreview(path: path, hunks: hunks)
         }
     }
 }
@@ -325,5 +407,162 @@ private struct FilePathTransition: View {
                     .lineLimit(1).truncationMode(.middle)
             }
         }
+    }
+}
+
+// MARK: - Search-and-replace diff
+
+/// Previews `edit_code_single` / `edit_code_batch` by applying their hunks to the file ON DISK
+/// and diffing the real before/after.
+///
+/// ⚠️⚠️ Deliberately NOT a diff of the hunks in isolation. Rendering `old_string` as red and
+/// `new_string` as green would be cheaper, but it cannot answer the question that matters —
+/// *what does the file look like afterwards?* The edit that prompted this view replaced a whole
+/// method body with a DIFFERENT method: shown as two isolated blobs it reads as "some code
+/// changes"; shown against the file it reads as "`greetRaj()` disappears and a second copy of
+/// `farewell()` appears", which is refusable at a glance.
+///
+/// ⚠️ It also reports hunks whose `old_string` is ABSENT or AMBIGUOUS. Those make the tool fail
+/// or edit the wrong occurrence, and the old JSON banner gave no hint before approval.
+private struct ReplaceFilePreview: View {
+    let path: String
+    let hunks: [FileChange.ReplacementHunk]
+    @Environment(\.appTheme) private var theme
+
+    /// Matches `WriteFilePreview` — above this we skip the line diff rather than hold two copies.
+    private static let diffByteLimit = 1_000_000
+
+    @State private var diff: [DiffResult] = []
+    @State private var fileExisted = false
+    @State private var existingReadable = true
+    @State private var tooLarge = false
+    @State private var loading = true
+    /// Hunks whose `old_string` does not appear exactly once, with the count found.
+    @State private var unmatched: [(index: Int, occurrences: Int)] = []
+
+    private var addedCount: Int { diff.filter { $0.type == .added }.count }
+    private var removedCount: Int { diff.filter { $0.type == .deleted }.count }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "pencil.line")
+                    .font(.system(.caption2, weight: .semibold))
+                    .foregroundColor(theme.warningColor)
+                Text(hunks.count == 1 ? "Edit" : "Edit (\(hunks.count) changes)")
+                    .font(.system(.caption2, weight: .semibold))
+                    .foregroundColor(theme.warningColor)
+                Text(displayPath(path))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(theme.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 6)
+                if !loading && !tooLarge && existingReadable && fileExisted {
+                    Text("+\(addedCount) −\(removedCount)")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(theme.tertiaryText)
+                }
+            }
+
+            // ⚠️ Surfaced ABOVE the diff: a hunk that will not apply is the most important thing
+            // on screen, because approving it wastes a turn or edits the wrong place.
+            if !unmatched.isEmpty {
+                ForEach(unmatched, id: \.index) { problem in
+                    Text(problem.occurrences == 0
+                         ? "Change \(problem.index + 1) won't apply — its search text isn't in this file"
+                         : "Change \(problem.index + 1) is ambiguous — its search text appears \(problem.occurrences) times")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(theme.warningColor)
+                }
+            }
+
+            if loading {
+                ProgressView().controlSize(.small).scaleEffect(0.7)
+            } else if !fileExisted {
+                Text("File doesn't exist — this edit will fail")
+                    .font(.system(size: 10))
+                    .foregroundColor(theme.warningColor)
+            } else if !existingReadable {
+                Text("Existing content can't be previewed (binary or unreadable)")
+                    .font(.system(size: 10))
+                    .foregroundColor(theme.warningColor)
+            } else if tooLarge {
+                Text("File too large — diff skipped")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(theme.tertiaryText)
+            } else {
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(diff.prefix(400)) { result in
+                            diffLine(result)
+                        }
+                        if diff.count > 400 {
+                            Text("… \(diff.count - 400) more lines")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(theme.tertiaryText)
+                                .padding(.vertical, 2)
+                        }
+                    }
+                }
+                .frame(maxHeight: 160)
+            }
+        }
+        .task(id: path) { await load() }
+    }
+
+    @ViewBuilder
+    private func diffLine(_ result: DiffResult) -> some View {
+        let tint: Color = result.type == .added ? theme.successColor
+                        : result.type == .deleted ? theme.errorColor
+                        : theme.secondaryText
+        diffLineText(result, emphasisBackground: tint)
+            .font(.system(size: 10, design: .monospaced))
+            .foregroundColor(tint)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 4)
+            .background(result.type == .unchanged ? Color.clear : tint.opacity(0.08))
+    }
+
+    private func load() async {
+        // Resolve first — the same reason `displayPath` does. A bare relative path anchors
+        // elsewhere, and previewing the wrong file is worse than previewing none.
+        let resolved = FilePathResolver.resolve(path)
+        let (existing, existed, readable) = await Task.detached(priority: .userInitiated) { () -> (String, Bool, Bool) in
+            guard FileManager.default.fileExists(atPath: resolved) else { return ("", false, true) }
+            guard let data = FileManager.default.contents(atPath: resolved) else { return ("", true, false) }
+            guard let text = String(data: data, encoding: .utf8) else { return ("", true, false) }
+            return (text, true, true)
+        }.value
+
+        fileExisted = existed
+        existingReadable = readable
+        guard existed, readable else { loading = false; return }
+
+        guard existing.utf8.count <= Self.diffByteLimit else {
+            tooLarge = true
+            loading = false
+            return
+        }
+
+        // Apply the hunks in order, exactly as the tool will, and record any that won't land.
+        var result = existing
+        var problems: [(index: Int, occurrences: Int)] = []
+        for (i, hunk) in hunks.enumerated() {
+            let occurrences = result.components(separatedBy: hunk.oldString).count - 1
+            if occurrences != 1 {
+                problems.append((index: i, occurrences: occurrences))
+                // Do not apply an ambiguous or missing hunk — the previewed post-state must match
+                // what the tool would actually produce, and the tool refuses these too.
+                continue
+            }
+            if let range = result.range(of: hunk.oldString) {
+                result.replaceSubrange(range, with: hunk.newString)
+            }
+        }
+
+        unmatched = problems
+        diff = DiffUtility.generateDiff(original: existing, modified: result)
+        loading = false
     }
 }

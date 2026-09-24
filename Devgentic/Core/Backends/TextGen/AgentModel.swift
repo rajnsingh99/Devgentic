@@ -267,6 +267,17 @@ enum AgentState: Codable, Equatable, Sendable {
         case finalizing = "Finalizing"    // Finishing response
         case errorRecovery = "Recovering" // Self-correction
         case preparing = "Preparing"      // RAG: Context retrieval and rewriting
+        /// Admitted nowhere yet — another run holds this conversation.
+        ///
+        /// ⚠️ Without this a queued run is indistinguishable from a slow one: the indicator says
+        /// "Reasoning" while nothing is reasoning, and a message sent from ChatOps while the user
+        /// is typing locally looks like the app has stalled. The label is what turns "it's broken"
+        /// into "it's second in line".
+        ///
+        /// A `ThinkingDetail` rather than a new `AgentState` case: the label is `detail.rawValue`,
+        /// so this renders everywhere without touching a switch, and `EvaluationLogger` counts
+        /// iterations by comparing specific cases — so waiting correctly does not count as one.
+        case queued = "Waiting its turn"
     }
 
     enum ActingDetail: Codable, Equatable, Sendable {
@@ -654,6 +665,15 @@ struct AgentInput: Sendable {
     var tools: [AgentTool]
     var longTermMemory: any LongTermMemoryStrategy
 
+    /// The project folder a Code session is confined to. Nil for every other profile type, which
+    /// is what leaves chat/agent/workflow runs unconfined — they have no user-chosen root.
+    ///
+    /// ⚠️ Until this existed, `projectPath` reached exactly ONE tool
+    /// (`UpdateProjectContextTool`); every filesystem tool was root-blind, so the folder the user
+    /// picked described the session without constraining it. `WorkspaceBoundary` turns it into a
+    /// boundary the tool loop actually applies.
+    var workspaceRoot: String? = nil
+
     // Architecture: Split-State (Active State + History)
     var activeState: SessionGraph?
     var recentHistory: String?
@@ -740,6 +760,10 @@ struct AgentInput: Sendable {
     /// 0 = disabled (no compaction) — the default for minimal/test constructors. (#22)
     var nativeContextBudgetChars: Int
 
+    /// Which part of an oversized tool result survives — the gauge's global setting plus the
+    /// profile's per-tool overrides. Defaults to automatic for minimal/test constructors.
+    var cutPolicy: ToolCutPolicy
+
     /// [Loop Safety] Shared per-run human-interaction memory. Nil (the default) means
     /// the executor creates its own — the historical behavior. Capability wrappers
     /// (Planning, Reflexion) set one instance on every derived sub-input so a
@@ -765,6 +789,11 @@ struct AgentInput: Sendable {
         conversationID: UUID,
         tools: [AgentTool],
         longTermMemory: any LongTermMemoryStrategy,
+        /// ⚠️ Defaulted so every existing construction stays unconfined. Only AgentConnect's
+        /// `.code` arm passes it; a new call site that forgets it silently opts OUT of the
+        /// workspace boundary, which is why `WorkspaceBoundaryTests` asserts the Code path
+        /// supplies it rather than trusting the default.
+        workspaceRoot: String? = nil,
         activeState: SessionGraph? = nil,
         recentHistory: String? = nil,
         generatorStrategy: (any CognitiveGenerator)? = nil,
@@ -784,7 +813,8 @@ struct AgentInput: Sendable {
         resumeState: TimelineReconstruction? = nil,
         traceContext: TraceContext,
         modelTier: ModelTier? = nil,
-        nativeContextBudgetChars: Int = 0
+        nativeContextBudgetChars: Int = 0,
+        cutPolicy: ToolCutPolicy = ToolCutPolicy()
     ) {
         self.userInput = userInput
         self.userPayload = userPayload
@@ -794,6 +824,7 @@ struct AgentInput: Sendable {
         self.chatHistory = chatHistory
         self.botHistoryImagesEnabled = botHistoryImagesEnabled
         self.conversationID = conversationID
+        self.workspaceRoot = workspaceRoot
         self.tools = tools
         self.longTermMemory = longTermMemory
         self.activeState = activeState
@@ -818,6 +849,7 @@ struct AgentInput: Sendable {
         self.traceContext = traceContext
         self.modelTier = modelTier
         self.nativeContextBudgetChars = nativeContextBudgetChars
+        self.cutPolicy = cutPolicy
     }
 }
 
@@ -835,6 +867,26 @@ struct EnvironmentFacts: Sendable {
     /// `getpwuid(getuid())` if sandboxing is ever enabled.
     let homeDirectory: String
     let currentDate: String
+
+    /// The project folder a Code run is confined to, or nil when the run is unconfined.
+    ///
+    /// ⚠️⚠️ The `<environment>` block used to advertise ONLY the home directory — "use absolute
+    /// paths; user folders are under /Users/<name> (Desktop, Documents, Downloads)". For a Code
+    /// run that is a direct instruction to leave the project, sitting a few hundred characters
+    /// below a system prompt that says the project folder is a boundary. Field-observed
+    /// 2026-09-20: with the Code prompt missing entirely, this block was the ONLY path guidance
+    /// the model received, and it walked the home directory. It still contradicted the prompt
+    /// after that was fixed. When this is set the block names the project instead.
+    let workspaceRoot: String?
+
+    init(osVersion: String, shellType: String, userName: String, homeDirectory: String, currentDate: String, workspaceRoot: String? = nil) {
+        self.osVersion = osVersion
+        self.shellType = shellType
+        self.userName = userName
+        self.homeDirectory = homeDirectory
+        self.currentDate = currentDate
+        self.workspaceRoot = workspaceRoot
+    }
 }
 
 /// Captures an ask_user Q+A pair for prompt injection as a `<clarification>` tag.

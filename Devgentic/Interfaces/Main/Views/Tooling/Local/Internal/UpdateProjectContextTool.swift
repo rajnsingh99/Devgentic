@@ -33,6 +33,14 @@ struct UpdateProjectContextTool: DevgenticTool {
 
     // MARK: - Type Definitions
 
+    /// Content argument aliases, IN PRIORITY ORDER — first match wins, exactly as the decoder
+    /// below walks them.
+    ///
+    /// ⚠️ The approval banner reads the proposed content with this same list. A preview that
+    /// accepted a key the decoder does not (or picked a different one when several are present)
+    /// would render a confident diff of text the tool is not about to write.
+    static let contentArgumentAliases = ["content", "text", "body", "data", "markdown", "context"]
+
     struct Arguments: Decodable, Sendable {
         let content: String
 
@@ -47,7 +55,7 @@ struct UpdateProjectContextTool: DevgenticTool {
             let container = try decoder.container(keyedBy: DynamicKey.self)
 
             var foundContent: String? = nil
-            let keys = ["content", "text", "body", "data", "markdown", "context"]
+            let keys = UpdateProjectContextTool.contentArgumentAliases
 
             for key in keys {
                 if let codingKey = DynamicKey(stringValue: key),
@@ -81,11 +89,27 @@ struct UpdateProjectContextTool: DevgenticTool {
         )
     }
 
+    // MARK: - Target
+
+    /// The file this tool writes, for a given project.
+    ///
+    /// ⚠️ The approval banner previews the change by reading THIS path off disk and diffing it
+    /// against the proposed content. A second, separately-derived copy of the path would let the
+    /// banner show a confident diff of one file while the tool overwrote another — the worst
+    /// possible failure for a control whose entire job is "what you approve is what runs".
+    /// One definition; `call` uses it too.
+    static func contextFilePath(inProject projectPath: String) -> String {
+        URL(fileURLWithPath: projectPath)
+            .appendingPathComponent(".devgentic")
+            .appendingPathComponent("context.md")
+            .path
+    }
+
     // MARK: - Execution
 
     func call(arguments: Arguments) async throws -> String {
-        let devgenticDir = URL(fileURLWithPath: projectPath).appendingPathComponent(".devgentic")
-        let contextFile = devgenticDir.appendingPathComponent("context.md")
+        let contextFile = URL(fileURLWithPath: Self.contextFilePath(inProject: projectPath))
+        let devgenticDir = contextFile.deletingLastPathComponent()
 
         do {
             // Ensure .devgentic/ directory exists

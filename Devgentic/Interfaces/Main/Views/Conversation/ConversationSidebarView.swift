@@ -96,6 +96,10 @@ struct SidebarGroupHeaderView: View {
 struct ConversationSidebarRow: View {
     let conversation: ConversationSD
 
+    /// [B] Whether a background task in this conversation will report into it when it ends.
+    /// Refreshed from `.backgroundTaskChanged`; see the handler for why it is not a bare read.
+    @State private var hasPendingBackgroundReport: Bool = false
+
     var viewModel: MainApplicationViewModel
     @Environment(MainViewRouter.self) private var router
 
@@ -139,7 +143,11 @@ struct ConversationSidebarRow: View {
             needsInput: viewModel.interactionCenter.hasPending(for: conversation.id),   // [F2]
             // [P8] Live truth from the stream manager (observable — the row updates the
             // moment a stream starts/ends). First time the pulse has ever been reachable.
-            isStreamingLive: viewModel.activeStreamManager.hasActiveStream(inConversation: conversation.id)
+            isStreamingLive: viewModel.activeStreamManager.hasActiveStream(inConversation: conversation.id),
+            // [B] Not observable — `BackgroundProcessRegistry` is an `NSLock`-guarded singleton,
+            // not an `@Observable`, so a bare read here would never redraw. State + the same
+            // `.backgroundTaskChanged` notice the pill and the footer listen to.
+            hasPendingBackgroundReport: hasPendingBackgroundReport
         )
         .contextMenu {
             contextMenuContent
@@ -147,6 +155,18 @@ struct ConversationSidebarRow: View {
         .onLongPressGesture(minimumDuration: 0.5) {
             enterSelectionMode()
         }
+        .onAppear(perform: reloadPendingBackgroundReport)
+        .onReceive(NotificationCenter.default.publisher(for: .backgroundTaskChanged)) { note in
+            // ⚠️ Scoped to THIS row's conversation. Every row in the sidebar observes this notice,
+            // so an unfiltered handler would recompute the registry once per row per task event.
+            guard note.userInfo?[BackgroundTaskNotificationKey.conversationID] as? UUID == conversation.id
+            else { return }
+            reloadPendingBackgroundReport()
+        }
+    }
+
+    private func reloadPendingBackgroundReport() {
+        hasPendingBackgroundReport = PendingBackgroundReports.count(forConversation: conversation.id) > 0
     }
 
     private func handleSelection() {

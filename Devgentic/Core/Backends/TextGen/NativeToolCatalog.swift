@@ -25,10 +25,11 @@
 //  would erase exactly the type it needs. `make` captures `T` at each call site, which is what
 //  lets one list hold 72 different tool types.
 //
-//  **Why the closure takes a `UUID?`.** Exactly one tool — `execute_shell` — needs the
-//  conversation to persist its working directory across calls. Passing `nil` yields the same
-//  tool without directory memory, which is what the Library needs for metadata. The other 71
-//  ignore the parameter. One uniform signature beats a special case.
+//  **Why the closure takes a `UUID?`.** Two tools need the conversation: `execute_shell` to
+//  persist its working directory across calls, and `batch_command` to scope its background tasks
+//  so `bg_1` means one thing per conversation and one conversation cannot poll or stop another's
+//  build. Passing `nil` yields the same tool without that state, which is what the Library needs
+//  for metadata. The other 71 ignore the parameter. One uniform signature beats a special case.
 //
 
 import Foundation
@@ -131,7 +132,7 @@ enum NativeToolCatalog {
         .make(.library) { _ in MoveFileTool() },
         .make(.library) { _ in CopyFileTool() },
         .make(.library) { _ in CreateFolderTool() },
-        .make(.libraryExceptCode(supersededBy: "batch_command")) { TerminalTool(conversationID: $0) },
+        .make(.libraryExceptCode(supersededBy: "run_command")) { TerminalTool(conversationID: $0) },
         .make(.library) { _ in OpenApplicationTool() },
         .make(.library) { _ in RunAppleScriptTool() },
         .make(.library) { _ in GetSystemStatsTool() },
@@ -174,7 +175,30 @@ enum NativeToolCatalog {
         .make(.libraryExceptCode(supersededBy: "code_search_text / code_search_symbol / code_search_files")) { _ in CodeSearchTool() },
         .make(.library) { _ in GlobFilesTool() },
         .make(.library) { _ in FindDefinitionTool() },
-        .make(.library) { _ in BatchCommandTool() },
+        // ⚠️ `batch_command` IS GONE FROM THIS CATALOGUE. It was never two behaviours — its `call`
+        // was a two-line dispatcher over the same `runForeground` / `startBackground` statics these
+        // two use, so `run_command` was a literal duplicate of `batch_command(background: false)`.
+        // Keeping both meant chat and Code were offered different names for identical work, and the
+        // observer tools below had to describe a starter that differed by mode.
+        //
+        // ⚠️ `BatchCommandTool` the TYPE remains: it owns `precheck`, `runForeground`,
+        // `startBackground` and `effectiveTimeout`, which both tools below call.
+        // Only its catalogue entry is withdrawn, so no profile can select it any more.
+        //
+        // ⚠️ NO RENAME MAP. One was built and then deliberately removed: nothing seeds a default
+        // tool list, so a profile created after this withdrawal CANNOT contain the old name, and
+        // with no released users the only holders were local development profiles. A standing
+        // "withdrawn names resolve to something else" mechanism is a first-party cousin of the
+        // guess-by-name fallback `resolveExecutableTools` deleted on purpose — keeping one invites
+        // reaching for it instead of migrating properly. A stored name that no longer exists is
+        // reported by the ⚠️ NOT RESOLVED error, which is the honest outcome.
+        .make(.library) { RunCommandTool(conversationID: $0) },
+        .make(.library) { StartBackgroundTaskTool(conversationID: $0) },
+        // The three that make `background: true` worth calling. Without them the flag starts work
+        // nobody can observe, which is not a capability. Conversation-scoped for the same reason
+        // `batch_command` now is.
+        .make(.library) { CommandOutputTool(conversationID: $0) },
+        .make(.library) { CommandStopTool(conversationID: $0) },
         .make(.libraryExceptCode(supersededBy: "create_new_file / overwrite_file")) { _ in CreateFileTool() },
         .make(.library) { _ in FileOverviewTool() },
         .make(.library) { _ in CodebaseMapTool() },
@@ -250,4 +274,55 @@ enum NativeToolCatalog {
 
     /// Tools only a Code profile gets — the intent-splits, absent from the Library entirely.
     static var codeOnlyTools: [NativeToolEntry] { entries.filter { $0.visibility == .codeOnly } }
+}
+
+// MARK: - Control-plane tools
+
+/// Name, description and argument schema for a tool `AgentConnect` builds per run.
+///
+/// ⚠️⚠️ METADATA ONLY — deliberately no `agentTool(...)` builder. These tools genuinely cannot
+/// live in `entries`: each needs run-scoped data to CONSTRUCT (the run's chat history, its skill
+/// manifests, a Code profile's project folder), which a startup catalogue cannot supply, and
+/// `ToolRegistryDriftTests` fails the build if one appears there. Giving this type a builder
+/// would re-open exactly that door.
+///
+/// But the data they need affects their BEHAVIOUR, not their schema: all five declare a constant
+/// `description` and `parameterSchema`. So they can be PRICED from a probe built with empty data
+/// even though they cannot be dispatched from one — and until 2026-09-20 nothing priced them, so
+/// every one cost 0 in the fit gauge.
+struct InjectedToolMetadata: Sendable {
+    let name: String
+    let description: String
+    let parameters: ToolParameters
+
+    /// Reads the metadata off a probe instance, so the values are the tool's own answer rather
+    /// than strings repeated here — the same discipline as `NativeToolEntry.make`.
+    static func describe<T: DevgenticTool>(_ probe: T) -> InjectedToolMetadata {
+        InjectedToolMetadata(name: probe.name, description: probe.description, parameters: probe.parameterSchema)
+    }
+}
+
+extension NativeToolCatalog {
+
+    /// Every tool `AgentConnect` injects outside the catalogue. **This is the list.**
+    ///
+    /// It used to exist only as `ToolRegistryDriftTests.injectedOutsideCatalog` — a hand-written
+    /// `Set` in a TEST file, which is why nothing in production could price these or show them in
+    /// a loadout. That test now derives its list from here, so this is one list where there were
+    /// two, not a third one.
+    ///
+    /// ⚠️ `ask_user` is described in its RICH form. Its schema is the one thing here that varies
+    /// at runtime — `AgentConnect` drops `options`/`multiline` for small and tiny models, which
+    /// fumble them — so no single entry is exact. Rich is the larger of the two (456 vs 195
+    /// chars), and over-reading is the safe direction for a budget on the models with the
+    /// smallest windows.
+    static let injectedTools: [InjectedToolMetadata] = [
+        .describe(FinalAnswerTool()),
+        .describe(AskUserTool(richFields: true)),
+        .describe(ConversationHistoryTool(chatHistory: [], correlation: "")),
+        .describe(LoadSkillTool(manifests: [])),
+        .describe(UpdateProjectContextTool(projectPath: "")),
+    ]
+
+    static var injectedToolNames: Set<String> { Set(injectedTools.map(\.name)) }
 }

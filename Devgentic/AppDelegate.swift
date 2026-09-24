@@ -710,6 +710,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // re-parented to launchd as orphans (SIGTERM, escalating to SIGKILL).
         await MCPClientService.shared.disconnectAll()
 
+        // The same thing, for the children a CONVERSATION started. `batch_command(background:)`
+        // was covered by nothing here: a build launched from Code mode outlived the app as a
+        // launchd orphan, with no record anywhere of what it was. MCP's children were handled
+        // and these were not, which is the asymmetry rather than a considered choice.
+        //
+        // Synchronous, and it sleeps once for `quitGrace` (0.4 s) between SIGTERM and SIGKILL.
+        // Blocking a cooperative-pool thread is normally wrong; here the process is ending, the
+        // block is bounded well inside this method's 3 s watchdog, and the alternative — going
+        // async — risks the watchdog firing before the escalation runs and leaving the orphan
+        // this call exists to prevent.
+        BackgroundProcessRegistry.shared.terminateAll()
+
         // Flush observability buffers to SQLite (Gap #13): up to 5s of logs and 1s of
         // span events are otherwise lost on quit.
         await LogRecorder.shared.prepareForTermination()

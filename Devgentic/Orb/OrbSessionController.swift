@@ -78,10 +78,12 @@ final class OrbSessionController {
 
     /// Bumped whenever a tester is asked to verify a change, so a log proves which binary ran.
     static let featureMarker = "pr9 (all P1/P2/P3 closed — entry-point guards, playback fallback, panel + HITL logging)"
-    /// Canonical wake word. ⚠️ Was dead code until 2026-09-04 — all matching went through
-    /// `wakeWordVariants`, so editing this changed nothing. `wakeWordVariants` now derives
-    /// from it, which is what makes a future user-configurable wake word actually take effect.
-    static let wakeWord = "orb"
+    /// Canonical wake word — whatever the user configured, sanitized, defaulting to "orb".
+    ///
+    /// ⚠️ Read at USE time, never captured into a `let`. It was a `static let` until 2026-09-19,
+    /// which is what made the setting impossible: every matcher below derived from it once, at
+    /// type-initialization, so a word typed in Settings could never reach a running orb.
+    static var wakeWord: String { OrbConfigManager.shared.wakeWord }
     /// Spoken when a run ends WELL. ⚠️ Until the reply itself is spoken (roadmap Phase 1)
     /// the announcement is the ONLY thing a voice-only user hears, so it must reflect the
     /// real outcome — see `announcement(for:reason:)`, not this constant, at the call site.
@@ -244,10 +246,25 @@ final class OrbSessionController {
     /// The command as it stands right now: everything spoken after the wake word, or —
     /// when capture was armed by clicking — everything spoken after the arm point.
     var commandPreview: String {
-        if let baseline = manualCaptureBaseline {
-            return Self.strippingPrefix(baseline, from: liveTranscript)
+        Self.commandPreview(liveTranscript: liveTranscript, manualBaseline: manualCaptureBaseline)
+    }
+
+    /// The policy behind `commandPreview`. Pure.
+    ///
+    /// ⚠️ Leading wake words are stripped on BOTH paths, not only the wake-word one. Observed on
+    /// device 2026-09-19: the user said the wake word three times, nothing visibly registered, they
+    /// clicked the orb and carried on — and "Orba, Orba, Orba. Write an essay…" reached the model
+    /// whole, because the click path only dropped the pre-arm baseline (and Whisper had rewritten
+    /// that baseline out of the final text anyway). A click after an unanswered wake word is the
+    /// common case, not an edge case, and the wake word is never part of what was asked.
+    static func commandPreview(liveTranscript: String,
+                               manualBaseline: String?,
+                               wakeWord: String = OrbSessionController.wakeWord) -> String {
+        if let manualBaseline {
+            return strippingLeadingWakeWords(from: strippingPrefix(manualBaseline, from: liveTranscript),
+                                             wakeWord: wakeWord)
         }
-        return Self.extractCommand(from: liveTranscript)
+        return extractCommand(from: liveTranscript, wakeWord: wakeWord)
     }
 
     /// Normalized 0…1 audio level for the core visual.
@@ -470,7 +487,7 @@ final class OrbSessionController {
         // correctly silent" — both look identical in a log. Bump `featureMarker` with any change
         // a tester is asked to verify.
         let config = OrbConfigManager.shared
-        logger.notice("[ORB_SESSION]\(self.tag) Orb \(Self.featureMarker) starting — activation: \(config.activationMode.rawValue), recognizer: \(config.recognizer.rawValue), spokenResponses: \(config.spokenResponses.rawValue), followUp: \(config.followUp.rawValue), earcons: \(config.earcons.rawValue), approvals: \(config.toolApprovals.rawValue), duplexAudio: \(config.duplexAudioEnabled), endpointing: \(String(format: "%.1f", Self.commandSilenceCommit))s.")
+        logger.notice("[ORB_SESSION]\(self.tag) Orb \(Self.featureMarker) starting — activation: \(config.activationMode.rawValue), wakeWord: \"\(Self.wakeWord)\", recognizer: \(config.recognizer.rawValue), spokenResponses: \(config.spokenResponses.rawValue), followUp: \(config.followUp.rawValue), earcons: \(config.earcons.rawValue), approvals: \(config.toolApprovals.rawValue), duplexAudio: \(config.duplexAudioEnabled), endpointing: \(String(format: "%.1f", Self.commandSilenceCommit))s.")
         installSystemObservers()
         loadProfiles()
         // Remembered profile → skip the picker entirely and start listening.
@@ -723,7 +740,7 @@ final class OrbSessionController {
         }
         // Same restriction as QuickAccess: only chat-style profiles make sense here.
         profiles = all.filter { $0.profileType == .bot || $0.profileType == .agent }
-        if let idString = UserDefaults.standard.string(forKey: AppSettings.orbProfileIDKey) {
+        if let idString = TestHost.defaults.string(forKey: AppSettings.orbProfileIDKey) {
             rememberedProfileID = UUID(uuidString: idString)
         }
     }
@@ -1159,7 +1176,7 @@ final class OrbSessionController {
                 setStage(.voiceUnavailable(reason: String(localized: "No speech model is loaded. Download a Whisper model from the composer's voice settings, then retry.")), "runListeningSessions")
                 return nil
             }
-            // ⚠️ The wake word is English orthography matched by substring. A recognizer
+            // ⚠️ The wake word is English orthography matched as a whole word. A recognizer
             // transcribing another script can never produce a match, and the failure is
             // silent — the orb looks alive and simply ignores the user forever.
             let canMatchWakeWord = OrbConfigManager.shared.activationMode != .wakeWord
@@ -1670,35 +1687,73 @@ final class OrbSessionController {
             .joined(separator: " ")
     }
 
-    /// Accepted wake-word spellings. A small Whisper model regularly renders "Orb"
-    /// as a near-homophone, and an unrecognized wake word leaves the user with no way
-    /// to talk to the HUD at all — so matching is deliberately generous. False
-    /// positives only arm command capture, which the user can see and simply not act on.
-    static let wakeWordVariants = [wakeWord, "jarvus", "jervis", "javis", "jarves", "charvis", "travis"]
+    /// Mishearings to accept alongside a wake word, keyed by that word. A recognizer that never
+    /// matches leaves the user with no way to talk to the HUD at all, so matching is deliberately
+    /// generous — a false positive only arms command capture, which the user can see and ignore.
+    ///
+    /// ⚠️ KEYED BY THE WORD, because a homophone list does not survive a rename. When the wake
+    /// word changed from a six-letter name to "orb" (2026-09-19) the OLD name's homophones
+    /// ("jarvus", "travis", …) rode along untouched — none contained the old name literally, so
+    /// no textual sweep could have caught them — and "Travis" armed the orb while "Orba", the
+    /// mishearing actually produced that session, did not. Pinned by
+    /// `OrbWakeWordTests.testNoHomophoneOfTheOldNameSurvives`.
+    ///
+    /// ⚠️ ONLY the shipped default has entries, and that is not an omission: these are words a
+    /// recognizer was *observed* producing on device, not words derived by rule. A custom wake
+    /// word gets none until someone hears one — guessing would widen the match on a hunch.
+    static let wakeWordHomophones: [String: [String]] = [
+        OrbConfigManager.defaultWakeWord: ["orba", "orbs"]
+    ]
 
-    /// Range of the first accepted wake-word variant in `text`, if any.
-    static func wakeWordRange(in text: String) -> Range<String.Index>? {
-        wakeWordVariants
-            .compactMap { text.range(of: $0, options: .caseInsensitive) }
-            .min { $0.lowerBound < $1.lowerBound }
+    /// Spellings accepted for `wakeWord`: the word itself plus any observed mishearing of it.
+    static func wakeWordVariants(for wakeWord: String = OrbSessionController.wakeWord) -> [String] {
+        [wakeWord] + (wakeWordHomophones[wakeWord.lowercased()] ?? [])
+    }
+
+    /// `\b(?:orb|orba|orbs)\b` for the default word. Built per call: the wake word is settable,
+    /// and a cached pattern is exactly how the old `static let` silently ignored the setting.
+    static func wakeWordPattern(for wakeWord: String) -> String {
+        let alternatives = wakeWordVariants(for: wakeWord)
+            .map { NSRegularExpression.escapedPattern(for: $0) }
+            .joined(separator: "|")
+        return "\\b(?:\(alternatives))\\b"
+    }
+
+    /// Range of the first accepted wake-word variant in `text`, matched as a WHOLE WORD, if any.
+    ///
+    /// ⚠️ Never a bare substring. A three-letter wake word matched by substring fires inside
+    /// "absorb", "forbid" and "orbit" — and slicing after the substring turned "Orba. Orba."
+    /// into the prompt "a. Orba", which the model answered as a question about a puzzle game
+    /// (device, 2026-09-19).
+    static func wakeWordRange(in text: String,
+                              wakeWord: String = OrbSessionController.wakeWord) -> Range<String.Index>? {
+        text.range(of: wakeWordPattern(for: wakeWord), options: [.regularExpression, .caseInsensitive])
     }
 
     /// Everything after the FIRST wake-word occurrence, stripped of leading/trailing
     /// punctuation. Falls back to the whole transcript if the wake word was rewritten
     /// out of the final text (partial → confirmed drift).
-    static func extractCommand(from transcriptText: String) -> String {
-        guard let range = wakeWordRange(in: transcriptText) else {
+    static func extractCommand(from transcriptText: String,
+                               wakeWord: String = OrbSessionController.wakeWord) -> String {
+        guard let range = wakeWordRange(in: transcriptText, wakeWord: wakeWord) else {
             return transcriptText.trimmingCharacters(in: commandStrippers)
         }
-        var command = String(transcriptText[range.upperBound...]).trimmingCharacters(in: commandStrippers)
+        let command = String(transcriptText[range.upperBound...]).trimmingCharacters(in: commandStrippers)
+        return strippingLeadingWakeWords(from: command, wakeWord: wakeWord)
+    }
 
-        // ⚠️ Strip REPEATED leading wake words. Observed on device 2026-09-04: Whisper returned
-        // "Orb. Orb, write an essay on technology." — the user said it twice because the
-        // first attempt did not visibly register — and stripping only the first occurrence sent
-        // "Orb, write an essay on technology" to the model. Deliberately LEADING-only: a wake
-        // word later in the sentence is part of the request ("tell Orb about it") and must
-        // survive.
-        while let leading = wakeWordRange(in: command), leading.lowerBound == command.startIndex {
+    /// `command` with every LEADING wake word removed, trimmed of punctuation. Pure.
+    ///
+    /// ⚠️ Repeated leading wake words are the common case. Observed on device 2026-09-04: Whisper
+    /// returned "Orb. Orb, write an essay on technology." — the user said it twice because the
+    /// first attempt did not visibly register — and stripping only the first occurrence sent
+    /// "Orb, write an essay on technology" to the model. Deliberately LEADING-only: a wake word
+    /// later in the sentence is part of the request ("tell Orb about it") and must survive.
+    static func strippingLeadingWakeWords(from text: String,
+                                          wakeWord: String = OrbSessionController.wakeWord) -> String {
+        var command = text.trimmingCharacters(in: commandStrippers)
+        while let leading = wakeWordRange(in: command, wakeWord: wakeWord),
+              leading.lowerBound == command.startIndex {
             let stripped = String(command[leading.upperBound...]).trimmingCharacters(in: commandStrippers)
             if stripped == command { break }   // no progress — do not spin
             command = stripped
@@ -1849,7 +1904,7 @@ final class OrbSessionController {
 
     /// Whether the configured ASR language can EVER produce a wake-word match. Pure.
     ///
-    /// ⚠️ `wakeWordVariants` is English orthography matched by case-insensitive substring, and
+    /// ⚠️ `wakeWordVariants` is English orthography matched case-insensitively as whole words, and
     /// the ASR language is the composer's shared `AppSettings.speechLanguageKey`. Set it to a
     /// non-Latin-script language and the recognizer returns text no variant can match — the orb
     /// looks alive and simply never responds, with no error logged anywhere. Callers must fall

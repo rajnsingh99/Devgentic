@@ -58,4 +58,44 @@ enum TestHost {
         logger.error("[TESTHOST] Refused to \(step) because this process is an XCTest host. CONSEQUENCE: the step did not run — deliberately. The test host is the real app, so without this it would have taken a REAL side effect on the developer's own machine during an ordinary `test-without-building` run.")
         return false
     }
+
+    // MARK: - Defaults redirect
+
+    /// `UserDefaults.standard`, or an isolated suite when running under XCTest.
+    ///
+    /// ⚠️⚠️ REDIRECT, not refuse — settings are PERSISTENCE, which `permits` above names as the
+    /// case a redirect is right for. A test that reads a setting is a test worth having; it just
+    /// must not read the developer's own.
+    ///
+    /// Field-observed 2026-09-20: nine `OrbWakeWordTests` failed on the author's machine and
+    /// passed everywhere else. The test host IS the shipping app, so `UserDefaults.standard` is
+    /// the real `app.devgentic.macos` domain — where the author had set a custom wake word. The
+    /// tests exercise the NO-ARGUMENT call shape on purpose (that is the wiring coverage: an
+    /// explicit argument would still pass if the setting were disconnected), so they can only be
+    /// correct when "unset" genuinely means unset.
+    ///
+    /// ⚠️ A REAL suite, not a stub. `OrbConfigManager` writes settings and reads them back, so the
+    /// round-trip has to work — what must not survive is the write reaching the user's domain, or
+    /// their value reaching the test.
+    ///
+    /// ⚠️ Computed, never cached by a caller in a `let`. Same ordering hazard as `isRunning`: a
+    /// stored property resolved during app launch could be evaluated before the test bundle loads
+    /// and pin `.standard` for the whole run.
+    static var defaults: UserDefaults {
+        isRunning ? testHostSuite : .standard
+    }
+
+    /// Wiped once per process, so each run starts from a genuinely empty domain — otherwise a
+    /// value written by one test would be "already configured" for the next run's defaults tests.
+    private static let testHostSuite: UserDefaults = {
+        let name = "devgentic.testhost.defaults"
+        guard let suite = UserDefaults(suiteName: name) else {
+            // ⚠️ Falling back to `.standard` would silently restore the exact leak this exists to
+            // close, so say so — a mysteriously-failing settings test is the symptom.
+            DGLogger(category: "TestHost").error("[TESTHOST] Could not open the isolated defaults suite '\(name)'. CONSEQUENCE: settings reads fall back to UserDefaults.standard, which under a test host is the developer's REAL app domain — tests will see their machine's settings and may overwrite them.")
+            return .standard
+        }
+        suite.removePersistentDomain(forName: name)
+        return suite
+    }()
 }

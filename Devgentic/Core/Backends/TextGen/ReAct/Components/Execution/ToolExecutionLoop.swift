@@ -37,6 +37,8 @@ func executeToolCalls(
     /// [WF-SE6/SE11] The workflow node's EXPLICIT unattended-approval setting; false for
     /// chat/code and for nodes without it. Only consulted when the run is unattended.
     unattendedAutoApprove: Bool = false,
+    /// Code mode's project folder. Nil for every other profile — those stay unconfined.
+    workspaceRoot: String? = nil,
     onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
 ) async throws -> [ToolObservation] {
 
@@ -124,6 +126,7 @@ func executeToolCalls(
                         continuation: continuation,
                         approvalNodeID: approvalNodeID,
                         unattendedAutoApprove: unattendedAutoApprove,
+                workspaceRoot: workspaceRoot,
                         onTraceUpdate: onTraceUpdate
                     )
                 }
@@ -152,6 +155,7 @@ func executeToolCalls(
             continuation: continuation,
             approvalNodeID: approvalNodeID,
             unattendedAutoApprove: unattendedAutoApprove,
+                workspaceRoot: workspaceRoot,
             onTraceUpdate: onTraceUpdate
         )
         observations.append(observation)
@@ -180,13 +184,91 @@ private func executeSingleTool(
     approvalNodeID: UUID?,
     /// [WF-SE6/SE11] see the outer overload.
     unattendedAutoApprove: Bool,
+    /// Code mode's project folder; nil leaves the call unconfined.
+    workspaceRoot: String?,
     onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
 ) async throws -> ToolObservation {
 
     let toolCallId = tool.id
     let toolName = tool.name
+
+    // ── Workspace boundary ───────────────────────────────────────────────────────────────────
+    //
+    // ⚠️⚠️ Runs BEFORE anything else touches the arguments, because it does two jobs and the
+    // first one changes what every later step sees:
+    //
+    //  1. RESOLVES relative paths against the PROJECT, not $HOME. `FilePathResolver.resolve`
+    //     anchors a bare path to the home directory — correct for a general assistant, and the
+    //     reason `codebase_map("./")` once spent 41.8 seconds walking `/Users/<name>` for a Code
+    //     session rooted at a small Java project.
+    //  2. REFUSES writes outside the project outright, and routes outside READS through the
+    //     ordinary confirmation banner instead of running them silently.
+    //
+    // Nil root (every non-Code profile) leaves both behaviours exactly as they were.
+    let tool0Arguments = tool.arguments
+    let boundary = WorkspaceBoundaryDecision.evaluate(
+        toolName: toolName,
+        arguments: tool0Arguments,
+        workspaceRoot: workspaceRoot
+    )
+
+    if case .refuse(let reason) = boundary.outcome {
+        logger.error("[WORKSPACE] conv \(conversationID.uuidString.prefix(8)) — '\(toolName)' REFUSED. \(reason) CONSEQUENCE: the tool did not run and nothing was written; the model receives this reason as its observation and can retry inside the project or ask the user to change the project folder.")
+        let refusalOutput = ToolOutput(toolName: toolName, params: serializeToolParams(tool.arguments), output: reason, isSuccess: false)
+        continuation.yield(.toolFailed(refusalOutput, category: .permissionRejected))
+        return ToolObservation(
+            stepId: currentIteration,
+            toolCallId: toolCallId,
+            toolName: toolName,
+            result: reason,
+            summary: reason,
+            isSuccess: false,
+            params: serializeToolParams(tool.arguments),
+            output: reason,
+            artifacts: [],
+            failureCategory: .permissionRejected
+        )
+    }
+
+    // Path arguments are now project-anchored and canonical. Everything downstream — dedup,
+    // the confirmation banner's params, the timeline record — reads the resolved form, so what
+    // the user approves is what actually runs.
+    let tool = PendingToolCall(id: tool.id, name: tool.name, arguments: boundary.arguments)
     let arguments = tool.arguments
     let paramsString = serializeToolParams(arguments)
+
+    // ⚠️ Logged only when the boundary actually CHANGED a path, so ordinary in-project calls stay
+    // quiet. This is the line whose absence let `codebase_map("./")` resolve to the home directory
+    // and walk it for 41.8 seconds with nothing in the log naming the substitution.
+    if workspaceRoot != nil, boundary.arguments != tool0Arguments {
+        logger.info("[WORKSPACE] conv \(conversationID.uuidString.prefix(8)) — '\(toolName)' path(s) re-anchored to the project before dispatch: \(serializeToolParams(tool0Arguments)) → \(paramsString). CONSEQUENCE: the tool, the confirmation banner and the timeline all see the resolved path, so what the user approves is what runs.")
+    }
+
+    if case .askUser(let reason) = boundary.outcome {
+        let operationID = UUID()
+        logger.notice("[WORKSPACE] conv \(conversationID.uuidString.prefix(8)) — '\(toolName)' reaches outside the project; asking the user. \(reason) CONSEQUENCE: the run PARKS on a confirmation banner and the compute budget stops counting while it waits; if the user declines, the model gets an honest observation and stays inside the project.")
+        continuation.yield(.requestConfirmation(toolName: toolName, params: "\(reason)\n\n\(paramsString)", operationID: operationID))
+        let approved = await ExecutionSuspensionService.shared.suspend(for: operationID, conversationID: conversationID, nodeID: approvalNodeID)
+        if !approved {
+            let denial = "\(reason) The user declined. Stay inside the project folder, or ask them which folder to use."
+            let denialOutput = ToolOutput(toolName: toolName, params: paramsString, output: denial, isSuccess: false)
+            continuation.yield(.toolFailed(denialOutput, category: .userDenied))
+            return ToolObservation(
+                stepId: currentIteration,
+                toolCallId: toolCallId,
+                toolName: toolName,
+                result: denial,
+                summary: denial,
+                isSuccess: false,
+                params: paramsString,
+                output: denial,
+                artifacts: [],
+                failureCategory: .userDenied
+            )
+        }
+        logger.info("[WORKSPACE] conv \(conversationID.uuidString.prefix(8)) — '\(toolName)' APPROVED by the user for a path outside the project: \(paramsString). CONSEQUENCE: this one call proceeds; the grant is not remembered, so a later out-of-project read asks again.")
+    }
+    // ─────────────────────────────────────────────────────────────────────────────────────────
 
     // Emit UI Event
     continuation.yield(.toolCall(name: toolName, params: paramsString, stepId: currentIteration))

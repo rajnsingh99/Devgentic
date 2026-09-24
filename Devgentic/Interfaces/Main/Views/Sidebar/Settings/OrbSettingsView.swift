@@ -116,6 +116,38 @@ struct OrbSettingsView: View {
                 .frame(width: 150)
             }
 
+            if config.activationMode == .wakeWord {
+                rowDivider
+                SettingsRow(
+                    title: "Wake word",
+                    description: "What you say to get Orb's attention. A short word is easy to say and easy for the speech model to miss — if it keeps ignoring you, a two-word phrase like \"hey orb\" is recognised far more reliably.",
+                    theme: theme
+                ) {
+                    TextField("", text: wakeWordBinding, prompt: Text(OrbConfigManager.defaultWakeWord))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 200)
+                }
+
+                // ⚠️ Same rule as the approval keywords: show what Orb ACTUALLY listens for, not
+                // what was typed. The entry is lowercased, stripped of punctuation and rejected
+                // below two characters — a field silently disagreeing with the matcher is exactly
+                // how a user concludes the microphone is broken.
+                let heard = OrbSessionController.wakeWordVariants(for: config.wakeWord)
+                let entryUnusable = OrbConfigManager.sanitizedWakeWord(config.wakeWordRaw) == nil
+                    && !config.wakeWordRaw.isEmpty
+                rowDivider
+                readoutRow(
+                    title: "Orb will listen for",
+                    description: entryUnusable
+                        ? "That entry can't be matched — it needs at least two letters or digits, so Orb is still listening for the default."
+                        : (heard.count > 1
+                            ? "Plus the mis-hearings a speech model is known to produce for it."
+                            : "Say this while the orb is open."),
+                    value: heard.joined(separator: "   ·   "),
+                    isWarning: entryUnusable
+                )
+            }
+
             if config.activationMode == .holdShortcut {
                 rowDivider
                 SettingsRow(
@@ -626,7 +658,7 @@ struct OrbSettingsView: View {
                 HStack(spacing: 8) {
                     TactileButton(
                         title: "Check Access",
-                        icon: "mic.badge.checkmark",
+                        icon: "checkmark.shield",   // ⚠️ `mic.badge.checkmark` is not an SF Symbol — it rendered blank and logged on every visit to the pane.
                         variant: .secondary
                     ) {
                         Task {
@@ -799,6 +831,13 @@ struct OrbSettingsView: View {
 
     private var approvalKeywordsBinding: Binding<String> {
         Binding(get: { config.approvalKeywordsRaw }, set: { config.approvalKeywordsRaw = $0 })
+    }
+
+    private var wakeWordBinding: Binding<String> {
+        // ⚠️ Deliberately NOT logged here — this fires on every keystroke. The word in force is
+        // logged once per session in the [ORB_SESSION] start line, which is what a device
+        // transcript actually needs.
+        Binding(get: { config.wakeWordRaw }, set: { config.wakeWordRaw = $0 })
     }
 
     private var denialKeywordsBinding: Binding<String> {

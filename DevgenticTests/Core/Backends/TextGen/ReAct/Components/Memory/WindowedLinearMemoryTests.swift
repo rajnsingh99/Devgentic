@@ -40,48 +40,66 @@ final class WindowedLinearMemoryTests: XCTestCase {
     }
 
     // MARK: - MemoryBudgetConfig.derive Tests
+    //
+    // ⚠️ Since 2026-09-24 the scratchpad gets WHATEVER ROOM THE FIXED PROMPT LEAVES (payload budget
+    // minus instructions/history/context/tool text), and one entry may use all of it. These assert
+    // that rule, not snapshots of percentages: the old 8–15%-of-window budget ÷ maxIterations put
+    // every 8K model at a 200-char cap.
 
-    func testDerive_TinyTier_ProducesCorrectBudget() {
-        let config = MemoryBudgetConfig.derive(contextWindow: 4096, tier: .tiny)
-        // 4096 * 0.08 = 327.68 tokens → 327 * 4 = 1308 chars
-        XCTAssertEqual(config.totalBudgetChars, 1308)
-        XCTAssertEqual(config.perEntryCap, 200) // max(200, 1308/15) = max(200, 87) = 200
-        XCTAssertEqual(config.fullFidelityWindow, 3)
-        XCTAssertEqual(config.maxSystemAlerts, 3)
-    }
-
-    func testDerive_LargeTier_ProducesCorrectBudget() {
-        let config = MemoryBudgetConfig.derive(contextWindow: 128_000, tier: .large)
-        // 128000 * 0.15 = 19200 tokens → 19200 * 4 = 76800 chars
-        XCTAssertEqual(config.totalBudgetChars, 76800)
-        XCTAssertEqual(config.perEntryCap, 5120) // 76800 / 15 = 5120
-        XCTAssertEqual(config.fullFidelityWindow, 5) // frontier
-    }
-
-    func testDerive_MediumTier_ProducesCorrectBudget() {
-        let config = MemoryBudgetConfig.derive(contextWindow: 32768, tier: .medium)
-        // 32768 * 0.10 = 3276 tokens → 3276 * 4 = 13104 chars (Int truncation: 3276.8 → 3276)
-        XCTAssertEqual(config.totalBudgetChars, 13104)
-        XCTAssertEqual(config.perEntryCap, 873) // 13104 / 15 = 873
+    func testDerive_TotalIsThePayloadBudgetMinusTheFixedPrompt() {
+        let config = MemoryBudgetConfig.derive(contextWindow: 32_768, tier: .medium, reservedChars: 20_000)
+        XCTAssertEqual(config.totalBudgetChars,
+                       PromptFitCheck.nativePayloadCharBudget(forContextWindow: 32_768) - 20_000)
         XCTAssertEqual(config.fullFidelityWindow, 3) // not frontier
     }
 
-    func testDerive_UltraTier_UsesFrontierWindow() {
-        let config = MemoryBudgetConfig.derive(contextWindow: 200_000, tier: .ultra)
-        XCTAssertEqual(config.fullFidelityWindow, 5) // frontier
+    /// No limit below what fits: a single result may use the whole room.
+    func testDerive_OneEntryMayUseAllTheRoom() {
+        let config = MemoryBudgetConfig.derive(contextWindow: 8_192, tier: .small, reservedChars: 10_000)
+        XCTAssertEqual(config.perEntryCap, config.totalBudgetChars)
+    }
+
+    /// ⚠️ THE REGRESSION GUARD. An 8K model with a typical fixed prompt must get thousands of
+    /// characters per result, not the old 200.
+    func testAn8KModelIsNotPinnedToTheFloor() {
+        let config = MemoryBudgetConfig.derive(contextWindow: 8_192, tier: .small, reservedChars: 10_000)
+        XCTAssertGreaterThan(config.perEntryCap, 5_000,
+                             "an 8K model is back near the old 200-char cap — the scratchpad is no longer sized by the free room")
+    }
+
+    func testDerive_AFixedPromptOverBudgetHitsTheFloor() {
+        let config = MemoryBudgetConfig.derive(contextWindow: 8_192, tier: .small, reservedChars: 1_000_000)
+        XCTAssertEqual(config.totalBudgetChars, MemoryBudgetConfig.minimumTotalChars)
+    }
+
+    func testDerive_FrontierTiersKeepMoreEntriesInFull() {
+        XCTAssertEqual(MemoryBudgetConfig.derive(contextWindow: 200_000, tier: .ultra).fullFidelityWindow, 5)
+        XCTAssertEqual(MemoryBudgetConfig.derive(contextWindow: 128_000, tier: .large).fullFidelityWindow, 5)
+    }
+
+    /// ⚠️ THE WIRING. Every derive test passes if `AgentConnect` stops telling it how big the fixed
+    /// prompt is — and then the scratchpad claims the whole payload budget and overflows the window.
+    func testAgentConnectSizesTheScratchpadAroundTheFixedPrompt() throws {
+        // EIGHT components: file → Memory → Components → ReAct → TextGen → Backends → Core → DevgenticTests → root.
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<8 { root = root.deletingLastPathComponent() }
+        let source = root.appendingPathComponent("Devgentic/Core/Backends/TextGen/AgentConnect.swift")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: source.path), "running outside a checkout")
+        let code = try String(contentsOf: source, encoding: .utf8)
+            .components(separatedBy: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+        XCTAssertTrue(code.contains("reservedChars: reservedPromptChars"),
+                      "the chat/code path no longer sizes the scratchpad around its fixed prompt")
+        XCTAssertEqual(code.components(separatedBy: "MemoryBudgetConfig.derive(").count - 1, 2,
+                       "expected exactly the chat/code and workflow call sites")
+        XCTAssertEqual(code.components(separatedBy: "reservedChars:").count - 1, 2,
+                       "a derive call site lost its reservedChars — it would claim the whole payload budget")
     }
 
     func testDerive_ZeroContextWindow_FloorsAt2048() {
         let config = MemoryBudgetConfig.derive(contextWindow: 0, tier: .tiny)
-        // max(2048, 0) = 2048 → 2048 * 0.08 = 163 tokens → 163 * 4 = 652 chars
         XCTAssertGreaterThan(config.totalBudgetChars, 0, "Budget should not be zero")
-        XCTAssertGreaterThanOrEqual(config.perEntryCap, 200, "Per-entry cap floor should apply")
-    }
-
-    func testDerive_ZeroMaxIterations_FloorsAtOne() {
-        // Should not crash with division by zero
-        let config = MemoryBudgetConfig.derive(contextWindow: 4096, tier: .small, maxIterations: 0)
-        XCTAssertGreaterThan(config.perEntryCap, 0, "Per-entry cap must be positive")
     }
 
     // MARK: - Basic Protocol Tests
@@ -132,7 +150,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
         memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", params: "", result: longResult, artifacts: [])
 
         let compiled = memory.compileForPrompt()
-        XCTAssertTrue(compiled.contains("...[truncated]"), "Long results should be truncated")
+        XCTAssertTrue(compiled.contains("truncated") || compiled.contains("omitted"), "Long results should be cut, and say so")
         XCTAssertFalse(compiled.contains(longResult), "Original full result should not appear")
     }
 

@@ -37,16 +37,10 @@
 //  append-only version chain removes that whole problem: the agent adds a version, and nothing that
 //  existed before is mutated.
 //
-//  ## Rule 5b: why V5 needs no frozen copies for this change
+//  ## Schema history
 //
-//  V6 RETIRES `SkillSourceSD` and `SkillManifestSD` — it does not evolve them. Their live classes
-//  stay in `SkillRegistrySD.swift`, unlisted by V6 but still listed by V5, so V5 keeps rendering
-//  exactly the shape it recorded and no two versions collide. That is the whole reason those classes
-//  are not deleted outright yet; they are V5's definition and the migration's read path. Contrast
-//  V4, which DID need frozen copies, because V5 evolved an entity V4 also listed.
-//
-//  Entity retirement itself is lightweight-safe and proven against a real store —
-//  `SchemaMigrationTests.testRetiredCodeViewerEntityDropsWithoutLosingConversations`.
+//  The registry entities (`SkillSourceSD`, `SkillManifestSD`) existed only in development builds and
+//  are gone, classes included; the 2026-09-23 schema-history reset folded this library into V1.
 //
 
 import Foundation

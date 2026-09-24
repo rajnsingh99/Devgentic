@@ -27,6 +27,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     case chatOps = "ChatOps"
     case quickAccess = "Quick Access"
     case orb = "Orb"
+    case downloads = "Downloads"
     case about = "About"
 
     var id: String { self.rawValue }
@@ -42,7 +43,8 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .theme:            return "Theme"
         case .chatOps:          return "ChatOps"
         case .quickAccess:      return "Quick Access"
-        case .orb:           return "Orb"
+        case .orb:              return "Orb"
+        case .downloads:        return "Downloads"
         case .about:            return "About"
         }
     }
@@ -62,6 +64,8 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
             return "bolt.circle"
         case .orb:
             return "atom"
+        case .downloads:
+            return "arrow.down.circle"
         case .about:
             return "info.circle"
         }
@@ -76,6 +80,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .chatOps: return String(localized: "Remote Telegram control")
         case .quickAccess: return String(localized: "Global shortcut and panel")
         case .orb: return String(localized: "Voice assistant and listening")
+        case .downloads: return String(localized: "Model and asset downloads")
         case .about: return String(localized: "Version and licenses")
         }
     }
@@ -96,6 +101,8 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
             QuickAccessSettingsView()
         case .orb:
             OrbSettingsView()
+        case .downloads:
+            DownloadManagerContainerView(isEmbeddedInSettings: true)
         case .about:
             VStack(spacing: 16) {
                 Image(systemName: "bolt.fill")

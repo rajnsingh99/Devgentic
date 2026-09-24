@@ -134,3 +134,6 @@ Planout/
 # `Devgentic/.devgentic/context.md`, which the synchronized group then copied into every built
 # app as `Contents/Resources/context.md`. Any project's `.devgentic/` is agent state, never source.
 **/.devgentic/
+
+# Local Xcode derived data redirected into the repo (hidden dot-folder variant of DerivedData/).
+.derivedData/

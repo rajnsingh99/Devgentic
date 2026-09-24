@@ -229,8 +229,8 @@ final class CodeSessionManager {
         let agentConfig = AgentConfig(
             llmConfig: providerConfig,
             tools: CodeToolPreset.defaultTools,
-            maxIterations: 20,
-            executionTimeout: 300,
+            maxIterations: Self.presetMaxIterations,
+            executionTimeout: Self.presetExecutionTimeout,
             retryPolicy: RetryPolicy(maxRetries: 3, backoffStrategy: .exponential),
             errorRecovery: ErrorRecovery(
                 onToolFailure: .fallbackPrompt,
@@ -315,18 +315,41 @@ final class CodeSessionManager {
     /// ⚠️ Static and pure so the settings→config mapping is testable without a store, a profile or
     /// a MainActor hop. Both callers — `applyQuickSettingsToProfile` and the per-send
     /// `refreshInstructionsOnProfile` — go through here, so the two cannot drift.
+    /// Preset values an untouched project runs with. Named constants rather than literals at the
+    /// two sites that need them — the same drift `AgentExecutionDefaults` exists to stop.
+    static let presetMaxIterations = 20
+
+    /// Bounds the COMPUTE of a whole turn — every iteration and every tool call together, with
+    /// time parked awaiting a human excluded (`ComputeTimeoutSentinel`).
+    ///
+    /// ⚠️ Raised 300 → 1800 on 2026-09-21, and it is NOT an independent choice. It must stay
+    /// comfortably above `BatchCommandTool.maxTimeoutSeconds` (900): a turn that spends the
+    /// command's full ceiling on one build still has to read the output, fix the error and
+    /// re-run. At 300 s the two bounds contradicted each other — the tool advertised a timeout
+    /// the run could never reach, and the sentinel got there first and aborted the whole turn
+    /// WITHOUT the partial output the tool's own timeout would have returned. Runaway loops are
+    /// bounded by `presetMaxIterations`, not by this; this bounds a hang.
+    static let presetExecutionTimeout: TimeInterval = 1800
+
     static func apply(_ settings: CodeQuickSettings, to agentConfig: inout AgentConfig) {
-        if let maxIterations = settings.maxIterations {
-            agentConfig.maxIterations = maxIterations
+        // ⚠️⚠️ ALWAYS ASSIGN — never "skip when nil". These used to be `if let`, which made the
+        // mapping a ONE-WAY DOOR: pressing Remove in the limits panel stored 0, `apply` turned
+        // that into `nil` (unbounded) on the profile, and afterwards resetting the setting back to
+        // "inherit" wrote nothing at all, so the preset's 300 s could never come back. A run
+        // observed 2026-09-20 logged "[EXEC_LIMITS] No execution timeout configured" for exactly
+        // this reason. An unset override must RESTORE the preset, not leave the last value in
+        // place — that is what makes "Reset to defaults" mean anything.
+        agentConfig.maxIterations = settings.maxIterations ?? presetMaxIterations
+
+        // Tri-state, and the three states are genuinely different: nil = inherit the preset,
+        // 0 = the user explicitly chose "No limit", anything else = that budget.
+        switch settings.executionTimeout {
+        case .none:            agentConfig.executionTimeout = presetExecutionTimeout
+        case .some(let t) where t > 0: agentConfig.executionTimeout = t
+        case .some:            agentConfig.executionTimeout = nil   // explicit "No limit"
         }
-        if let timeout = settings.executionTimeout {
-            // 0 is the UI's "No limit". `nil` on the config means unbounded — see AgentConnect's
-            // `[EXEC_LIMITS]` notice for what that costs.
-            agentConfig.executionTimeout = timeout > 0 ? timeout : nil
-        }
-        if let thinking = settings.thinkingEnabled {
-            agentConfig.llmConfig.thinkingEnabled = thinking
-        }
+
+        agentConfig.llmConfig.thinkingEnabled = settings.thinkingEnabled ?? false
         agentConfig.tools = mergePresetTools(
             preset: CodeToolPreset.defaultTools,
             existing: agentConfig.tools,
@@ -453,6 +476,10 @@ final class CodeSessionManager {
             return
         }
 
+        // What is on disk right now. Compared against the rebuilt value below so an unchanged
+        // send does not pay for a write — see the guard at the end of this function.
+        let detailsBeforeRefresh = profile.details
+
         let projectPathStr = projectPath?.path ?? "/"
         let projectName = projectPath?.lastPathComponent ?? "?"
 
@@ -487,11 +514,31 @@ final class CodeSessionManager {
         // preset's guarantees still hold.
         let settings = CodeQuickSettingsStore.settings(for: projectPathStr, defaults: defaults)
         Self.apply(settings, to: &agentConfig)
-        if !settings.isDefault {
-            logger.info("[CODE_SETTINGS] Applied per-project quick settings for '\(projectName)' — maxIterations: \(agentConfig.maxIterations.map(String.init) ?? "nil"), timeout: \(agentConfig.executionTimeout.map { String(Int($0)) } ?? "none")s, \(settings.toolConfirmations.count) tool confirmation override(s).")
-        }
+        // ⚠️ Logged on EVERY send, not only when the user has overridden something. This was
+        // gated on `!settings.isDefault`, so a run at the preset limits said nothing about what
+        // they were — and "Reached maximum iterations (N)" is only diagnosable against the cap
+        // that was in force. `apply` runs either way; only the line was conditional.
+        let limitSource = settings.isDefault ? "preset" : "per-project override"
+        logger.info("[CODE_SETTINGS] '\(projectName)' runs with maxIterations: \(agentConfig.maxIterations.map(String.init) ?? "unbounded"), timeout: \(agentConfig.executionTimeout.map { "\(Int($0))s" } ?? "none"), \(settings.toolConfirmations.count) tool confirmation override(s) — source: \(limitSource). CONSEQUENCE: an iteration-cap or timeout termination in this run is against these exact values.")
 
         profile.details = .code(agentConfig)
+
+        // ⚠️⚠️ F10. This runs on EVERY send and rebuilds the same 7,567-char instruction block
+        // from the same inputs, so an unchanged session wrote an identical row per message —
+        // each one a real SwiftData write, a WAL entry, and a `lastSelected` bump that reordered
+        // "recently used" for a profile the user had not selected. The store logs that as
+        // `[PROFILE_SAVE] ⚠️ REDUNDANT`, which is how this was found.
+        //
+        // ⚠️ The guard lives HERE rather than in the store, deliberately. `BackendProfile.details`
+        // has a setter that moves the API key to the Keychain, refuses to overwrite an
+        // undecodable blob and rewrites every denormalized column — skipping it centrally would
+        // also skip those, and would strand a row whose cached value diverged from its persisted
+        // blob after an encode failure. This caller knows exactly what it recomputed, so it is
+        // the one place that can answer "nothing changed" without giving anything up.
+        guard profile.details != detailsBeforeRefresh else {
+            logger.debug("[CODE] Instructions unchanged for '\(projectName)' — skipping the profile write. CONSEQUENCE: no SwiftData write and no lastSelected bump this send; the row already holds these exact instructions, project path and quick settings.")
+            return
+        }
 
         do {
             try BackendProfileStore.shared.saveProfile(profile)
@@ -656,6 +703,7 @@ final class CodeSessionManager {
                 carried.isFavorite = user.isFavorite
                 carried.timeout = user.timeout
                 carried.timeoutMessage = user.timeoutMessage
+                carried.cutStrategy = user.cutStrategy
             }
             // Applied AFTER the carry-over so it wins, and keyed by NAME so it cannot resurrect a
             // tool the preset no longer contains — an override for an unknown name is simply

@@ -45,6 +45,12 @@ enum ToolCapability {
     static let arbitraryCodeExecution: Set<String> = [
         "execute_shell",
         "batch_command",
+        // ⚠️ The `batch_command` splits. Both hand their argument to `/bin/zsh -c`, so both are
+        // arbitrary code execution and both must be `.destructive` — `HITLRiskTier.classify`
+        // reads this set, and `SessionToolApprovals` refuses a durable "allow for this chat"
+        // grant for anything in it. Omitting them would have quietly downgraded a shell.
+        "run_command",
+        "start_background_task",
         "run_applescript",
     ]
 

@@ -67,8 +67,10 @@ enum PreSendFitHint {
         // MLX profile therefore read a real 32K in the ring and 8K here, and because the
         // shared dedupe key ends in `|window`, the send-time banner then stopped updating this
         // one in place: two banners, two numbers, neither replacing the other.
-        let (window, trained) = llmConfig.map { ContextWindowUsage.windows(for: $0, profileID: profile.id) }
-            ?? (EffectiveContextWindow.resolve(for: nil), nil)
+        let flavour: OllamaConfigDefaultProfile = .forProfileType(profile.profileType)
+        let (window, trained) = llmConfig.map {
+            ContextWindowUsage.windows(for: $0, profileID: profile.id, flavour: flavour)
+        } ?? (EffectiveContextWindow.resolve(for: nil, flavour: flavour), nil)
 
         // Gated on vision so the composer never warns about images a non-vision model
         // will have stripped before they reach the wire. Matches the send-time gate, so

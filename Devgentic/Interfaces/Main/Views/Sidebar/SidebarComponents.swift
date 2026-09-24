@@ -116,9 +116,10 @@ struct SidebarSearchBarView: View {
                 .animation(.easeInOut(duration: 0.2), value: isFocused)
                 .accessibilityHidden(true)
 
-            TextField(placeholder, text: $localText)
+            TextField("", text: $localText, prompt: Text(placeholder).foregroundColor(theme.placeholderText))
                 .textFieldStyle(.plain)
-                .font(theme.fontSubheadline)
+                .font(theme.fontFootnote)
+                .foregroundStyle(theme.primaryText)
                 .focused($isFocused)
                 .onChange(of: localText) { _, newValue in
                     debouncedUpdate(newValue)
@@ -146,20 +147,20 @@ struct SidebarSearchBarView: View {
             }
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .padding(.vertical, 6)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(theme.surfaceOverlayStrong)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(theme.surfaceOverlayStrong.opacity(0.45))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .strokeBorder(
-                    isFocused ? theme.accentColor.opacity(0.65) : theme.secondaryText.opacity(0.18),
-                    lineWidth: 1
+                    isFocused ? theme.accentColor.opacity(0.55) : theme.dividerColor.opacity(0.35),
+                    lineWidth: 0.5
                 )
         )
         .shadow(
-            color: isFocused ? theme.accentColor.opacity(0.2) : theme.shadowColor.opacity(0.35),
+            color: isFocused ? theme.accentColor.opacity(0.2) : Color.clear,
             radius: 5, x: 0, y: 1
         )
         .animation(.easeInOut(duration: 0.2), value: isFocused)

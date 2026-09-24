@@ -291,7 +291,8 @@ actor ReActAgentExecutor: Executor {
                             shellType: "Zsh (Non-Interactive Mode)",
                             userName: NSUserName(),
                             homeDirectory: NSHomeDirectory(),
-                            currentDate: Date().formatted(date: .numeric, time: .shortened)
+                            currentDate: Date().formatted(date: .numeric, time: .shortened),
+                            workspaceRoot: input.workspaceRoot
                         )
 
                         // `userProfile` is read ONCE before the loop (#21) and injected into
@@ -486,6 +487,7 @@ actor ReActAgentExecutor: Executor {
                                     continuation: continuation,
                                     approvalNodeID: input.workflowContext?.nodeID,
                                     unattendedAutoApprove: input.workflowContext?.unattendedAutoApprove ?? false,
+                                    workspaceRoot: input.workspaceRoot,
                                     onTraceUpdate: onTraceUpdate
                                 )
                                 if let nativeAdapter {
@@ -991,6 +993,7 @@ actor ReActAgentExecutor: Executor {
                             continuation: continuation,
                             approvalNodeID: input.workflowContext?.nodeID,
                             unattendedAutoApprove: input.workflowContext?.unattendedAutoApprove ?? false,
+                            workspaceRoot: input.workspaceRoot,
                             onTraceUpdate: onTraceUpdate
                         )
 
@@ -1054,6 +1057,15 @@ actor ReActAgentExecutor: Executor {
                         var pendingDenialAlerts: [String] = []
                         for obs in observations {
                             memoryStrategy.recordObservation(stepId: obs.stepId, toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, result: obs.result, artifacts: obs.artifacts)
+                            // The scratchpad path's cut, reported like the native one. Only when
+                            // the scratchpad IS what the model reads — on the native path the
+                            // native fit above decides, and reporting both would double-count.
+                            if nativeGenerator == nil, obs.result.count > memoryStrategy.perResultLimit {
+                                ContextCutLog.post(
+                                    cut: .init(toolName: obs.toolName, originalChars: obs.result.count,
+                                               keptChars: memoryStrategy.perResultLimit),
+                                    conversationID: input.conversationID, traceID: input.traceContext.traceID)
+                            }
 
                             if obs.failureCategory == .userDenied {
                                 let denialAlert = "User DENIED tool '\(obs.toolName)' with the attempted arguments. DO NOT retry this exact action — either choose a different tool, finalize with what you have, or explain the limitation."
@@ -1065,8 +1077,15 @@ actor ReActAgentExecutor: Executor {
                         // G12: Extend native conversation turns with this iter's assistant(tool_calls)
                         // + tool(result) exchange. Observations are sorted to match the order of the
                         // model's original tool_calls (Gemini matches functionResponse → functionCall
-                        // by position) and truncated via the memory strategy so a huge tool output
-                        // doesn't blow past the per-entry cap that the scratchpad path already enforces.
+                        // by position) and fitted by `ToolResultBudget`.
+                        //
+                        // ⚠️⚠️ NOT the scratchpad's per-entry cap any more (2026-09-24). That cap was
+                        // `8% of the window ÷ maxIterations`, floored at 200 — so on an 8K model every
+                        // tool result in Chat, Code and workflow agents reached the model as its first
+                        // 200 characters. The limit is now the room compaction can never free (payload
+                        // budget minus the protected prefix, shared across this batch), capped at a
+                        // third of the payload budget, and cut from the MIDDLE with a note that tells
+                        // the model how to get the rest. See `ToolResultBudget`.
                         // Reasoning is sanitized — same policy as the legacy recordReasoning path —
                         // so leaked markdown fences / tool-call prose don't pollute the conversation.
                         if let nativeGen = nativeGenerator {
@@ -1074,8 +1093,24 @@ actor ReActAgentExecutor: Executor {
                                 observations: observations,
                                 toolCalls: step.toolCalls
                             )
+                            let protectedChars = liveConversationTurns
+                                .prefix(nativePrefixCount)
+                                .reduce(0) { $0 + approximateTurnChars($1) }
+                            let perResultLimit = ToolResultBudget.limit(
+                                payloadBudgetChars: input.nativeContextBudgetChars,
+                                protectedChars: protectedChars,
+                                resultsInBatch: orderedObservations.count
+                            )
                             let truncatedObservations = orderedObservations.map { obs in
-                                obs.withResult(memoryStrategy.truncatedResult(for: obs.result))
+                                let fitted = ToolResultBudget.fit(obs.result, limit: perResultLimit,
+                                                                  strategy: input.cutPolicy.strategy(forTool: obs.toolName))
+                                if fitted.count < obs.result.count {
+                                    ContextCutLog.post(
+                                        cut: .init(toolName: obs.toolName, originalChars: obs.result.count, keptChars: fitted.count),
+                                        conversationID: input.conversationID, traceID: input.traceContext.traceID)
+                                    logger.info("[TOOLRESULT] '\(obs.toolName)' result cut from \(obs.result.count) to \(fitted.count) chars (limit \(perResultLimit) = payload budget \(input.nativeContextBudgetChars), protected prefix \(protectedChars), \(orderedObservations.count) result(s) this step). CONSEQUENCE: the model sees its start and end with a note naming what was omitted and how to fetch it.")
+                                }
+                                return obs.withResult(fitted)
                             }
                             let sanitizedReasoning: String? = {
                                 guard !step.reasoning.isEmpty, step.reasoning != step.thought else { return nil }
@@ -1130,6 +1165,9 @@ actor ReActAgentExecutor: Executor {
                                 )
                                 if droppedNow > 0 {
                                     compactedExchangesTotal += droppedNow
+                                    ContextCutLog.post(compactedExchanges: droppedNow,
+                                                       conversationID: input.conversationID,
+                                                       traceID: input.traceContext.traceID)
                                     logger.info("🧹 [Native] Compacted \(droppedNow) tool exchange(s) (\(compactedExchangesTotal) total) to fit context budget.")
                                     if !didInjectFullBudgetAlert {
                                         didInjectFullBudgetAlert = true
@@ -1150,15 +1188,16 @@ actor ReActAgentExecutor: Executor {
                             latestClarification = ClarificationContext(query: obs.params, response: answer)
                         }
 
-                        var shouldAbort = false
-                        var abortReason = ""
-                        // Category for the classified abort error. Repetitive-action is the
-                        // historical default; the ask_user idle gate overrides to .cbIdleLimit.
-                        var abortCategory: AgentErrorCategory = .cbRepetitiveAction
-                        // Loop-hygiene aborts (ask_user idle exhaustion) bypass the user's
-                        // ErrorRecovery.onToolFailure tolerance — that policy governs tool
-                        // failures, not interrogation loops.
-                        var abortBypassesRecoveryPolicy = false
+                        var abortTrigger: AbortTrigger?
+                        // ⚠️⚠️ ONE value, not three. This was `abortReason` + `abortCategory` +
+                        // `abortBypassesRecoveryPolicy` — facts about the abort stored apart from
+                        // the abort — and two of the three went dead without a compiler or a test
+                        // noticing: the bypass was never assigned `true` (so the `ask_user` idle
+                        // exemption its comment described never once fired) and the category was
+                        // never reassigned (so consecutive tool FAILURES and user DENIALS were both
+                        // filed as "Repetitive Action" in the dashboards). `AbortTrigger` derives
+                        // both from its `kind`, so they cannot drift and a new trigger cannot be
+                        // added without answering for them.
 
                         for obs in observations {
                             let isSuccess = obs.isSuccess
@@ -1173,9 +1212,8 @@ actor ReActAgentExecutor: Executor {
                                 ? circuitBreaker.recordDenial()
                                 : circuitBreaker.recordToolResult(isSuccess: isSuccess)
 
-                            if case .abort(let reason) = resultAction {
-                                shouldAbort = true
-                                abortReason = reason
+                            if case .abort(let trigger) = resultAction {
+                                abortTrigger = trigger
                             }
 
                             // Only genuinely hallucinated names (not in the registry) enter
@@ -1198,9 +1236,8 @@ actor ReActAgentExecutor: Executor {
                         // Catches "successful but useless" loops (e.g., same tool with empty args returning same result).
                         let repetitiveAction = circuitBreaker.evaluateRepetitiveActions(observations)
                         switch repetitiveAction {
-                        case .abort(let reason):
-                            shouldAbort = true
-                            abortReason = reason
+                        case .abort(let trigger):
+                            abortTrigger = trigger
                         case .proceedWithWarning(let uiMessage, let modelAlert):
                             // G2: Dual-channel imminent-abort signal.
                             //   UI   — terse chip so the human can intervene (cancel, refine prompt).
@@ -1226,18 +1263,22 @@ actor ReActAgentExecutor: Executor {
                             break
                         }
 
-                        if shouldAbort {
-                            // Consult ErrorRecovery.onToolFailure policy before aborting —
-                            // unless the abort is loop hygiene (ask_user idle), which the
-                            // tolerance policy doesn't govern.
-                            let effectivePolicy: ToolFailurePolicy = abortBypassesRecoveryPolicy
-                                ? .abort
-                                : input.errorRecovery.onToolFailure
+                        if let abortTrigger {
+                            let abortReason = abortTrigger.reason
+                            // Consult ErrorRecovery.onToolFailure ONLY for kinds that the policy
+                            // legitimately governs. `honoursToolFailurePolicy` is derived from the
+                            // trigger, so this can no longer be silently wrong the way the dead
+                            // `abortBypassesRecoveryPolicy` flag was.
+                            let effectivePolicy: ToolFailurePolicy = abortTrigger.honoursToolFailurePolicy
+                                ? input.errorRecovery.onToolFailure
+                                : .abort
+                            logger.info("[BREAKER] \(abortTrigger.category.rawValue) requested an abort — conv \(input.conversationID.uuidString.prefix(8)), policy: \(effectivePolicy). CONSEQUENCE: \(effectivePolicy == .abort ? "the run STOPS here" : "the run CONTINUES with a corrective alert; the breaker's request was downgraded by the profile's ErrorRecovery tolerance").")
                             switch effectivePolicy {
                             case .skipAndContinue:
                                 // Log the failure but let the agent continue reasoning
-                                continuation.yield(.thought("⚠️ Tool failures detected — skipping and continuing."))
-                                let skipAlert = "Previous tool calls failed: \(abortReason). Continue with available information."
+                                continuation.yield(.thought("⚠️ \(abortTrigger.category.displayName) — skipping and continuing."))
+                                // ⚠️ The trigger's OWN wording, never a generic "tools failed".
+                                let skipAlert = "\(abortTrigger.modelNarrative) Continue with the information you already have."
                                 memoryStrategy.recordSystemAlert(msg: skipAlert)
                                 if let adapter = nativeGenerator?.toolTurnAdapter {
                                     liveConversationTurns.append(adapter.systemAlertTurn(message: skipAlert))
@@ -1246,9 +1287,15 @@ actor ReActAgentExecutor: Executor {
 
                             case .fallbackPrompt:
                                 // Inject a fallback hint and let the agent try a different approach
-                                continuation.yield(.thought("⚠️ Tool failures detected — trying alternative approach."))
+                                continuation.yield(.thought("⚠️ \(abortTrigger.category.displayName) — trying a different approach."))
                                 let userMessage = input.errorRecovery.fallbackMessage ?? ErrorRecovery.defaultFallbackMessage
-                                let fallbackAlert = "Tools are failing repeatedly: \(abortReason). \(userMessage)"
+                                // ⚠️⚠️ THE LINE THAT CORRUPTED A FILE. This read "Tools are failing
+                                // repeatedly: …" for EVERY trigger — including a repetition loop in
+                                // which every call had SUCCEEDED. The model believed it, decided it
+                                // could not read a file it had just read three times, and committed
+                                // an edit it called a "high-risk guess" (2026-09-20). The narrative
+                                // now comes from the trigger, which knows whether anything failed.
+                                let fallbackAlert = "\(abortTrigger.modelNarrative) \(userMessage)"
                                 memoryStrategy.recordSystemAlert(msg: fallbackAlert)
                                 if let adapter = nativeGenerator?.toolTurnAdapter {
                                     liveConversationTurns.append(adapter.systemAlertTurn(message: fallbackAlert))
@@ -1263,7 +1310,7 @@ actor ReActAgentExecutor: Executor {
                                 // aborts, .cbIdleLimit for ask_user idle exhaustion.
                                 executionSummary.markComplete(failureReason: abortReason)
                                 let classified = ClassifiedAgentError.synthetic(
-                                    category: abortCategory,
+                                    category: abortTrigger.category,
                                     origin: "ReActAgentExecutor.circuitBreakerAbort",
                                     message: "Circuit breaker triggered: \(abortReason)",
                                     context: ["iteration": "\(currentIteration)"]

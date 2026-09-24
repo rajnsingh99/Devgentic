@@ -35,6 +35,23 @@ private let logger = DGLogger(category: "ContextWindowGauge")
 /// A snapshot of how full the selected model's context window is for the current
 /// conversation. Pure value type — the display math (`fraction`, `level`,
 /// formatting) is unit-testable without a view or a store.
+/// What the next send's estimate is MADE OF — the "what's using it" rows in the breakdown.
+///
+/// ⚠️ Added 2026-09-24 because the total alone hid the biggest lever: on an 8K Code session the
+/// TOOL DEFINITIONS were ~half the window before a word was typed, and nothing on screen said so.
+/// Same numbers `estimatedOccupancy` already computed for its debug log, now kept.
+struct ContextOccupancy: Equatable, Sendable {
+    var toolChars = 0
+    var historyChars = 0
+    var knowledgeChars = 0
+    var attachmentChars = 0
+    /// The fixed prompt layers `PromptFitCheck.estimatedTokens` adds on top.
+    var overheadChars = PromptFitCheck.layerOverheadChars
+    var imageTokens = 0
+
+    static func tokens(_ chars: Int) -> Int { Int(Double(chars) / PromptFitCheck.charsPerToken) }
+}
+
 struct ContextWindowUsage: Equatable, Sendable {
     /// Estimated tokens the next send will occupy (history + attachments + overhead).
     let usedTokens: Int
@@ -69,6 +86,10 @@ struct ContextWindowUsage: Equatable, Sendable {
     /// over an entire multi-step turn. "~12K / 128K" above "Last turn 40K in" is not an error
     /// — they answer different questions, and nothing said so.
     let turnSpansMultipleCalls: Bool
+    /// What the estimate above is made of. Nil for an empty conversation (nothing to break down).
+    var breakdown: ContextOccupancy? = nil
+    /// Lets the breakdown read what the last turn in THIS conversation had to cut.
+    var conversationID: UUID? = nil
 
     var fraction: Double { windowTokens > 0 ? Double(usedTokens) / Double(windowTokens) : 0 }
     /// Clamped for the bar/ring — the raw `fraction` can exceed 1.0 when the
@@ -173,7 +194,10 @@ extension ContextWindowUsage {
             return nil
         }
 
-        let (window, trained) = windows(for: config, profileID: profile.id)
+        let (window, trained) = windows(
+            for: config,
+            profileID: profile.id,
+            flavour: .forProfileType(profile.profileType))
         let windowIsFallback = (trained == nil)
 
         // `resolvedHistoryStrategy` is nil for bot / code profiles; the estimator resolves
@@ -181,7 +205,7 @@ extension ContextWindowUsage {
         // three profile types the gauge shows for DO receive episodic memory
         // (`PromptLayerConfig.bot/.agent/.code` all set `includeEpisodicMemory`), so none of
         // them is being charged for payload it never sees.
-        let used = estimatedOccupancyTokens(
+        let occupancy = estimatedOccupancy(
             config: config,
             profile: profile,
             messages: messages,
@@ -190,6 +214,7 @@ extension ContextWindowUsage {
             contextWindow: window,
             extraKnowledgeChars: extraKnowledgeChars
         )
+        let used = occupancy?.totalTokens ?? 0
 
         // Ground truth for the breakdown: the newest completed agent turn's REAL usage.
         // The resolved history is ASCENDING (oldest first), so the LAST agent message
@@ -211,7 +236,9 @@ extension ContextWindowUsage {
             // Matches `profileUsesConversationRAG` in the orchestrator.
             usesRetrieval: profile.profileType == .bot || profile.profileType == .agent,
             // Agent and Code both run the ReAct loop (`ExecutorFactory`); a bot is one call.
-            turnSpansMultipleCalls: profile.profileType == .agent || profile.profileType == .code
+            turnSpansMultipleCalls: profile.profileType == .agent || profile.profileType == .code,
+            breakdown: occupancy?.breakdown,
+            conversationID: conversationID
         )
     }
 
@@ -220,7 +247,12 @@ extension ContextWindowUsage {
     /// gauge denominator); `trained` = the model's max. They diverge only for Ollama
     /// (num_ctx caps below trained) and match for cloud / MLX.
     @MainActor
-    static func windows(for config: ProviderConfig, profileID: UUID?) -> (effective: Int, trained: Int?) {
+    /// ⚠️ `flavour` reaches the Ollama branch of `EffectiveContextWindow.resolve` and decides
+    /// which preset ladder's `numCtx` the ring is priced against. Before it existed the ring
+    /// read the profile's STORED advanced configuration, which is nil for any profile whose
+    /// Advanced panel was never opened — so it showed the auto-default window while the
+    /// request ran under the preset's smaller one, and reported 24% at 48% occupancy.
+    static func windows(for config: ProviderConfig, profileID: UUID?, flavour: OllamaConfigDefaultProfile) -> (effective: Int, trained: Int?) {
         var trained = EffectiveContextWindow.trainedWindow(for: config)
         // MLX profiles saved before the config.json window read carry nil metadata → the
         // shared resolver would return the 8K fallback. Recover the real window (and heal
@@ -234,7 +266,7 @@ extension ContextWindowUsage {
             effective = max(2_048, trained ?? 8_192)
         } else {
             // Ollama → num_ctx allocation; cloud → trained/catalog. Both via the shared resolver.
-            effective = EffectiveContextWindow.resolve(for: config)
+            effective = EffectiveContextWindow.resolve(for: config, flavour: flavour)
         }
         return (effective, trained)
     }
@@ -273,11 +305,27 @@ extension ContextWindowUsage {
         contextWindow: Int,
         extraKnowledgeChars: Int = 0
     ) -> Int {
+        estimatedOccupancy(config: config, profile: profile, messages: messages, attachedFiles: attachedFiles,
+                           historyStrategy: historyStrategy, contextWindow: contextWindow,
+                           extraKnowledgeChars: extraKnowledgeChars)?.totalTokens ?? 0
+    }
+
+    /// The estimate AND what it is made of. Nil for a conversation with nothing in it.
+    @MainActor
+    static func estimatedOccupancy(
+        config: ProviderConfig,
+        profile: BackendProfileModel,
+        messages: [ChatMessage],
+        attachedFiles: [FileSystemItem],
+        historyStrategy: HistoryStrategy?,
+        contextWindow: Int,
+        extraKnowledgeChars: Int = 0
+    ) -> (totalTokens: Int, breakdown: ContextOccupancy)? {
         // A brand-new chat with nothing attached reads as empty, not as the ~0.7K the
         // fixed layer overhead alone would imply. Code mode's always-injected project
         // context counts as real content, so a fresh code session with a large context.md
         // correctly reads as already partly full.
-        guard !messages.isEmpty || !attachedFiles.isEmpty || extraKnowledgeChars > 0 else { return 0 }
+        guard !messages.isEmpty || !attachedFiles.isEmpty || extraKnowledgeChars > 0 else { return nil }
 
         // The request strips error turns before building the prompt
         // (`BackendOrchestrationService`, "Sanitize History"), so charging for them here
@@ -316,7 +364,8 @@ extension ContextWindowUsage {
             in: messages,
             carriesProse: profile.carriesHistoryProse,
             strategy: historyStrategy,
-            contextWindow: contextWindow
+            contextWindow: contextWindow,
+            toolsAvailable: profile.profileType != .bot
         )
         let historyChars = proseChars + episodicChars
         // Strategy-aware: a `.stateless` profile ships a path manifest, not the files, so
@@ -348,7 +397,7 @@ extension ContextWindowUsage {
         // cost is entirely invisible in the transcript.
         logger.debug("[CTXGAUGE] Breakdown — episodic \(episodicChars) chars (strategy=\(historyStrategy?.rawValue ?? "recentHistory/non-agent default"), \(messages.count) msg), prose \(proseChars) chars (carried=\(profile.carriesHistoryProse)), attachments \(attachmentChars) chars, knowledge \(extraKnowledgeChars) chars, tools \(toolSchemaChars) chars, kb \(knowledgeSourceChars) chars, images \(currentImageTokens)+\(historyImageTokens) tok.")
 
-        return PromptFitCheck.estimatedTokens(
+        let total = PromptFitCheck.estimatedTokens(
             attachmentChars: attachmentChars,
             knowledgeChars: extraKnowledgeChars + toolSchemaChars + knowledgeSourceChars,
             retrievalChars: 0,
@@ -356,6 +405,14 @@ extension ContextWindowUsage {
             historyChars: historyChars,
             imageTokens: imageTokens
         )
+        let breakdown = ContextOccupancy(
+            toolChars: toolSchemaChars,
+            historyChars: historyChars,
+            knowledgeChars: extraKnowledgeChars + knowledgeSourceChars,
+            attachmentChars: attachmentChars,
+            imageTokens: imageTokens
+        )
+        return (total, breakdown)
     }
 
 }
@@ -366,6 +423,14 @@ extension ContextWindowUsage {
 /// tap-through breakdown, matching the "small icon" the user asked for.
 struct ContextWindowGauge: View {
     let usage: ContextWindowUsage
+    /// Opens the profile's Tool Library from the breakdown's Tools row. Declared BEFORE
+    /// `onOpenSettings` so the hosts' trailing closure keeps binding to that one.
+    var onOpenTools: ((UUID) -> Void)? = nil
+    /// Summarizes older turns now. Returns what happened, in words. Nil hides the button.
+    var onCompact: (() async -> String)? = nil
+    /// False while a run is in flight — compacting under a running turn would summarize history
+    /// the run is still reading.
+    var canCompact: Bool = true
     /// Optional deep-link to the profile's settings (raise Context Window). Each surface
     /// supplies the right implementation — the main window routes; QuickAccess activates
     /// the main window and posts. Nil → the breakdown falls back to instructional text.
@@ -453,7 +518,13 @@ struct ContextWindowGauge: View {
                 onOpenSettings: onOpenSettings == nil ? nil : { id in
                     showBreakdown = false
                     onOpenSettings?(id)
-                }
+                },
+                onOpenTools: onOpenTools == nil ? nil : { id in
+                    showBreakdown = false
+                    onOpenTools?(id)
+                },
+                onCompact: onCompact,
+                canCompact: canCompact
             )
             .environment(\.appTheme, theme)
         }
@@ -581,14 +652,25 @@ struct ContextGaugeHoverCard: View {
 struct ContextWindowBreakdown: View {
     let usage: ContextWindowUsage
     var onOpenSettings: ((UUID) -> Void)? = nil
+    var onOpenTools: ((UUID) -> Void)? = nil
+    var onCompact: (() async -> String)? = nil
+    var canCompact: Bool = true
+    @State private var isCompacting = false
+    @State private var compactStatus: String?
     @Environment(\.appTheme) private var theme
+    /// The app-wide "what to keep" setting. Per-tool overrides live in each tool's settings.
+    @AppStorage(ContextCutStrategy.defaultsKey) private var cutStrategyRaw = ContextCutStrategy.automatic.rawValue
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
             headline
             bar
+            if let breakdown = usage.breakdown { usageRows(breakdown) }
+            if onCompact != nil, usage.breakdown != nil { compactRow }
             if let last = usage.lastTurn { lastTurnRow(last) }
+            if let cuts = ContextCutLog.shared.lastTurn(for: usage.conversationID) { cutsRow(cuts) }
+            cutStrategyRow
             notes
         }
         .padding(14)
@@ -647,6 +729,139 @@ struct ContextWindowBreakdown: View {
             }
         }
         .frame(height: 6)
+    }
+
+    // MARK: Compact
+
+    /// "Compact history" — summarizes older turns into a checkpoint now. Uses the Intelligence
+    /// Core when it is on, otherwise this conversation's own model; the transcript is untouched,
+    /// only what is sent from the next turn changes.
+    private var compactRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Button {
+                    guard let onCompact, !isCompacting else { return }
+                    isCompacting = true
+                    compactStatus = nil
+                    Task { @MainActor in
+                        compactStatus = await onCompact()
+                        isCompacting = false
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        if isCompacting {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "arrow.down.right.and.arrow.up.left").font(.system(size: 10))
+                        }
+                        Text(isCompacting ? "Compacting…" : "Compact history")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(canCompact ? theme.accentColor : theme.secondaryText)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canCompact || isCompacting)
+                .help(canCompact
+                      ? "Summarize earlier turns into a checkpoint. The 5 most recent messages are kept; the transcript is not changed."
+                      : "Available once the current run finishes.")
+                Spacer()
+            }
+            if let compactStatus {
+                Text(compactStatus)
+                    .font(.system(size: 10))
+                    .foregroundColor(theme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    // MARK: Cut strategy
+
+    /// "When a tool result doesn't fit, keep …" — the global default. Automatic picks per tool:
+    /// the end of command output, the start of reads and searches, both ends otherwise.
+    private var cutStrategyRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "scissors")
+                .font(.system(size: 11))
+                .foregroundColor(theme.secondaryText)
+            Text("If a tool result doesn't fit, keep")
+                .font(.system(size: 11))
+                .foregroundColor(theme.secondaryText)
+            Spacer()
+            Picker("", selection: $cutStrategyRaw) {
+                ForEach(ContextCutStrategy.allCases, id: \.rawValue) { strategy in
+                    Text(strategy.label).tag(strategy.rawValue)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .controlSize(.small)
+            .fixedSize()
+            .help("Automatic keeps the end of command output, the start of files and searches, and both ends of anything else. Individual tools can override this in the Tool Library.")
+        }
+    }
+
+    // MARK: What's using it
+
+    /// The rows the total is made of, largest first, zero rows omitted — so the biggest lever is
+    /// always on top. Tools gets an action: on a small window its definitions are often the
+    /// largest single cost, and the Tool Library is where they are switched off.
+    private func usageRows(_ b: ContextOccupancy) -> some View {
+        let rows: [(label: String, icon: String, tokens: Int, isTools: Bool)] = [
+            ("Tool definitions", "wrench.and.screwdriver", ContextOccupancy.tokens(b.toolChars), true),
+            ("History", "clock.arrow.circlepath", ContextOccupancy.tokens(b.historyChars), false),
+            ("Knowledge & project context", "books.vertical", ContextOccupancy.tokens(b.knowledgeChars), false),
+            ("Attachments", "paperclip", ContextOccupancy.tokens(b.attachmentChars), false),
+            ("Images", "photo", b.imageTokens, false),
+            ("Instructions (fixed)", "text.alignleft", ContextOccupancy.tokens(b.overheadChars), false),
+        ].filter { $0.tokens > 0 }.sorted { $0.tokens > $1.tokens }
+
+        return VStack(alignment: .leading, spacing: 5) {
+            Text("What's using it")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(theme.secondaryText)
+                .textCase(.uppercase)
+            ForEach(rows, id: \.label) { row in
+                HStack(spacing: 6) {
+                    Image(systemName: row.icon)
+                        .font(.system(size: 10))
+                        .foregroundColor(theme.secondaryText)
+                        .frame(width: 14)
+                    Text(row.label)
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
+                    if row.isTools, let profileID = usage.profileID, let onOpenTools {
+                        Button { onOpenTools(profileID) } label: {
+                            Image(systemName: "slider.horizontal.3").font(.system(size: 10))
+                                .foregroundColor(theme.accentColor)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open this profile's Tool Library — tools you switch off stop costing context")
+                    }
+                    Spacer()
+                    Text("~\(PromptFitCheck.roundedK(row.tokens))")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(theme.secondaryText)
+                }
+            }
+        }
+    }
+
+    /// What the last turn had to cut. Shown here rather than on each tool card — the user's
+    /// choice: the transcript stays clean, and the place you check the window is where you learn
+    /// the window ran out.
+    private func cutsRow(_ record: ContextCutLog.TurnRecord) -> some View {
+        var parts: [String] = []
+        if !record.cuts.isEmpty {
+            let largest = record.cuts.max { $0.originalChars < $1.originalChars }!
+            parts.append(record.cuts.count == 1
+                ? "1 tool result trimmed (\(largest.toolName): \(PromptFitCheck.roundedK(ContextOccupancy.tokens(largest.originalChars))) → \(PromptFitCheck.roundedK(ContextOccupancy.tokens(largest.keptChars))) tok)"
+                : "\(record.cuts.count) tool results trimmed (largest: \(largest.toolName), \(PromptFitCheck.roundedK(ContextOccupancy.tokens(largest.originalChars))) → \(PromptFitCheck.roundedK(ContextOccupancy.tokens(largest.keptChars))) tok)")
+        }
+        if record.compactedExchanges > 0 {
+            parts.append("\(record.compactedExchanges) older tool step(s) summarized out")
+        }
+        return noteRow(icon: "scissors", text: "Last turn: " + parts.joined(separator: "; ") + ".")
     }
 
     private func lastTurnRow(_ turn: TokenUsage) -> some View {

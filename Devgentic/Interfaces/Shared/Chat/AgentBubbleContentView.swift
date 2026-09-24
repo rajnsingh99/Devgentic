@@ -119,16 +119,18 @@ struct AgentBubbleContentView: View, Equatable {
 
             // 5. TERMINAL OUTCOME INDICATOR
             // Surfaces a subtle chip when the run ended in a non-success state
-            // (circuit-breaker abort, iteration exhaustion, cancellation). Keeps
+            // (circuit-breaker abort, iteration exhaustion). Keeps
             // the bubble honest — user shouldn't mistake best-effort synthesis
             // for an authoritative answer.
             //
-            // Skipped when content is already a `.error` card — the card itself
-            // communicates the failure with more detail than the chip, and
-            // showing both creates a redundant "something went wrong" double-banner.
+            // Skipped when cancelled or showing a stopped-run placeholder (the text already explains
+            // that the operation was stopped, making a "Run stopped" chip redundant) or when content
+            // is already a `.error` card.
             if !message.isStreaming,
                let outcome = message.terminalOutcome,
                outcome != .completed,
+               outcome != .cancelled,
+               !(contentToDisplay.textContent.map(ChatMessage.isSyntheticPlaceholder) ?? false),
                !isErrorContent {
                 TerminalOutcomeChip(outcome: outcome, reason: message.terminalReason)
             }
@@ -138,11 +140,6 @@ struct AgentBubbleContentView: View, Equatable {
                 AgentMessageActionsView(message: message, mainAppViewModel: mainAppViewModel)
                     .environment(chatHistoryViewModel)
                     .opacity(0.6)
-            }
-
-            // 6. TOKEN USAGE BADGE
-            if let usage = message.tokenUsage, !message.isStreaming {
-                TokenUsageBadge(usage: usage)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

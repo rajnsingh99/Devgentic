@@ -27,6 +27,17 @@ final class ToolCapabilityTests: XCTestCase {
     /// shell (`ps -eo …`, `ioreg …`), which are not this capability and must not be flagged.
     private static let interpreterSites: [(label: String, pattern: String)] = [
         ("zsh -c <argument>",        #""-c"\s*,\s*arguments\."#),
+        // ⚠️ DELEGATION, added 2026-09-22. The scan above is syntactic: it looks for a tool
+        // handing ITS OWN argument to an interpreter, on one line. That premise held while every
+        // shell tool spawned its own process — and broke the moment `batch_command` was split by
+        // intent and the execution was centralised, because `run_command` and
+        // `start_background_task` now reach `/bin/zsh` through a shared core instead of inline.
+        //
+        // The scan reported exactly that, correctly: three shell tools vanished from its view
+        // while remaining every bit as dangerous. Following the one call shape they share keeps
+        // the guarantee — "a tool that can reach a shell must declare it" — rather than narrowing
+        // it to "a tool that reaches a shell ON THIS LINE".
+        ("shared shell core",        #"(BatchCommandTool|Self)\.(runForeground|startBackground)\("#),
         ("NSAppleScript(<argument>)", #"NSAppleScript\(source:\s*arguments\."#),
         ("ShellSessionManager(<argument>)", #"ShellSessionManager\.shared\.execute\(command:\s*arguments\."#),
     ]

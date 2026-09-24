@@ -23,7 +23,12 @@ final class ThemeFoundationsTests: XCTestCase {
         let cosmicDarkTheme = AppThemes.CosmicDarkTheme()
         XCTAssertEqual(cosmicDarkTheme.colorScheme, .dark)
         XCTAssertTrue(cosmicDarkTheme.isDark)
-        XCTAssertEqual(cosmicDarkTheme.codeHighlightThemeName, "nord")
+        // ⚠️ "dracula" is a HIGHLIGHTR STYLESHEET, not the deleted Dracula app theme. The app
+        // ships four themes (Material, CosmicDark, OneLight, SolarizedLight) and `ThemeManager`
+        // migrates a stored "dracula" id to `.material` — but CosmicDark deliberately renders its
+        // CODE with Highlightr's dracula palette, which `Theme.swift` documents at the property.
+        // Was "nord": the third stale reference to the same rename in this file, and the last.
+        XCTAssertEqual(cosmicDarkTheme.codeHighlightThemeName, "dracula")
 
         let oneLightTheme = AppThemes.OneLightTheme()
         XCTAssertEqual(oneLightTheme.colorScheme, .light)
@@ -136,9 +141,13 @@ final class ThemeFoundationsTests: XCTestCase {
     func testCodeThemeOverridePropagatesToCurrentTheme() {
         let manager = ThemeManager()
 
-        // 1. When default, code theme follows app theme (Material Darker)
+        // 1. With the Material override, the code theme follows the app theme (Material Darker).
+        // ⚠️ Was `.default`, a case the override rename removed — "default" survives only as a
+        // backward-compatible rawValue (asserted below), not as a case. The sweep updated the
+        // other two call sites in this file and missed this one, which broke the whole test
+        // BUNDLE's compile — so every test in the target was unrunnable, not just this one.
         manager.applyTheme(AppThemes.MaterialTheme())
-        manager.applyCodeViewerTheme(.default)
+        manager.applyCodeViewerTheme(.material)
         XCTAssertEqual(manager.currentTheme.codeHighlightThemeName, "material-darker")
 
         // 2. Override with One Light (GitHub Highlightr stylesheet)
@@ -148,7 +157,7 @@ final class ThemeFoundationsTests: XCTestCase {
 
         // 3. Override with Cosmic Dark
         manager.applyCodeViewerTheme(.cosmicDark)
-        XCTAssertEqual(manager.currentTheme.codeHighlightThemeName, "nord")
+        XCTAssertEqual(manager.currentTheme.codeHighlightThemeName, "dracula")
         XCTAssertEqual(manager.currentTheme.syntaxTheme.background, AppThemes.CosmicDarkTheme().syntaxTheme.background)
 
         // 4. Override with Solarized Light
@@ -157,14 +166,15 @@ final class ThemeFoundationsTests: XCTestCase {
         XCTAssertEqual(manager.currentTheme.syntaxTheme.background, AppThemes.SolarizedLightTheme().syntaxTheme.background)
 
         // Backward compatibility mappings
+        XCTAssertEqual(CodeViewerThemeOverride(rawValue: "default"), .material)
         XCTAssertEqual(CodeViewerThemeOverride(rawValue: "dracula"), .material)
         XCTAssertEqual(CodeViewerThemeOverride(rawValue: "one_dark"), .material)
         XCTAssertEqual(CodeViewerThemeOverride(rawValue: "material"), .material)
         XCTAssertEqual(CodeViewerThemeOverride(rawValue: "github_light"), .oneLight)
         XCTAssertEqual(CodeViewerThemeOverride(rawValue: "one_light"), .oneLight)
 
-        // 5. Reset to default
-        manager.applyCodeViewerTheme(.default)
+        // 5. Reset to Material
+        manager.applyCodeViewerTheme(.material)
         XCTAssertEqual(manager.currentTheme.codeHighlightThemeName, "material-darker")
     }
 

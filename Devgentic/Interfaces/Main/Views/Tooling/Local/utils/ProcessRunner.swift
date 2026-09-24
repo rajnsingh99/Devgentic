@@ -156,7 +156,13 @@ enum ProcessRunner {
             // Its OWN serial queue. Sharing one between the two streams lets a busy stdout
             // handler starve stderr until stderr's 64 KB fills and its writer blocks — the
             // original deadlock, relocated.
-            source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: DispatchQueue(label: label))
+            // ⚠️ `.userInitiated`, matching the caller. `run` blocks on `group.wait` until these
+            // pumps finish, so a default-QoS queue here makes a user-initiated thread wait on
+            // lower-priority work — which Thread Performance Checker reports as a priority
+            // inversion on every git_tool call, and which genuinely slows the wait under load.
+            source = DispatchSource.makeReadSource(
+                fileDescriptor: fd,
+                queue: DispatchQueue(label: label, qos: .userInitiated))
             group.enter()
 
             source.setEventHandler { [self] in
@@ -243,7 +249,8 @@ enum ProcessRunner {
     // MARK: - Core
 
     /// The one implementation. `timeout == nil` is an unbounded run.
-    private static func execute(_ process: Process, timeout: TimeInterval?, label: String) throws -> TimedResult {
+    private static func execute(_ process: Process, timeout: TimeInterval?, label: String,
+                                onStarted: ((Process) -> Void)? = nil) throws -> TimedResult {
         let outPipe = Pipe()
         let errPipe = Pipe()
         process.standardOutput = outPipe
@@ -255,6 +262,12 @@ enum ProcessRunner {
         process.terminationHandler = { _ in exited.signal() }
 
         try process.run()
+
+        // ⚠️ AFTER `run()` — there is no pid before it — and after the pipes are attached, which
+        // must happen first or the output is lost. This is the only moment a caller can take a
+        // handle on a running foreground process: `execute` blocks until the command finishes, so
+        // anything wanting to stop it, or clean it up at quit, has to be handed it here.
+        onStarted?(process)
 
         let group = DispatchGroup()
         let outDrain = PipeDrain(reading: outPipe.fileHandleForReading, label: "processrunner.out", group: group)
@@ -268,18 +281,39 @@ enum ProcessRunner {
         var watchdog: DispatchWorkItem?
         if let timeout {
             let item = DispatchWorkItem {
+                // ⚠️ THE GUARD STAYS FIRST — but NOT for the reason it looks like, and the
+                // difference was established by mutation rather than argued.
+                //
+                // Removing it passes all 28 ProcessRunnerTests, including the one that pins a
+                // deliberately-backgrounded daemon surviving. That case never reaches here: the
+                // command's own process exits, `exited.wait` returns, and `watchdog?.cancel()`
+                // lands long before the deadline, so this item simply never runs. Watchdog
+                // CANCELLATION is what protects `cmd &`, not this line.
+                //
+                // What this line does cover is the narrow race where the item had already begun
+                // executing when `cancel()` arrived — `cancel()` only prevents a start. Without
+                // it, a command that finished right at its bound would be marked `timedOut` AND
+                // have its descendants killed: a false statement plus a real side effect, on a
+                // run that actually succeeded. Too narrow for a behavioural test to reach
+                // reliably, so the order is pinned in `testTheWatchdogChecksLivenessBeforeActing`.
                 guard process.isRunning else { return }
                 killed.set()
-                process.terminate()
-                // SIGTERM is a request. A child that blocks or ignores it would otherwise hold
-                // this call past a bound that has already expired.
-                let pid = process.processIdentifier
-                DispatchQueue.global().asyncAfter(deadline: .now() + sigkillGrace) {
-                    if process.isRunning { kill(pid, SIGKILL) }
-                }
+
+                // The whole job tree, not just the shell. `zsh -c "xcodebuild …"` puts the
+                // compiler in a separate process, so signalling only the zsh left the build
+                // running past a bound that had already expired — the foreground twin of the
+                // defect `ProcessTree` was written for on the background path. A 900 s
+                // `batch_command` that times out used to leave the build burning CPU.
+                //
+                // SIGTERM is a request; `ProcessTree` escalates to SIGKILL after `sigkillGrace`
+                // on its own queue, for the same reason the old inline version did — the caller
+                // is blocked on `exited` with a bound that depends on this firing on time.
+                ProcessTree.terminateTree(root: process.processIdentifier,
+                                          grace: sigkillGrace,
+                                          isRootRunning: { process.isRunning })
             }
             watchdog = item
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: item)
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + timeout, execute: item)
             // Hard ceiling, so even an unkillable (D-state) child cannot hold the caller.
             if exited.wait(timeout: .now() + timeout + sigkillGrace + 1) == .timedOut { killed.set() }
         } else {
@@ -383,9 +417,11 @@ enum ProcessRunner {
     /// - Warning: a descendant that inherited the write end keeps running, and loses its reader.
     ///   It will take SIGPIPE on its next write. Redirect it (`cmd > log 2>&1 &`) if it is meant
     ///   to outlive the call.
-    static func run(_ process: Process, timeout: TimeInterval) throws -> TimedResult {
+    static func run(_ process: Process, timeout: TimeInterval,
+                    onStarted: ((Process) -> Void)? = nil) throws -> TimedResult {
         try execute(process, timeout: timeout,
-                    label: process.executableURL?.lastPathComponent ?? "process")
+                    label: process.executableURL?.lastPathComponent ?? "process",
+                    onStarted: onStarted)
     }
 
     /// Convenience for the common `/bin/zsh -c` shape.

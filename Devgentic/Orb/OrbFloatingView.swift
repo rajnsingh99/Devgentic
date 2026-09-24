@@ -363,12 +363,13 @@ struct OrbFloatingView: View {
             }
             // A wake word that cannot match in the configured speech language must say so —
             // otherwise the orb looks alive and silently ignores the user.
-            // ⚠️ “Orb” stays untranslated inside the sentence around it: it is an ACOUSTIC
-            // token matched against ASR output, not a word. Translating it would tell the user to
-            // say something that can never match — see `wakeWordCanMatch(language:)`.
+            // ⚠️ The wake word is INTERPOLATED, and stays untranslated inside the sentence around
+            // it: it is an ACOUSTIC token matched against ASR output, not a word. Translating it —
+            // or hard-coding "Orb" now that the word is user-configurable — would tell the user to
+            // say something that can never match. See `wakeWordCanMatch(language:)`.
             return controller.wakeWordUnavailable
                 ? String(localized: "Standing by — click to speak (the wake word can’t work in this speech language)")
-                : String(localized: "Standing by — say “Orb”, or click to speak")
+                : String(localized: "Standing by — say “\(OrbSessionController.wakeWord)”, or click to speak")
         case .commandCapture:    return String(localized: "Listening — click to send, or right-click to cancel")
         case .followUpWindow:    return String(localized: "Go ahead — ask a follow-up, no wake word needed")
         case .executing:         return String(localized: "Working — follow along in the chat window")

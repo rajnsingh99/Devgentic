@@ -80,8 +80,12 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
         let maxFailures = maxConsecutiveToolFailures
 
         if currentFailures >= maxFailures {
-            logger.warning("🚫 Consecutive tool failure limit (\(maxFailures)) reached. Aborting.")
-            return .abort(reason: "Reached \(maxFailures) consecutive tool failures without recovery.")
+            logger.warning("🚫 Consecutive tool failure limit (\(maxFailures)) reached — requesting abort. CONSEQUENCE: whether the run actually stops is the executor's call; `ErrorRecovery.onToolFailure` may downgrade this to a nudge.")
+            return .abort(AbortTrigger(
+                kind: .consecutiveToolFailures,
+                reason: "Reached \(maxFailures) consecutive tool failures without recovery.",
+                modelNarrative: "\(maxFailures) tool calls in a row have failed. Something about how you are calling them is wrong — change the arguments or the approach, or answer with what you already have."
+            ))
         }
 
         return .proceed
@@ -100,15 +104,23 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
         let denialLimit = maxConsecutiveDenials
 
         if currentDenials >= denialLimit {
-            logger.warning("🚫 Consecutive user-denial limit (\(denialLimit)) reached. Aborting.")
-            return .abort(reason: "User denied \(currentDenials) consecutive tool calls. Halting to respect the denial constraint.")
+            logger.warning("🚫 Consecutive user-denial limit (\(denialLimit)) reached — requesting abort. CONSEQUENCE: the executor decides; today the profile's tolerance can still downgrade this to a nudge, which is why `AbortTrigger.honoursToolFailurePolicy` names this the likeliest kind to change.")
+            return .abort(AbortTrigger(
+                kind: .consecutiveDenials,
+                reason: "User denied \(currentDenials) consecutive tool calls. Halting to respect the denial constraint.",
+                modelNarrative: "The user has declined \(currentDenials) tool calls in a row. They are not failures — the user does not want these actions taken. Stop proposing them and either answer with what you have or ask what they would prefer."
+            ))
         }
 
         // Fall through to the general failure check — mixed denial+failure patterns
         // still hit the 3-strike limit from recordToolResult's perspective.
         if consecutiveToolFailures >= maxConsecutiveToolFailures {
-            logger.warning("🚫 Consecutive tool failure limit (\(maxConsecutiveToolFailures)) reached (including denials). Aborting.")
-            return .abort(reason: "Reached \(maxConsecutiveToolFailures) consecutive tool failures without recovery.")
+            logger.warning("🚫 Consecutive tool failure limit (\(maxConsecutiveToolFailures)) reached including denials — requesting abort. CONSEQUENCE: the executor decides; the profile's tolerance may downgrade it.")
+            return .abort(AbortTrigger(
+                kind: .consecutiveToolFailures,
+                reason: "Reached \(maxConsecutiveToolFailures) consecutive tool failures without recovery.",
+                modelNarrative: "\(maxConsecutiveToolFailures) tool calls in a row have failed or been declined. Change the arguments or the approach, or answer with what you already have."
+            ))
         }
 
         return .proceed
@@ -167,8 +179,15 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
 
         if current >= limit {
             let toolNames = observations.map(\.toolName).joined(separator: ", ")
-            logger.warning("🔁 Repetitive action loop detected: [\(toolNames)] repeated \(current) times. Aborting.")
-            return .abort(reason: "Detected \(current) consecutive identical tool calls [\(toolNames)] with the same results. Breaking degenerate loop.")
+            logger.warning("🔁 Repetitive action loop detected: [\(toolNames)] repeated \(current) times — requesting abort. CONSEQUENCE: the executor decides; with the default tolerance the run CONTINUES with a corrective alert rather than stopping.")
+            return .abort(AbortTrigger(
+                kind: .repetitiveAction,
+                reason: "Detected \(current) consecutive identical tool calls [\(toolNames)] with the same results. Breaking degenerate loop.",
+                // ⚠️ Says SUCCEEDED, explicitly. These calls worked — the loop is the problem,
+                // not the tools. Telling the model its tools are failing is what made one read
+                // its own successful output as truncated and guess at an edit instead.
+                modelNarrative: "You called [\(toolNames)] \(current) times in a row with identical arguments and received identical results each time. Those calls SUCCEEDED — the results you already have are complete and correct. Repeating them will not produce anything new. Use what you have, or take a different approach."
+            ))
         }
 
         // --- Check 2: Per-tool global frequency (catches alternating combos) ---
@@ -184,8 +203,12 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
             let count = globalToolFrequency[key, default: 0]
             if count >= maxGlobalToolRepetitions {
                 let toolName = key.components(separatedBy: "|").first ?? "unknown"
-                logger.warning("🔁 Global repetition limit: '\(toolName)' executed \(count) times with identical args+output. Aborting.")
-                return .abort(reason: "Tool '\(toolName)' has been called \(count) times with the same parameters and results across multiple iterations. Breaking stale loop.")
+                logger.warning("🔁 Global repetition limit: '\(toolName)' executed \(count) times with identical args+output — requesting abort. CONSEQUENCE: the executor decides; with the default tolerance the run CONTINUES with a corrective alert rather than stopping.")
+                return .abort(AbortTrigger(
+                    kind: .staleToolRepetition,
+                    reason: "Tool '\(toolName)' has been called \(count) times with the same parameters and results across multiple iterations. Breaking stale loop.",
+                    modelNarrative: "You have called '\(toolName)' \(count) times with identical arguments and received identical output every time. Those calls SUCCEEDED — the output you already have is complete. Calling it again will return the same thing. Work with the result you have, or change approach."
+                ))
             }
         }
 

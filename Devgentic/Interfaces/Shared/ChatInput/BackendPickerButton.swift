@@ -31,22 +31,21 @@ struct BackendPickerButton: View {
             HStack(spacing: 7) {
                 ZStack {
                     Circle()
-                        .fill(profileThemeColor.opacity(0.25))
+                        .fill(profileThemeColor.opacity(0.18))
                         .frame(width: 12, height: 12)
                     Circle()
                         .fill(profileThemeColor)
-                        .frame(width: 7, height: 7)
-                        .shadow(color: profileThemeColor.opacity(0.7), radius: 3, x: 0, y: 0)
+                        .frame(width: 6.5, height: 6.5)
                 }
 
                 Text(profileButtonText)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(theme.fontCaption.weight(.medium))
                     .foregroundColor(theme.primaryText)
                     .lineLimit(1)
 
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundColor(theme.secondaryText.opacity(0.85))
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundColor(theme.secondaryText.opacity(isHovering ? 0.9 : 0.65))
             }
             .padding(.horizontal, 11)
             .padding(.vertical, 6)
@@ -57,17 +56,12 @@ struct BackendPickerButton: View {
             .overlay(
                 Capsule()
                     .strokeBorder(
-                        LinearGradient(
-                            colors: isHovering
-                                ? [profileThemeColor.opacity(0.5), theme.secondaryText.opacity(0.3)]
-                                : [theme.secondaryText.opacity(0.2), theme.secondaryText.opacity(0.1)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
+                        isHovering
+                            ? theme.dividerColor.opacity(0.55)
+                            : theme.dividerColor.opacity(0.30),
+                        lineWidth: 0.5
                     )
             )
-            .scaleEffect(isHovering ? 1.025 : 1.0)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingPopup, arrowEdge: .bottom) {
@@ -82,7 +76,7 @@ struct BackendPickerButton: View {
             .tint(theme.accentColor)
             .preferredColorScheme(theme.colorScheme)
         }
-        .onHover { hover in withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { isHovering = hover } }
+        .onHover { hover in withAnimation(.easeInOut(duration: 0.15)) { isHovering = hover } }
         .help("Select a backend (Bot, Agent, Workflow, or Image Gen)")
         .accessibilityLabel("\(profileButtonText). Select a backend")
     }

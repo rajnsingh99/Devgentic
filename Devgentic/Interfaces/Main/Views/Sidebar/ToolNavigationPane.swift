@@ -25,7 +25,8 @@ private let logger = DGLogger(category: "ToolNavigationPane")
 
 struct ToolNavigationPane: View {
 
-    /// Where this pane is hosted. Only affects whether a "back to profiles" row is offered.
+    /// Where this pane is hosted. When hosted in profilesTab, suppresses automatic
+    /// navigation to the global tool library on appear.
     enum Host {
         case toolsTab
         case profilesTab
@@ -62,11 +63,6 @@ struct ToolNavigationPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if host == .profilesTab {
-                backToProfilesRow
-                Divider().opacity(0.4)
-            }
-
             titleRow
             sectionSwitcher
 
@@ -172,20 +168,6 @@ struct ToolNavigationPane: View {
 
     // MARK: - Header
 
-    /// A RETURN, not a mode toggle. Switching which profile you configure is the header
-    /// selector's job — one control per intent.
-    private var backToProfilesRow: some View {
-        HStack {
-            SidebarHeaderActionButton(title: "Profiles", systemImage: "chevron.left") {
-                router.goBack()
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .help("Back to the profile list")
-    }
-
     private var titleRow: some View {
         HStack(spacing: 8) {
             Text("Tool Library")
@@ -206,7 +188,7 @@ struct ToolNavigationPane: View {
             .help("Configure an MCP server by hand (⌘N)")
         }
         .padding(.horizontal, 14)
-        .padding(.top, host == .profilesTab ? 4 : 12)
+        .padding(.top, 12)
         .padding(.bottom, 10)
     }
 

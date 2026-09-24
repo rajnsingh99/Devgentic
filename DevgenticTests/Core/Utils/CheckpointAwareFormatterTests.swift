@@ -221,7 +221,7 @@ final class CheckpointAwareFormatterTests: XCTestCase {
     func testPointerTurns_WithCheckpoint_PrependsContextPair() {
         let (history, _) = makeHistoryWithCheckpoint()
 
-        let turns = NativeHistoryConverter.buildPointerTurns(from: history).asWireDicts()
+        let turns = NativeHistoryConverter.buildPointerTurns(from: history, toolsAvailable: true).asWireDicts()
 
         XCTAssertTrue(turns.count >= 2)
         XCTAssertTrue(turns[0]["content"]?.contains("Prior conversation summary") ?? false,
@@ -231,7 +231,7 @@ final class CheckpointAwareFormatterTests: XCTestCase {
     func testHybridTurns_WithCheckpoint_PrependsContextPair() {
         let (history, _) = makeHistoryWithCheckpoint()
 
-        let turns = NativeHistoryConverter.buildHybridTurns(from: history, inlineCount: 3, charBudget: 50_000).asWireDicts()
+        let turns = NativeHistoryConverter.buildHybridTurns(from: history, inlineCount: 3, charBudget: 50_000, toolsAvailable: true).asWireDicts()
 
         XCTAssertTrue(turns.count >= 2)
         XCTAssertTrue(turns[0]["content"]?.contains("Prior conversation summary") ?? false,

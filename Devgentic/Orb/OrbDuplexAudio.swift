@@ -54,7 +54,12 @@ final class OrbDuplexAudio {
     /// `[s:…]`, so across several orb open/close cycles in one device test there was no way to
     /// attribute an engine line to the session that produced it — which is exactly the question
     /// asked when one of several attempts misbehaves.
-    var correlationTag: String = ""
+    var correlationTag: String = "" {
+        // ⚠️ Propagated on every change, not only at warm time. The engine can be warmed BETWEEN
+        // panel sessions (the Settings toggle warms it), so a processor tagged only when built
+        // carried the PREVIOUS session's `[s:…]` through the whole next session (device, 2026-09-19).
+        didSet { processor?.correlationTag = correlationTag }
+    }
     private var processor: OrbAudioProcessor?
     private var warmingTask: Task<Bool, Never>?
     /// ⚠️ Set by `release`, cleared by `warm`. `Task.cancel()` is cooperative: a build already past

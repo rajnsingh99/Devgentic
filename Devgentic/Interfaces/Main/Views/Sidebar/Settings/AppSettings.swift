@@ -75,6 +75,7 @@ struct AppSettings {
     // which matches on the value, not the symbol. Hence `orbShortcutCode`, not `…KeyCode`.
     static let orbEnabledKey = "orbEnabled"
     static let orbActivationModeKey = "orbActivationMode"
+    static let orbWakeWordKey = "orbWakeWord"
     static let orbShortcutCodeKey = "orbShortcutCode"
     static let orbShortcutModifiersKey = "orbShortcutModifiers"
     static let orbEndpointingKey = "orbEndpointing"

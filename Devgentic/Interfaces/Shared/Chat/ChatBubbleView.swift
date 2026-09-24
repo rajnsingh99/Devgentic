@@ -157,14 +157,13 @@ struct ChatActionButton<LabelContent: View>: View {
     var body: some View {
         Button(action: action) {
             label
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
+                .frame(width: 26, height: 26)
                 .background(
-                    Capsule()
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .fill(isHovering && !disabled ? theme.surfaceOverlay.opacity(0.8) : Color.clear)
                 )
-                .contentShape(Capsule())
-                .scaleEffect(isHovering && !disabled ? 1.03 : 1.0)
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .scaleEffect(isHovering && !disabled ? 1.05 : 1.0)
         }
         .buttonStyle(.plain)
         .disabled(disabled)
@@ -202,27 +201,79 @@ struct AgentMessageActionsView: View {
         }
     }
 
+    /// A report delivered by a woken background-task run — a turn nobody asked for.
+    ///
+    /// ⚠️ Reads `messageSource`, NOT `sender`. The report is genuinely `.agent`: the agent wrote
+    /// it, from this conversation's own profile, through the same executor. What differs is what
+    /// CAUSED the turn, and collapsing the two questions into one enum was considered and
+    /// rejected — `sender` is compared at ~30 sites, almost all `if`/ternary, and Swift enforces
+    /// exhaustiveness only on `switch`, so a third role would have landed silently in the wrong
+    /// branch here (right-aligned like a user bubble, per `ChatBubbleView.body`) with no compile
+    /// error. See `ChatMessage.messageSource`.
+    private var isUnpromptedReport: Bool {
+        Self.isUnpromptedReport(source: message.messageSource)
+    }
+
+    /// The rule itself, promoted out of the view body.
+    ///
+    /// ⚠️ A `private var` inside a SwiftUI `View` cannot be exercised without rendering, so a test
+    /// would have to TRANSCRIBE the condition — and a transcribed predicate stays green when the
+    /// production one is neutered. `BackgroundTasksFloatingButton.shouldShow` was promoted for
+    /// exactly this reason; this follows it so there is one pattern.
+    ///
+    /// ⚠️ `.scheduled` is deliberately NOT included, though it is also an unattended run. A
+    /// scheduled turn answers a question the user WROTE when they set the task up, so Redo re-runs
+    /// something real; a woken report's preceding "question" is a machine-written stub. Folding
+    /// the two together would remove Redo from scheduled runs for no reason.
+    static func isUnpromptedReport(source: MessageSource) -> Bool {
+        source == .backgroundTask
+    }
+
     var body: some View {
         HStack {
             Spacer()
             HStack(spacing: theme.spacingSmall) {
-                if !containsCode {
+                // ⚠️ `|| isUnpromptedReport` — otherwise a report whose task printed a fenced
+                // block loses Copy entirely, because the `containsCode` branch below hands its
+                // slot to "Open in Editor", which a report does not get.
+                if !containsCode || isUnpromptedReport {
                     ChatActionButton(action: {
                         chatHistoryViewModel.copyMessageContentToClipboard(message: message)
                         withAnimation(.easeInOut) { didCopy = true }
                         Task { @MainActor in try? await Task.sleep(for: .seconds(2)); withAnimation(.easeInOut) { didCopy = false } }
                     }) {
-                        Label(didCopy ? "Copied" : "Copy", systemImage: didCopy ? "checkmark" : "doc.on.doc")
+                        Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
                     }
                     .foregroundColor(didCopy ? theme.successColor : theme.secondaryText)
+                    .help(didCopy ? String(localized: "Copied!") : String(localized: "Copy"))
                     .accessibilityLabel(didCopy ? "Copied to clipboard" : "Copy response")
                 }
 
+                // ⚠️⚠️ COPY IS THE ONLY ACTION A WOKEN REPORT GETS, and the reason is Redo.
+                // `regenerateResponse` re-runs the USER MESSAGE that precedes this one — which,
+                // for a report, is the synthetic stub a background task wrote. Pressing it would
+                // re-ask the model to report on a task using a one-line stub in place of the
+                // output (that lived in `promptOverride` and was never persisted), producing a
+                // confident answer about nothing. It is not that Redo is unhelpful here; it is
+                // that Redo is WRONG here, and a wrong button that looks live is worse than an
+                // absent one.
+                //
+                // The rest follow it for weaker but real reasons: there are no variants to pick
+                // between on a single unprompted turn, and Read Aloud on a turn the user did not
+                // ask for is a machine talking unbidden.
+                //
+                // ⚠️ The trace Report goes too, and that one is a genuine LOSS — a woken run is
+                // unattended and therefore among the hardest to debug, and its `traceID` is real.
+                // It was dropped to match the agreed design; restoring it is this `if` plus
+                // nothing else, and the trace itself is untouched either way.
+                if !isUnpromptedReport {
+
                 if message.agentResponse?.variants.count ?? 0 > 1 {
                     ChatActionButton(action: { showVariantsPopover.toggle() }) {
-                        Label("\(message.agentResponse?.variants.count ?? 0) Versions", systemImage: "square.3.layers.3d.down.right")
+                        Image(systemName: "square.3.layers.3d.down.right")
                     }
                     .foregroundColor(theme.secondaryText)
+                    .help(String(localized: "\(message.agentResponse?.variants.count ?? 0) Versions"))
                     .accessibilityLabel("\(message.agentResponse?.variants.count ?? 0) response versions available")
                     .popover(isPresented: $showVariantsPopover, arrowEdge: .bottom) {
                         VariantsSelectionView(message: message, isPresented: $showVariantsPopover)
@@ -238,18 +289,19 @@ struct AgentMessageActionsView: View {
                     let redoRefusal = mainAppViewModel.regenerationRefusal(for: message)
                     let isRedoDisabled = redoRefusal != nil
                     ChatActionButton(action: { mainAppViewModel.regenerateResponse(for: message) }, disabled: isRedoDisabled) {
-                        Label("Redo", systemImage: "arrow.clockwise")
+                        Image(systemName: "arrow.clockwise")
                     }
                     .foregroundColor(isRedoDisabled ? theme.tertiaryText : theme.secondaryText)
-                    .help(redoRefusal?.userFacingReason ?? "Generate a new response")
+                    .help(redoRefusal?.userFacingReason ?? String(localized: "Redo"))
                     .accessibilityLabel("Regenerate response")
                 }
 
                 if containsCode {
                     ChatActionButton(action: { chatHistoryViewModel.openMessageInCodeViewer(message: message) }) {
-                        Label("Open in Editor", systemImage: "doc.text.magnifyingglass")
+                        Image(systemName: "doc.text.magnifyingglass")
                     }
                     .foregroundColor(theme.secondaryText)
+                    .help(String(localized: "Open in Editor"))
                     .accessibilityLabel("Open code in editor")
                 }
 
@@ -267,19 +319,22 @@ struct AgentMessageActionsView: View {
                         )
                     }) {
                         // One unified report now — the Trace/Feedback fork is gone.
-                        Label("Report", systemImage: "chart.bar.doc.horizontal")
+                        Image(systemName: "chart.bar.doc.horizontal")
                     }
                     .foregroundColor(theme.secondaryText)
-                    .help("What happened during this run")
+                    .help(String(localized: "Report"))
                     .accessibilityLabel("Open the run report for this response")
                 }
 
                 // Read Aloud
                 ChatActionButton(action: { toggleReadAloud() }) {
-                    Label(isSpeaking ? "Stop" : "Read Aloud", systemImage: isSpeaking ? "stop.fill" : "speaker.wave.2")
+                    Image(systemName: isSpeaking ? "stop.fill" : "speaker.wave.2")
                 }
                 .foregroundColor(isSpeaking ? theme.accentColor : theme.secondaryText)
+                .help(isSpeaking ? String(localized: "Stop reading aloud") : String(localized: "Read aloud"))
                 .accessibilityLabel(isSpeaking ? "Stop reading aloud" : "Read response aloud")
+
+                }   // end `if !isUnpromptedReport`
             }
             .font(.system(.caption))
             .padding(.top, theme.spacingSmall)

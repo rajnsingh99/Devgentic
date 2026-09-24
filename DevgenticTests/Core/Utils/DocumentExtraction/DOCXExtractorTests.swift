@@ -14,12 +14,11 @@ final class DOCXExtractorTests: XCTestCase {
 
     private let extractor = DOCXExtractor()
 
-    private func fixtureURL(_ name: String, ext: String) -> URL {
-        let bundle = Bundle(for: type(of: self))
-        guard let url = bundle.url(forResource: name, withExtension: ext) else {
-            fatalError("Missing test fixture: \(name).\(ext)")
-        }
-        return url
+    /// ⚠️ Shared loader — see `TestFixtures`. This was a local `fatalError`, which kills the
+    /// TEST HOST and so ended the whole run on one absent resource. It now skips this test
+    /// alone; `FixtureAvailabilityTests` is what fails when a fixture is genuinely missing.
+    private func fixtureURL(_ name: String, ext: String) throws -> URL {
+        try TestFixtures.url(name, ext: ext, in: self)
     }
 
     // MARK: - Tier 1: XML Parser — Unit Tests (No File I/O)
@@ -123,7 +122,7 @@ final class DOCXExtractorTests: XCTestCase {
     // MARK: - Tier 1: Real Fixture — Full Pipeline
 
     func testExtract_SampleDOCX_ReturnsContent() async throws {
-        let url = fixtureURL("sample", ext: "docx")
+        let url = try fixtureURL("sample", ext: "docx")
         let result = try await extractor.extract(from: url, maxSize: 500_000)
 
         XCTAssertFalse(result.text.isEmpty, "Should extract text from sample.docx")

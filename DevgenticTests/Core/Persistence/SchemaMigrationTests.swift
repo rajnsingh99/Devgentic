@@ -23,7 +23,6 @@
 import XCTest
 import SwiftData
 import CryptoKit
-import SQLite3
 @testable import devgentic
 
 final class SchemaMigrationTests: XCTestCase {
@@ -54,8 +53,7 @@ final class SchemaMigrationTests: XCTestCase {
     /// existing store un-openable, and it is invisible at compile time.
     ///
     /// ⚠️ If this fails because you deliberately added or removed an entity, that is a SCHEMA
-    /// CHANGE: update this list *and* confirm `testFixtureStoreOpensUnderCurrentSchema` still
-    /// passes before shipping.
+    /// CHANGE: follow the V2 procedure in DevgenticSchemaVersions.swift before shipping.
     func testProductionSchemaRegistersExactlyTheExpectedEntities() {
         let expected: Set<String> = [
             "BackendProfile",
@@ -70,18 +68,12 @@ final class SchemaMigrationTests: XCTestCase {
             "DownloadRecord",
             "WorkflowLayoutSD",
             "WorkflowRunRecordSD",
-            // The skill LIBRARY, added in V6 (2026-09-14). Devgentic owns skill content: a skill
-            // is an opaque id, a version is an immutable complete snapshot, a file is bytes.
-            // Deliberately NOT related to BackendProfile — a profile references a skill BY VALUE,
-            // one direction only, which is what keeps V1/V2/V3 free of frozen copies.
+            // The skill library. Deliberately NOT related to BackendProfile — a profile
+            // references a skill BY VALUE, one direction only, which keeps the relationship
+            // closure (and so any future frozen copies) small.
             "SkillSD",
             "SkillVersionSD",
             "SkillFileSD",
-            // SkillSourceSD / SkillManifestSD retired in V6 (2026-09-14). They were an INDEX over
-            // folders on disk, which meant two sources of truth and the entire reconciliation
-            // apparatus that came with it. Their live classes REMAIN in the codebase because V5
-            // still lists them — deleting those classes would leave V5 undefinable.
-            // CodeViewerSessionSD retired 2026-08-04 — see the retirement test below.
         ]
 
         let actual = Set(DevgenticSchema.schema.entities.map(\.name))
@@ -94,7 +86,7 @@ final class SchemaMigrationTests: XCTestCase {
             Removed: \(expected.subtracting(actual).sorted())
             """
         )
-        XCTAssertEqual(DevgenticSchema.models.count, 15, "Entity count drifted from the documented 15 (12 through V3, +3 for the V6 skill library; V4/V5's 2 registry entities were retired in V6).")
+        XCTAssertEqual(DevgenticSchema.models.count, 15, "Entity count drifted from the documented 15.")
     }
 
     /// The `Schema` the app builds must equal the one built from the extracted model list.
@@ -103,7 +95,7 @@ final class SchemaMigrationTests: XCTestCase {
         // defaults to (1,0,0), so the comparison must supply the version explicitly.
         XCTAssertEqual(DevgenticSchema.schema, Schema(DevgenticSchema.models, version: DevgenticSchema.currentVersion.versionIdentifier))
         XCTAssertEqual(DevgenticSchema.schema.version, DevgenticSchema.currentVersion.versionIdentifier,
-                       "Schema version drifted from the declared current version (V5 as of 2026-09-14).")
+                       "Schema version drifted from the declared current version.")
     }
 
     // MARK: - G67: the OS-side collection-storage regression
@@ -239,7 +231,41 @@ final class SchemaMigrationTests: XCTestCase {
         )
     }
 
-    // MARK: - Step 3: the VersionedSchema wrap is hash-neutral
+    // MARK: - Step 3: V1 renders what it recorded; the VersionedSchema wrap is hash-neutral
+
+    /// ⚠️⚠️ V1 MUST RENDER EXACTLY WHAT `SchemaBaselineV1` RECORDED — FOREVER, not only while it is
+    /// current. Today this overlaps the drift test below (V1 IS the current version); it stops
+    /// overlapping the day a V2 lands, and that is the day it matters. V1 lists its models by their
+    /// LIVE classes, so a V2 that evolves one of them rewrites V1's shape too unless V1 is given
+    /// frozen copies (rule 5b). This fails when that is forgotten.
+    ///
+    /// It exists from day one because on 2026-09-23 exactly that happened to two older versions
+    /// whose baselines were on file but compared against nothing: every store stamped at them
+    /// stopped opening, and no test went red. Each version gets this test the day it is frozen.
+    func testV1RendersExactlyTheV1Baseline() {
+        assertRenders(DevgenticSchemaV1.self, exactly: SchemaBaselineV1.descriptor, version: "V1")
+    }
+
+    private func assertRenders(_ version: any VersionedSchema.Type, exactly baseline: String,
+                               version label: String, file: StaticString = #filePath, line: UInt = #line) {
+        let rendered = DevgenticSchema.structuralDescriptor(for: Schema(versionedSchema: version))
+        guard rendered != baseline else { return }
+        let baselineLines = baseline.components(separatedBy: "\n")
+        let currentLines = rendered.components(separatedBy: "\n")
+        let removed = Set(baselineLines).subtracting(currentLines).sorted()
+        let added = Set(currentLines).subtracting(baselineLines).sorted()
+        XCTFail(
+            """
+            \(label) no longer renders its recorded shape — a store stamped at \(label) will not open.
+            Usually a model it lists by its LIVE class evolved; give \(label) a frozen copy (rule 5b).
+            Removed (\(removed.count)):
+            \(removed.map { "  - \($0)" }.joined(separator: "\n"))
+            Added (\(added.count)):
+            \(added.map { "  + \($0)" }.joined(separator: "\n"))
+            """,
+            file: file, line: line
+        )
+    }
 
     /// The assertion that makes introducing `VersionedSchema` safe, and the permanent guard
     /// against it silently ceasing to be safe.
@@ -259,35 +285,6 @@ final class SchemaMigrationTests: XCTestCase {
     /// store still opened cleanly — because with one declared version and zero stages SwiftData
     /// never engages staged migration, leaving the identifier inert. It becomes load-bearing the
     /// moment a V2 exists, which is precisely when it is too late to discover a wrong value.
-    /// The nested frozen V1 model copies (added 2026-08-22 with V2) must render the
-    /// EXACT shape SchemaBaselineV1 recorded — this is what makes hand-copied legacy
-    /// classes safe: any drifted attribute, relationship, delete rule or option shows
-    /// up as a line-level diff here instead of as a failed migration on a user's store.
-    func testV1NestedModelsRenderExactlyTheV1Baseline() {
-        let v1 = DevgenticSchema.structuralDescriptor(for: Schema(versionedSchema: DevgenticSchemaV1.self))
-        guard v1 != SchemaBaselineV1.descriptor else { return }
-        let baselineLines = SchemaBaselineV1.descriptor.components(separatedBy: "\n")
-        let currentLines = v1.components(separatedBy: "\n")
-        let removed = Set(baselineLines).subtracting(currentLines).sorted()
-        let added = Set(currentLines).subtracting(baselineLines).sorted()
-        XCTFail(
-            """
-            The frozen V1 nested models no longer render V1's recorded shape.
-            Removed (\(removed.count)):
-            \(removed.map { "  - \($0)" }.joined(separator: "\n"))
-            Added (\(added.count)):
-            \(added.map { "  + \($0)" }.joined(separator: "\n"))
-            """
-        )
-    }
-
-    // ⚠️⚠️ `testV4NestedModelsRenderExactlyTheV4Baseline` WAS DELETED WITH SCHEMA V4 (2026-09-15).
-    // It pinned V4's frozen nested copies against a recorded baseline — a guard that mattered only
-    // while V4 existed. V4 and V5 never shipped (the last release is at V3) and were removed
-    // outright rather than frozen forever, taking the copies, the baselines and this guard with
-    // them. The V1 twin below STAYS: V1 is a version real stores were written at.
-
-
     func testVersionedSchemaIsHashIdenticalToUnversioned() {
         let unversioned = Schema(DevgenticSchemaV1.models)
         let versioned = Schema(versionedSchema: DevgenticSchemaV1.self)
@@ -448,7 +445,7 @@ final class SchemaMigrationTests: XCTestCase {
         let current = DevgenticSchema.structuralDescriptor(for: DevgenticSchema.schema)
 
         if ProcessInfo.processInfo.environment["DEVGENTIC_WRITE_SCHEMA_BASELINE"] != nil {
-            // Regeneration escape hatch. Prints the descriptor for pasting into SchemaBaselineV6.swift.
+            // Regeneration escape hatch. Prints the descriptor for pasting into SchemaBaselineV1.swift.
             print("=== BEGIN SCHEMA DESCRIPTOR ===\n\(current)\n=== END SCHEMA DESCRIPTOR ===")
             // ⚠️ SKIP, not `return`. A bare return reports this test as PASSED — so the run that
             // regenerates the baseline also announces that the schema matches it, which is the one
@@ -457,23 +454,23 @@ final class SchemaMigrationTests: XCTestCase {
             // `XCTSkip` makes the suite say "not checked" instead of "checked and fine".
             throw XCTSkip(
                 "Baseline regeneration mode — the drift check did NOT run. Paste the descriptor above "
-                + "into SchemaBaselineV6.swift, then re-run WITHOUT TEST_RUNNER_DEVGENTIC_WRITE_SCHEMA_BASELINE "
+                + "into SchemaBaselineV1.swift, then re-run WITHOUT TEST_RUNNER_DEVGENTIC_WRITE_SCHEMA_BASELINE "
                 + "to actually verify it."
             )
         }
 
-        guard !SchemaBaselineV6.descriptor.isEmpty else {
+        guard !SchemaBaselineV1.descriptor.isEmpty else {
             return XCTFail(
-                "SchemaBaselineV6.descriptor is empty. Regenerate it with:\n"
+                "SchemaBaselineV1.descriptor is empty. Regenerate it with:\n"
                 + "  TEST_RUNNER_DEVGENTIC_WRITE_SCHEMA_BASELINE=1 xcodebuild test-without-building "
                 + "-only-testing:devgenticTests/SchemaMigrationTests/testSchemaStructureMatchesCheckedInBaseline"
             )
         }
 
-        guard current != SchemaBaselineV6.descriptor else { return }
+        guard current != SchemaBaselineV1.descriptor else { return }
 
         // Emit a line-level diff — a 13-entity descriptor is far too long to eyeball whole.
-        let baselineLines = SchemaBaselineV6.descriptor.components(separatedBy: "\n")
+        let baselineLines = SchemaBaselineV1.descriptor.components(separatedBy: "\n")
         let currentLines = current.components(separatedBy: "\n")
         let removed = Set(baselineLines).subtracting(currentLines).sorted()
         let added = Set(currentLines).subtracting(baselineLines).sorted()
@@ -565,69 +562,6 @@ final class SchemaMigrationTests: XCTestCase {
         XCTAssertEqual(artifacts.support.lastPathComponent, ".DevgenticSD_SUPPORT")
     }
 
-    // MARK: - G58: an old store opens under the current schema
-
-    /// THE regression guard: a store written by an earlier build, checked into the repo, opened by
-    /// whatever schema exists today.
-    ///
-    /// Skips with an explicit message when the fixture is absent rather than passing silently — a
-    /// green test that asserted nothing is worse than no test. Generate it with
-    /// `testRegenerateCheckedInFixtureStore` below.
-    func testFixtureStoreOpensUnderCurrentSchema() throws {
-        guard let fixture = Self.locateFixtureStore() else {
-            throw XCTSkip(
-                "No checked-in fixture store found (\(Self.fixtureBaseName).store). "
-                + "Generate one with DEVGENTIC_WRITE_FIXTURE_STORE=1 and commit it — see "
-                + "testRegenerateCheckedInFixtureStore."
-            )
-        }
-
-        // Copy ALL artifacts to a temp dir. Opening a fixture in place would mutate a committed
-        // file, and copying only `.store` would drop rows still sitting in the -wal (G30).
-        let storeURL = workDirectory.appendingPathComponent(DevgenticSchema.storeFilename)
-        try Self.copyStoreArtifacts(from: fixture, to: storeURL)
-
-        let container = try Self.makeContainer(at: storeURL)
-        let context = ModelContext(container)
-
-        // Row counts must survive. NOTE: asserting counts alone is not sufficient — a store can
-        // migrate structurally while every blob inside it becomes undecodable (G58), which is what
-        // the blob-hardening tests cover separately.
-        XCTAssertGreaterThan(try context.fetchCount(FetchDescriptor<ConversationSD>()), 0,
-                             "Conversations did not survive migration from the fixture store.")
-        XCTAssertGreaterThan(try context.fetchCount(FetchDescriptor<PromptModel>()), 0,
-                             "Prompts did not survive migration from the fixture store.")
-        XCTAssertGreaterThan(try context.fetchCount(FetchDescriptor<BackendProfile>()), 0,
-                             "Profiles did not survive migration from the fixture store.")
-
-        // Content, not just cardinality: prove a blob column still DECODES to its original value.
-        //
-        // ⚠️ This used to assert only `!configData.isEmpty`, which is precisely the G12/G13 failure
-        // shape sailing through: a blob that survives migration byte-for-byte but can no longer be
-        // decoded is NOT empty — it is present, non-empty, and worthless. The store opens, the row
-        // count is right, and every profile silently becomes a blank Ollama bot. Asserting the
-        // decoded VALUE is the only version of this check that can fail for the reason that matters.
-        let profile = try XCTUnwrap(try context.fetch(FetchDescriptor<BackendProfile>()).first)
-        XCTAssertEqual(profile.displayName, Self.fixtureProfileName)
-        XCTAssertFalse(profile.configData.isEmpty, "Profile blob is empty after migration.")
-        XCTAssertFalse(profile.hasUnreadableConfiguration,
-                       """
-                       The profile blob survived migration but no longer DECODES — the exact G12/G13 \
-                       mechanism. Every profile would present as a blank Ollama bot while the store \
-                       reports itself perfectly healthy.
-                       """)
-        guard case .bot(let botConfig) = profile.details else {
-            return XCTFail("Fixture profile decoded to \(profile.details), expected .bot — the "
-                           + "persisted discriminator or the blob's shape changed.")
-        }
-        XCTAssertEqual(botConfig.llmConfig.modelName, "llama3",
-                       "The blob decoded, but not to the value the fixture was written with.")
-
-        let prompt = try XCTUnwrap(try context.fetch(FetchDescriptor<PromptModel>()).first)
-        XCTAssertEqual(prompt.tags, Self.fixturePromptTags,
-                       "PromptModel.tags did not survive — the [String]? storage shape (G67).")
-    }
-
     // MARK: - Step 5: the "Start Fresh" contract, end to end
 
     /// The full promise of the recovery affordance, exercised against real SwiftData containers:
@@ -675,152 +609,25 @@ final class SchemaMigrationTests: XCTestCase {
                        "External-storage payload did not survive the quarantine rename.")
     }
 
-    // MARK: - G66: the CodeViewerSessionSD retirement
-
-    /// Proves the entity drop is safe on a store that ACTUALLY CONTAINED the entity's rows.
-    ///
-    /// `CodeViewerSessionSD` was retired on 2026-08-04 together with its cascade relationship
-    /// `ConversationSD.codeViewerSessions`. The design doc's original two-release plan existed
-    /// because "relying on SwiftData to silently discard a removed entity's rows is probably fine
-    /// — but 'probably' is doing too much work next to real user data". This test replaces that
-    /// "probably" with evidence: the committed fixture holds one `ZCODEVIEWERSESSIONSD` row whose
-    /// `ZCONVERSATION` foreign key points at the fixture's conversation, and the current schema —
-    /// which has neither the entity nor the relationship — must still open it with the
-    /// conversation intact.
-    ///
-    /// ⚠️ If the fixture is ever regenerated without re-seeding that row (see the warning in the
-    /// regenerator), this test keeps passing while proving nothing.
-    /// ⚠️ MEANING FLIPPED 2026-08-22 with V2 (and renamed accordingly below). The original
-    /// test proved the retired `CodeViewerSessionSD` entity DROPPED SILENTLY on open —
-    /// behavior of the zero-stage plan, where SwiftData fell back to automatic inference.
-    /// Staged migration deliberately replaces that: a store whose model hash matches NO
-    /// declared version (this pre-V1 artifact mismatches on BOTH the retired entity and a
-    /// pre-freeze ConversationSD shape) is REFUSED with NSCocoaErrorDomain 134504 instead
-    /// of being silently guessed at — and the app's fatal-store alert + StoreRecovery
-    /// quarantine own that path. Pre-V1 stores exist only on dev machines (nothing has
-    /// shipped); the refusal is the honest outcome, and this test pins it.
-    func testPreV1StoreIsRefusedLoudlyUnderStagedMigration() throws {
-        guard let fixture = Self.locateLegacyFixtureStore() else {
-            throw XCTSkip("No checked-in pre-V1 legacy fixture found (\(Self.legacyFixtureBaseName).store).")
-        }
-
-        // The artifact must genuinely be pre-V1: it carries ROWS of the retired
-        // CodeViewerSessionSD entity (and a pre-freeze ConversationSD shape), so its
-        // model hash matches no declared version.
-        let retiredRowCount = try Self.rowCount(inFixture: fixture, table: "ZCODEVIEWERSESSIONSD")
-        XCTAssertGreaterThan(retiredRowCount, 0,
-                             "The legacy fixture no longer carries retired-entity rows — it cannot prove the refusal.")
-
-        let storeURL = workDirectory.appendingPathComponent(DevgenticSchema.storeFilename)
-        try Self.copyStoreArtifacts(from: fixture, to: storeURL)
-
-        XCTAssertFalse(
-            DevgenticSchema.schema.entities.map(\.name).contains("CodeViewerSessionSD"),
-            "CodeViewerSessionSD is still registered — the retirement is incomplete."
-        )
-
-        // Staged migration must REFUSE the unknown version — loudly, not by guessing.
-        // (The app surfaces this through the fatal-store alert + StoreRecovery
-        // quarantine; silent inference of unknown shapes ended with the zero-stage plan.)
-        XCTAssertThrowsError(try Self.makeContainer(at: storeURL),
-                             "A pre-V1 store (unknown model version) must be refused under staged migration, not silently inferred.")
-    }
-
-    /// Writes the checked-in fixture. Not a test: gated behind an env var so a normal run never
-    /// rewrites a committed file. Run it, then copy the printed artifacts into
-    /// `DevgenticTests/Core/Persistence/Fixtures/`.
-    func testRegenerateCheckedInFixtureStore() throws {
-        guard ProcessInfo.processInfo.environment["DEVGENTIC_WRITE_FIXTURE_STORE"] != nil else {
-            throw XCTSkip("Set DEVGENTIC_WRITE_FIXTURE_STORE=1 to regenerate the fixture store.")
-        }
-
-        let output = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("devgentic-fixture-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-        let storeURL = output.appendingPathComponent("\(Self.fixtureBaseName).store")
-
-        try autoreleasepool {
-            // ⚠️ Written with the FROZEN V1 schema (nested legacy classes), NOT the current
-            // one — the fixture's whole purpose since V2 landed (2026-08-22) is to be a
-            // genuine PREVIOUS-version store so `testFixtureStoreOpensUnderCurrentSchema`
-            // exercises the real V1→V2 staged lightweight migration. Writing it with
-            // `makeContainer` (current schema) would produce an already-migrated store and
-            // reduce that test to a no-op reopen.
-            //
-            // (Historical note: the 2026-08-04 fixture predated even the V1 freeze — it
-            // carried the retired `CodeViewerSessionSD` and a pre-freeze `ConversationSD`
-            // shape, which staged migration correctly REFUSES as an unknown version. That
-            // artifact now lives on as the legacy-refusal fixture — see
-            // `testPreV1StoreIsRefusedLoudlyUnderStagedMigration`.)
-            let v1Schema = Schema(versionedSchema: DevgenticSchemaV1.self)
-            let config = ModelConfiguration(DevgenticSchema.configurationName, schema: v1Schema, url: storeURL)
-            let container = try ModelContainer(for: v1Schema, configurations: config)
-            let context = ModelContext(container)
-
-            let conversation = DevgenticSchemaV1.ConversationSD()
-            conversation.userDefinedTitle = Self.fixtureConversationTitle
-            context.insert(conversation)
-            context.insert(PromptModel(title: "Fixture prompt", text: "body", category: "general",
-                                       isUserDefined: true, tags: Self.fixturePromptTags))
-            context.insert(DownloadRecord(backend: .mlx, modelIdentifier: "fixture/model"))
-            context.insert(BackendProfile(
-                displayName: Self.fixtureProfileName,
-                details: .bot(BotConfig(llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "llama3")))
-            ))
-            // One V1 workflow-run row, so the V1→V2 migration has an actual row to carry
-            // through the +traceID column change (Core Data's mandatory-attribute
-            // validation only fires for entities WITH rows — the all-entities lesson).
-            let run = DevgenticSchemaV1.WorkflowRunRecordSD(
-                conversationID: conversation.id, workflowName: "Fixture workflow",
-                userInput: "fixture input", finalOutput: "fixture output", statusRaw: "completed",
-                nodeResultsData: Data("[]".utf8), variablesData: Data("{}".utf8))
-            run.conversation = conversation
-            context.insert(run)
-
-            try context.save()
-        }
-
-        // A non-empty -wal means rows are committed to the write-ahead log but not yet
-        // checkpointed into the .store. Committing the .store alone would then silently ship a
-        // fixture missing its newest rows — the same partial-copy bug this repo already has an
-        // instance of in Application Support (G28/G30).
-        let walPath = storeURL.path + "-wal"
-        let walSize = (try? FileManager.default.attributesOfItem(atPath: walPath)[.size] as? Int) ?? 0
-        let walIsEmpty = (walSize ?? 0) == 0
-
-        print("=== FIXTURE STORE WRITTEN ===")
-        print("  \(storeURL.path)")
-        if walIsEmpty {
-            print("  -wal is empty (checkpointed) — commit the .store ALONE.")
-        } else {
-            print("  ⚠️ -wal holds \(walSize ?? 0) bytes NOT yet checkpointed: \(walPath)")
-            print("  ⚠️ Commit the -wal alongside the .store, or the fixture loses its newest rows.")
-        }
-        print("Copy into DevgenticTests/Core/Persistence/Fixtures/ and commit.")
-
-        XCTAssertTrue(walIsEmpty, "Fixture WAL was not checkpointed — see the warning above before committing.")
-    }
-
     // MARK: - G64/G86: every entity needs a ROW, or "it still opens" proves nothing
 
     static let allEntitiesFixtureBaseName = "devgentic-all-entities-fixture"
 
-    /// ⚠️ WHY A SECOND FIXTURE EXISTS.
+    /// ⚠️ WHY EVERY ENTITY NEEDS A ROW.
     ///
     /// Core Data's mandatory-attribute validation (`NSCocoaErrorDomain 134110`) only fires for
-    /// entities that have ROWS TO MIGRATE. The original fixture carries rows for just 4 of the 12
-    /// entities — BackendProfile, ConversationSD, PromptModel, DownloadRecord — so a classic bricking
-    /// change to any of the other eight opened it perfectly cleanly.
+    /// entities that have ROWS TO MIGRATE. The fixture this one replaced carried rows for just 4 of
+    /// 12 entities, so a classic bricking change to any of the other eight opened it cleanly.
     ///
     /// MEASURED, not assumed: injecting `var g64Probe: String` (non-optional, no declaration default,
     /// with a DEFAULTED init parameter — the exact `ScheduledTaskModel` trap G64 describes) into
-    /// `ScheduledTaskModel` left `testFixtureStoreOpensUnderCurrentSchema` PASSING. Only the baseline
-    /// diff caught it — and a baseline is a reviewable signal a developer can regenerate away, not a
-    /// proof.
+    /// `ScheduledTaskModel` left that fixture's open-test PASSING. Only the baseline diff caught it —
+    /// and a baseline is a reviewable signal a developer can regenerate away, not a proof.
     ///
-    /// The original fixture is NOT regenerated to fix this: it deliberately carries a
-    /// `CodeViewerSessionSD` row that can no longer be seeded (the type is gone), and regenerating
-    /// would silently turn the entity-retirement test into a tautology. Hence a second file.
+    /// ⚠️ Since the 2026-09-23 schema-history reset this is the ONLY store fixture of the current
+    /// shape. Before the first post-release schema change, copy it aside as the previous-version
+    /// fixture (procedure step 8 in DevgenticSchemaVersions.swift) — regenerating it in place then
+    /// would leave nothing that proves an old store still opens.
     func testAllEntitiesFixtureOpensUnderCurrentSchema() throws {
         let url = try XCTUnwrap(
             Bundle(for: Self.self).url(forResource: Self.allEntitiesFixtureBaseName, withExtension: "store"),
@@ -886,9 +693,9 @@ final class SchemaMigrationTests: XCTestCase {
 
     /// Regenerates the all-entities fixture. Env-gated — it writes a file that gets committed.
     ///
-    /// ⚠️ Unlike the original fixture, this one is SAFE to regenerate: it carries no retired-entity
-    /// row and makes no historical claim. Its only job is "one row per entity, written by the schema
-    /// current at generation time".
+    /// Safe to regenerate while no build has shipped: its only job is "one row per entity, written by
+    /// the schema current at generation time". After a release, see step 8 of the schema procedure
+    /// FIRST — the file in the repo is then the only record of what a shipped store looks like.
     func testRegenerateAllEntitiesFixture() throws {
         guard ProcessInfo.processInfo.environment["DEVGENTIC_WRITE_ALL_ENTITIES_FIXTURE"] != nil else {
             throw XCTSkip("Set DEVGENTIC_WRITE_ALL_ENTITIES_FIXTURE=1 to regenerate.")
@@ -1238,16 +1045,6 @@ final class SchemaMigrationTests: XCTestCase {
 
     // MARK: - Helpers
 
-    static let fixtureBaseName = "devgentic-schema-v1-fixture"
-    /// The 2026-08-04 artifact — PRE-V1 (carries retired CodeViewerSessionSD rows and a
-    /// pre-freeze ConversationSD). Kept precisely because no version matches it: it is
-    /// the refusal-path fixture. Regenerating it is impossible by design (the retired
-    /// type is gone), so treat the file as irreplaceable.
-    static let legacyFixtureBaseName = "devgentic-pre-v1-legacy-fixture"
-    static let fixtureProfileName = "Fixture Bot"
-    static let fixtureConversationTitle = "Fixture conversation"
-    static let fixturePromptTags = ["alpha", "beta"]
-
     /// Opens a container over `storeURL` exactly as `DevgenticApp` does — same schema AND same
     /// migration plan, both by reference rather than by copy, so these tests cannot drift from
     /// production (G54). If the app's open call changes, change it here too.
@@ -1262,69 +1059,5 @@ final class SchemaMigrationTests: XCTestCase {
             migrationPlan: DevgenticSchema.migrationPlan,
             configurations: configuration
         )
-    }
-
-    /// Finds the fixture in the test bundle. Bundle resources are FLATTENED to the bundle root
-    /// (G60), so the lookup is by basename with no subdirectory.
-    /// Row count for a table in a fixture store, read straight from SQLite.
-    ///
-    /// ⚠️ Deliberately bypasses SwiftData. The whole point is to inspect a store containing an entity
-    /// the CURRENT schema does not declare — SwiftData cannot fetch what it has no model for, so the
-    /// only way to ask "does the retired table actually hold rows?" is to read the file directly.
-    /// Opened `immutable=1` so a check can never modify the committed fixture.
-    static func rowCount(inFixture url: URL, table: String) throws -> Int {
-        guard table.wholeMatch(of: /^[A-Za-z_][A-Za-z0-9_]*$/) != nil else {
-            throw XCTSkip("Refusing to interpolate a non-identifier table name: \(table)")
-        }
-        var handle: OpaquePointer?
-        guard sqlite3_open_v2("file:\(url.path)?immutable=1", &handle,
-                              SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK else {
-            sqlite3_close(handle)
-            throw XCTSkip("Could not open the fixture store for inspection at \(url.path)")
-        }
-        defer { sqlite3_close(handle) }
-
-        var statement: OpaquePointer?
-        // A missing table is a real answer — 0 rows — not an error: it means the fixture predates or
-        // postdates the entity entirely, which the caller's assertion should report clearly.
-        guard sqlite3_prepare_v2(handle, "SELECT COUNT(*) FROM \(table)", -1, &statement, nil) == SQLITE_OK else {
-            return 0
-        }
-        defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
-        return Int(sqlite3_column_int(statement, 0))
-    }
-
-    private static func locateFixtureStore() -> URL? {
-        Bundle(for: SchemaMigrationTests.self).url(forResource: fixtureBaseName, withExtension: "store")
-    }
-
-    private static func locateLegacyFixtureStore() -> URL? {
-        Bundle(for: SchemaMigrationTests.self).url(forResource: legacyFixtureBaseName, withExtension: "store")
-    }
-
-    /// Copies a store and every sidecar that exists beside it.
-    ///
-    /// Copying only `.store` is the bug this repo already has an instance of on disk
-    /// (`DevgenticSD.store.pre-revision-backup`, with no matching `-wal`) — rows committed to the
-    /// write-ahead log but not yet checkpointed would be silently absent (G28/G30).
-    private static func copyStoreArtifacts(from source: URL, to destination: URL) throws {
-        let fileManager = FileManager.default
-        try fileManager.copyItem(at: source, to: destination)
-
-        for suffix in ["-wal", "-shm"] {
-            let sidecar = URL(fileURLWithPath: source.path + suffix)
-            guard fileManager.fileExists(atPath: sidecar.path) else { continue }
-            try fileManager.copyItem(at: sidecar, to: URL(fileURLWithPath: destination.path + suffix))
-        }
-
-        let sourceSupport = storeSupportDirectory(for: source)
-        if fileManager.fileExists(atPath: sourceSupport.path) {
-            try fileManager.copyItem(at: sourceSupport, to: storeSupportDirectory(for: destination))
-        }
-    }
-
-    private static func storeSupportDirectory(for storeURL: URL) -> URL {
-        DevgenticSchema.storeArtifactURLs(for: storeURL).support
     }
 }

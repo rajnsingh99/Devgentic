@@ -81,12 +81,33 @@ struct NativeHistoryConverter {
     /// - Parameter correlation: nil-equivalent ("") for measurement — the builders only log
     ///   when given one, so sizing the prompt does not emit trim warnings for prompts that
     ///   were never sent.
+    /// - Parameter toolsAvailable: false for a BOT, which `AgentConnect` gives `rawTools = []`
+    ///   and `ChatExecutor` sends `tools: nil`. Mirrors
+    ///   `EpisodicHistoryFormatter.build(toolsAvailable:)` — and exists because it did NOT.
+    ///
+    ///   ⚠️⚠️ THE TWO EMITTERS. `Call get_conversation_history(N)` is produced in two independent
+    ///   places: `EpisodicHistoryFormatter.renderPointerTurn`, which reaches the system prompt,
+    ///   and the pointer/hybrid builders here, which reach the model as real assistant turns.
+    ///   When the gate was added in response to a tool-less profile being told to call a tool it
+    ///   does not have, it was applied to the formatter and not to this converter — so on a
+    ///   native provider the envelope could say "full detail is not retrievable this turn" while
+    ///   every turn body said "Call get_conversation_history(N)".
+    ///
+    ///   That was never reachable: `ProfileDetails.historyStrategy` is
+    ///   `agentConfig?.historyStrategy ?? .recentHistory`, a bot has no `AgentConfig`, and only
+    ///   the pointer and hybrid branches emit the marker — so the one profile type without tools
+    ///   was also the one that could never reach either pointer renderer. It was held shut by a
+    ///   property of a DIFFERENT type, with nothing stating the dependency. Closed 2026-09-20.
+    ///
+    ///   No default, deliberately, for the same reason `renderPointerTurn` has none: a silent
+    ///   default is exactly how a call site comes to make that promise on a profile's behalf.
     static func build(
         strategy: HistoryStrategy,
         from history: [ChatMessage],
         charBudget: Int,
         includeImages: Bool = false,
-        correlation: String = ""
+        correlation: String = "",
+        toolsAvailable: Bool
     ) -> [HistoryTurn] {
         switch strategy {
         case .recentHistory:
@@ -98,11 +119,11 @@ struct NativeHistoryConverter {
                                     includeImages: includeImages, correlation: correlation)
         case .pointer:
             return buildPointerTurns(from: history, includeImages: includeImages,
-                                     correlation: correlation)
+                                     correlation: correlation, toolsAvailable: toolsAvailable)
         case .hybrid:
             return buildHybridTurns(from: history, inlineCount: EpisodicHistoryFormatter.hybridInlineCount,
                                     charBudget: charBudget, includeImages: includeImages,
-                                    correlation: correlation)
+                                    correlation: correlation, toolsAvailable: toolsAvailable)
         }
     }
 
@@ -169,7 +190,7 @@ struct NativeHistoryConverter {
     /// Images are therefore never attached on the pointer path — the whole point of
     /// pointers is a minimal payload. `includeImages` is accepted for call-site
     /// symmetry and deliberately ignored; the omission is logged.
-    static func buildPointerTurns(from history: [ChatMessage], includeImages: Bool = false, correlation: String = "") -> [HistoryTurn] {
+    static func buildPointerTurns(from history: [ChatMessage], includeImages: Bool = false, correlation: String = "", toolsAvailable: Bool) -> [HistoryTurn] {
         let (contextTurns, filteredHistory) = extractCheckpointContext(from: history)
         let pairs = pairMessages(from: filteredHistory, includeImages: false)
         guard !pairs.isEmpty else { return contextTurns }
@@ -193,7 +214,12 @@ struct NativeHistoryConverter {
 
             // Build compact tool list from the original message
             let toolList = pair.toolNames.isEmpty ? "" : "[\(pair.toolNames.joined(separator: ", "))] "
-            let assistant = "\(toolList)Call get_conversation_history(\(index)) for full response."
+            // A retrieval instruction is only true when there is something to retrieve WITH.
+            // Wording matches `EpisodicHistoryFormatter.renderPointerTurn`'s withheld branch so
+            // the two emitters read identically in a prompt and grep as a pair.
+            let assistant = toolsAvailable
+                ? "\(toolList)Call get_conversation_history(\(index)) for full response."
+                : "\(toolList)Summary only — full detail is not retrievable this turn."
             messages.append(HistoryTurn(role: .assistant, text: assistant))
         }
 
@@ -217,7 +243,8 @@ struct NativeHistoryConverter {
         inlineCount: Int = 3,
         charBudget: Int,
         includeImages: Bool = false,
-        correlation: String = ""
+        correlation: String = "",
+        toolsAvailable: Bool
     ) -> [HistoryTurn] {
         // Extract checkpoint context — if a checkpoint exists, only convert turns after it.
         let (contextTurns, filteredHistory) = extractCheckpointContext(from: history)
@@ -238,7 +265,11 @@ struct NativeHistoryConverter {
             messages.append(HistoryTurn(role: .user, text: pair.userTurn.text))
 
             let toolList = pair.toolNames.isEmpty ? "" : "[\(pair.toolNames.joined(separator: ", "))] "
-            let assistant = "\(toolList)Call get_conversation_history(\(index)) for full response."
+            // See `buildPointerTurns` — the hybrid pointer segment makes the same promise and
+            // needs the same gate.
+            let assistant = toolsAvailable
+                ? "\(toolList)Call get_conversation_history(\(index)) for full response."
+                : "\(toolList)Summary only — full detail is not retrievable this turn."
             messages.append(HistoryTurn(role: .assistant, text: assistant))
         }
         if pointerDroppedImages > 0 {

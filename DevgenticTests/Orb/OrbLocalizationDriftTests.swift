@@ -122,7 +122,7 @@ final class OrbLocalizationDriftTests: XCTestCase {
     /// the user to say a word that can never match.
     func testTheMatchingVocabulariesAreNotLocalized() throws {
         let source = try source("OrbSessionController")
-        for vocabulary in ["wakeWordVariants", "cancelPhrases", "repeatPhrases",
+        for vocabulary in ["wakeWordHomophones", "cancelPhrases", "repeatPhrases",
                            "tellMeMorePhrases", "newConversationPhrases"] {
             guard let line = source.split(separator: "\n").first(where: { $0.contains("let \(vocabulary)") }) else {
                 continue   // renamed or moved; the other tests still cover the visible surface

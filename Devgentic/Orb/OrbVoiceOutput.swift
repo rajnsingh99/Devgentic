@@ -86,14 +86,14 @@ final class OrbVoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
     /// anyone who never chooses an Orb voice, and breaks it the moment they do.
     static func applyVoiceSettings(to utterance: AVSpeechUtterance) {
         let config = OrbConfigManager.shared
-        let readAloudRate = UserDefaults.standard.float(forKey: AppSettings.speechPlaybackRateKey)
+        let readAloudRate = TestHost.defaults.float(forKey: AppSettings.speechPlaybackRateKey)
         let multiplier = config.narratorRate > 0
             ? config.narratorRate
             : (readAloudRate > 0 ? readAloudRate : 1.0)
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * multiplier
 
         let voiceID: String? = config.usesReadAloudVoice
-            ? UserDefaults.standard.string(forKey: AppSettings.speechPlaybackVoiceKey)
+            ? TestHost.defaults.string(forKey: AppSettings.speechPlaybackVoiceKey)
             : config.narratorVoiceID
         if let voiceID, let voice = AVSpeechSynthesisVoice(identifier: voiceID) {
             utterance.voice = voice

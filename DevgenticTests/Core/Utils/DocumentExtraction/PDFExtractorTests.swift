@@ -17,18 +17,17 @@ final class PDFExtractorTests: XCTestCase {
     private let extractor = PDFExtractor()
 
     /// Resolves a fixture file from the test bundle
-    private func fixtureURL(_ name: String, ext: String) -> URL {
-        let bundle = Bundle(for: type(of: self))
-        guard let url = bundle.url(forResource: name, withExtension: ext) else {
-            fatalError("Missing test fixture: \(name).\(ext) — ensure it is in DevgenticTests/Core/Utils/Fixtures/")
-        }
-        return url
+    /// ⚠️ Shared loader — see `TestFixtures`. This was a local `fatalError`, which kills the
+    /// TEST HOST and so ended the whole run on one absent resource. It now skips this test
+    /// alone; `FixtureAvailabilityTests` is what fails when a fixture is genuinely missing.
+    private func fixtureURL(_ name: String, ext: String) throws -> URL {
+        try TestFixtures.url(name, ext: ext, in: self)
     }
 
     // MARK: - Tier 1: Basic Extraction
 
     func testExtract_TextPDF_ReturnsContent() async throws {
-        let url = fixtureURL("sample", ext: "pdf")
+        let url = try fixtureURL("sample", ext: "pdf")
         let result = try await extractor.extract(from: url, maxSize: 500_000)
 
         XCTAssertFalse(result.text.isEmpty, "Should extract text from sample.pdf")
@@ -38,7 +37,7 @@ final class PDFExtractorTests: XCTestCase {
     }
 
     func testExtract_TextPDF_HasMultiplePages() async throws {
-        let url = fixtureURL("sample", ext: "pdf")
+        let url = try fixtureURL("sample", ext: "pdf")
         let result = try await extractor.extract(from: url, maxSize: 500_000)
 
         XCTAssertNotNil(result.metadata.pageCount, "Should report page count")
@@ -46,7 +45,7 @@ final class PDFExtractorTests: XCTestCase {
     }
 
     func testExtract_TextPDF_WordCountPositive() async throws {
-        let url = fixtureURL("sample", ext: "pdf")
+        let url = try fixtureURL("sample", ext: "pdf")
         let result = try await extractor.extract(from: url, maxSize: 500_000)
 
         XCTAssertGreaterThan(result.metadata.wordCount, 10,
@@ -55,8 +54,8 @@ final class PDFExtractorTests: XCTestCase {
 
     // MARK: - Tier 1: OCR Fallback
 
-    func testExtract_ScannedPDF_FallsBackToOCR() async {
-        let url = fixtureURL("sample_scanned", ext: "pdf")
+    func testExtract_ScannedPDF_FallsBackToOCR() async throws {
+        let url = try fixtureURL("sample_scanned", ext: "pdf")
         do {
             let result = try await extractor.extract(from: url, maxSize: 500_000)
             // If OCR succeeds, it should report vision-ocr as extraction method
@@ -79,15 +78,15 @@ final class PDFExtractorTests: XCTestCase {
     // MARK: - Tier 2: Edge Cases
 
     func testExtract_MaxSizeTruncation() async throws {
-        let url = fixtureURL("sample", ext: "pdf")
+        let url = try fixtureURL("sample", ext: "pdf")
         let result = try await extractor.extract(from: url, maxSize: 50)
 
         XCTAssertLessThanOrEqual(result.text.count, 50, "Text should be truncated to maxSize")
         XCTAssertTrue(result.metadata.wasTruncated, "Truncation flag should be set")
     }
 
-    func testExtract_EmptyPDF_ThrowsEmptyDocument() async {
-        let url = fixtureURL("empty", ext: "pdf")
+    func testExtract_EmptyPDF_ThrowsEmptyDocument() async throws {
+        let url = try fixtureURL("empty", ext: "pdf")
         do {
             _ = try await extractor.extract(from: url, maxSize: 500_000)
             // If OCR somehow finds text in a blank page, that's acceptable
@@ -119,7 +118,7 @@ final class PDFExtractorTests: XCTestCase {
     }
 
     func testExtract_WhenNotTruncated_FlagIsFalse() async throws {
-        let url = fixtureURL("sample", ext: "pdf")
+        let url = try fixtureURL("sample", ext: "pdf")
         let result = try await extractor.extract(from: url, maxSize: 500_000)
 
         XCTAssertFalse(result.metadata.wasTruncated,

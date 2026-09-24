@@ -82,7 +82,10 @@ enum ToolRecoveryHints {
         Hint(toolName: "find_definition", errorSubstring: "does not exist",             suggestions: ["list_directory", "codebase_map"]),
 
         // batch_command's working_directory problem is a path-not-found in disguise.
-        Hint(toolName: "batch_command",  errorSubstring: "working_directory",           suggestions: ["list_directory", "codebase_map"]),
+        Hint(toolName: "run_command",    errorSubstring: "working_directory",           suggestions: ["list_directory", "codebase_map"]),
+        Hint(toolName: "start_background_task", errorSubstring: "working_directory",     suggestions: ["list_directory", "codebase_map"]),
+        Hint(toolName: "run_command",    errorSubstring: "working_directory",           suggestions: ["list_directory", "codebase_map"]),
+        Hint(toolName: "start_background_task", errorSubstring: "working_directory",    suggestions: ["list_directory", "codebase_map"]),
 
         // git_tool guards its path arg before dispatch; same recovery as other path tools.
         Hint(toolName: "git_tool",       errorSubstring: "does not exist",              suggestions: ["list_directory"]),
@@ -99,7 +102,7 @@ enum ToolRecoveryHints {
         // execute_shell — legacy single-shot shell. batch_command is a richer superset
         // (timeout, working_directory, background, output cap); hint the model to use it
         // when simple execution fails.
-        Hint(toolName: "execute_shell", errorSubstring: "Command failed",               suggestions: ["batch_command"]),
+        Hint(toolName: "execute_shell", errorSubstring: "Command failed",               suggestions: ["run_command"]),
 
         // grep_files — classic grep wrapper. code_search is a structured ripgrep-backed
         // alternative with richer output; glob_files is the right fallback for "find by

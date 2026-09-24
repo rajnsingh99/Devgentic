@@ -509,6 +509,15 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
                 }
                 existing.traceID = message.traceID
                 existing.senderType = message.sender.rawValue
+                // ⚠️ UPDATED ON EVERY UPSERT, NOT ONLY ON INSERT — and that is the whole point.
+                // `ActiveStreamManager` creates the agent message and every attributing surface
+                // stamps `messageSource` AFTER `startMessageStream` returns (its own comment says
+                // so), so the FIRST flush of a run can reach disk while the field still reads
+                // `.localUI`. Written only on insert, a woken background report would persist as
+                // if it had been typed here, and the UI that branches on it — the divider, the
+                // reduced action row — would be correct live and wrong after every relaunch.
+                existing.messageSourceRaw = message.messageSource.rawValue
+                existing.isSyntheticPrompt = message.isSyntheticPrompt
                 // Terminal status — set late in the run by the executor's `.executionFinished`
                 // event, so almost every persistence write here happens AFTER the field is
                 // populated. Update on every upsert to keep disk in sync with the in-memory

@@ -667,6 +667,21 @@ struct PendingToolConfirmation: Sendable, Identifiable, Codable, Equatable {
     /// indistinguishably from a native guarantee. Optional so pre-SE3 persisted confirmations
     /// (G1 park/resume) decode as nil.
     var riskIsServerDeclared: Bool?
+    /// The on-disk file this tool will write, when the ARGUMENTS do not name one.
+    ///
+    /// ⚠️⚠️ Exists for `update_project_context`, whose only argument is `content` — the target is
+    /// fixed by the run's project, not chosen by the model. Without this the banner had nothing
+    /// to preview against and fell back to raw JSON, which is how a paragraph asserting two
+    /// methods that do not exist was approved into `.devgentic/context.md` and then injected into
+    /// every subsequent conversation for that project (field-observed 2026-09-20).
+    ///
+    /// ⚠️ Deliberately NOT injected into `arguments`. The banner makes every top-level string
+    /// argument editable, and this tool derives its own destination — so an edited path would be
+    /// silently ignored and the write would land somewhere other than what was approved. It is a
+    /// preview hint, and only that.
+    ///
+    /// Optional so pre-existing persisted confirmations (G1 park/resume) still decode.
+    var previewPath: String?
 
     init(
         id: UUID = UUID(),
@@ -674,7 +689,8 @@ struct PendingToolConfirmation: Sendable, Identifiable, Codable, Equatable {
         params: String,
         risk: HITLRiskTier = .moderate,
         arguments: JSONValue? = nil,
-        riskIsServerDeclared: Bool? = nil
+        riskIsServerDeclared: Bool? = nil,
+        previewPath: String? = nil
     ) {
         self.id = id
         self.toolName = toolName
@@ -682,6 +698,7 @@ struct PendingToolConfirmation: Sendable, Identifiable, Codable, Equatable {
         self.risk = risk
         self.arguments = arguments
         self.riskIsServerDeclared = riskIsServerDeclared
+        self.previewPath = previewPath
     }
 }
 

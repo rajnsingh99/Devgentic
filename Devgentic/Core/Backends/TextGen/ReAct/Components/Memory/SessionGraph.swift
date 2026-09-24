@@ -100,6 +100,54 @@ enum ActionStatus: String, Codable, Sendable {
 /// Persisted (unlike the raw snapshots it derives from) so a resumed or reopened
 /// conversation can still describe and undo what it changed — see
 /// `Docs/codeviewer-rescope-design.md` §12 D1.
+/// A file's observable state at a moment in time.
+///
+/// ⚠️⚠️ BUILT FROM CONTENT ALREADY IN MEMORY — never by stat'ing at capture. The first version of
+/// this took `FileManager.attributesOfItem` inside `ActionEffectBuilder.from`, which runs ON THE
+/// MAIN ACTOR for every file write (`ActiveStreamManager.completeToolTimelineEvent`,
+/// `CapabilityCardRouter.completeTool`). That file's own comment already warns what main-thread
+/// work there costs — "the transcript stopped scrolling and Stop did not respond" — and the
+/// syscall made the CodeViewer live-write suite ~40% slower, which was enough to tip a
+/// race-sensitive test over its budget. Measured 2026-09-20.
+///
+/// So the expensive half is the COMPARISON, which happens at render, and it is ordered to stay
+/// cheap: `stat` first (one syscall, no read) and only read the file when the size still matches.
+/// A change that alters length — nearly all of them — costs no read at all.
+struct EffectFingerprint: Sendable, Codable, Equatable {
+    let byteCount: Int
+    /// A cheap, stable digest of the bytes written. Not cryptographic: this answers "is this the
+    /// same content", not "did someone forge it".
+    let contentHash: UInt64
+
+    /// Fingerprints content the caller already holds. No I/O.
+    static func of(_ content: String) -> EffectFingerprint {
+        let bytes = Array(content.utf8)
+        // FNV-1a: one pass, no allocation, no dependency. Collisions would mean a missed
+        // staleness, which is the same direction as the pre-existing "no fingerprint" case.
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in bytes {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x0000_0100_0000_01B3
+        }
+        return EffectFingerprint(byteCount: bytes.count, contentHash: hash)
+    }
+
+    /// True when the file at `path` no longer matches this fingerprint.
+    ///
+    /// ⚠️ A file that cannot be read reads as CHANGED. Deleted or unreadable is precisely where a
+    /// stored diff misleads most, and "I could not check" must never render as "unchanged".
+    ///
+    /// ⚠️ Size is checked FIRST and short-circuits. That is the whole performance story: a real
+    /// edit almost always changes the length, so the common case is one `stat` and no read.
+    func differsFromDisk(at path: String) -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = attributes[.size] as? Int else { return true }
+        guard size == byteCount else { return true }
+        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return true }
+        return Self.of(content).contentHash != contentHash
+    }
+}
+
 struct ActionEffect: Sendable, Codable, Equatable {
     /// Absolute path the action changed.
     let path: String
@@ -111,6 +159,36 @@ struct ActionEffect: Sendable, Codable, Equatable {
     /// True when `diff` hit the size cap. Surfaced in the XML so the model is never told a
     /// partial change is the whole one.
     let isTruncated: Bool
+
+    /// What the file looked like on disk immediately after this write.
+    ///
+    /// ⚠️⚠️ Exists so the episodic record stops PROMISING a retrieval it cannot honour. The
+    /// `<effect>` element advertises `diff="on_demand"`, meaning "call get_conversation_history(N)
+    /// and you will get the change for this file". Once the file changes underneath — a git
+    /// checkout, the user's editor, another agent — that stored diff no longer describes it, and
+    /// the promise is false. Same class as the `get_conversation_history` promise made to
+    /// tool-less profiles, fixed 2026-09-20.
+    ///
+    /// ⚠️ OPTIONAL, and that is mandatory rather than stylistic. Every effect already in the
+    /// store predates this field, and a non-optional property on a `Codable` type throws
+    /// `keyNotFound` on each of those blobs. Nil therefore means "staleness UNKNOWN" — a third
+    /// state, rendered as neither fresh nor stale, so old conversations are byte-identical.
+    ///
+    /// ⚠️ Size + mtime, NOT a content hash. Comparing requires reading the file, and episodic
+    /// memory is rebuilt on every request — a hash would put the whole file on the hot path.
+    /// `stat` reads nothing. Its weakness is a false STALE on a touch that changed no bytes,
+    /// which costs one re-read; the opposite error would let the model trust a file that moved.
+    let fingerprint: EffectFingerprint?
+
+    init(path: String, linesAdded: Int, linesRemoved: Int, diff: String?, isTruncated: Bool,
+         fingerprint: EffectFingerprint? = nil) {
+        self.path = path
+        self.linesAdded = linesAdded
+        self.linesRemoved = linesRemoved
+        self.diff = diff
+        self.isTruncated = isTruncated
+        self.fingerprint = fingerprint
+    }
 
     /// Longest diff carried into memory. Episodic memory rides in EVERY subsequent prompt,
     /// so this is a per-action budget, not a display limit. An eighth of the timeline's

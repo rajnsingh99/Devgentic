@@ -43,6 +43,48 @@ enum ToolSchemaSizes {
             ).count
         }
 
+        // ⚠️⚠️ Then the CATALOGUE, as a backstop — because the registry is a SUBSET of what can
+        // be dispatched. `LocalToolManager` registers `.library` + `.libraryExceptCode` only;
+        // `.codeOnly` is deliberately withheld (Code profiles get those from `CodeToolPreset`),
+        // and `.hidden` runs while being offered nowhere. Reading the registry alone therefore
+        // left all nine code-only tools permanently unpriced, and every Code run logged them as
+        // "absent from the snapshot" while blaming a late MCP connect that had nothing to do
+        // with it.
+        //
+        // Field-observed 2026-09-20: a Code session priced 19 tools at 3,168 chars with 9 of them
+        // costing ZERO — including `git_tool` (seven actions), `edit_code_batch` (a nested array
+        // schema) and `diff_files`. That is the one profile type whose tool payload is entirely
+        // fixed and knowable ahead of time, and it was the only one being mis-priced.
+        //
+        // ⚠️ Deliberately walks EVERY entry rather than adding a second `.codeOnly`-shaped loop.
+        // The defect class is "the snapshot enumerates a subset of dispatchable tools and the
+        // subset fell behind" — a codeOnly-specific fix would leave that open for whatever
+        // visibility is added next. `ToolSchemaSizingTests` asserts the invariant directly.
+        var fromCatalogue = 0
+        for entry in NativeToolCatalog.entries where measured[entry.name] == nil {
+            let tool = entry.executable()
+            measured[entry.name] = AgentTool.markdownDefinition(
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.parameters
+            ).count
+            fromCatalogue += 1
+        }
+
+        // Control-plane tools next. `AgentConnect` appends `final_answer`, `ask_user`,
+        // `get_conversation_history`, `load_skill` and `update_project_context` per run, outside
+        // the catalogue, because each needs run-scoped data to construct. Their SCHEMAS are
+        // constants, so they are priceable here — and they were not priced at all until
+        // 2026-09-20, which cost a pointer-history Code run 2,102 unaccounted chars.
+        for injected in NativeToolCatalog.injectedTools where measured[injected.name] == nil {
+            measured[injected.name] = AgentTool.markdownDefinition(
+                name: injected.name,
+                description: injected.description,
+                parameters: injected.parameters
+            ).count
+            fromCatalogue += 1
+        }
+
         // MCP tools are priced too. They used to fall through to the unknown-name branch
         // and cost 0, which is the WORST case for this gauge: a single server can add
         // dozens of tools with long descriptions and deep argument schemas — easily more
@@ -72,15 +114,21 @@ enum ToolSchemaSizes {
 
         if isFirst {
             let total = measured.values.reduce(0, +)
-            logger.debug("[TOOLSCHEMA] Snapshotted \(measured.count) tool schema(s) (\(mcpToolCount) from MCP), \(total) chars if all were enabled at once.")
+            logger.debug("[TOOLSCHEMA] Snapshotted \(measured.count) tool schema(s) (\(mcpToolCount) from MCP, \(fromCatalogue) from the catalogue that the registry does not carry), \(total) chars if all were enabled at once.")
         }
     }
 
     /// Chars the given tools contribute to the prompt.
     ///
-    /// Unknown names contribute 0 and are logged. Since 2026-08-01 the snapshot covers MCP
-    /// tools as well as built-ins, so an unknown name now means a tool registered after the
-    /// last snapshot (a server connected mid-session) rather than "every MCP tool".
+    /// Unknown names contribute 0 and are logged. The snapshot covers built-ins, code-only tools
+    /// and MCP tools, so an unknown name means a tool registered after the last snapshot — a
+    /// server that connected mid-session — and nothing structural.
+    ///
+    /// ⚠️ That was not true until 2026-09-20: `.codeOnly` tools could never enter the snapshot at
+    /// all, so all nine were reported here on EVERY Code run and the message blamed a cause that
+    /// did not apply. A message that fires constantly for a reason that is never right is worse
+    /// than silence — it trains the reader to skip the line that would have named a real gap.
+    ///
     /// An empty cache also yields 0 — under-reading, which is the safe direction for an
     /// advisory the user cannot act on.
     static func chars(for toolNames: [String]) -> Int {
@@ -101,7 +149,7 @@ enum ToolSchemaSizes {
             if let size = snapshot[name] { total += size } else { unknown.append(name) }
         }
         if !unknown.isEmpty {
-            logger.debug("[TOOLSCHEMA] \(unknown.count) tool(s) absent from the snapshot, priced at 0 — the fit gauge under-reads by their schema size until the next refresh (usual cause: an MCP server connected after the last snapshot): \(unknown.joined(separator: ", ")).")
+            logger.debug("[TOOLSCHEMA] \(unknown.count) tool(s) absent from the snapshot, priced at 0 — the fit gauge under-reads by their schema size until the next refresh. CONSEQUENCE: the context gauge and the pre-send fit check both report more headroom than the request has. Usual cause is an MCP server that connected after the last snapshot; a NATIVE name here instead means the catalogue gained a visibility the snapshot does not walk. Absent: \(unknown.joined(separator: ", ")).")
         }
         return total
     }

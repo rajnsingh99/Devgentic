@@ -16,8 +16,8 @@ private let logger = DGLogger(category: "RemoteConversationOrigin")
 /// A conversation's remote provenance, persisted so it survives a rename.
 ///
 /// ⚠️ WHY NOT A `ConversationSD` COLUMN, which is what the CF-39 row asked for. Adding a stored
-/// property to that entity is a full versioned-schema step: a `DevgenticSchemaV4`, and — per step
-/// 5b of `DevgenticSchemaVersions.swift`'s own procedure — NESTED FROZEN COPIES of the changed
+/// property to that entity is, once any build has shipped, a full versioned-schema step: a new
+/// `DevgenticSchemaV<n>`, and — per step 5b of `DevgenticSchemaVersions.swift`'s own procedure — NESTED FROZEN COPIES of the changed
 /// entity's entire relationship closure, which for `ConversationSD` is `ChatMessageSD` and
 /// `WorkflowRunRecordSD` and everything they reach. Getting that wrong crashes EVERY container
 /// open with "Duplicate version checksums detected". The value being stored decides one icon and

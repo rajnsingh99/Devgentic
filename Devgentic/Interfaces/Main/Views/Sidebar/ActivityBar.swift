@@ -117,7 +117,7 @@ struct ActivityBarButton: View {
 
     private var showBadge: Bool {
         switch tab {
-        case .downloads:
+        case .settings, .downloads:
             return downloadManager.hasActiveDownloads
         case .promptLibrary:
             return PromptService.shared.loadState.isError
@@ -210,7 +210,7 @@ struct ActivityBarView: View {
     // ⚠️ The ONE site that is not compiler-enforced. Every other `SidebarTab` switch fails the
     // build when a case is missing; this hand-written array does not — a tab omitted here exists,
     // routes, and persists its selection, with no button anywhere to reach it.
-    private let topTabs: [SidebarTab] = [.conversations, .explorer, .promptLibrary, .scheduler, .backendProfiles, .tools, .skills, .downloads]
+    private let topTabs: [SidebarTab] = [.conversations, .explorer, .promptLibrary, .scheduler, .backendProfiles, .tools, .skills]
     private let bottomTabs: [SidebarTab] = [.settings]
 
     var body: some View {

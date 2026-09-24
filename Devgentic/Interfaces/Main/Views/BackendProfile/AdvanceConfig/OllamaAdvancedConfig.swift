@@ -20,6 +20,24 @@ enum OllamaConfigDefaultProfile {
     case chat
 }
 
+extension OllamaConfigDefaultProfile {
+
+    /// Which preset ladder a profile type is on.
+    ///
+    /// ⚠️ ONE mapping, because it is now read from two sides that must agree: the request
+    /// factory (which ladder to materialise) and `EffectiveContextWindow` (which ladder's
+    /// `numCtx` to price budgets against). They disagreed about the window for five weeks
+    /// precisely because the factory's choice was invisible to everyone else; a second copy
+    /// of this `if` would reopen that seam in a new place.
+    ///
+    /// `.bot` is the only conversational type. `.agent`, `.code` and `.workflow` all run the
+    /// tool loop and want the deterministic agent ladder — `.code` especially, since a Code
+    /// session on a chat ladder would sample at temperature 0.7 with no fixed seed.
+    static func forProfileType(_ type: ProfileType) -> OllamaConfigDefaultProfile {
+        type == .bot ? .chat : .agent
+    }
+}
+
 /// A Codable struct that represents the advanced configuration options for the Ollama API.
 struct OllamaAdvancedConfig: Codable, Hashable {
     

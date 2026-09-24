@@ -133,8 +133,8 @@ final class OrbPushToTalkAdmissionTests: XCTestCase {
     /// `begin()` resolves it straight into `selectProfile`, and the press lands one statement
     /// later. If `beginPushToTalk` ever goes back to hard-coding the idle stages, this fails.
     func testAColdOpenPressArmsCaptureForReal() {
-        let savedProfile = UserDefaults.standard.string(forKey: AppSettings.orbProfileIDKey)
-        let savedEarcons = UserDefaults.standard.string(forKey: AppSettings.orbEarconsKey)
+        let savedProfile = TestHost.defaults.string(forKey: AppSettings.orbProfileIDKey)
+        let savedEarcons = TestHost.defaults.string(forKey: AppSettings.orbEarconsKey)
         defer {
             restore(savedProfile, forKey: AppSettings.orbProfileIDKey)
             restore(savedEarcons, forKey: AppSettings.orbEarconsKey)
@@ -159,9 +159,9 @@ final class OrbPushToTalkAdmissionTests: XCTestCase {
 
     private func restore(_ value: String?, forKey key: String) {
         if let value {
-            UserDefaults.standard.set(value, forKey: key)
+            TestHost.defaults.set(value, forKey: key)
         } else {
-            UserDefaults.standard.removeObject(forKey: key)
+            TestHost.defaults.removeObject(forKey: key)
         }
     }
 

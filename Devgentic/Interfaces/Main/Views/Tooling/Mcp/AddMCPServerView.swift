@@ -8,8 +8,7 @@
 //  Updated on 04/02/26 for Modern Dashboard UI.
 //  Refactored on 30/04/26 for in-window stack navigation. Layout now mirrors
 //  CreateScheduledTaskView / AgentConfigDetailView (DynamicIslandBar + SettingsCard
-//  stack) and the Test Connection control moved out of the bottom footer into a
-//  floating bottom-right FAB.
+//  stack) and refined for Tactile Dark Glass guidelines with inline Diagnostics verification.
 //
 
 import SwiftUI
@@ -106,9 +105,11 @@ private struct ServerConfigFormData: Hashable {
     var oauthScopes: String = ""
 }
 
-private enum ConfigMode: String, CaseIterable {
+private enum ConfigMode: String, CaseIterable, Identifiable {
     case wizard = "Visual"
     case json = "JSON"
+
+    var id: Self { self }
 
     /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
     /// the non-localizing `StringProtocol` overload, so the segment titles were invisible to
@@ -118,6 +119,202 @@ private enum ConfigMode: String, CaseIterable {
         case .wizard: return "Visual"
         case .json:   return "JSON"
         }
+    }
+}
+
+// MARK: - Reusable Tactile Controls
+
+private struct TactileSegmentedControl<T: Hashable & Identifiable>: View {
+    let items: [T]
+    @Binding var selection: T
+    let labelFor: (T) -> (title: LocalizedStringKey, icon: String?)
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(items) { item in
+                let isSelected = selection == item
+                let info = labelFor(item)
+                Button {
+                    withAnimation(.spring(response: 0.22, dampingFraction: 0.75)) {
+                        selection = item
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        if let icon = info.icon {
+                            Image(systemName: icon)
+                                .font(.system(size: 11, weight: .semibold))
+                                .accessibilityHidden(true)
+                        }
+                        Text(info.title)
+                            .font(theme.fontFootnote.weight(isSelected ? .semibold : .medium))
+                            .lineLimit(1)
+                    }
+                    .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(isSelected ? theme.surfaceOverlayStrong : Color.clear)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(isSelected ? theme.accentColor.opacity(0.35) : Color.clear, lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(theme.secondaryBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(theme.dividerColor.opacity(0.3), lineWidth: 1)
+        )
+    }
+}
+
+private struct TactileFormField: View {
+    let label: LocalizedStringKey
+    var caption: LocalizedStringKey? = nil
+    let placeholder: String
+    @Binding var text: String
+    var isMonospaced: Bool = false
+    var isRequired: Bool = false
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Text(label)
+                    .font(theme.fontFootnote.weight(.semibold))
+                    .foregroundColor(theme.primaryText)
+                if isRequired {
+                    Text("*")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.accentColor)
+                }
+            }
+
+            ZStack(alignment: .leading) {
+                if text.isEmpty {
+                    Text(placeholder)
+                        .font(isMonospaced ? theme.fontCode : theme.fontFootnote)
+                        .foregroundColor(theme.placeholderText)
+                        .padding(.horizontal, 10)
+                        .allowsHitTesting(false)
+                }
+
+                TextField("", text: $text)
+                    .textFieldStyle(.plain)
+                    .font(isMonospaced ? theme.fontCode : theme.fontFootnote)
+                    .foregroundColor(theme.primaryText)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+            }
+            .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(theme.dividerColor.opacity(0.35), lineWidth: 1)
+            )
+
+            if let caption {
+                Text(caption)
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct TactileSecretFormField: View {
+    let label: LocalizedStringKey
+    var caption: LocalizedStringKey? = nil
+    let placeholder: String
+    @Binding var text: String
+    var isConnected: Bool = false
+    @State private var isRevealed: Bool = false
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label)
+                .font(theme.fontFootnote.weight(.semibold))
+                .foregroundColor(theme.primaryText)
+
+            HStack(spacing: 8) {
+                Image(systemName: "key.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.secondaryText.opacity(0.7))
+                    .accessibilityHidden(true)
+
+                ZStack(alignment: .leading) {
+                    if text.isEmpty {
+                        Text(placeholder)
+                            .font(theme.fontCode)
+                            .foregroundColor(theme.placeholderText)
+                            .allowsHitTesting(false)
+                    }
+
+                    if isRevealed {
+                        TextField("", text: $text)
+                            .textFieldStyle(.plain)
+                            .font(theme.fontCode)
+                            .foregroundColor(theme.primaryText)
+                            .disabled(isConnected)
+                    } else {
+                        SecureField("", text: $text)
+                            .textFieldStyle(.plain)
+                            .font(theme.fontCode)
+                            .foregroundColor(theme.primaryText)
+                            .disabled(isConnected)
+                    }
+                }
+
+                if !text.isEmpty && !isConnected {
+                    Button {
+                        isRevealed.toggle()
+                    } label: {
+                        Image(systemName: isRevealed ? "eye.slash" : "eye")
+                            .font(.system(size: 11))
+                            .foregroundColor(theme.secondaryText.opacity(0.8))
+                    }
+                    .buttonStyle(.plain)
+                    .help(isRevealed ? "Hide value" : "Show value")
+
+                    Button {
+                        text = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 11))
+                            .foregroundColor(theme.secondaryText.opacity(0.6))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear value")
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(theme.dividerColor.opacity(0.35), lineWidth: 1)
+            )
+
+            if let caption {
+                Text(caption)
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -221,6 +418,7 @@ struct AddMCPServerView: View {
                         if formData.connectionType == .localProcess {
                             SettingsCard(title: "Local Process", icon: "terminal.fill", theme: theme) {
                                 localProcessCard
+                                    .padding(16)
                             }
 
                             SettingsCard(
@@ -229,34 +427,31 @@ struct AddMCPServerView: View {
                                 theme: theme
                             ) {
                                 environmentVariablesCard
+                                    .padding(16)
                             }
                         } else {
                             SettingsCard(title: "Remote Connection", icon: "network", theme: theme) {
                                 remoteConnectionCard
+                                    .padding(16)
                             }
                         }
                     } else {
                         SettingsCard(title: "Configuration JSON", icon: "doc.text", theme: theme) {
                             jsonEditorCard
+                                .padding(16)
                         }
                     }
 
-                    SettingsCard(title: "Diagnostics", icon: "stethoscope", theme: theme) {
+                    SettingsCard(title: "Diagnostics & Verification", icon: "stethoscope", theme: theme) {
                         diagnosticsCard
+                            .padding(16)
                     }
                 }
                 .padding(ViewLayout.containerPadding)
-                // Reserve space for the floating FAB so it never covers the
-                // bottom of the diagnostics card on short windows.
-                .padding(.bottom, 96)
+                .padding(.bottom, ViewLayout.containerPadding)
                 .frame(maxWidth: ViewLayout.maxContentWidth)
                 .frame(maxWidth: .infinity)
             }
-        }
-        .overlay(alignment: .bottomTrailing) {
-            floatingTestButton
-                .padding(.trailing, 28)
-                .padding(.bottom, 24)
         }
         .alert("Duplicate Server", isPresented: $isShowingDuplicateAlert) {
             Button("OK") { }
@@ -300,27 +495,65 @@ struct AddMCPServerView: View {
     /// "Server Identity" card with a labelled "Server Name" field.
     private var identityHeader: some View {
         HStack(alignment: .center, spacing: 14) {
-            Image(systemName: isEditing ? "pencil.and.outline" : "server.rack")
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 36, height: 36)
-                .foregroundColor(theme.accentColor)
-                .accessibilityHidden(true)
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(theme.accentColor.opacity(0.12))
+                Image(systemName: isEditing ? "pencil.and.outline" : "server.rack")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundColor(theme.accentColor)
+            }
+            .frame(width: 44, height: 44)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(theme.accentColor.opacity(0.25), lineWidth: 0.5)
+            )
+            .accessibilityHidden(true)
 
-            VStack(alignment: .leading, spacing: 2) {
-                TextField(
-                    isEditing ? "Server name" : "Name your server (e.g. github, brave, filesystem)",
-                    text: $formData.serverName
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text("SERVER IDENTIFIER")
+                        .font(theme.fontCodeCaption.weight(.bold))
+                        .foregroundColor(theme.secondaryText)
+                        .tracking(0.6)
+
+                    if isNameConflicting {
+                        HStack(spacing: 4) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 10))
+                            Text("Name already taken")
+                                .font(theme.fontCaption2)
+                        }
+                        .foregroundColor(theme.warningColor)
+                    }
+                }
+
+                ZStack(alignment: .leading) {
+                    if formData.serverName.isEmpty {
+                        Text("e.g. github-server, filesystem-tools")
+                            .font(theme.fontFootnote)
+                            .foregroundColor(theme.placeholderText)
+                            .padding(.horizontal, 10)
+                            .allowsHitTesting(false)
+                    }
+
+                    TextField("", text: $formData.serverName)
+                        .textFieldStyle(.plain)
+                        .font(theme.fontFootnote.weight(.medium))
+                        .foregroundColor(theme.primaryText)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .accessibilityLabel("Server name")
+                }
+                .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(isNameConflicting ? theme.warningColor.opacity(0.6) : theme.dividerColor.opacity(0.35), lineWidth: 1)
                 )
-                .font(theme.fontTitle2)
-                .fontWeight(.bold)
-                .textFieldStyle(.plain)
-                .foregroundColor(theme.primaryText)
-                .accessibilityLabel("Server name")
 
-                Text("Model Context Protocol — local process or remote endpoint.")
-                    .font(theme.fontCaption)
+                Text("Model Context Protocol — local stdio process or remote HTTP/SSE endpoint.")
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2)
             }
 
             Spacer(minLength: 8)
@@ -336,31 +569,28 @@ struct AddMCPServerView: View {
 
     // MARK: - Transport & Mode Row
 
-    /// Two segmented controls inline above the dynamic content. They drive
+    /// Two tactile segmented controls inline above the dynamic content. They drive
     /// what's rendered below (transport → local-process vs remote card;
-    /// mode → visual cards vs JSON editor) so they read as tabs rather than
-    /// first-class settings. No card wrapper — keeps the meta-controls
-    /// visually distinct from the configuration sections.
+    /// mode → visual cards vs JSON editor) with clean glass pills rather than
+    /// saturated native accent tabs.
     private var transportAndModeRow: some View {
         HStack(alignment: .top, spacing: 16) {
             controlColumn(label: "TRANSPORT") {
-                Picker("", selection: $formData.connectionType) {
-                    ForEach(ConnectionType.allCases) { type in
-                        Label(type.localizedTitle, systemImage: type.icon).tag(type)
-                    }
+                TactileSegmentedControl(
+                    items: ConnectionType.allCases,
+                    selection: $formData.connectionType
+                ) { type in
+                    (title: type.localizedTitle, icon: type.icon)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
             }
 
             controlColumn(label: "CONFIG MODE") {
-                Picker("", selection: $configMode) {
-                    ForEach(ConfigMode.allCases, id: \.self) { mode in
-                        Text(mode.localizedTitle).tag(mode)
-                    }
+                TactileSegmentedControl(
+                    items: ConfigMode.allCases,
+                    selection: $configMode
+                ) { mode in
+                    (title: mode.localizedTitle, icon: mode == .wizard ? "slider.horizontal.3" : "doc.text")
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
             }
         }
     }
@@ -371,7 +601,7 @@ struct AddMCPServerView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label)
-                .font(.system(.caption2, weight: .bold))
+                .font(theme.fontCodeCaption.weight(.bold))
                 .foregroundColor(theme.secondaryText)
                 .tracking(0.6)
             content()
@@ -383,131 +613,169 @@ struct AddMCPServerView: View {
 
     private var localProcessCard: some View {
         VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Executable Command")
-                    .font(theme.fontCaption.weight(.medium))
-                    .foregroundColor(theme.secondaryText)
-                TextField("e.g. 'npx', 'uvx', 'python3'…", text: $formData.command)
-                    .textFieldStyle(.roundedBorder)
-                Text("Must be on PATH or an absolute path.")
-                    .font(.caption2)
-                    .foregroundColor(theme.tertiaryText)
-            }
+            TactileFormField(
+                label: "Executable Command",
+                caption: "Must be available on your PATH or provided as an absolute path.",
+                placeholder: "e.g. npx, uvx, python3, or /usr/local/bin/server",
+                text: $formData.command,
+                isMonospaced: true,
+                isRequired: true
+            )
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Arguments")
-                    .font(theme.fontCaption.weight(.medium))
-                    .foregroundColor(theme.secondaryText)
-                TextField("-y @modelcontextprotocol/server-filesystem /Users/…", text: $formData.arguments)
-                    .textFieldStyle(.roundedBorder)
-            }
+            TactileFormField(
+                label: "Arguments",
+                caption: "Space-separated arguments passed to the executable. Quotes are preserved.",
+                placeholder: "e.g. -y @modelcontextprotocol/server-filesystem /Users/username/Desktop",
+                text: $formData.arguments,
+                isMonospaced: true
+            )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var environmentVariablesCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ForEach($formData.environmentVariables) { $item in
-                HStack(spacing: 8) {
-                    TextField("KEY", text: $item.key)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 160)
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Environment variables are passed to the child process at launch and stored securely in macOS Keychain.")
+                .font(theme.fontCaption2)
+                .foregroundColor(theme.secondaryText)
+                .lineSpacing(2)
 
-                    Text("=")
-                        .font(theme.fontBody)
-                        .foregroundColor(theme.tertiaryText)
+            if formData.environmentVariables.isEmpty {
+                Text("No environment variables configured.")
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.secondaryText.opacity(0.6))
+                    .padding(.vertical, 4)
+            } else {
+                VStack(spacing: 8) {
+                    ForEach($formData.environmentVariables) { $item in
+                        HStack(spacing: 8) {
+                            ZStack(alignment: .leading) {
+                                if item.key.isEmpty {
+                                    Text("e.g. API_KEY")
+                                        .font(theme.fontCode)
+                                        .foregroundColor(theme.placeholderText)
+                                        .padding(.horizontal, 10)
+                                        .allowsHitTesting(false)
+                                }
+                                TextField("", text: $item.key)
+                                    .textFieldStyle(.plain)
+                                    .font(theme.fontCode)
+                                    .foregroundColor(theme.primaryText)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 7)
+                            }
+                            .frame(width: 180)
+                            .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .strokeBorder(theme.dividerColor.opacity(0.35), lineWidth: 1)
+                            )
 
-                    TextField("VALUE", text: $item.value)
-                        .textFieldStyle(.roundedBorder)
+                            Text("=")
+                                .font(theme.fontCode.weight(.bold))
+                                .foregroundColor(theme.secondaryText)
 
-                    Button {
-                        formData.environmentVariables.removeAll { $0.id == item.id }
-                    } label: {
-                        Image(systemName: "trash")
-                            .foregroundColor(theme.secondaryText)
-                            .frame(width: 24, height: 24)
-                            .contentShape(Rectangle())
+                            ZStack(alignment: .leading) {
+                                if item.value.isEmpty {
+                                    Text("e.g. secret_token_value")
+                                        .font(theme.fontCode)
+                                        .foregroundColor(theme.placeholderText)
+                                        .padding(.horizontal, 10)
+                                        .allowsHitTesting(false)
+                                }
+                                TextField("", text: $item.value)
+                                    .textFieldStyle(.plain)
+                                    .font(theme.fontCode)
+                                    .foregroundColor(theme.primaryText)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 7)
+                            }
+                            .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .strokeBorder(theme.dividerColor.opacity(0.35), lineWidth: 1)
+                            )
+
+                            TactileIconButton(
+                                icon: "trash",
+                                tooltip: "Remove variable",
+                                accessibilityLabel: "Remove variable",
+                                variant: .subtle,
+                                size: 28
+                            ) {
+                                formData.environmentVariables.removeAll { $0.id == item.id }
+                            }
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Remove variable")
                 }
             }
 
-            Button {
+            TactileButton(
+                title: "Add Variable",
+                icon: "plus",
+                variant: .secondary,
+                size: .compact
+            ) {
                 formData.environmentVariables.append(KeyValueItem())
-            } label: {
-                Label("Add Variable", systemImage: "plus")
-                    .font(theme.fontCaption)
             }
-            .buttonStyle(.borderless)
             .padding(.top, 2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var remoteConnectionCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Server URL")
-                    .font(theme.fontCaption.weight(.medium))
-                    .foregroundColor(theme.secondaryText)
-                TextField("https://… or http://localhost…", text: $formData.url)
-                    .textFieldStyle(.roundedBorder)
-                Text("HTTPS is enforced when an auth scheme is set. `localhost` is allowed for development.")
-                    .font(.caption2)
-                    .foregroundColor(theme.tertiaryText)
-            }
+        VStack(alignment: .leading, spacing: 18) {
+            TactileFormField(
+                label: "Server URL",
+                caption: "HTTPS is enforced when an auth scheme is set. localhost is allowed for development.",
+                placeholder: "e.g. https://api.example.com/mcp",
+                text: $formData.url,
+                isMonospaced: true,
+                isRequired: true
+            )
 
-            // Transport picker.
-            //
-            // Remote servers were always constructed with SSE streaming on. That is correct
-            // for the Streamable HTTP standard, but a server that only implements POST just
-            // failed to connect with nothing the user could do about it.
-            VStack(alignment: .leading, spacing: 6) {
+            // Transport picker
+            VStack(alignment: .leading, spacing: 8) {
                 Text("Transport")
-                    .font(theme.fontCaption.weight(.medium))
-                    .foregroundColor(theme.secondaryText)
-                Picker("", selection: $formData.transport) {
-                    ForEach(MCPTransportMode.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
+                    .font(theme.fontFootnote.weight(.semibold))
+                    .foregroundColor(theme.primaryText)
+
+                TactileSegmentedControl(
+                    items: MCPTransportMode.allCases,
+                    selection: $formData.transport
+                ) { mode in
+                    (title: mode == .streamableHTTP ? "Streamable HTTP (SSE)" : "HTTP (No Streaming)",
+                     icon: mode == .streamableHTTP ? "antenna.radiowaves.left.and.right" : "arrow.up.arrow.down")
                 }
-                .pickerStyle(.radioGroup)
-                .labelsHidden()
                 .onChange(of: formData.transport) { _, _ in
-                    // The transport determines how we connect, so a prior successful test
-                    // says nothing about the new one.
                     invalidateVerifiedState()
                 }
+
                 Text(formData.transport.explanation)
-                    .font(.caption2)
-                    .foregroundColor(theme.tertiaryText)
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             // Auth scheme picker
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
                 Text("Authentication")
-                    .font(theme.fontCaption.weight(.medium))
-                    .foregroundColor(theme.secondaryText)
-                Picker("", selection: $formData.authScheme) {
-                    ForEach(AuthFormScheme.allCases) { scheme in
-                        Text(scheme.localizedTitle).tag(scheme)
-                    }
+                    .font(theme.fontFootnote.weight(.semibold))
+                    .foregroundColor(theme.primaryText)
+
+                TactileSegmentedControl(
+                    items: AuthFormScheme.allCases,
+                    selection: $formData.authScheme
+                ) { scheme in
+                    (title: scheme.localizedTitle, icon: nil)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
                 .onChange(of: formData.authScheme) { _, newValue in
-                    // Reset cross-scheme state so changing scheme doesn't
-                    // smuggle stale tokens or bundles.
                     if newValue != .oauth {
                         oauthBundle = nil
                         oauthError = nil
                     }
                     if newValue == .oauth, formData.oauthIssuer.isEmpty {
-                        // Auto-fill issuer with the scheme+host of the
-                        // server URL — most providers serve metadata at the
-                        // server's host root.
                         if let parsed = URLComponents(string: formData.url),
                            let scheme = parsed.scheme,
                            let host = parsed.host {
@@ -527,69 +795,56 @@ struct AddMCPServerView: View {
                 EmptyView()
 
             case .bearer:
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Bearer Token")
-                        .font(theme.fontCaption.weight(.medium))
-                        .foregroundColor(theme.secondaryText)
-                    SecureField("Token…", text: $formData.authSecret)
-                        .textFieldStyle(.roundedBorder)
-                    if formData.unreadableScopes.contains(MCPSecretScope.bearerToken.rawScope) {
-                        unreadableSecretNotice
-                    } else {
-                        Text("Stored in the macOS Keychain. Sent as `Authorization: Bearer …`.")
-                            .font(.caption2)
-                            .foregroundColor(theme.tertiaryText)
-                    }
+                TactileSecretFormField(
+                    label: "Bearer Token",
+                    caption: formData.unreadableScopes.contains(MCPSecretScope.bearerToken.rawScope) ? nil : "Stored in macOS Keychain. Sent as `Authorization: Bearer <token>`.",
+                    placeholder: "e.g. bearer_token_abc123",
+                    text: $formData.authSecret
+                )
+                if formData.unreadableScopes.contains(MCPSecretScope.bearerToken.rawScope) {
+                    unreadableSecretNotice
                 }
 
             case .apiKeyHeader:
                 HStack(alignment: .top, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Header Name")
-                            .font(theme.fontCaption.weight(.medium))
-                            .foregroundColor(theme.secondaryText)
-                        TextField("X-API-Key", text: $formData.apiKeyHeaderName)
-                            .textFieldStyle(.roundedBorder)
-                    }
+                    TactileFormField(
+                        label: "Header Name",
+                        placeholder: "e.g. X-API-Key",
+                        text: $formData.apiKeyHeaderName,
+                        isMonospaced: true
+                    )
                     .frame(width: 180)
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Value")
-                            .font(theme.fontCaption.weight(.medium))
-                            .foregroundColor(theme.secondaryText)
-                        SecureField("API key…", text: $formData.authSecret)
-                            .textFieldStyle(.roundedBorder)
-                        if formData.unreadableScopes.contains(MCPSecretScope.apiKeyHeaderValue.rawScope) {
-                            unreadableSecretNotice
-                        }
-                    }
+                    TactileSecretFormField(
+                        label: "Header Value",
+                        placeholder: "e.g. api_key_value",
+                        text: $formData.authSecret
+                    )
+                }
+                if formData.unreadableScopes.contains(MCPSecretScope.apiKeyHeaderValue.rawScope) {
+                    unreadableSecretNotice
                 }
 
             case .oauth:
                 oauthSection
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// Shown in place of the usual caption when a stored secret could not be READ. Register KC-1.
-    ///
-    /// ⚠️ WHY THIS EXISTS AT ALL. The field below it is blank, and a blank field means "no secret
-    /// configured" everywhere else in this form. When the Keychain is unreadable that reading is
-    /// wrong and dangerous: the user concludes the secret was lost, retypes or clears it, and saves.
-    /// The persistence layer already refuses to DELETE what it could not read, so nothing is
-    /// destroyed either way — but without this line the user has no way to tell a blank field
-    /// caused by an outage from one caused by an empty Keychain, and would have no reason to wait.
     @ViewBuilder
     private var unreadableSecretNotice: some View {
-        HStack(alignment: .top, spacing: 5) {
+        HStack(alignment: .top, spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.caption2)
+                .font(.system(size: 11))
             Text("A secret is stored for this server but the Keychain could not be read, so this "
                  + "field is blank. Nothing has been lost. Leave it empty and save to keep the "
                  + "stored value; unlock your Keychain (or re-grant access after an app update) to "
                  + "see or change it.")
-                .font(.caption2)
+                .font(theme.fontCaption2)
                 .fixedSize(horizontal: false, vertical: true)
+                .lineSpacing(2)
         }
         .foregroundColor(theme.warningColor)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -599,84 +854,73 @@ struct AddMCPServerView: View {
 
     @ViewBuilder
     private var oauthSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Issuer URL")
-                    .font(theme.fontCaption.weight(.medium))
-                    .foregroundColor(theme.secondaryText)
-                TextField("https://auth.example.com", text: $formData.oauthIssuer)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(isSigningIn || oauthBundle != nil)
-                Text("Authorization-server root. We probe `\(formData.oauthIssuer.isEmpty ? "<issuer>" : formData.oauthIssuer)/.well-known/oauth-authorization-server`.")
-                    .font(.caption2)
-                    .foregroundColor(theme.tertiaryText)
-            }
+        VStack(alignment: .leading, spacing: 14) {
+            TactileFormField(
+                label: "Issuer URL",
+                caption: "Authorization-server root. We probe \(formData.oauthIssuer.isEmpty ? "<issuer>" : formData.oauthIssuer)/.well-known/oauth-authorization-server.",
+                placeholder: "e.g. https://auth.example.com",
+                text: $formData.oauthIssuer,
+                isMonospaced: true
+            )
+            .disabled(isSigningIn || oauthBundle != nil)
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Scopes (Optional)")
-                    .font(theme.fontCaption.weight(.medium))
-                    .foregroundColor(theme.secondaryText)
-                TextField("space-separated, e.g. mcp:tools profile email", text: $formData.oauthScopes)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(isSigningIn || oauthBundle != nil)
-            }
+            TactileFormField(
+                label: "Scopes (Optional)",
+                caption: "Space-separated scopes requested from provider.",
+                placeholder: "e.g. mcp:tools profile email",
+                text: $formData.oauthScopes,
+                isMonospaced: true
+            )
+            .disabled(isSigningIn || oauthBundle != nil)
 
             // Status row + action button
-            HStack(spacing: 10) {
+            HStack(spacing: 12) {
                 if isSigningIn {
                     ProgressView().controlSize(.small)
                     Text("Waiting for browser sign-in…")
-                        .font(theme.fontCaption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
                 } else if let bundle = oauthBundle {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundColor(theme.successColor)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Signed in to \(bundle.issuer.host ?? bundle.issuer.absoluteString)")
-                            .font(theme.fontCaption.weight(.semibold))
+                            .font(theme.fontFootnote.weight(.semibold))
                             .foregroundColor(theme.primaryText)
-                        Text("scopes: \(bundle.grantedScopes.isEmpty ? "—" : bundle.grantedScopes.joined(separator: " "))")
-                            .font(.caption2)
+                        Text("Scopes: \(bundle.grantedScopes.isEmpty ? "—" : bundle.grantedScopes.joined(separator: " "))")
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.tertiaryText)
                     }
                 } else if let oauthError {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundColor(theme.warningColor)
                     Text(oauthError)
-                        .font(theme.fontCaption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.warningColor)
                         .lineLimit(2)
                 } else {
                     Image(systemName: "lock.shield")
                         .foregroundColor(theme.secondaryText)
-                    Text("Click Sign In to authorize via the system browser.")
-                        .font(theme.fontCaption)
+                    Text("Authorize via system browser.")
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
                 }
 
                 Spacer()
 
-                Button {
+                TactileButton(
+                    title: oauthBundle == nil ? "Sign In" : "Re-authenticate",
+                    icon: oauthBundle == nil ? "person.badge.key" : "arrow.clockwise",
+                    variant: .primary,
+                    size: .compact,
+                    isEnabled: canStartOAuth && !isSigningIn
+                ) {
                     if oauthBundle != nil {
-                        // Re-auth: discard current bundle and run a fresh flow.
                         oauthBundle = nil
                         oauthError = nil
                     }
                     triggerOAuthSignIn()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: oauthBundle == nil ? "person.badge.key" : "arrow.clockwise")
-                            .font(.system(.caption, weight: .semibold))
-                        Text(oauthBundle == nil ? "Sign In" : "Re-authenticate")
-                            .font(.system(.caption, weight: .semibold))
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Capsule().fill(theme.accentColor.opacity(canStartOAuth ? 1.0 : 0.4)))
-                    .foregroundColor(.white)
                 }
-                .buttonStyle(.plain)
-                .disabled(!canStartOAuth || isSigningIn)
             }
             .padding(.top, 4)
         }
@@ -726,12 +970,9 @@ struct AddMCPServerView: View {
     }
 
     private var jsonEditorCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             TextEditor(text: $configInput)
-                // .callout (12pt) renders code at a comfortable density without
-                // shouting like .body monospaced. Lets a 30-line config fit in
-                // the editor frame without scrolling.
-                .font(.system(.callout, design: .monospaced))
+                .font(theme.fontCode)
                 .scrollContentBackground(.hidden)
                 .padding(10)
                 .background(theme.primaryBackground)
@@ -739,8 +980,8 @@ struct AddMCPServerView: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .stroke(
-                            isJSONValid ? theme.surfaceOverlayStrong.opacity(0.4) : theme.errorColor,
-                            lineWidth: isJSONValid ? 1 : 1.5
+                            isJSONValid ? theme.dividerColor.opacity(0.35) : theme.errorColor,
+                            lineWidth: 1
                         )
                 )
                 .frame(minHeight: 240)
@@ -749,10 +990,10 @@ struct AddMCPServerView: View {
                 }
 
             HStack(spacing: 6) {
-                Image(systemName: isJSONValid ? "checkmark.seal" : "exclamationmark.triangle.fill")
-                    .font(.system(size: 10, weight: .semibold))
-                Text(isJSONValid ? "Valid JSON" : "Invalid JSON syntax")
-                    .font(.system(.caption2, weight: .medium))
+                Image(systemName: isJSONValid ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(isJSONValid ? "Valid JSON configuration" : "Invalid JSON syntax")
+                    .font(theme.fontCaption2.weight(.medium))
             }
             .foregroundColor(isJSONValid ? theme.successColor : theme.errorColor)
         }
@@ -764,71 +1005,185 @@ struct AddMCPServerView: View {
     @ViewBuilder
     private var diagnosticsCard: some View {
         if isConnecting {
-            HStack(spacing: 10) {
-                ProgressView().controlSize(.small)
-                Text("Attempting handshake with server…")
-                    .font(theme.fontSubheadline)
-                    .foregroundColor(theme.primaryText)
-                Spacer()
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(theme.accentColor.opacity(0.12))
+                    ProgressView().controlSize(.small)
+                }
+                .frame(width: 36, height: 36)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(theme.accentColor.opacity(0.25), lineWidth: 0.5)
+                )
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Connecting to MCP server…")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
+                    Text("Running handshake and probing tool capabilities.")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.secondaryText)
+                }
+
+                Spacer(minLength: 16)
+
+                TactileButton(title: "Cancel", icon: "xmark", variant: .subtle, size: .compact) {
+                    connectTask?.cancel()
+                    connectTask = nil
+                    isConnecting = false
+                }
+                .fixedSize()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         } else if let error = activeError {
-            errorContent(error)
+            VStack(alignment: .leading, spacing: 14) {
+                errorContent(error)
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.3))
+                    .frame(height: 0.5)
+                HStack {
+                    Spacer()
+                    TactileButton(
+                        title: "Retry Connection",
+                        icon: "arrow.clockwise",
+                        variant: .primary,
+                        size: .compact,
+                        isEnabled: canTestConnection
+                    ) {
+                        testConnection()
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         } else if let tools = discoveredTools {
-            successContent(tools: tools)
+            VStack(alignment: .leading, spacing: 14) {
+                successContent(tools: tools)
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.3))
+                    .frame(height: 0.5)
+                HStack {
+                    Text("Configuration verified and ready to save.")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.secondaryText)
+                    Spacer()
+                    TactileButton(
+                        title: "Re-test",
+                        icon: "arrow.clockwise",
+                        variant: .secondary,
+                        size: .compact,
+                        isEnabled: canTestConnection
+                    ) {
+                        testConnection()
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            // Idle / never-tested. The play FAB is already on screen, so this
-            // hint is intentionally low-contrast — just enough to anchor the
-            // empty card without competing for attention.
-            Text("Tap the play button to verify the configuration.")
-                .font(theme.fontCaption)
-                .foregroundColor(theme.tertiaryText)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(alignment: .center, spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(theme.accentColor.opacity(0.12))
+                    Image(systemName: "stethoscope")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(theme.accentColor)
+                }
+                .frame(width: 36, height: 36)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(theme.accentColor.opacity(0.25), lineWidth: 0.5)
+                )
+                .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Server Handshake Not Verified")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
+                    Text("Run a connection test to verify executable arguments or endpoint reachability before adding to your library.")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2)
+                }
+
+                Spacer(minLength: 16)
+
+                TactileButton(
+                    title: "Test Connection",
+                    icon: "play.fill",
+                    variant: .primary,
+                    size: .compact,
+                    isEnabled: canTestConnection,
+                    tooltip: canTestConnection ? "Test server handshake (⌘↵)" : "Fill required fields to test connection"
+                ) {
+                    testConnection()
+                }
+                .keyboardShortcut(.return, modifiers: [.command])
+                .fixedSize()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private func errorContent(_ error: MCPUserError) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(theme.fontTitle3)
-                .foregroundColor(theme.warningColor)
-                .accessibilityHidden(true)
+        HStack(alignment: .top, spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(theme.warningColor.opacity(0.12))
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 15))
+                    .foregroundColor(theme.warningColor)
+            }
+            .frame(width: 36, height: 36)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(theme.warningColor.opacity(0.25), lineWidth: 0.5)
+            )
+            .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(error.title)
-                    .font(theme.fontSubheadline.weight(.semibold))
+                    .font(theme.fontFootnote.weight(.semibold))
                     .foregroundColor(theme.primaryText)
                 Text(error.message)
-                    .font(theme.fontSubheadline)
-                    .foregroundColor(theme.primaryText)
+                    .font(theme.fontFootnote)
+                    .foregroundColor(theme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
+                    .lineSpacing(2)
 
-                Divider()
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.3))
+                    .frame(height: 0.5)
                     .padding(.vertical, 2)
 
                 HStack(alignment: .top, spacing: 6) {
-                    Text("Fix:")
-                        .font(theme.fontCaption.weight(.semibold))
+                    Text("Remediation:")
+                        .font(theme.fontCaption2.weight(.semibold))
                         .foregroundColor(theme.secondaryText)
                     Text(error.suggestion)
-                        .font(theme.fontCaption)
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
+                        .lineSpacing(2)
                 }
 
                 if let raw = error.rawLog {
-                    DisclosureGroup("Raw log") {
+                    DisclosureGroup("Raw diagnostic log") {
                         ScrollView(.horizontal, showsIndicators: false) {
                             Text(raw)
-                                .font(.caption2.monospaced())
+                                .font(theme.fontCodeCaption)
                                 .padding(8)
                                 .foregroundColor(theme.primaryText)
                         }
                         .background(theme.primaryBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .strokeBorder(theme.dividerColor.opacity(0.3), lineWidth: 0.5)
+                        )
                     }
-                    .font(theme.fontCaption)
-                    .padding(.top, 2)
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.secondaryText)
+                    .padding(.top, 4)
                 }
             }
         }
@@ -836,66 +1191,85 @@ struct AddMCPServerView: View {
     }
 
     private func successContent(tools: [ToolDefinition]) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(.title3, weight: .semibold))
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(theme.successColor.opacity(0.12))
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(theme.successColor)
+                }
+                .frame(width: 36, height: 36)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(theme.successColor.opacity(0.25), lineWidth: 0.5)
+                )
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Connection Verified")
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundColor(theme.primaryText)
+                    Text("Handshake succeeded. Server is responding normally.")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.secondaryText)
+                }
+
+                Spacer(minLength: 16)
+
+                Text("\(tools.count) tool\(tools.count == 1 ? "" : "s") discovered")
+                    .font(theme.fontCaption2.weight(.semibold))
                     .foregroundColor(theme.successColor)
-                Text("Connection verified")
-                    .font(theme.fontSubheadline.weight(.semibold))
-                    .foregroundColor(theme.primaryText)
-                Spacer()
-                Text("\(tools.count) tool\(tools.count == 1 ? "" : "s")")
-                    .font(.system(.caption2, weight: .semibold))
-                    .foregroundColor(theme.successColor)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 3)
                     .background(theme.successColor.opacity(0.12))
                     .clipShape(Capsule())
+                    .overlay(
+                        Capsule().strokeBorder(theme.successColor.opacity(0.25), lineWidth: 0.5)
+                    )
             }
 
-            Divider()
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.3))
+                .frame(height: 0.5)
 
-            Text("AVAILABLE CAPABILITIES")
-                .font(.system(.caption2, weight: .bold))
+            Text("DISCOVERED CAPABILITIES")
+                .font(theme.fontCodeCaption.weight(.bold))
                 .foregroundColor(theme.secondaryText)
                 .tracking(0.6)
 
-            // Denser grid + smaller chips read more like a list of code symbols
-            // and let the user scan the surface area at a glance. 110pt minimum
-            // accommodates short names like `read`, `write` without one-per-row.
             LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 110), spacing: 6)],
+                columns: [GridItem(.adaptive(minimum: 120), spacing: 6)],
                 alignment: .leading,
                 spacing: 6
             ) {
                 ForEach(tools.prefix(12), id: \.name) { tool in
-                    HStack(spacing: 5) {
+                    HStack(spacing: 6) {
                         Circle()
-                            .fill(theme.accentColor.opacity(0.55))
-                            .frame(width: 4, height: 4)
+                            .fill(theme.accentColor.opacity(0.7))
+                            .frame(width: 5, height: 5)
                         Text(tool.name)
-                            .font(.system(.caption2, design: .monospaced))
+                            .font(theme.fontCodeCaption)
+                            .foregroundColor(theme.primaryText)
                             .lineLimit(1)
                             .truncationMode(.tail)
-                            .foregroundColor(theme.primaryText)
                     }
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(theme.primaryBackground)
-                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .stroke(theme.surfaceOverlayStrong.opacity(0.35), lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(theme.dividerColor.opacity(0.35), lineWidth: 1)
                     )
                 }
                 if tools.count > 12 {
                     Text("+\(tools.count - 12) more")
-                        .font(.system(.caption2, weight: .medium))
+                        .font(theme.fontCaption2.weight(.medium))
                         .foregroundColor(theme.secondaryText)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 4)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
@@ -911,6 +1285,7 @@ struct AddMCPServerView: View {
                 title: isEditing ? "Save Changes" : "Add to Library",
                 icon: isEditing ? "checkmark" : "plus",
                 style: .primary,
+                help: hasVerifiedConnection || canSaveUnverified ? nil : "Test connection before adding to library",
                 accessibilityLabel: isEditing ? "Save changes" : "Add server to library",
                 keyboardShortcut: hasVerifiedConnection ? .defaultAction : nil
             ) {
@@ -920,56 +1295,7 @@ struct AddMCPServerView: View {
                     isShowingUnverifiedSaveAlert = true
                 }
             }
-            // Editing an EXISTING server no longer requires a live connection.
-            //
-            // Save used to be gated on a successful Test Connection, which is backwards for
-            // the case that matters most: a server is failing BECAUSE its config is wrong,
-            // and the user cannot save the fix without first making the broken config work.
-            // A server that is simply down (laptop offline, endpoint restarting) had the
-            // same problem. Adding a NEW server still requires verification — there is no
-            // prior good state to preserve there, and saving something never seen to work
-            // would just produce a broken entry.
             .disabled(!hasVerifiedConnection && !canSaveUnverified)
-        }
-    }
-
-    // MARK: - Floating FAB
-
-    @ViewBuilder
-    private var floatingTestButton: some View {
-        // Hidden once we already have a verified config — the trailing Save pill
-        // becomes the primary action and the FAB would just be redundant. It
-        // re-appears as soon as the form changes (via invalidateVerifiedState).
-        if !hasVerifiedConnection {
-            Button {
-                testConnection()
-            } label: {
-                Group {
-                    if isConnecting {
-                        ProgressView()
-                            .controlSize(.small)
-                            .tint(.white)
-                    } else {
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundColor(.white)
-                            // Slight optical offset — `play.fill` has visual weight on the right.
-                            .offset(x: 1.5)
-                    }
-                }
-                .frame(width: 56, height: 56)
-                .background(
-                    Circle()
-                        .fill(theme.accentColor.opacity(canTestConnection ? 1.0 : 0.5))
-                        .shadow(color: theme.primaryText.opacity(0.18), radius: 14, x: 0, y: 6)
-                )
-            }
-            .buttonStyle(.plain)
-            .disabled(!canTestConnection || isConnecting)
-            .help(isConnecting ? "Connecting…" : "Test Connection")
-            .accessibilityLabel(isConnecting ? "Connecting" : "Test Connection")
-            .keyboardShortcut(.return, modifiers: [.command])
-            .transition(.scale(scale: 0.8).combined(with: .opacity))
         }
     }
 

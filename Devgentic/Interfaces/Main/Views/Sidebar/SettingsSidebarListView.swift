@@ -171,6 +171,14 @@ private struct SettingsCategoryRow: View {
                 }
 
                 Spacer()
+
+                if category == .downloads && DownloadManager.shared.hasActiveDownloads {
+                    Circle()
+                        .fill(theme.accentColor)
+                        .frame(width: 7, height: 7)
+                        .shadow(color: theme.accentColor.opacity(0.6), radius: 3)
+                        .padding(.trailing, 4)
+                }
             }
         }
         .padding(.horizontal, 8)

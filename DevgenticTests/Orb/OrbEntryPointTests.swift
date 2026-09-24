@@ -28,15 +28,15 @@ final class OrbEntryPointTests: XCTestCase {
 
     override func setUp() async throws {
         try await super.setUp()
-        savedEarcons = UserDefaults.standard.string(forKey: AppSettings.orbEarconsKey)
+        savedEarcons = TestHost.defaults.string(forKey: AppSettings.orbEarconsKey)
         OrbConfigManager.shared.earcons = .off
     }
 
     override func tearDown() async throws {
         if let savedEarcons {
-            UserDefaults.standard.set(savedEarcons, forKey: AppSettings.orbEarconsKey)
+            TestHost.defaults.set(savedEarcons, forKey: AppSettings.orbEarconsKey)
         } else {
-            UserDefaults.standard.removeObject(forKey: AppSettings.orbEarconsKey)
+            TestHost.defaults.removeObject(forKey: AppSettings.orbEarconsKey)
         }
         try await super.tearDown()
     }

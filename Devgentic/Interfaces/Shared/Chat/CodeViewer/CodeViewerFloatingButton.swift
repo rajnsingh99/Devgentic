@@ -25,6 +25,7 @@ struct CodeViewerFloatingButton: View {
     @State private var isHoveringDismiss = false
 
     private var tabCount: Int { chatHistoryViewModel.codeViewerTabs.count }
+    private var hasDirtyTabs: Bool { chatHistoryViewModel.codeViewerTabs.contains(where: \.isDirty) }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -40,14 +41,22 @@ struct CodeViewerFloatingButton: View {
                         .font(.system(size: 12, weight: .semibold)) // Fixed size: pill affordance
                         .foregroundColor(theme.accentColor)
 
-                    Text("\(tabCount)")
-                        .font(.system(size: 10, weight: .bold, design: .rounded)) // Fixed size: count badge
-                        .foregroundColor(theme.accentColor)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1)
-                        .background(theme.accentColor.opacity(0.15))
-                        .clipShape(Capsule())
-                        .contentTransition(.numericText())
+                    HStack(spacing: 3) {
+                        Text("\(tabCount)")
+                            .font(.system(size: 10, weight: .bold, design: .rounded)) // Fixed size: count badge
+                            .foregroundColor(theme.accentColor)
+
+                        if hasDirtyTabs {
+                            Circle()
+                                .fill(Color.orange)
+                                .frame(width: 4, height: 4)
+                        }
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(theme.accentColor.opacity(0.15))
+                    .clipShape(Capsule())
+                    .contentTransition(.numericText())
 
                     // Badge-only policy: while minimized, a live agent write pulses here
                     // instead of the panel opening itself.
@@ -57,11 +66,11 @@ struct CodeViewerFloatingButton: View {
                 }
             }
             .buttonStyle(.plain)
-            .help(String(localized: "Reopen the code viewer"))
+            .help(String(localized: "Reopen the code viewer (right-click to peek tabs)"))
             .accessibilityLabel(String(localized: "Reopen code viewer, \(tabCount) tab(s) open"))
 
             Rectangle()
-                .fill(theme.dividerColor)
+                .fill(theme.dividerColor.opacity(0.6))
                 .frame(width: 1, height: 16)
 
             // Dismiss — closes every tab.
@@ -82,14 +91,51 @@ struct CodeViewerFloatingButton: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(.regularMaterial, in: Capsule())
+        .background(theme.secondaryBackground.opacity(0.85))
+        .background(.ultraThinMaterial, in: Capsule())
+        .clipShape(Capsule())
         .overlay(
-            Capsule().stroke(theme.accentColor.opacity(isHovering ? 0.5 : 0.22), lineWidth: 1)
+            Capsule()
+                .stroke(
+                    hasDirtyTabs
+                        ? Color.orange.opacity(isHovering ? 0.7 : 0.4)
+                        : (isHovering ? theme.accentColor.opacity(0.5) : theme.dividerColor.opacity(0.4)),
+                    lineWidth: 0.8
+                )
         )
-        .shadow(color: .black.opacity(0.22), radius: 10, x: 0, y: 4)
+        .shadow(color: .black.opacity(0.25), radius: 10, x: 0, y: 4)
         .scaleEffect(isHovering ? 1.02 : 1.0)
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) { isHovering = hovering }
+        }
+        .contextMenu {
+            Section(String(localized: "Open Tabs (\(tabCount))")) {
+                ForEach(chatHistoryViewModel.codeViewerTabs) { tab in
+                    Button {
+                        chatHistoryViewModel.selectCodeViewerTab(id: tab.id)
+                        chatHistoryViewModel.reopenCodeViewer()
+                    } label: {
+                        HStack {
+                            if tab.id == chatHistoryViewModel.activeCodeViewerTabID {
+                                Image(systemName: "checkmark")
+                            } else if tab.isDirty {
+                                Image(systemName: "circle.fill")
+                            }
+                            Text(tab.title)
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
+            Button(String(localized: "Reopen Code Viewer")) {
+                chatHistoryViewModel.reopenCodeViewer()
+            }
+
+            Button(String(localized: "Close All Tabs"), role: .destructive) {
+                chatHistoryViewModel.closeAllCodeViewerTabs()
+            }
         }
         // Dismiss-all can hit unsaved edits; the panel hosts the same confirmation for
         // its own close button, but while minimized the pill is the only mounted host.

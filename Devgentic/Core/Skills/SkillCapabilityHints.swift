@@ -39,7 +39,12 @@ enum SkillCapabilityHints {
     /// this set decides whether a sentence appears, so a miss costs a missing suggestion and a false
     /// hit costs a suggestion the user declines — but a loose match would start inferring capability
     /// from arbitrary foreign vocabulary, which is the thing that was removed.
-    static let shellDeclaringNames: Set<String> = ["Bash", "execute_shell", "batch_command"]
+    /// ⚠️ `batch_command` STAYS. It is withdrawn from the catalogue but a SKILL on disk, written
+    /// before the split, may still declare it — and a skill that names a retired tool should still
+    /// be recognised as declaring a shell rather than silently declaring nothing.
+    static let shellDeclaringNames: Set<String> = [
+        "Bash", "execute_shell", "batch_command", "run_command", "start_background_task"
+    ]
 
     /// Whether linking this skill should OFFER the profile a shell tool.
     ///

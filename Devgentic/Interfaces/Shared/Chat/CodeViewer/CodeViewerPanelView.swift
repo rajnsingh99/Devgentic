@@ -139,6 +139,111 @@ class CodeDocument: Equatable {
     }
 }
 
+// MARK: - CodeLanguage Display & Selection Extensions
+
+extension CodeLanguage: @retroactive Identifiable {
+    var displayName: String {
+        switch id {
+        case .agda: return "Agda"
+        case .bash: return "Bash"
+        case .c: return "C"
+        case .cpp: return "C++"
+        case .cSharp: return "C#"
+        case .css: return "CSS"
+        case .dart: return "Dart"
+        case .dockerfile: return "Dockerfile"
+        case .elixir: return "Elixir"
+        case .go: return "Go"
+        case .goMod: return "Go Module"
+        case .haskell: return "Haskell"
+        case .html: return "HTML"
+        case .java: return "Java"
+        case .javascript: return "JavaScript"
+        case .jsdoc: return "JSDoc"
+        case .json: return "JSON"
+        case .jsx: return "JSX"
+        case .julia: return "Julia"
+        case .kotlin: return "Kotlin"
+        case .lua: return "Lua"
+        case .markdown: return "Markdown"
+        case .markdownInline: return "Markdown (Inline)"
+        case .objc: return "Objective-C"
+        case .ocaml: return "OCaml"
+        case .ocamlInterface: return "OCaml Interface"
+        case .perl: return "Perl"
+        case .php: return "PHP"
+        case .python: return "Python"
+        case .regex: return "Regex"
+        case .ruby: return "Ruby"
+        case .rust: return "Rust"
+        case .scala: return "Scala"
+        case .sql: return "SQL"
+        case .swift: return "Swift"
+        case .toml: return "TOML"
+        case .tsx: return "TSX"
+        case .typescript: return "TypeScript"
+        case .verilog: return "Verilog"
+        case .yaml: return "YAML"
+        case .zig: return "Zig"
+        case .plainText: return "Plain Text"
+        }
+    }
+
+    static let commonLanguages: [CodeLanguage] = [
+        .swift,
+        .typescript,
+        .javascript,
+        .python,
+        .json,
+        .html,
+        .css,
+        .markdown,
+        .bash,
+        .rust,
+        .go,
+        .cpp,
+        .default
+    ]
+
+    static let allSortedLanguages: [CodeLanguage] = {
+        var list = CodeLanguage.allLanguages
+        if !list.contains(where: { $0.id == .plainText }) {
+            list.append(.default)
+        }
+        return list.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }()
+}
+
+// MARK: - Code Viewer Status Bar State
+
+@Observable
+final class CodeViewerStatusBarState {
+    var line: Int = 1
+    var column: Int = 1
+    var selectionLength: Int = 0
+
+    func update(from state: SourceEditorState) {
+        if let cursor = state.cursorPositions?.first {
+            if cursor.start.line > 0 {
+                self.line = cursor.start.line
+            }
+            if cursor.start.column > 0 {
+                self.column = cursor.start.column
+            }
+            if cursor.range.location != NSNotFound {
+                self.selectionLength = max(0, cursor.range.length)
+            } else {
+                self.selectionLength = 0
+            }
+        }
+    }
+
+    func reset() {
+        line = 1
+        column = 1
+        selectionLength = 0
+    }
+}
 
 // MARK: - Syntax theme memo
 
@@ -210,9 +315,23 @@ struct CodeViewerPanelView: View {
     }
 
     @State private var document: CodeDocument?
+    @State private var statusBarState = CodeViewerStatusBarState()
     @State private var didCopy: Bool = false
     @State private var currentSnippet: CodeSnippet?
     @State private var saveErrorMessage: String?
+    @State private var backgroundTaskCount: Int = 0
+    @State private var backgroundTaskRunningCount: Int = 0
+
+    private func reloadBackgroundTasks() {
+        guard let cid = chatHistoryViewModel.viewerOwningConversationID else {
+            backgroundTaskCount = 0
+            backgroundTaskRunningCount = 0
+            return
+        }
+        let list = BackgroundProcessRegistry.shared.snapshots(conversationID: cid)
+        backgroundTaskCount = list.count
+        backgroundTaskRunningCount = list.filter { !$0.status.isTerminal }.count
+    }
 
     // MARK: - Resolved Theme Colors (derived from Code Viewer syntax theme)
 
@@ -295,6 +414,12 @@ struct CodeViewerPanelView: View {
         } message: {
             Text(saveErrorMessage ?? String(localized: "An unknown error occurred."))
         }
+        .onAppear {
+            reloadBackgroundTasks()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .backgroundTaskChanged)) { _ in
+            reloadBackgroundTasks()
+        }
     }
 
     // MARK: - Snippet Loading
@@ -318,7 +443,10 @@ struct CodeViewerPanelView: View {
         let store = chatHistoryViewModel.codeViewerEditorStates
         return Binding(
             get: { store.state(for: tabID) },
-            set: { store.setState($0, for: tabID) }
+            set: { newState in
+                store.setState(newState, for: tabID)
+                statusBarState.update(from: newState)
+            }
         )
     }
 
@@ -331,6 +459,7 @@ struct CodeViewerPanelView: View {
             }
             currentSnippet = nil
             document = nil
+            statusBarState.reset()
             return
         }
 
@@ -344,10 +473,26 @@ struct CodeViewerPanelView: View {
         // The buffer resumes from the tab's DRAFT when one exists — switching away and
         // back (or minimize/reopen) must not roll edits back to the chat block.
         let content = chatHistoryViewModel.activeCodeViewerTab?.effectiveCode ?? snippet.code
-        let doc = CodeDocument(content: content, language: snippet.language)
+        let language = chatHistoryViewModel.activeCodeViewerTab?.effectiveLanguage ?? snippet.language
+        let doc = CodeDocument(content: content, language: language)
         currentSnippet = snippet
         document = doc
-        logger.info("[CodeViewer] Loaded tab \(position)/\(total) — lang=\(snippet.language ?? "nil") → resolved=\(doc.language.id.rawValue), \(content.count) chars\(content != snippet.code ? " (draft)" : "").")
+        if let tabID = chatHistoryViewModel.activeCodeViewerTabID {
+            statusBarState.update(from: chatHistoryViewModel.codeViewerEditorStates.state(for: tabID))
+        } else {
+            statusBarState.reset()
+        }
+        logger.info("[CodeViewer] Loaded tab \(position)/\(total) — lang=\(language ?? "nil") → resolved=\(doc.language.id.rawValue), \(content.count) chars\(content != snippet.code ? " (draft)" : "").")
+    }
+
+    /// Updates the syntax highlighting language for the currently loaded document and tab.
+    private func handleLanguageSelected(_ newLanguage: CodeLanguage) {
+        guard let doc = document else { return }
+        guard doc.language.id != newLanguage.id else { return }
+        doc.language = newLanguage
+        if let activeID = chatHistoryViewModel.activeCodeViewerTabID {
+            chatHistoryViewModel.updateCodeViewerTabLanguage(tabID: activeID, language: newLanguage.id.rawValue)
+        }
     }
 
     // MARK: - Resizable Divider
@@ -480,6 +625,17 @@ struct CodeViewerPanelView: View {
                     Text(String(localized: "This tab has edits that haven't been saved."))
                 }
 
+            // Breadcrumbs Sub-Bar
+            if let activeTab = chatHistoryViewModel.activeCodeViewerTab, document != nil {
+                CodeViewerBreadcrumbsBar(
+                    tab: activeTab,
+                    textColor: textColor,
+                    secondaryColor: secondaryTextColor,
+                    accentColor: accentTint,
+                    backgroundColor: headerBackground
+                )
+            }
+
             // Live-write banner: the ACTIVE tab's file is being written by the agent
             // right now (or its last write was rejected).
             if let liveState = chatHistoryViewModel.activeCodeViewerTab?.liveState {
@@ -530,6 +686,7 @@ struct CodeViewerPanelView: View {
                     let syntax = resolvedSyntax
                     HighPerformanceCodeViewRepresentable(
                         document: document,
+                        language: document.language,
                         fontSize: fontSize,
                         editorTheme: syntax.editorTheme,
                         bracketHighlightColor: syntax.bracketHighlight,
@@ -555,6 +712,21 @@ struct CodeViewerPanelView: View {
                 } else {
                     placeholderContent
                 }
+            }
+            .frame(maxHeight: .infinity)
+
+            if let document = document {
+                CodeViewerStatusBar(
+                    state: statusBarState,
+                    document: document,
+                    textColor: textColor,
+                    secondaryColor: secondaryTextColor,
+                    accentColor: accentTint,
+                    backgroundColor: headerBackground,
+                    onSelectLanguage: { newLanguage in
+                        handleLanguageSelected(newLanguage)
+                    }
+                )
             }
         }
         // Overlay/split modes: fixed width, clamped to the container so a width persisted
@@ -615,46 +787,47 @@ struct CodeViewerPanelView: View {
 
     private var actionButtons: some View {
         HStack(spacing: 6) {
-            // GROUP 1: Save. The Diff toggle and per-hunk Apply are gone — a change is
-            // shown in the tool row that produced it, not here. `applyChanges` survives as
-            // the save engine behind ⌘S.
-            if let activeTab = chatHistoryViewModel.activeCodeViewerTab,
-               activeTab.snippet.sourceFileID != nil {
-                HStack(spacing: 4) {
-                    // Save writes the buffer back to the linked source file.
-                    do {
-                        Button {
-                            chatHistoryViewModel.applyChanges(for: activeTab.snippet)
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .font(.system(size: 11, weight: .bold))
-                                Text(String(localized: "Save"))
-                                    .font(.system(size: 11, weight: .semibold))
-                            }
-                            .foregroundColor(Color(nsColor: resolvedSyntax.strings))
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 4)
-                            .background(Color(nsColor: resolvedSyntax.strings).opacity(0.15))
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .stroke(Color(nsColor: resolvedSyntax.strings).opacity(0.4), lineWidth: 0.8)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .help(String(localized: "Save to the linked source file"))
-                        .accessibilityLabel(String(localized: "Save to the linked source file"))
+            // GROUP 1: Save CTA. Only visible when the active tab has unsaved changes.
+            if let activeTab = chatHistoryViewModel.activeCodeViewerTab, activeTab.isDirty {
+                Button(action: saveActiveTab) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "square.and.arrow.down.fill")
+                            .font(.system(size: 10, weight: .bold))
+                        Text(String(localized: "Save"))
+                            .font(.system(size: 11, weight: .semibold))
                     }
-
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(
+                        LinearGradient(
+                            colors: [Color(nsColor: .systemGreen), Color(nsColor: .systemGreen).opacity(0.85)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(Color.white.opacity(0.25), lineWidth: 0.8)
+                    )
+                    .shadow(color: Color(nsColor: .systemGreen).opacity(0.35), radius: 4, x: 0, y: 1.5)
                 }
+                .buttonStyle(.plain)
+                .help(String(localized: "Save changes (⌘S)"))
+                .accessibilityLabel(String(localized: "Save active tab"))
+                .transition(.asymmetric(
+                    insertion: .scale(scale: 0.88, anchor: .trailing).combined(with: .opacity),
+                    removal: .opacity
+                ))
 
                 Capsule()
                     .fill(secondaryTextColor.opacity(0.2))
                     .frame(width: 1, height: 14)
+                    .transition(.opacity)
             }
 
-            // GROUP 2: Code Tools (Copy & Save)
+            // GROUP 2: Code Tools (Copy & Find)
             HStack(spacing: 3) {
                 CodeViewerHeaderButton(
                     action: {
@@ -664,7 +837,7 @@ struct CodeViewerPanelView: View {
                     },
                     icon: didCopy ? "checkmark" : "doc.on.doc",
                     helpText: String(localized: "Copy code (right-click for more formats)"),
-                    foregroundColor: didCopy ? Color(nsColor: resolvedSyntax.strings) : secondaryTextColor,
+                    foregroundColor: didCopy ? Color(nsColor: .systemGreen) : secondaryTextColor,
                     hoverBackground: selectionColor
                 )
                 .animation(.easeInOut(duration: 0.2), value: didCopy)
@@ -678,12 +851,12 @@ struct CodeViewerPanelView: View {
                     }
                 }
 
-                // Smart save (⌘S): linked tabs write to their source file; unlinked fall to Save As
+                // Find in file (⌘F)
                 CodeViewerHeaderButton(
-                    action: saveActiveTab,
-                    icon: "square.and.arrow.down",
-                    helpText: String(localized: "Save (⌘S)"),
-                    foregroundColor: (chatHistoryViewModel.activeCodeViewerTab?.isDirty == true) ? accentTint : secondaryTextColor,
+                    action: toggleFindPanel,
+                    icon: "magnifyingglass",
+                    helpText: String(localized: "Find in file (⌘F)"),
+                    foregroundColor: secondaryTextColor,
                     hoverBackground: selectionColor
                 )
                 .disabled(document == nil)
@@ -739,6 +912,34 @@ struct CodeViewerPanelView: View {
                 .fill(secondaryTextColor.opacity(0.2))
                 .frame(width: 1, height: 14)
 
+            // Switch to Background Tasks (when tasks exist)
+            if backgroundTaskCount > 0 {
+                Button {
+                    chatHistoryViewModel.showBackgroundTasks()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: backgroundTaskRunningCount > 0 ? "play.circle" : "terminal")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("\(backgroundTaskCount)")
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                        if backgroundTaskRunningCount > 0 {
+                            LivePulseDot(color: .orange)
+                        }
+                    }
+                    .foregroundColor(accentTint)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(accentTint.opacity(0.12))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help(backgroundTaskRunningCount > 0 ? String(localized: "Switch to Background tasks (\(backgroundTaskRunningCount) running)") : String(localized: "Switch to Background tasks"))
+
+                Capsule()
+                    .fill(secondaryTextColor.opacity(0.2))
+                    .frame(width: 1, height: 14)
+            }
+
             // GROUP 4: Presentation & Window Controls
             HStack(spacing: 3) {
                 // Side-by-side split with the chat
@@ -749,7 +950,8 @@ struct CodeViewerPanelView: View {
                         ? String(localized: "Overlay the chat")
                         : String(localized: "Split view with chat"),
                     foregroundColor: presentation == .split ? accentTint : secondaryTextColor,
-                    hoverBackground: selectionColor
+                    hoverBackground: selectionColor,
+                    isActive: presentation == .split
                 )
 
                 // Full-width toggle
@@ -762,7 +964,8 @@ struct CodeViewerPanelView: View {
                         ? String(localized: "Restore previous width")
                         : String(localized: "Expand to full width"),
                     foregroundColor: presentation == .full ? accentTint : secondaryTextColor,
-                    hoverBackground: selectionColor
+                    hoverBackground: selectionColor,
+                    isActive: presentation == .full
                 )
 
                 // Minimize
@@ -775,6 +978,7 @@ struct CodeViewerPanelView: View {
                 )
             }
         }
+        .animation(.spring(response: 0.25, dampingFraction: 0.75), value: chatHistoryViewModel.activeCodeViewerTab?.isDirty)
     }
 
     // MARK: - Keyboard Shortcuts
@@ -822,6 +1026,9 @@ struct CodeViewerPanelView: View {
 
             Button("", action: saveActiveTab)
                 .keyboardShortcut("s", modifiers: .command)
+
+            Button("", action: toggleFindPanel)
+                .keyboardShortcut("f", modifiers: .command)
         }
         .frame(width: 0, height: 0)
         .opacity(0)
@@ -836,15 +1043,74 @@ struct CodeViewerPanelView: View {
     // MARK: - Placeholder
 
     private var placeholderContent: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "curlybraces.square")
-                .font(.system(size: 40, weight: .thin)) // Fixed size: intentional (icon)
-                .foregroundColor(secondaryTextColor.opacity(0.4))
-            Text("No Code Selected")
-                .font(.system(.body, weight: .medium))
-                .foregroundColor(secondaryTextColor.opacity(0.6))
+        VStack(spacing: 20) {
+            Spacer()
+
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [accentTint.opacity(0.12), accentTint.opacity(0.02)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 80, height: 80)
+
+                Image(systemName: "curlybraces.square")
+                    .font(.system(size: 34, weight: .light))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [accentTint, accentTint.opacity(0.65)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            }
+
+            VStack(spacing: 6) {
+                Text(String(localized: "No Code Open"))
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(textColor)
+
+                Text(String(localized: "Select a code block from the chat or double-click any file in the Explorer to inspect and edit."))
+                    .font(.system(size: 12))
+                    .foregroundColor(secondaryTextColor.opacity(0.85))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 320)
+                    .lineSpacing(2)
+            }
+
+            HStack(spacing: 10) {
+                placeholderShortcutBadge(label: String(localized: "Close Tab"), keys: "⌘W")
+                placeholderShortcutBadge(label: String(localized: "Switch Tab"), keys: "⌘1-9")
+                placeholderShortcutBadge(label: String(localized: "Save"), keys: "⌘S")
+            }
+            .padding(.top, 4)
+
+            Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 24)
+    }
+
+    private func placeholderShortcutBadge(label: String, keys: String) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(secondaryTextColor.opacity(0.75))
+            Text(keys)
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundColor(textColor.opacity(0.9))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(selectionColor.opacity(0.4))
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .stroke(secondaryTextColor.opacity(0.2), lineWidth: 0.5)
+                )
+        }
     }
 
     // MARK: - Actions
@@ -869,6 +1135,12 @@ struct CodeViewerPanelView: View {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(string, forType: .string)
+    }
+
+    private func toggleFindPanel() {
+        let menuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        menuItem.tag = 1 // NSFindPanelActionShowFindPanel (Show Find Panel)
+        NSApp.sendAction(#selector(NSTextView.performFindPanelAction(_:)), to: nil, from: menuItem)
     }
 
     /// The active tab's linked/inferred filename, when it has one.
@@ -1048,7 +1320,7 @@ struct CodeViewerPanelView: View {
 
 /// The SF Symbol used to represent a code language, shared by the tab strip (and formerly the
 /// header badge). Free function so it isn't tied to a view instance.
-fileprivate func codeViewerLanguageIcon(for languageID: String?) -> String {
+func codeViewerLanguageIcon(for languageID: String?) -> String {
     switch languageID?.lowercased() {
     case "swift": return "swift"
     case "python": return "chevron.left.forwardslash.chevron.right"
@@ -1084,14 +1356,44 @@ fileprivate struct CodeViewerTabStrip: View {
     let onSelect: (UUID) -> Void
     let onClose: (UUID) -> Void
 
+    private var filenameCounts: [String: Int] {
+        var counts: [String: Int] = [:]
+        for tab in tabs {
+            let key = tab.title.lowercased()
+            counts[key, default: 0] += 1
+        }
+        return counts
+    }
+
+    private func disambiguationHint(for tab: CodeViewerTab) -> String? {
+        let key = tab.title.lowercased()
+        guard (filenameCounts[key] ?? 0) > 1, let path = tab.filePath else { return nil }
+        let url = URL(fileURLWithPath: path)
+        let parent = url.deletingLastPathComponent().lastPathComponent
+        let grandParent = url.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
+        guard !parent.isEmpty, parent != "/" else { return nil }
+
+        let sameParentCount = tabs.filter {
+            $0.title.lowercased() == key &&
+            $0.filePath.map { URL(fileURLWithPath: $0).deletingLastPathComponent().lastPathComponent } == parent
+        }.count
+
+        if sameParentCount > 1, !grandParent.isEmpty, grandParent != "/" {
+            return "\(grandParent)/\(parent)"
+        }
+        return parent
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 4) {
-                    ForEach(tabs) { tab in
+                    ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
                         CodeViewerTabChip(
                             tab: tab,
                             isActive: tab.id == activeTabID,
+                            isLastTab: index == tabs.count - 1,
+                            disambiguationHint: disambiguationHint(for: tab),
                             textColor: textColor,
                             secondaryColor: secondaryColor,
                             accentColor: accentColor,
@@ -1104,7 +1406,20 @@ fileprivate struct CodeViewerTabStrip: View {
                     }
                 }
                 .padding(.vertical, 4)
+                .padding(.leading, 2)
+                .padding(.trailing, 8)
             }
+            .mask(
+                LinearGradient(
+                    stops: [
+                        .init(color: .black, location: 0),
+                        .init(color: .black, location: 0.95),
+                        .init(color: .clear, location: 1.0)
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            )
             .onChange(of: activeTabID) { _, id in
                 guard let id else { return }
                 withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .center) }
@@ -1135,11 +1450,25 @@ struct LivePulseDot: View {
     }
 }
 
+// MARK: - Relative Path Formatter Helper
+func formatRelativePath(for path: String) -> String {
+    let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+    if path.hasPrefix(homePath) {
+        var rel = path
+        rel.removeFirst(homePath.count)
+        if rel.hasPrefix("/") { rel.removeFirst() }
+        return "~/" + rel
+    }
+    return URL(fileURLWithPath: path).lastPathComponent
+}
+
 // MARK: - Tab Chip
 
 fileprivate struct CodeViewerTabChip: View {
     let tab: CodeViewerTab
     let isActive: Bool
+    let isLastTab: Bool
+    let disambiguationHint: String?
     let textColor: Color
     let secondaryColor: Color
     let accentColor: Color
@@ -1148,6 +1477,7 @@ fileprivate struct CodeViewerTabChip: View {
     let onSelect: () -> Void
     let onClose: () -> Void
 
+    @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
     @State private var isHovering = false
     @State private var isHoveringClose = false
 
@@ -1157,11 +1487,21 @@ fileprivate struct CodeViewerTabChip: View {
                 .font(.system(size: 10, weight: .medium)) // Fixed size: tab affordance
                 .foregroundColor(isActive ? accentColor : secondaryColor)
 
-            Text(tab.title)
-                .font(.system(size: 11, weight: isActive ? .semibold : .regular)) // Fixed size: tab label
-                .foregroundColor(isActive ? textColor : secondaryColor)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            HStack(spacing: 4) {
+                Text(tab.title)
+                    .font(.system(size: 11, weight: isActive ? .semibold : .regular)) // Fixed size: tab label
+                    .foregroundColor(isActive ? textColor : secondaryColor)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                if let disambiguationHint {
+                    Text("· \(disambiguationHint)")
+                        .font(.system(size: 10, weight: .regular))
+                        .foregroundColor(secondaryColor.opacity(0.75))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
 
             // Trailing slot, VS Code-style: hover always offers the ✕; a LIVE tab pulses
             // (agent writing) or warns (write rejected); otherwise a DIRTY tab shows its
@@ -1170,12 +1510,12 @@ fileprivate struct CodeViewerTabChip: View {
             // a clean inactive tab reserves the space.
             if !isHovering, tab.liveState == .active {
                 LivePulseDot(color: .orange)
-                    .frame(width: 15, height: 15)
+                    .frame(width: 18, height: 18)
             } else if !isHovering, tab.liveState == .rejected {
                 Image(systemName: "exclamationmark.circle")
                     .font(.system(size: 10, weight: .semibold)) // Fixed size: status glyph
                     .foregroundColor(.orange)
-                    .frame(width: 15, height: 15)
+                    .frame(width: 18, height: 18)
                     .help(String(localized: "The agent's write was not applied"))
                     .accessibilityLabel(String(localized: "Write not applied"))
             } else if isHovering {
@@ -1183,7 +1523,7 @@ fileprivate struct CodeViewerTabChip: View {
                     Image(systemName: "xmark")
                         .font(.system(size: 8, weight: .bold)) // Fixed size: close glyph
                         .foregroundColor(isHoveringClose ? textColor : secondaryColor)
-                        .frame(width: 15, height: 15)
+                        .frame(width: 18, height: 18)
                         .background(isHoveringClose ? hoverColor : Color.clear)
                         .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                 }
@@ -1195,27 +1535,30 @@ fileprivate struct CodeViewerTabChip: View {
                 Circle()
                     .fill(accentColor)
                     .frame(width: 7, height: 7)
-                    .frame(width: 15, height: 15)
+                    .frame(width: 18, height: 18)
                     .help(String(localized: "Unsaved changes"))
                     .accessibilityLabel(String(localized: "Unsaved changes"))
             } else if isActive {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 8, weight: .bold)) // Fixed size: close glyph
-                        .foregroundColor(secondaryColor)
-                        .frame(width: 15, height: 15)
+                        .foregroundColor(isHoveringClose ? textColor : secondaryColor)
+                        .frame(width: 18, height: 18)
+                        .background(isHoveringClose ? hoverColor : Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                 }
                 .buttonStyle(.plain)
+                .onHover { isHoveringClose = $0 }
                 .help(String(localized: "Close tab"))
                 .accessibilityLabel(String(localized: "Close tab"))
             } else {
-                Color.clear.frame(width: 15, height: 15)
+                Color.clear.frame(width: 18, height: 18)
             }
         }
         .padding(.leading, 10)
         .padding(.trailing, 5)
         .padding(.vertical, 5)
-        .frame(maxWidth: 200)
+        .frame(maxWidth: disambiguationHint != nil ? 240 : 200)
         .background(isActive ? activeBackground : (isHovering ? hoverColor.opacity(0.45) : Color.clear))
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .overlay(
@@ -1225,10 +1568,54 @@ fileprivate struct CodeViewerTabChip: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { isHovering = $0 }
-        .help(tab.title)
+        .help(disambiguationHint != nil ? "\(tab.title) (\(disambiguationHint!))" : tab.title)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(tab.title)
         .accessibilityAddTraits(isActive ? [.isSelected, .isButton] : .isButton)
+        .contextMenu {
+            Button(String(localized: "Close Tab")) {
+                onClose()
+            }
+
+            Button(String(localized: "Close Other Tabs")) {
+                chatHistoryViewModel.closeOtherCodeViewerTabs(exceptID: tab.id)
+            }
+            .disabled(chatHistoryViewModel.codeViewerTabs.count <= 1)
+
+            Button(String(localized: "Close Tabs to the Right")) {
+                chatHistoryViewModel.closeTabsToTheRight(ofID: tab.id)
+            }
+            .disabled(isLastTab)
+
+            Button(String(localized: "Close All Tabs")) {
+                chatHistoryViewModel.closeAllCodeViewerTabs()
+            }
+
+            if let path = tab.filePath {
+                Divider()
+
+                Button(String(localized: "Copy File Path")) {
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(path, forType: .string)
+                }
+
+                Button(String(localized: "Copy Relative Path")) {
+                    let rel = formatRelativePath(for: path)
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(rel, forType: .string)
+                }
+
+                Button(String(localized: "Reveal in Finder")) {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+                }
+
+                Button(String(localized: "Open with System App")) {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                }
+            }
+        }
     }
 }
 
@@ -1240,6 +1627,7 @@ fileprivate struct CodeViewerHeaderButton: View {
     let helpText: String
     let foregroundColor: Color
     let hoverBackground: Color
+    var isActive: Bool = false
     @State private var isHovering = false
     @Environment(\.isEnabled) private var isEnabled
 
@@ -1247,13 +1635,22 @@ fileprivate struct CodeViewerHeaderButton: View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundColor(isEnabled ? (isHovering ? foregroundColor : foregroundColor.opacity(0.75)) : foregroundColor.opacity(0.2))
+                .foregroundColor(isEnabled ? (isActive ? foregroundColor : (isHovering ? foregroundColor : foregroundColor.opacity(0.75))) : foregroundColor.opacity(0.2))
                 .frame(width: 28, height: 28)
-                .background(isHovering && isEnabled ? hoverBackground.opacity(0.6) : Color.clear)
+                .background(
+                    isActive
+                        ? foregroundColor.opacity(0.18)
+                        : (isHovering && isEnabled ? hoverBackground.opacity(0.6) : Color.clear)
+                )
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .stroke(isHovering && isEnabled ? foregroundColor.opacity(0.25) : Color.clear, lineWidth: 0.5)
+                        .stroke(
+                            isActive
+                                ? foregroundColor.opacity(0.4)
+                                : (isHovering && isEnabled ? foregroundColor.opacity(0.25) : Color.clear),
+                            lineWidth: isActive ? 0.8 : 0.5
+                        )
                 )
                 .scaleEffect(isHovering && isEnabled ? 1.04 : 1.0)
         }
@@ -1274,6 +1671,7 @@ extension CodeDocument: Identifiable {}
 // MARK: - High-Performance NSViewControllerRepresentable
 private struct HighPerformanceCodeViewRepresentable: NSViewControllerRepresentable {
     var document: CodeDocument
+    var language: CodeLanguage
     var fontSize: Double
     var editorTheme: CodeEditSourceEditor.EditorTheme
     var bracketHighlightColor: NSColor
@@ -1288,6 +1686,7 @@ private struct HighPerformanceCodeViewRepresentable: NSViewControllerRepresentab
     func makeNSViewController(context: Context) -> HighPerformanceCodeViewController {
         let controller = HighPerformanceCodeViewController(
             document: document,
+            language: language,
             editorTheme: editorTheme,
             bracketHighlightColor: bracketHighlightColor,
             themeIdentifier: themeIdentifier,
@@ -1304,6 +1703,7 @@ private struct HighPerformanceCodeViewRepresentable: NSViewControllerRepresentab
         nsViewController.editorState = editorState
         nsViewController.update(
             document: document,
+            language: language,
             fontSize: fontSize,
             editorTheme: editorTheme,
             bracketHighlightColor: bracketHighlightColor,
@@ -1318,7 +1718,7 @@ private struct HighPerformanceCodeViewRepresentable: NSViewControllerRepresentab
 class HighPerformanceCodeViewController: NSViewController {
 
     private var document: CodeDocument
-
+    private var currentLanguage: CodeLanguage
     private var hostingController: NSHostingController<SourceEditor>?
     private var currentFontSize: Double = 14
     private var currentEditorTheme: CodeEditSourceEditor.EditorTheme
@@ -1339,8 +1739,9 @@ class HighPerformanceCodeViewController: NSViewController {
     /// restarted the editor at line 1.
     var editorState: Binding<SourceEditorState>
 
-    init(document: CodeDocument, editorTheme: CodeEditSourceEditor.EditorTheme, bracketHighlightColor: NSColor, themeIdentifier: String, wrapLines: Bool, showMinimap: Bool, editorState: Binding<SourceEditorState>) {
+    init(document: CodeDocument, language: CodeLanguage, editorTheme: CodeEditSourceEditor.EditorTheme, bracketHighlightColor: NSColor, themeIdentifier: String, wrapLines: Bool, showMinimap: Bool, editorState: Binding<SourceEditorState>) {
         self.document = document
+        self.currentLanguage = language
         self.editorState = editorState
         self.currentEditorTheme = editorTheme
         self.currentBracketColor = bracketHighlightColor
@@ -1428,7 +1829,7 @@ class HighPerformanceCodeViewController: NSViewController {
         let font = NSFont.monospacedSystemFont(ofSize: currentFontSize, weight: .regular)
         let editorView = SourceEditor(
             contentBinding,
-            language: document.language,
+            language: currentLanguage,
             configuration: makeConfiguration(font: font),
             state: editorState
         )
@@ -1455,18 +1856,23 @@ class HighPerformanceCodeViewController: NSViewController {
 
         let newEditorView = SourceEditor(
             contentBinding,
-            language: self.document.language,
+            language: self.currentLanguage,
             configuration: makeConfiguration(font: font),
             state: editorState
         )
         hostingController?.rootView = newEditorView
     }
 
-    func update(document: CodeDocument, fontSize: Double, editorTheme: CodeEditSourceEditor.EditorTheme, bracketHighlightColor: NSColor, themeIdentifier: String, wrapLines: Bool, showMinimap: Bool) {
+    func update(document: CodeDocument, language: CodeLanguage, fontSize: Double, editorTheme: CodeEditSourceEditor.EditorTheme, bracketHighlightColor: NSColor, themeIdentifier: String, wrapLines: Bool, showMinimap: Bool) {
         var needsViewUpdate = false
 
         if self.document != document {
             self.document = document
+            needsViewUpdate = true
+        }
+
+        if self.currentLanguage.id != language.id {
+            self.currentLanguage = language
             needsViewUpdate = true
         }
 
@@ -1495,5 +1901,146 @@ class HighPerformanceCodeViewController: NSViewController {
         if needsViewUpdate {
             updatePresentationView()
         }
+    }
+}
+
+// MARK: - CodeViewerStatusBar
+
+struct CodeViewerStatusBar: View {
+    var state: CodeViewerStatusBarState
+    var document: CodeDocument
+    var textColor: Color
+    var secondaryColor: Color
+    var accentColor: Color
+    var backgroundColor: Color
+    var onSelectLanguage: (CodeLanguage) -> Void
+
+    @State private var isHoveringLanguage = false
+
+    private var lineCount: Int {
+        let content = document.content
+        guard !content.isEmpty else { return 1 }
+        var count = 1
+        for byte in content.utf8 {
+            if byte == 0x0A { count += 1 }
+        }
+        return count
+    }
+
+    private var lineEndings: String {
+        document.content.contains("\r\n") ? "CRLF" : "LF"
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            // Left cluster: Cursor position, Line count, Indentation
+            HStack(spacing: 6) {
+                HStack(spacing: 0) {
+                    Text("Ln \(state.line), Col \(state.column)")
+                        .monospacedDigit()
+                    if state.selectionLength > 0 {
+                        Text(" (\(state.selectionLength) sel)")
+                            .monospacedDigit()
+                            .foregroundColor(accentColor)
+                    }
+                }
+
+                Text("·")
+                    .foregroundColor(secondaryColor.opacity(0.4))
+
+                Text("\(lineCount) \(lineCount == 1 ? "line" : "lines")")
+                    .monospacedDigit()
+
+                Text("·")
+                    .foregroundColor(secondaryColor.opacity(0.4))
+
+                Text("Spaces: 4")
+            }
+
+            Spacer(minLength: 8)
+
+            // Right cluster: Encoding, Line endings, Language selector
+            HStack(spacing: 6) {
+                Text("UTF-8")
+
+                Text("·")
+                    .foregroundColor(secondaryColor.opacity(0.4))
+
+                Text(lineEndings)
+
+                Text("·")
+                    .foregroundColor(secondaryColor.opacity(0.4))
+
+                Menu {
+                    Section(String(localized: "Common Languages")) {
+                        ForEach(CodeLanguage.commonLanguages, id: \.id) { lang in
+                            Button {
+                                onSelectLanguage(lang)
+                            } label: {
+                                HStack {
+                                    Text(lang.displayName)
+                                    if lang.id == document.language.id {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Divider()
+
+                    Section(String(localized: "All Languages")) {
+                        ForEach(CodeLanguage.allSortedLanguages, id: \.id) { lang in
+                            Button {
+                                onSelectLanguage(lang)
+                            } label: {
+                                HStack {
+                                    Text(lang.displayName)
+                                    if lang.id == document.language.id {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "curlybraces")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(isHoveringLanguage ? accentColor : secondaryColor)
+                        Text(document.language.displayName)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(isHoveringLanguage ? textColor : secondaryColor)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundColor(secondaryColor.opacity(0.7))
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(isHoveringLanguage ? secondaryColor.opacity(0.12) : Color.clear)
+                    )
+                    .contentShape(Rectangle())
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .onHover { hovering in
+                    isHoveringLanguage = hovering
+                }
+                .help(String(localized: "Select Language Mode"))
+            }
+        }
+        .font(.system(size: 11, weight: .regular))
+        .foregroundColor(secondaryColor)
+        .frame(height: 22)
+        .padding(.horizontal, 10)
+        .background(backgroundColor)
+        .overlay(
+            Rectangle()
+                .fill(secondaryColor.opacity(0.12))
+                .frame(height: 0.5),
+            alignment: .top
+        )
     }
 }

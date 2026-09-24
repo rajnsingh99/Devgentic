@@ -70,7 +70,8 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
     // 2026-08-24). Adding it to this struct alone would NOT persist it: this record is not stored as
     // a blob, it is rebuilt field-by-field from promoted columns on `WorkflowRunRecordSD`, so a new
     // field needs its own column, its five seams (init / apply / RowSnapshot / rowSnapshot / both
-    // decoders) and a `DevgenticSchemaV3` lightweight stage — the traceID precedent. Until someone
+    // decoders) and, once a build has shipped, a new schema version with a lightweight stage — the
+    // traceID precedent. Until someone
     // takes that on, a field here would be silently dropped at `decodeRecord` and every "the record
     // persists it" comment would be false. The flag lives on `WorkflowExecutionState` only.
 

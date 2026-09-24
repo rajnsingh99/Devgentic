@@ -4,58 +4,41 @@
 //  SchemaBaselineV1.swift
 //  DevgenticTests
 //
-//  Created on 04/08/26.
+//  The recorded persisted shape of schema version 1.0.0 — the shape the first shipped build will
+//  carry. Drift target of `testSchemaStructureMatchesCheckedInBaseline` and of
+//  `testV1RendersExactlyTheV1Baseline`.
 //
-//  The recorded persisted shape of the production SwiftData schema.
+//  ⚠️ RECORDED 2026-09-23 AT THE HISTORY RESET. The development history (baselines V1, V2, V3 and V6)
+//  was collapsed into this one before any build reached anyone; see `DevgenticSchemaVersions.swift`.
+//  15 entities.
 //
-//  This is a GIT-DIFFABLE RECORD, not configuration. `SchemaMigrationTests
-//  .testSchemaStructureMatchesCheckedInBaseline` renders the live schema into the same format and
-//  fails on any difference, so a hash-perturbing edit shows up as a reviewable diff in this file
-//  instead of as a launch failure on a user's machine (SWIFTDATA_GAP_REGISTER.md G1).
+//  ⚠️ ONCE A BUILD SHIPS, THIS FILE IS A HISTORICAL RECORD AND IS NEVER EDITED. A schema change
+//  then gets a NEW `SchemaBaselineV2`, and the drift test is pointed at it; this file keeps saying
+//  what V1 shipped, which is exactly what `testV1RendersExactlyTheV1Baseline` checks the frozen V1
+//  against. Editing it to turn a build green erases the record the guard exists to keep.
 //
-//  ⚠️ Only the fields that feed Core Data's model version hash are recorded: entity name, and per
-//  property its name, original name, value type, optionality, and the transient/unique flags —
-//  plus uniqueness constraints and indices. Swift default VALUES are deliberately absent: they do
-//  not participate in the hash, so adding one is safe and must not require touching this file.
+//  ⚠️ NOTE WHAT IS *NOT* HERE: `SkillVersionSD.allowedToolsJSON` is `Optional<String>`, NOT
+//  `Optional<Array<String>>`. Below macOS 26.1 SwiftData persists a native `[String]?` as Binary
+//  Data and a store written there fails to open on 26.1+ with NSCocoaErrorDomain 134140.
+//  `PromptModel.tags` is the only attribute of that shape, which
+//  `testTagsRemainsTheOnlyNonRelationshipCollectionAttribute` exists to preserve.
 //
-//  Attribute `options=` are recorded for REVIEW value, not because they perturb the hash.
-//  Two are load-bearing:
-//    - `binaryData: Data options=externalStorage` — the payload lives in the hidden
-//      `.DevgenticSD_SUPPORT/_EXTERNAL_DATA` sidecar, not in the store file. Any copy/move/export
-//      that ignores that directory is silently incomplete.
-//    - `tags: Optional<Array<String>> options=transformable with Optional("NSSecureUnarchiveFromData")`
-//      — this marking is chosen by the OS, not by us. It CHANGED between macOS 26.0 and 26.1
-//      (Binary Data -> Transformable) and bricked shipped apps with no developer change. Recording
-//      it here turns a future OS-side change into a loud test failure instead of a launch failure.
+//  ⚠️ Regenerate with the TEST_RUNNER_-PREFIXED variable; without the prefix xcodebuild forwards
+//  nothing to the test host and the hatch prints nothing at all:
 //
-//  ⚠️ TO UPDATE: do not paste a new value in to make the build green. First decide whether the
-//  change is lightweight-migratable (safety table in SWIFTDATA_MIGRATION_PLAN.md). If it is not,
-//  it needs a migration stage, and this baseline should be superseded by a V2 rather than edited.
-//
-//  Regenerate with:
 //    TEST_RUNNER_DEVGENTIC_WRITE_SCHEMA_BASELINE=1 \
 //    TEST_RUNNER_DEVGENTIC_SKIP_LAUNCH_SWEEP=1 \
 //    TEST_RUNNER_DEVGENTIC_STORE_URL="$TMPDIR/devgentic-testhost.store" \
 //    xcodebuild test-without-building -scheme devgentic -destination 'platform=macOS' \
 //      -only-testing:devgenticTests/SchemaMigrationTests/testSchemaStructureMatchesCheckedInBaseline
 //
-//  ⚠️ The TEST_RUNNER_ prefix is REQUIRED: xcodebuild does not forward the shell environment to
-//  the test host, so a bare DEVGENTIC_* variable is silently ignored and the app host opens the
-//  developer's REAL store instead of a temporary one.
-//
 
 import Foundation
 
-/// Recorded shape of schema version 1.0.0 — the shape the first shipped build will carry.
-///
-/// ⚠️ 2026-08-04: `CodeViewerSessionSD` and `ConversationSD.codeViewerSessions` were RETIRED
-/// before this shape was frozen, deliberately. Freezing V1 with the entity still present would
-/// have canonized a tombstone and made the very next release an entity-deletion migration. The
-/// drop was verified against a real store containing a linked row — see
-/// `SchemaMigrationTests.testRetiredCodeViewerEntityDropsWithoutLosingConversations`.
+/// Recorded shape of schema version 1.0.0.
 enum SchemaBaselineV1 {
 
-    /// Canonical structural descriptor of all 12 registered entities.
+    /// Canonical structural descriptor of all 15 registered entities.
     static let descriptor = """
 ENTITY AttachedImageFileSD
   ATTR binaryData: Data [required] options=externalStorage
@@ -80,6 +63,8 @@ ENTITY BackendProfile
   ATTR id: UUID [required,unique] options=unique
   ATTR lastSelected: Optional<Date> [optional]
   ATTR modelNameRaw: String [required]
+  ATTR ownerNodeID: Optional<UUID> [optional]
+  ATTR ownerWorkflowID: Optional<UUID> [optional]
   ATTR profileTypeRaw: String [required]
   ATTR providerRaw: String [required]
   UNIQUE (id)
@@ -89,7 +74,9 @@ ENTITY ChatMessageSD
   ATTR contentData: Data [required]
   ATTR conversationId: UUID [required]
   ATTR id: UUID [required,unique] options=unique
+  ATTR isSyntheticPrompt: Optional<Bool> [optional]
   ATTR lifecycleStateRaw: Optional<String> [optional]
+  ATTR messageSourceRaw: Optional<String> [optional]
   ATTR modelDialect: Optional<String> [optional]
   ATTR modelName: Optional<String> [optional]
   ATTR parkedOperationID: Optional<String> [optional]
@@ -185,6 +172,32 @@ ENTITY ScheduledTaskModel
   ATTR scheduledAt: Optional<Date> [optional]
   ATTR status: String [required]
   UNIQUE (id)
+ENTITY SkillFileSD
+  ATTR content: Data [required] options=externalStorage
+  ATTR isExecutable: Bool [required]
+  ATTR relativePath: String [required]
+  REL  version: Optional<SkillVersionSD> [optional] -> SkillVersionSD delete=nullify inverse=files
+ENTITY SkillSD
+  ATTR createdAt: Date [required]
+  ATTR displayName: String [required]
+  ATTR id: String [required,unique] options=unique
+  ATTR isAgentWritable: Bool [required]
+  ATTR isDraft: Bool [required]
+  ATTR latestVersionID: Optional<String> [optional]
+  ATTR name: String [required]
+  ATTR originRaw: String [required]
+  REL  versions: Array<SkillVersionSD> [required] -> SkillVersionSD delete=cascade inverse=skill
+  UNIQUE (id)
+ENTITY SkillVersionSD
+  ATTR allowedToolsJSON: Optional<String> [optional]
+  ATTR body: String [required]
+  ATTR createdAt: Date [required]
+  ATTR id: String [required,unique] options=unique
+  ATTR note: String [required]
+  ATTR skillDescription: String [required]
+  REL  files: Array<SkillFileSD> [required] -> SkillFileSD delete=cascade inverse=version
+  REL  skill: Optional<SkillSD> [optional] -> SkillSD delete=nullify inverse=versions
+  UNIQUE (id)
 ENTITY WorkflowLayoutSD
   ATTR annotationCount: Int [required]
   ATTR edgeCount: Int [required]
@@ -202,6 +215,7 @@ ENTITY WorkflowRunRecordSD
   ATTR nodeResultsData: Data [required]
   ATTR statusRaw: String [required]
   ATTR timestamp: Date [required]
+  ATTR traceID: Optional<String> [optional]
   ATTR userInput: String [required]
   ATTR variablesData: Data [required]
   ATTR workflowName: String [required]

@@ -147,6 +147,10 @@ struct AgentTimelineView: View {
         ChatUIConstants.agentTimelineMaxHeight(forChatFontSize: CGFloat(chatFontSize))
     }
 
+    private var isContentOverflowing: Bool {
+        scrollable && timelineContentHeight > timelineMaxHeight
+    }
+
     private func initialEstimatedHeight(for count: Int) -> CGFloat {
         let estimated = CGFloat(count) * 44.0 + (streamingContext?.shouldDisplay == true ? 32.0 : 0.0) + 10.0
         return min(estimated, timelineMaxHeight)
@@ -200,6 +204,7 @@ struct AgentTimelineView: View {
                             Image(systemName: isStreaming ? "sparkles" : summaryValue.status.glyph)
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundColor(isStreaming ? theme.accentColor : summaryTint(for: summaryValue.status))
+                                .frame(width: 14, alignment: .center)
 
                             Text(titleText)
                                 .font(.system(size: 11, weight: .medium))
@@ -279,38 +284,12 @@ struct AgentTimelineView: View {
                 if Self.showsTimelineBody(isTimelineExpanded: isTimelineExpanded,
                                           isStreaming: isStreaming,
                                           userToggled: userToggled) {
-                    if scrollable {
+                    if isContentOverflowing {
                         ScrollViewReader { proxy in
                             ScrollView(.vertical, showsIndicators: true) {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    ForEach(visibleNodes) { node in
-                                        TimelineNodeGroupView(
-                                            node: node,
-                                            compactReasoning: compactReasoning,
-                                            isStreaming: isStreaming,
-                                            conversationID: conversationID,
-                                            expandedRowIDs: $expandedRowIDs
-                                        )
-                                        .id(node.id)
-                                    }
-                                    if let ctx = streamingContext, ctx.shouldDisplay {
-                                        StreamingTimelineFooter(context: ctx)
-                                            .id("streaming_footer")
-                                            .transition(.opacity)
-                                    }
-                                }
-                                .padding(.top, 4)
-                                .padding(.bottom, 6)
-                                .padding(.horizontal, 2)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .onGeometryChange(for: CGFloat.self) { p in
-                                    p.size.height
-                                } action: { newHeight in
-                                    timelineContentHeight = newHeight
-                                }
+                                timelineNodesContent(nodes: visibleNodes)
                             }
-                            .frame(height: timelineContentHeight > 0 ? min(timelineContentHeight, timelineMaxHeight) : initialEstimatedHeight(for: visibleNodes.count))
-                            .frame(maxHeight: timelineMaxHeight)
+                            .frame(height: timelineMaxHeight)
                             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                             .onChange(of: revision) { _, _ in
                                 if isStreaming {
@@ -327,23 +306,9 @@ struct AgentTimelineView: View {
                         .padding(.top, 2)
                         .transition(.opacity.combined(with: .move(edge: .top)))
                     } else {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(visibleNodes) { node in
-                                TimelineNodeGroupView(
-                                    node: node,
-                                    compactReasoning: compactReasoning,
-                                    isStreaming: isStreaming,
-                                    conversationID: conversationID,
-                                    expandedRowIDs: $expandedRowIDs
-                                )
-                            }
-                            if let ctx = streamingContext, ctx.shouldDisplay {
-                                StreamingTimelineFooter(context: ctx)
-                                    .transition(.opacity)
-                            }
-                        }
-                        .padding(.top, 2)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+                        timelineNodesContent(nodes: visibleNodes)
+                            .padding(.top, 2)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                 }
             }
@@ -359,7 +324,43 @@ struct AgentTimelineView: View {
                         isTimelineExpanded = streaming
                     }
                 }
+                if !streaming {
+                    timelineContentHeight = 0
+                }
             }
+            .onChange(of: showThoughts) { _, _ in
+                timelineContentHeight = 0
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func timelineNodesContent(nodes: [TimelineNode]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(nodes) { node in
+                TimelineNodeGroupView(
+                    node: node,
+                    compactReasoning: compactReasoning,
+                    isStreaming: isStreaming,
+                    conversationID: conversationID,
+                    expandedRowIDs: $expandedRowIDs
+                )
+                .id(node.id)
+            }
+            if let ctx = streamingContext, ctx.shouldDisplay {
+                StreamingTimelineFooter(context: ctx)
+                    .id("streaming_footer")
+                    .transition(.opacity)
+            }
+        }
+        .padding(.top, 4)
+        .padding(.bottom, 6)
+        .padding(.horizontal, 0)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onGeometryChange(for: CGFloat.self) { p in
+            p.size.height
+        } action: { newHeight in
+            timelineContentHeight = newHeight
         }
     }
 
@@ -609,6 +610,54 @@ struct AgentTimelineView: View {
         }
     }
 
+    /// Tool calls that only OBSERVE a background task. Deliberately NOT including
+    /// `command_stop`: that one CHANGES state, and an action the user took (or the agent took on
+    /// their behalf) should stay visible even when its outcome is also on the card. Hide
+    /// observations, keep actions.
+    private static let backgroundPollTools: Set<String> = ["command_output"]
+
+    /// Drops poll rows for tasks that already have a `.backgroundTask` card.
+    ///
+    /// ⚠️ Device test 2026-09-21: asked to "check on it periodically", the model produced NINE
+    /// `command_status` calls in ~40 seconds — one every few seconds, because nothing lets it
+    /// wait. (2026-09-23: it did it TWENTY times and hit the iteration cap; `command_status` has
+    /// since been withdrawn and the polls now arrive as `command_output`, which this folds.) Each was an ordinary tool execution, so the timeline showed nine identical
+    /// "Command bg_1" rows above a card that was already displaying the same status live.
+    ///
+    /// Folded in the VIEW, not at the source: the events stay in `timelineEvents`, so episodic
+    /// history, resume reconstruction and export are unaffected. This is presentation — the polls
+    /// really happened and the record should still say so.
+    ///
+    /// ⚠️ Only when a card EXISTS for that task. A task adopted with no live stream has no card,
+    /// and hiding its polls too would leave the user with nothing at all.
+    static func foldBackgroundTaskPolls(_ events: [TimelineEvent]) -> [TimelineEvent] {
+        let carded: Set<String> = Set(events.compactMap {
+            if case .backgroundTask(let data) = $0 { return data.taskID }
+            return nil
+        })
+        guard !carded.isEmpty else { return events }
+
+        return events.filter { event in
+            guard case .toolExecution(let data) = event,
+                  backgroundPollTools.contains(data.name) else { return true }
+            // A `command_output` with no `task_id` is the list-everything form; with a card on
+            // screen it is the same noise, so it folds too.
+            guard let id = taskID(inParams: data.params) else { return false }
+            return !carded.contains(id)
+        }
+    }
+
+    /// ⚠️ PARSED, not substring-matched. `params.contains("bg_1")` would also fire on a
+    /// `batch_command` whose COMMAND text happened to mention a task id, folding a row that is
+    /// not a poll at all — the shape-matching class of defect this codebase has already paid for
+    /// four times.
+    private static func taskID(inParams params: String) -> String? {
+        guard let data = params.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return object["task_id"] as? String
+    }
+
     /// Builds grouped timeline nodes from raw events.
     /// Homogeneous / heterogeneous tool runs of size 2+ collapse into `.actionGroup`.
     /// Single tools render as `.action` (no collapsible header).
@@ -681,6 +730,9 @@ struct AgentTimelineView: View {
         // long / multiline and fall outside this rule.
         events = collapseShortStatusRuns(events)
 
+        // Pass 4: fold away the polls on a background task that already has a card.
+        events = foldBackgroundTaskPolls(events)
+
         var nodes: [TimelineNode] = []
         var pendingActions: [TimelineEvent] = []
 
@@ -718,6 +770,13 @@ struct AgentTimelineView: View {
 
             case .mediaGeneration:
                 pendingActions.append(event)
+
+            case .backgroundTask(let data):
+                // Never grouped. A grouped row collapses to a one-line summary, and this is the
+                // only place a running task is visible at all — the tool call that started it
+                // returned long ago.
+                flushActions()
+                nodes.append(.backgroundCard(data))
 
             case .unknown(let id, let caseName, _):
                 flushActions()
@@ -802,6 +861,7 @@ enum TimelineNode: Identifiable {
     case capabilityMilestone(id: UUID, kind: CapabilityMilestoneKind, detail: String)
     case warning(id: UUID, category: WarningCategory, text: String)
     /// Structured Plan & Execute card (step checklist with nested sub-timelines).
+    case backgroundCard(BackgroundTaskData)
     case planCard(PlanRunData)
     /// Structured Reflexion card (attempt rows with nested sub-timelines).
     case reflectionCard(ReflectionRunData)
@@ -820,6 +880,7 @@ enum TimelineNode: Identifiable {
         case .actionGroup(let a):              return a.first?.id ?? UUID()
         case .capabilityMilestone(let id, _, _): return id
         case .warning(let id, _, _):           return id
+        case .backgroundCard(let data):        return data.id
         case .planCard(let data):              return data.id
         case .reflectionCard(let data):        return data.id
         case .unrecognized(let id, _):         return id
@@ -882,6 +943,9 @@ struct TimelineNodeGroupView: View {
         case .unrecognized(_, let caseName):
             UnrecognizedEventRow(caseName: caseName)
 
+        case .backgroundCard(let data):
+            BackgroundTaskCard(data: data, conversationID: conversationID)
+
         case .planCard(let data):
             PlanProgressCard(data: data, isStreaming: isStreaming, conversationID: conversationID)
 
@@ -891,8 +955,8 @@ struct TimelineNodeGroupView: View {
         case .action(let event):
             ActionDetailView(event: event,
                              originConversationID: conversationID,
-                             expandedRowIDs: $expandedRowIDs)
-                .padding(.horizontal, 4)
+                             expandedRowIDs: $expandedRowIDs,
+                             isStandalone: true)
 
         case .actionGroup(let actions):
             VStack(alignment: .leading, spacing: 2) {
@@ -906,8 +970,8 @@ struct TimelineNodeGroupView: View {
                         }
                     }
                 } label: {
-                    HStack(spacing: 8) {
-                        // Glowing anchor dot
+                    HStack(spacing: 6) {
+                        // Glowing anchor dot centered in 14-pt icon column
                         Circle()
                             .fill(theme.accentColor)
                             .frame(width: 6, height: 6)
@@ -918,7 +982,7 @@ struct TimelineNodeGroupView: View {
                                     .scaleEffect(isExpanded ? 1.4 : 1.0)
                                     .opacity(isExpanded ? 0 : 1)
                             )
-                            .padding(.leading, 8)
+                            .frame(width: 14, alignment: .center)
 
                         Text(generateGroupTitle(actions))
                             .font(theme.fontSubheadline.weight(.medium))
@@ -930,8 +994,9 @@ struct TimelineNodeGroupView: View {
                             .font(.system(size: 10, weight: .bold))
                             .foregroundColor(theme.tertiaryText)
                             .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                            .padding(.trailing, 8)
+                            .padding(.trailing, 2)
                     }
+                    .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -951,7 +1016,8 @@ struct TimelineNodeGroupView: View {
                         ForEach(actions) { action in
                             ActionDetailView(event: action,
                                              originConversationID: conversationID,
-                                             expandedRowIDs: $expandedRowIDs)
+                                             expandedRowIDs: $expandedRowIDs,
+                                             isStandalone: false)
                         }
                     }
                     .padding(.leading, 28)
@@ -966,7 +1032,7 @@ struct TimelineNodeGroupView: View {
                                 )
                             )
                             .frame(width: 2)
-                            .padding(.leading, 10) // Centered with the 6pt dot which sits at leading 8
+                            .padding(.leading, 16) // Centered with the anchor dot at 17 (10 + 7)
                     }
                     .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
                 }
@@ -1258,6 +1324,9 @@ struct ActionDetailView: View {
     /// Disclosure lives in `AgentTimelineView`, keyed by `data.id` — per-row `@State` was
     /// being reset out from under the user by view-identity churn.
     @Binding var expandedRowIDs: Set<UUID>
+    /// When true, the row is rendered standalone at the top level of the timeline
+    /// with card styling matching interim reasoning thoughts.
+    var isStandalone: Bool = false
     @State private var isHovering: Bool = false
     /// "+N −M" for successful writes with a pre-write snapshot; computed off-main once.
     @State private var writeDiffStat: (added: Int, deleted: Int)? = nil
@@ -1648,15 +1717,116 @@ struct ActionDetailView: View {
             // pass: once by `actionRowButton` for the `isDisclosable` predicate and again here
             // for the disclosed content. A `LazyVStack` re-runs this on every scroll-in.
             let detail = rowDetail(data)
-            VStack(alignment: .leading, spacing: 3) {
+            let isDisclosable = detail != nil && !data.isExecuting
+            let isExpanded = isOutputExpanded(data)
+
+            VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
-                    actionRowButton(data: data, detail: detail)
+                    Button {
+                        guard isDisclosable else { return }
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            if expandedRowIDs.contains(data.id) {
+                                expandedRowIDs.remove(data.id)
+                            } else {
+                                expandedRowIDs.insert(data.id)
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            leadingStatusIcon(data: data)
+
+                            Text(ToolArgFormatter.verb(tool: data.name))
+                                .font(theme.fontSubheadline)
+                                .foregroundColor(theme.secondaryText)
+
+                            // Cached per key by `resolveChip`; parsed inline only on a miss (see
+                            // `primaryArgLabel`). A direct `primaryLabel` call here re-parsed the
+                            // full params — the whole file for a write — on every body pass (CF-45).
+                            let primaryArg = Self.primaryArgLabel(
+                                cached: primaryArgCache,
+                                for: Self.chipKey(for: data),
+                                tool: data.name,
+                                params: data.params
+                            )
+                            if !primaryArg.isEmpty {
+                                Text(primaryArg)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundColor(theme.primaryText.opacity(0.9))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+
+                            if let dur = data.durationMs, dur >= 100 {
+                                Text(DurationFormat.milliseconds(dur))
+                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                    .foregroundColor(theme.tertiaryText)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(theme.surfaceOverlay.opacity(0.5)))
+                            }
+
+                            Spacer(minLength: 4)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    // `.allowsHitTesting` rather than `.disabled`: on macOS a `.plain` button
+                    // renders its label dimmed when disabled, which would grey out the verb,
+                    // path and spinner of every row for as long as it runs.
+                    .allowsHitTesting(isDisclosable)
+                    // SwiftUI has no "expanded" trait for a hand-rolled disclosure, and the
+                    // label text is identical in both states — without this VoiceOver cannot
+                    // tell them apart at all.
+                    .accessibilityValue(
+                        isDisclosable
+                            ? Text(isExpanded ? String(localized: "Expanded") : String(localized: "Collapsed"))
+                            : Text("")
+                    )
+                    .accessibilityHint(
+                        isDisclosable
+                            ? Text(isExpanded
+                                   ? String(localized: "Hides this step's details")
+                                   : String(localized: "Shows this step's details"))
+                            : Text("")
+                    )
+
+                    trailingStatusBadge(data: data)
+
                     fileViewerChip(data: data)
+
+                    if isDisclosable {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                if expandedRowIDs.contains(data.id) {
+                                    expandedRowIDs.remove(data.id)
+                                } else {
+                                    expandedRowIDs.insert(data.id)
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(theme.tertiaryText)
+                                .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                                .padding(2)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHidden(true)
+                    }
+                }
+                .padding(.horizontal, isStandalone ? 0 : 6)
+                .padding(.vertical, isStandalone ? 0 : 4)
+                .background {
+                    if !isStandalone && isHovering && isDisclosable {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(theme.surfaceOverlay.opacity(0.7))
+                    }
                 }
 
                 // Disclosed by the row's own chevron, exactly like a read's content —
                 // collapsed by default, one tap to reveal.
-                if isOutputExpanded(data), let detail {
+                if isExpanded, let detail {
                     switch detail {
                     case .diff(let effect, let note):
                         inlineDiff(effect)
@@ -1697,6 +1867,25 @@ struct ActionDetailView: View {
                     .transition(.opacity)
                 }
             }
+            .padding(.horizontal, isStandalone ? 10 : 0)
+            .padding(.vertical, isStandalone ? 6 : 0)
+            .background {
+                if isStandalone {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(theme.surfaceOverlay.opacity(isHovering && isDisclosable ? 0.6 : 0.4))
+                }
+            }
+            .overlay {
+                if isStandalone {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
+                }
+            }
+            .onHover { hovering in
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                    isHovering = hovering
+                }
+            }
             // Keyed on the completion state too: a row resolves to no chip while the tool
             // is still executing, and must re-resolve once it finishes — which is also when
             // `params` is rewritten, so the cached label re-resolves with it.
@@ -1722,169 +1911,84 @@ struct ActionDetailView: View {
                             .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
                     )
             )
-            .padding(.leading, 6)
+            .padding(.leading, isStandalone ? 0 : 6)
             .transition(.opacity)
     }
 
-    /// - Parameter detail: resolved ONCE by `body` — see the note there. Do not re-resolve.
-    private func actionRowButton(data: ToolExecutionData, detail: TimelineRowDetail?) -> some View {
-                // ONE predicate for the chevron, the hit target and the hover affordance.
-                // A row is not disclosable while it executes (no output yet, no effect yet),
-                // and letting it highlight + scale under the pointer advertised a tap that
-                // silently did nothing for the whole duration of every tool call.
-                let isDisclosable = detail != nil && !data.isExecuting
-                let isExpanded = isOutputExpanded(data)
-                return Button {
-                    guard isDisclosable else { return }
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        if expandedRowIDs.contains(data.id) {
-                            expandedRowIDs.remove(data.id)
-                        } else {
-                            expandedRowIDs.insert(data.id)
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        Text(ToolArgFormatter.verb(tool: data.name))
-                            .font(theme.fontSubheadline)
-                            .foregroundColor(theme.secondaryText)
-
-                        // Cached per key by `resolveChip`; parsed inline only on a miss (see
-                        // `primaryArgLabel`). A direct `primaryLabel` call here re-parsed the
-                        // full params — the whole file for a write — on every body pass (CF-45).
-                        let primaryArg = Self.primaryArgLabel(
-                            cached: primaryArgCache,
-                            for: Self.chipKey(for: data),
-                            tool: data.name,
-                            params: data.params
-                        )
-                        if !primaryArg.isEmpty {
-                            Text(primaryArg)
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundColor(theme.primaryText.opacity(0.9))
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-
-                        if let dur = data.durationMs, dur >= 100 {
-                            Text(DurationFormat.milliseconds(dur))
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                .foregroundColor(theme.tertiaryText)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(theme.surfaceOverlay.opacity(0.5)))
-                        }
-
-                        Spacer(minLength: 4)
-
-                        statusIcon(data: data)
-
-                        if isDisclosable {
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundColor(theme.tertiaryText)
-                                .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                                // Decorative: its rotation is the sighted cue for the state
-                                // that `.accessibilityValue` announces below.
-                                .accessibilityHidden(true)
-                        }
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(isHovering && isDisclosable ? theme.surfaceOverlay.opacity(0.7) : Color.clear)
-                    )
-                    .contentShape(Rectangle())
-                    .scaleEffect(isHovering && isDisclosable ? 1.01 : 1.0)
+    @ViewBuilder
+    private func leadingStatusIcon(data: ToolExecutionData) -> some View {
+        Group {
+            if data.isExecuting {
+                ProgressView()
+                    .controlSize(.mini)
+            } else if let success = data.isSuccess {
+                if data.name == "ask_user" {
+                    Image(systemName: success ? "bubble.left.fill" : "arrow.uturn.left")
+                        .font(.system(size: 10))
+                        .foregroundColor(success ? theme.streamingIndicator.opacity(0.85) : theme.secondaryText.opacity(0.5))
+                } else if success {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(theme.successColor.opacity(0.85))
+                } else {
+                    Image(systemName: data.failureCategory?.icon ?? "exclamationmark.triangle.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(theme.errorColor)
                 }
-                .buttonStyle(.plain)
-                // `.allowsHitTesting` rather than `.disabled`: on macOS a `.plain` button
-                // renders its label dimmed when disabled, which would grey out the verb,
-                // path and spinner of every row for as long as it runs.
-                .allowsHitTesting(isDisclosable)
-                // SwiftUI has no "expanded" trait for a hand-rolled disclosure, and the
-                // label text is identical in both states — without this VoiceOver cannot
-                // tell them apart at all.
-                .accessibilityValue(
-                    isDisclosable
-                        ? Text(isExpanded ? String(localized: "Expanded") : String(localized: "Collapsed"))
-                        : Text("")
-                )
-                .accessibilityHint(
-                    isDisclosable
-                        ? Text(isExpanded
-                               ? String(localized: "Hides this step's details")
-                               : String(localized: "Shows this step's details"))
-                        : Text("")
-                )
-                .onHover { hovering in
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                        isHovering = hovering
-                    }
-                }
+            } else {
+                // ⚠️ [tc-10] SETTLED, but its outcome was never reported. `isExecuting == false` with
+                // `isSuccess == nil` used to fall off the end of this `if`/`else if` and render
+                // NOTHING, so a row a user Stop had closed looked the same as one still waiting for a
+                // badge — no spinner, no glyph, nothing to say the tool's fate is unknown.
+                //
+                // Reachable from EXACTLY three writers, all deliberate terminal closes in
+                // `DanglingToolRowCloser`: `closeReporting` (cancel), `closeForUserSkipReporting`
+                // (the user skipped the node) and `markInterruptedByProcessDeath`. Every normal
+                // completion pairs `isSuccess` with `isExecuting = false` — `ActiveStreamManager`
+                // :1261/:1264 and `CapabilityCardRouter` :252/:255 — and `ToolOutput.isSuccess` is a
+                // non-optional `Bool`, so a finished tool can never land here.
+                //
+                // ⚠️ `slash.circle`, matching `CapabilityStatusIcon`'s cancelled glyph — NOT
+                // `ToolFailureCategory.cancelled.icon`, which is `xmark.circle` and reads as a
+                // failure. A user's own Stop is not a failure; `summarize` still counts nothing here.
+                Image(systemName: data.failureCategory == .cancelled ? "slash.circle" : "circle.dotted")
+                    .font(.system(size: 10))
+                    .foregroundColor(theme.tertiaryText)
+            }
+        }
+        .frame(width: 14, alignment: .center)
+        .accessibilityLabel(statusAccessibilityLabel(data: data))
+    }
+
+    private func statusAccessibilityLabel(data: ToolExecutionData) -> String {
+        if data.isExecuting {
+            return String(localized: "Running")
+        } else if let success = data.isSuccess {
+            if success {
+                return String(localized: "Succeeded")
+            } else {
+                return String(localized: "Failed: \(data.failureCategory?.displayName ?? "Error")")
+            }
+        } else {
+            return data.failureCategory == .cancelled
+                ? String(localized: "Cancelled before it finished")
+                : String(localized: "Outcome unknown — the run ended first")
+        }
     }
 
     @ViewBuilder
-    private func statusIcon(data: ToolExecutionData) -> some View {
-        if data.isExecuting {
-            ProgressView().controlSize(.small).scaleEffect(0.6)
-        } else if let success = data.isSuccess {
-            if data.name == "ask_user" {
-                Image(systemName: success ? "bubble.left.fill" : "arrow.uturn.left")
-                    .font(.system(size: 10))
-                    .foregroundColor(success ? theme.streamingIndicator.opacity(0.85) : theme.secondaryText.opacity(0.5))
-                    .padding(4)
-                    .background(Circle().fill(success ? theme.streamingIndicator.opacity(0.12) : theme.surfaceOverlay))
-            } else if success {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(theme.successColor.opacity(0.85))
-                    .padding(4)
-                    .background(Circle().fill(theme.successColor.opacity(0.12)))
-            } else {
-                HStack(spacing: 3) {
-                    Image(systemName: data.failureCategory?.icon ?? "exclamationmark.triangle.fill")
-                        .font(.system(size: 10))
-                        .foregroundColor(theme.errorColor)
-                    if let cat = data.failureCategory {
-                        Text(cat.displayName.uppercased())
-                            .font(.system(size: 8, weight: .bold, design: .monospaced))
-                            .foregroundColor(theme.errorColor.opacity(0.85))
-                            .tracking(0.3)
-                    }
-                }
+    private func trailingStatusBadge(data: ToolExecutionData) -> some View {
+        if !data.isExecuting, data.name != "ask_user", let success = data.isSuccess, !success, let cat = data.failureCategory {
+            Text(cat.displayName.uppercased())
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .foregroundColor(theme.errorColor.opacity(0.85))
+                .tracking(0.3)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 3)
                 .background(
                     Capsule()
                         .fill(theme.errorColor.opacity(0.12))
                 )
-            }
-        } else {
-            // ⚠️ [tc-10] SETTLED, but its outcome was never reported. `isExecuting == false` with
-            // `isSuccess == nil` used to fall off the end of this `if`/`else if` and render
-            // NOTHING, so a row a user Stop had closed looked the same as one still waiting for a
-            // badge — no spinner, no glyph, nothing to say the tool's fate is unknown.
-            //
-            // Reachable from EXACTLY three writers, all deliberate terminal closes in
-            // `DanglingToolRowCloser`: `closeReporting` (cancel), `closeForUserSkipReporting`
-            // (the user skipped the node) and `markInterruptedByProcessDeath`. Every normal
-            // completion pairs `isSuccess` with `isExecuting = false` — `ActiveStreamManager`
-            // :1261/:1264 and `CapabilityCardRouter` :252/:255 — and `ToolOutput.isSuccess` is a
-            // non-optional `Bool`, so a finished tool can never land here.
-            //
-            // ⚠️ `slash.circle`, matching `CapabilityStatusIcon`'s cancelled glyph — NOT
-            // `ToolFailureCategory.cancelled.icon`, which is `xmark.circle` and reads as a
-            // failure. A user's own Stop is not a failure; `summarize` still counts nothing here.
-            Image(systemName: data.failureCategory == .cancelled ? "slash.circle" : "circle.dotted")
-                .font(.system(size: 10))
-                .foregroundColor(theme.tertiaryText)
-                .padding(4)
-                .background(Circle().fill(theme.surfaceOverlay))
-                .accessibilityLabel(data.failureCategory == .cancelled
-                                    ? String(localized: "Cancelled before it finished")
-                                    : String(localized: "Outcome unknown — the run ended first"))
         }
     }
 
@@ -1913,7 +2017,7 @@ struct CapabilityMilestoneRow: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(
                     LinearGradient(
                         colors: [milestoneColor.opacity(0.12), milestoneColor.opacity(0.04)],
@@ -1923,7 +2027,7 @@ struct CapabilityMilestoneRow: View {
                 )
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(milestoneColor.opacity(0.2), lineWidth: 0.5)
         )
     }
@@ -1945,6 +2049,7 @@ struct WarningRow: View {
             Image(systemName: category.icon)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.orange)
+                .frame(width: 14, alignment: .center)
 
             Text(category.displayName.uppercased())
                 .font(.system(size: 9, weight: .bold, design: .monospaced))
@@ -1961,14 +2066,14 @@ struct WarningRow: View {
 
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
         .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(Color.orange.opacity(0.08))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(Color.orange.opacity(0.2), lineWidth: 0.5)
         )
     }
@@ -2040,11 +2145,11 @@ struct InterimReasoningRow: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(theme.surfaceOverlay.opacity(0.4))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
         )
     }
@@ -2124,10 +2229,11 @@ struct StreamingTimelineFooter: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             Image(systemName: "sparkle")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(theme.streamingIndicator.opacity(0.95))
+                .frame(width: 14, alignment: .center)
                 .symbolEffect(.pulse, options: .repeating, isActive: context.isStreaming && !reduceMotion)
 
             // TimelineView re-renders once per second while visible and stops
@@ -2139,7 +2245,7 @@ struct StreamingTimelineFooter: View {
                     .monospacedDigit()
             }
         }
-        .padding(.horizontal, 4)
+        .padding(.horizontal, 10)
         .padding(.top, 2)
         // `.ignore`, and a label with no elapsed time in it. This used to be
         // `"Streaming, \(elapsed(to: Date()))"` — rebuilt on every body pass, so the label
@@ -2243,7 +2349,7 @@ enum ToolArgFormatter {
             if let q = firstString(dict, keys: ["query", "q"]) {
                 return truncate(q, 50)
             }
-        case "run_shell", "execute_shell", "bash", "shell", "batch_command":
+        case "run_shell", "execute_shell", "bash", "shell", "batch_command", "run_command", "start_background_task":
             if let cmd = firstString(dict, keys: ["command", "cmd", "script"]) {
                 return truncate(cmd, 50)
             }
@@ -2475,7 +2581,11 @@ enum ToolArgFormatter {
         "run_shell":                   "Ran",
         "bash":                        "Ran",
         "shell":                       "Ran",
+        // ⚠️ `batch_command` STAYS — a timeline row PERSISTED before the split still carries that
+        // toolName, and dropping it would relabel every historical row to the generic fallback.
         "batch_command":               "Ran",
+        "run_command":                 "Ran",
+        "start_background_task":       "Started",
         "grep":                        "Searched",
         "grep_search":                 "Searched",
         "ripgrep":                     "Searched",
@@ -2517,6 +2627,8 @@ enum ToolArgFormatter {
         "bash":             ("command", "commands"),
         "shell":            ("command", "commands"),
         "batch_command":    ("command", "commands"),
+        "run_command":      ("command", "commands"),
+        "start_background_task": ("task", "tasks"),
         "grep":             ("search", "searches"),
         "grep_search":      ("search", "searches"),
         "ripgrep":          ("search", "searches"),
@@ -2635,13 +2747,14 @@ struct UnrecognizedEventRow: View {
             Image(systemName: "questionmark.square.dashed")
                 .font(.caption)
                 .foregroundStyle(theme.secondaryText)
+                .frame(width: 14, alignment: .center)
             Text("This version can't display this step (\(caseName)). It's kept and will appear in a newer version.")
                 .font(.caption)
                 .foregroundStyle(theme.secondaryText)
                 .textSelection(.enabled)
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 3)
-        .padding(.horizontal, 4)
+        .padding(.vertical, 4)
+        .padding(.horizontal, 10)
     }
 }

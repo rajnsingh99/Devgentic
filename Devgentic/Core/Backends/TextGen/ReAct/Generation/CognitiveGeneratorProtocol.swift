@@ -407,13 +407,27 @@ enum PromptBuilder {
         // Home is rendered as an absolute path (never tilde): small models copy
         // paths verbatim from context, and a literal "/Users/<name>" anchor is what
         // stops them emitting training-data placeholders like "/path/to/X".
+        // ⚠️⚠️ The last line is CONDITIONAL, and that is the point. Advertising the home
+        // directory to a CONFINED run is an instruction to leave the project — it sat a few
+        // hundred characters below a system prompt calling the project a boundary, and when that
+        // prompt went missing (2026-09-20) it was the only path guidance the model had, so it
+        // walked `/Users/<name>`. A confined run is pointed at its project and is told nothing
+        // about the home directory; an unconfined one keeps the original anchor, which exists
+        // because small models emit "/path/to/X" placeholders without a real absolute path.
+        let pathGuidance: String
+        if let root = context.environmentFacts.workspaceRoot, !root.isEmpty {
+            pathGuidance = "- Paths: use absolute paths under the project root \(root); a relative path resolves against it"
+        } else {
+            pathGuidance = "- Paths: use absolute paths; user folders are under \(context.environmentFacts.homeDirectory) (Desktop, Documents, Downloads)"
+        }
+
         let envContent = """
         - OS: \(context.environmentFacts.osVersion)
         - Shell: \(context.environmentFacts.shellType)
         - User: \(context.environmentFacts.userName)
         - Home: \(context.environmentFacts.homeDirectory)
         - Date: \(context.environmentFacts.currentDate)
-        - Paths: use absolute paths; user folders are under \(context.environmentFacts.homeDirectory) (Desktop, Documents, Downloads)
+        \(pathGuidance)
         """
         systemContent += "\n\n" + wrapping.section("environment", content: envContent)
 

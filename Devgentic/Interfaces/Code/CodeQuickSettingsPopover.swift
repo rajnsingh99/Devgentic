@@ -28,9 +28,24 @@ struct CodeQuickSettingsPopover: View {
     /// settings could evict a different project's. Viewing is not changing.
     @State private var hasHydrated = false
 
+    /// ⚠️⚠️ F9. `draft` changes on every stepper CLICK, and each change used to persist
+    /// immediately: walking maxIterations 3→15 produced nine UserDefaults writes and nine
+    /// profile saves, each one bumping `lastSelected` and reordering "recently used" — for a
+    /// profile the user was configuring, not selecting.
+    ///
+    /// Every one of those writes is a genuine value change, so the store's no-op guard cannot
+    /// help; the churn has to stop at the source. The trailing edge is what the user meant —
+    /// the number they stopped on, not each one they passed through.
+    @State private var persistTask: Task<Void, Never>?
+
+    /// Long enough to coalesce a burst of clicks, short enough that closing the popover by
+    /// clicking away almost always lands after it. `onDisappear` flushes regardless, so this
+    /// value trades write count against nothing the user can perceive.
+    private static let persistDebounce = Duration.milliseconds(400)
+
     /// Logical ordering for confirmable tools
     private var confirmableTools: [Tool] {
-        let order = ["edit_code_single", "edit_code_batch", "create_new_file", "overwrite_file", "batch_command"]
+        let order = ["edit_code_single", "edit_code_batch", "create_new_file", "overwrite_file", "run_command", "start_background_task"]
         return CodeToolPreset.defaultTools
             .filter { $0.requiresConfirmation }
             .sorted { a, b in
@@ -76,7 +91,22 @@ struct CodeQuickSettingsPopover: View {
         }
         .onChange(of: draft) { _, newValue in
             guard hasHydrated else { return }
-            codeSessionManager.updateQuickSettings(newValue)
+            persistTask?.cancel()
+            persistTask = Task { @MainActor in
+                try? await Task.sleep(for: Self.persistDebounce)
+                guard !Task.isCancelled else { return }
+                codeSessionManager.updateQuickSettings(newValue)
+            }
+        }
+        .onDisappear {
+            // ⚠️ MANDATORY, not tidiness. A debounce that loses the user's last change is worse
+            // than the churn it replaces: clicking + then immediately dismissing would silently
+            // discard the setting. Cancel the pending write and commit the final value directly.
+            // If it already landed, the store's no-op guard makes this free.
+            persistTask?.cancel()
+            persistTask = nil
+            guard hasHydrated else { return }
+            codeSessionManager.updateQuickSettings(draft)
         }
     }
 
@@ -311,7 +341,7 @@ struct CodeQuickSettingsPopover: View {
         Menu {
             Button(action: { setTimeout(nil) }) {
                 HStack {
-                    Text("5 minutes (Default)")
+                    Text("30 minutes (Default)")
                     if draft.executionTimeout == nil { Image(systemName: "checkmark") }
                 }
             }
@@ -506,7 +536,7 @@ struct CodeQuickSettingsPopover: View {
 
     private func toolIcon(for name: String) -> String {
         switch name {
-        case "batch_command":
+        case "run_command", "start_background_task":
             return "terminal"
         case "create_new_file":
             return "doc.badge.plus"
@@ -523,7 +553,7 @@ struct CodeQuickSettingsPopover: View {
 
     private func toolDomain(for name: String) -> String {
         switch name {
-        case "batch_command":
+        case "run_command", "start_background_task":
             return "SHELL"
         case "create_new_file", "overwrite_file":
             return "FILE"
@@ -544,8 +574,10 @@ struct CodeQuickSettingsPopover: View {
             return "Creates a brand-new file. Fails safely if the file already exists."
         case "overwrite_file":
             return "Replaces an existing file's contents entirely with new content."
-        case "batch_command":
-            return "Executes shell commands with timeout guarantees and scoping."
+        case "run_command":
+            return "Runs a shell command and waits for its output."
+        case "start_background_task":
+            return "Starts a shell command and returns immediately with a task id."
         default:
             return original
         }

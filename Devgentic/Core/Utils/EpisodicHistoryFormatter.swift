@@ -145,6 +145,20 @@ struct EpisodicHistoryFormatter {
         /// retrieve with. The counts and path still render: "what did you change?" stays
         /// answerable, only "undo it" does not.
         case withheld
+        /// Measured, but the FILE HAS CHANGED since the write — so the stored diff no longer
+        /// describes it.
+        ///
+        /// ⚠️⚠️ Distinct from every case above because the reason is about the WORLD, not this
+        /// prompt's budget or capabilities. `on_demand` promises "call get_conversation_history(N)
+        /// and you will get this change"; once the file moved, that promise is false. Field-observed
+        /// 2026-09-20: a file was restored underneath a conversation and the record kept advertising
+        /// a retrievable diff, so the model answered "successfully completed in a previous turn" and
+        /// made ZERO tool calls.
+        ///
+        /// ⚠️ The counts and path still render. "What did you change?" stays answerable — only the
+        /// claim that the stored body still matches the file is withdrawn. Same shape as `withheld`,
+        /// different cause.
+        case stale
 
         var attribute: String {
             switch self {
@@ -152,8 +166,33 @@ struct EpisodicHistoryFormatter {
             case .elided:   return " diff=\"elided\""
             case .onDemand: return " diff=\"on_demand\""
             case .withheld: return " diff=\"withheld\""
+            case .stale:    return " diff=\"stale\""
             }
         }
+    }
+
+    /// Decides whether an effect's file still matches what the write left behind.
+    ///
+    /// ⚠️⚠️ INJECTED, and it must stay injected. The comparison is a `stat`, and this formatter is
+    /// called by `ContextWindowGauge` to SIZE the prompt — on every recompute, including while the
+    /// user types. Putting the syscall inside `renderEffect` would put the filesystem on that path.
+    /// The request builder supplies `.live`; the gauge supplies `.unknown` and does no I/O.
+    ///
+    /// ⚠️ `.unknown` is also the honest answer for an effect with no fingerprint (recorded before
+    /// the field existed), which is why "unknown" renders exactly as it did before this case
+    /// existed rather than guessing either way.
+    struct EffectStalenessCheck: Sendable {
+        let isStale: @Sendable (ActionEffect) -> Bool
+
+        /// Asks the filesystem. For the request path only.
+        static let live = EffectStalenessCheck { effect in
+            guard let fingerprint = effect.fingerprint else { return false }
+            return fingerprint.differsFromDisk(at: effect.path)
+        }
+
+        /// Never reports staleness and touches no files. For sizing, and for any caller that
+        /// must not do I/O.
+        static let unknown = EffectStalenessCheck { _ in false }
     }
 
     /// Truncates a string to a maximum length, appending "..." if truncated.
@@ -518,7 +557,8 @@ struct EpisodicHistoryFormatter {
     /// A turn rendered in FULL: outcome, params, errors, and what each action changed.
     private static func renderInlineTurn(_ turn: TurnPair, recency: String, includeImageNames: Bool,
                                          elidedActionIDs: Set<UUID> = [],
-                                         toolsAvailable: Bool = true) -> String {
+                                         toolsAvailable: Bool = true,
+                                         staleness: EffectStalenessCheck = .unknown) -> String {
         var xml = turnOpenTag(turn, recency: recency)
 
         // Image label — names the images the user attached on this turn so the model
@@ -576,8 +616,14 @@ struct EpisodicHistoryFormatter {
             // the whole element would read as "nothing happened", which is the failure
             // `<effect>` was introduced to fix.
             if let effect = action.effect {
+                // ⚠️ Precedence. `withheld` first: with no tools there is nothing to retrieve
+                // WITH, which is true regardless of the file. `stale` next, because once the file
+                // has moved the stored body no longer describes it — rendering it inline would
+                // hand the model a revert instrument for a state that no longer exists, which is
+                // the same mistake as promising a retrieval. Only then does the budget speak.
                 let availability: EffectDiff
                 if !toolsAvailable { availability = .withheld }
+                else if staleness.isStale(effect) { availability = .stale }
                 else if elidedActionIDs.contains(action.id) { availability = .elided }
                 else { availability = .inline }
                 xml += renderEffect(effect, diff: availability)
@@ -607,7 +653,8 @@ struct EpisodicHistoryFormatter {
     /// default because a silent one is exactly how both call sites came to make that promise
     /// to profiles that have no tools to keep it with.
     private static func renderPointerTurn(_ turn: TurnPair, index: Int, recency: String,
-                                          toolsAvailable: Bool) -> String {
+                                          toolsAvailable: Bool,
+                                          staleness: EffectStalenessCheck) -> String {
         var xml = turnOpenTag(turn, recency: recency)
         // The retrieval instruction is only true when there is something to retrieve WITH.
         // Marking the effects `withheld` while this line still said "Call
@@ -638,7 +685,13 @@ struct EpisodicHistoryFormatter {
             // exception. Counts only, ~90 chars: enough to know something changed and that
             // it is worth asking about. The body comes from `get_conversation_history(N)`.
             if let effect = action.effect {
-                children += renderEffect(effect, diff: toolsAvailable ? .onDemand : .withheld)
+                // `on_demand` is a PROMISE that get_conversation_history(N) returns this change.
+                // A file that has moved since makes it false — see `EffectDiff.stale`.
+                let availability: EffectDiff
+                if !toolsAvailable { availability = .withheld }
+                else if staleness.isStale(effect) { availability = .stale }
+                else { availability = .onDemand }
+                children += renderEffect(effect, diff: availability)
             }
 
             xml += children.isEmpty ? open + "/>\n" : open + ">\n" + children + "      </action>\n"
@@ -835,7 +888,8 @@ struct EpisodicHistoryFormatter {
                       includeImageNames: Bool = false,
                       effectBudget: Int? = nil,
                       correlation: String? = nil,
-                      toolsAvailable: Bool = true) -> String {
+                      toolsAvailable: Bool = true,
+                      staleness: EffectStalenessCheck = .unknown) -> String {
         // EVERY branch forwards `toolsAvailable`. Two of them did not, and because the
         // builders below it defaulted the flag to true, a tool-less profile silently got the
         // agent rendering: no `<tool_availability>` preface, full diff bodies inline, and
@@ -848,23 +902,23 @@ struct EpisodicHistoryFormatter {
                                             includeImageNames: includeImageNames,
                                             effectBudget: effectBudget, correlation: correlation,
                                             strategyLabel: strategy.rawValue,
-                                            toolsAvailable: toolsAvailable)
+                                            toolsAvailable: toolsAvailable, staleness: staleness)
         case .fullHistory:
             return buildRecentHistoryString(from: history, limit: history.count,
                                             includeImageNames: includeImageNames,
                                             effectBudget: effectBudget, correlation: correlation,
                                             strategyLabel: strategy.rawValue,
-                                            toolsAvailable: toolsAvailable)
+                                            toolsAvailable: toolsAvailable, staleness: staleness)
         case .pointer:
             return buildPointerHistoryString(from: history, correlation: correlation,
                                              strategyLabel: strategy.rawValue,
-                                             toolsAvailable: toolsAvailable)
+                                             toolsAvailable: toolsAvailable, staleness: staleness)
         case .hybrid:
             return buildHybridHistoryString(from: history, inlineCount: hybridInlineCount,
                                             includeImageNames: includeImageNames,
                                             effectBudget: effectBudget, correlation: correlation,
                                             strategyLabel: strategy.rawValue,
-                                            toolsAvailable: toolsAvailable)
+                                            toolsAvailable: toolsAvailable, staleness: staleness)
         }
     }
 
@@ -887,7 +941,8 @@ struct EpisodicHistoryFormatter {
     static func buildRecentHistoryString(from history: [ChatMessage], limit: Int = 4, includeImageNames: Bool = false,
                                          effectBudget: Int? = nil, correlation: String? = nil,
                                          strategyLabel: String = "recent",
-                                         toolsAvailable: Bool = true) -> String {
+                                         toolsAvailable: Bool = true,
+                                         staleness: EffectStalenessCheck = .unknown) -> String {
         let (turns, summary, compacted) = turnContext(from: history)
         let recentTurns = turns.suffix(limit)
         // No bodies are rendered without tools, so there is nothing for the budget to spend.
@@ -902,7 +957,8 @@ struct EpisodicHistoryFormatter {
                 recency: recencyLabel(turnsAgo: recentTurns.count - index),
                 includeImageNames: includeImageNames,
                 elidedActionIDs: budgeted.elidedActionIDs,
-                toolsAvailable: toolsAvailable
+                toolsAvailable: toolsAvailable,
+                staleness: staleness
             )
         }
 
@@ -925,13 +981,14 @@ struct EpisodicHistoryFormatter {
     /// compacted away. This used to discard the summary outright.
     static func buildPointerHistoryString(from history: [ChatMessage], correlation: String? = nil,
                                           strategyLabel: String = "pointer",
-                                          toolsAvailable: Bool = true) -> String {
+                                          toolsAvailable: Bool = true,
+                                          staleness: EffectStalenessCheck = .unknown) -> String {
         let (turns, summary, compacted) = turnContext(from: history)
 
         var body = ""
         for (index, turn) in turns.enumerated() {
             body += renderPointerTurn(turn, index: index, recency: recencyLabel(turnsAgo: turns.count - index),
-                                      toolsAvailable: toolsAvailable)
+                                      toolsAvailable: toolsAvailable, staleness: staleness)
         }
 
         let xml = envelope(turnsXML: body, checkpointSummary: summary, compactedTurnCount: compacted,
@@ -964,7 +1021,8 @@ struct EpisodicHistoryFormatter {
     static func buildHybridHistoryString(from history: [ChatMessage], inlineCount: Int = 3, includeImageNames: Bool = false,
                                          effectBudget: Int? = nil, correlation: String? = nil,
                                          strategyLabel: String = "hybrid",
-                                         toolsAvailable: Bool = true) -> String {
+                                         toolsAvailable: Bool = true,
+                                         staleness: EffectStalenessCheck = .unknown) -> String {
         let (turns, summary, compacted) = turnContext(from: history)
         let pointerCount = max(0, turns.count - inlineCount)
         // Only the inline segment carries effect bodies, so only it is budgeted — and with no
@@ -979,10 +1037,11 @@ struct EpisodicHistoryFormatter {
         for (index, turn) in turns.enumerated() {
             let recency = recencyLabel(turnsAgo: turns.count - index)
             body += index < pointerCount
-                ? renderPointerTurn(turn, index: index, recency: recency, toolsAvailable: toolsAvailable)
+                ? renderPointerTurn(turn, index: index, recency: recency,
+                                    toolsAvailable: toolsAvailable, staleness: staleness)
                 : renderInlineTurn(turn, recency: recency, includeImageNames: includeImageNames,
                                    elidedActionIDs: budgeted.elidedActionIDs,
-                                   toolsAvailable: toolsAvailable)
+                                   toolsAvailable: toolsAvailable, staleness: staleness)
         }
 
         let xml = envelope(turnsXML: body, checkpointSummary: summary, compactedTurnCount: compacted,

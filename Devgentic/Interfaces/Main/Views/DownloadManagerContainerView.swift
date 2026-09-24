@@ -30,6 +30,7 @@ private let boundedDownloadRecords: FetchDescriptor<DownloadRecord> = {
 }()
 
 struct DownloadManagerContainerView: View {
+    var isEmbeddedInSettings: Bool = false
 
     @Query(boundedDownloadRecords)
     private var allRecords: [DownloadRecord]
@@ -43,6 +44,73 @@ struct DownloadManagerContainerView: View {
     private var historyRecords: [DownloadRecord] { allRecords.filter { !$0.isActive } }
 
     var body: some View {
+        Group {
+            if isEmbeddedInSettings {
+                settingsBody
+            } else {
+                standaloneBody
+            }
+        }
+        .alert("Clear download history?", isPresented: $showingClearAlert) {
+            Button("Clear", role: .destructive) {
+                let cleared = (try? DownloadHistoryStore.shared.deleteAllHistory(keepingActive: true).get()) ?? 0
+                toastManager.show("Removed \(cleared) record\(cleared == 1 ? "" : "s")", style: .success)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Removes all completed, failed, and cancelled records. Active downloads are kept.")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .clearDownloadHistory)) { _ in
+            showingClearAlert = true
+        }
+    }
+
+    @ViewBuilder
+    private var settingsBody: some View {
+        if allRecords.isEmpty {
+            emptyState
+                .frame(minHeight: 320)
+        } else {
+            VStack(spacing: 20) {
+                if !activeRecords.isEmpty {
+                    sectionView(title: "Active Downloads (\(activeRecords.count))") {
+                        ForEach(activeRecords) { record in
+                            ActiveDownloadCardView(record: record)
+                        }
+                    }
+                }
+
+                if !historyRecords.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("History (\(historyRecords.count))")
+                                .font(theme.fontSubheadline.weight(.bold))
+                                .foregroundColor(theme.primaryText)
+                                .textCase(.uppercase)
+                                .tracking(0.5)
+
+                            Spacer()
+
+                            TactileButton(
+                                title: "Clear History",
+                                icon: "trash",
+                                variant: .subtle,
+                                size: .compact
+                            ) {
+                                showingClearAlert = true
+                            }
+                        }
+
+                        ForEach(historyRecords) { record in
+                            HistoryDownloadCardView(record: record)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var standaloneBody: some View {
         VStack(spacing: 0) {
             DynamicIslandBar(title: "Download Manager", icon: "arrow.down.circle") {
                 if !historyRecords.isEmpty {
@@ -60,38 +128,33 @@ struct DownloadManagerContainerView: View {
                 emptyState
             } else {
                 ScrollView {
-                    VStack(spacing: 20) {
-                        if !activeRecords.isEmpty {
-                            sectionView(title: "Active Downloads (\(activeRecords.count))") {
-                                ForEach(activeRecords) { record in
-                                    ActiveDownloadCardView(record: record)
-                                }
-                            }
-                        }
-
-                        if !historyRecords.isEmpty {
-                            sectionView(title: "History (\(historyRecords.count))") {
-                                ForEach(historyRecords) { record in
-                                    HistoryDownloadCardView(record: record)
-                                }
-                            }
-                        }
-                    }
-                    .padding(24)
-                    .frame(maxWidth: ViewLayout.maxContentWidth)
-                    .frame(maxWidth: .infinity)
+                    downloadCards
+                        .padding(24)
+                        .frame(maxWidth: ViewLayout.maxContentWidth)
+                        .frame(maxWidth: .infinity)
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .alert("Clear download history?", isPresented: $showingClearAlert) {
-            Button("Clear", role: .destructive) {
-                let cleared = (try? DownloadHistoryStore.shared.deleteAllHistory(keepingActive: true).get()) ?? 0
-                toastManager.show("Removed \(cleared) record\(cleared == 1 ? "" : "s")", style: .success)
+    }
+
+    private var downloadCards: some View {
+        VStack(spacing: 20) {
+            if !activeRecords.isEmpty {
+                sectionView(title: "Active Downloads (\(activeRecords.count))") {
+                    ForEach(activeRecords) { record in
+                        ActiveDownloadCardView(record: record)
+                    }
+                }
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Removes all completed, failed, and cancelled records. Active downloads are kept.")
+
+            if !historyRecords.isEmpty {
+                sectionView(title: "History (\(historyRecords.count))") {
+                    ForEach(historyRecords) { record in
+                        HistoryDownloadCardView(record: record)
+                    }
+                }
+            }
         }
     }
 

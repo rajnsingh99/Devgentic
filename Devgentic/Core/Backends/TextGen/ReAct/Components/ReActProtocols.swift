@@ -24,7 +24,81 @@ enum CircuitBreakerAction: Equatable, Sendable {
     /// humans want a short signal, models need explicit escape hatches.
     case proceedWithWarning(uiMessage: String, modelAlert: String)
     case intervene(systemMessage: String)
-    case abort(reason: String)
+    case abort(AbortTrigger)
+}
+
+// MARK: - Abort Trigger
+
+/// Why the circuit breaker wants to stop, plus everything the executor needs to act on it.
+///
+/// ⚠️⚠️ WHY THIS IS A TYPE AND NOT A STRING. `abort` used to carry only a `reason`, so the
+/// executor reconstructed the rest from two `var`s declared ~80 lines away —
+/// `abortCategory` and `abortBypassesRecoveryPolicy`. BOTH went dead without anyone noticing:
+///
+///   • `abortBypassesRecoveryPolicy` was declared `false` and NEVER assigned `true`, so the
+///     `ask_user` idle bypass its own comment describes had never once fired.
+///   • `abortCategory` was declared `.cbRepetitiveAction` and never reassigned, so every
+///     circuit-breaker abort — including consecutive tool FAILURES and user DENIALS — was
+///     filed under "Repetitive Action" in the error dashboards.
+///
+/// Both are the same defect: facts about the trigger, stored apart from the trigger. Here they
+/// are DERIVED from `kind`, so a new trigger cannot be added without answering for them, and
+/// they cannot drift from the thing that produced them.
+struct AbortTrigger: Equatable, Sendable {
+
+    enum Kind: Equatable, Sendable {
+        /// The same (tool, args, output) fingerprint repeated N times in a row.
+        case repetitiveAction
+        /// One tool called N times with identical args AND identical output across iterations.
+        case staleToolRepetition
+        /// N consecutive tool failures without recovery.
+        case consecutiveToolFailures
+        /// The user declined N consecutive tool calls.
+        case consecutiveDenials
+    }
+
+    let kind: Kind
+    /// Operator- and user-facing text. Says what happened, not what will happen about it.
+    let reason: String
+
+    /// What the MODEL is told when the run continues.
+    ///
+    /// ⚠️ Carried per-trigger because one shared sentence was actively harmful. The executor
+    /// used to inject "Tools are failing repeatedly: …" for EVERY abort — including a
+    /// repetition loop where all three calls SUCCEEDED. Field-observed 2026-09-20: the model
+    /// read that, replied "I understand the frustration with the tool failures", concluded it
+    /// could not read a 531-byte file it had just read three times, and made an edit it
+    /// itself labelled a "high-risk guess". A wrong word in an alert corrupted a source file.
+    let modelNarrative: String
+
+    /// ⚠️ Derived. Was a mutable `var` that nothing ever set — see the type's note.
+    var category: AgentErrorCategory {
+        switch kind {
+        case .repetitiveAction:      return .cbRepetitiveAction
+        case .staleToolRepetition:   return .cbToolRetryLimit
+        case .consecutiveToolFailures: return .cbConsecutiveFail
+        case .consecutiveDenials:    return .cbAskUserLimit
+        }
+    }
+
+    /// Whether the profile's `ErrorRecovery.onToolFailure` may downgrade this abort.
+    ///
+    /// ⚠️ TRUE FOR EVERY KIND TODAY, DELIBERATELY. That preserves current behaviour exactly:
+    /// the dead bypass flag meant nothing has ever bypassed the policy, and the decision taken
+    /// 2026-09-20 was to keep loops NUDGING rather than hard-stopping — the tools in a loop
+    /// have succeeded, so the run still holds real information and killing it discards that.
+    /// The breaker already intervenes one call earlier via `proceedWithWarning`.
+    ///
+    /// This is the seam where that changes. Returning `false` for a kind makes it abort
+    /// regardless of the profile's tolerance; `.consecutiveDenials` is the likeliest first
+    /// candidate, since a user saying no repeatedly is not a tool failure to be retried.
+    var honoursToolFailurePolicy: Bool {
+        switch kind {
+        case .repetitiveAction, .staleToolRepetition,
+             .consecutiveToolFailures, .consecutiveDenials:
+            return true
+        }
+    }
 }
 
 /// Evaluates execution state to prevent infinite loops, hallucination spirals,

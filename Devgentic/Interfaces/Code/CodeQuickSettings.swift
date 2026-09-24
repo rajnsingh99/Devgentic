@@ -27,7 +27,7 @@ struct CodeQuickSettings: Codable, Hashable, Sendable {
     var maxIterations: Int?
 
     /// COMPUTE budget in seconds — time parked awaiting a human is excluded by
-    /// `ComputeTimeoutSentinel`. `nil` → the preset's 300. `.some(0)` means no limit.
+    /// `ComputeTimeoutSentinel`. `nil` → `CodeSessionManager.presetExecutionTimeout`. `.some(0)` means no limit.
     var executionTimeout: TimeInterval?
 
     /// Per-tool confirmation overrides, keyed by tool name. `true` = ask first, `false` = run

@@ -133,23 +133,29 @@ struct CodeBlockView: View {
         let lines = Self.lineCount(of: display)
 
         VStack(spacing: 0) {
-            // MARK: - Mac Window Header
+            // MARK: - IDE Window Header
             HStack(spacing: 8) {
                 // Language Badge (Aligned Left)
-                Text(language.isEmpty ? "plaintext" : language.lowercased())
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(theme.codeBlockHeaderText.opacity(0.85))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(theme.codeBlockHeaderText.opacity(0.08)))
-                    .overlay(Capsule().stroke(theme.codeBlockHeaderText.opacity(0.15), lineWidth: 0.5))
+                Text(language.isEmpty ? "PLAINTEXT" : language.uppercased())
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .foregroundColor(theme.codeBlockHeaderText.opacity(0.9))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2.5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(theme.codeBlockHeaderText.opacity(0.08))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .strokeBorder(theme.codeBlockHeaderText.opacity(0.14), lineWidth: 0.5)
+                    )
 
                 if let fileName, !fileName.isEmpty {
                     HStack(spacing: 4) {
                         Image(systemName: "doc.text.fill")
                             .font(.system(size: 10))
                         Text(fileName)
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: 11, weight: .medium))
                     }
                     .foregroundColor(theme.codeBlockHeaderText.opacity(0.85))
                     .lineLimit(1)
@@ -158,9 +164,16 @@ struct CodeBlockView: View {
                 }
 
                 if lines > 1 {
-                    Text("\(lines) lines")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(theme.codeBlockHeaderSecondaryText)
+                    HStack(spacing: 4) {
+                        if fileName != nil {
+                            Text("•")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(theme.codeBlockHeaderSecondaryText.opacity(0.6))
+                        }
+                        Text("\(lines) lines")
+                            .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                            .foregroundColor(theme.codeBlockHeaderSecondaryText)
+                    }
                 }
 
                 Spacer()
@@ -188,13 +201,19 @@ struct CodeBlockView: View {
                                 Image(systemName: "arrow.up.forward.app")
                                     .font(.system(size: 10, weight: .semibold))
                                 Text("Viewer")
-                                    .font(.system(size: 10, weight: .semibold))
+                                    .font(.system(size: 10.5, weight: .semibold))
                             }
-                            .foregroundColor(theme.accentColor)
+                            .foregroundColor(isOpenHovering ? theme.primaryText : theme.codeBlockHeaderText.opacity(0.85))
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3.5)
-                            .background(Capsule().fill(theme.accentColor.opacity(isOpenHovering ? 0.22 : 0.12)))
-                            .overlay(Capsule().stroke(theme.accentColor.opacity(isOpenHovering ? 0.45 : 0.25), lineWidth: 0.5))
+                            .background(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .fill(theme.codeBlockHeaderText.opacity(isOpenHovering ? 0.14 : 0.06))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .strokeBorder(theme.codeBlockHeaderText.opacity(isOpenHovering ? 0.25 : 0.12), lineWidth: 0.5)
+                            )
                         }
                         .buttonStyle(.plain)
                         .onHover { hovering in withAnimation(.easeInOut(duration: 0.15)) { isOpenHovering = hovering } }
@@ -207,13 +226,19 @@ struct CodeBlockView: View {
                             Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
                                 .font(.system(size: 10, weight: .semibold))
                             Text(isCopied ? "Copied" : "Copy")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(.system(size: 10.5, weight: .semibold))
                         }
-                        .foregroundColor(isCopied ? theme.successColor : theme.codeBlockHeaderText.opacity(0.85))
+                        .foregroundColor(isCopied ? theme.successColor : (isHovering ? theme.primaryText : theme.codeBlockHeaderText.opacity(0.85)))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3.5)
-                        .background(Capsule().fill(theme.codeBlockHeaderText.opacity(isHovering ? 0.12 : 0.06)))
-                        .overlay(Capsule().stroke(theme.codeBlockHeaderText.opacity(0.15), lineWidth: 0.5))
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(isCopied ? theme.successColor.opacity(0.12) : theme.codeBlockHeaderText.opacity(isHovering ? 0.14 : 0.06))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .strokeBorder(isCopied ? theme.successColor.opacity(0.3) : theme.codeBlockHeaderText.opacity(isHovering ? 0.25 : 0.12), lineWidth: 0.5)
+                        )
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(isCopied ? "Copied" : "Copy code")
@@ -225,21 +250,23 @@ struct CodeBlockView: View {
             .background(theme.codeBlockHeaderBackground)
 
             Rectangle()
-                .fill(theme.codeBlockHeaderText.opacity(0.1))
+                .fill(theme.dividerColor.opacity(0.4))
                 .frame(height: 0.5)
 
             // MARK: - Editor Content
             if exceedsHeightCap(lines: lines) {
                 ScrollView(.vertical) {
                     HighlightedCodeViewRepresentable(attributedString: highlightedCode, code: display, fontSize: fontSize)
-                        .padding(12)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
                         .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
                 .frame(height: ChatUIConstants.codeBlockMaxHeight)
                 .background(theme.codeBlockEditorBackground)
             } else {
                 HighlightedCodeViewRepresentable(attributedString: highlightedCode, code: display, fontSize: fontSize)
-                    .padding(12)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                     .background(theme.codeBlockEditorBackground)
             }
@@ -263,9 +290,9 @@ struct CodeBlockView: View {
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
+                .strokeBorder(theme.dividerColor.opacity(0.45), lineWidth: 0.5)
         )
-        .shadow(color: theme.shadowColor.opacity(0.3), radius: 6, x: 0, y: 3)
+        .shadow(color: theme.shadowColor.opacity(0.22), radius: 5, x: 0, y: 2)
     }
 
     /// Re-highlight trigger. Holds the code by reference (Swift strings are COW) rather

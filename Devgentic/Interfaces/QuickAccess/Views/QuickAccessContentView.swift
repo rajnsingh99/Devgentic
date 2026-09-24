@@ -508,9 +508,20 @@ extension QuickAccessContentView {
                     LazyVStack(spacing: 0) {
                         // currentChatMessages is newest-first; reverse for top→bottom display.
                         ForEach(session.chatHistoryViewModel.currentChatMessages.reversed()) { message in
-                            ChatBubbleView(message: message)
-                                .id(message.id)
-                                .padding(.horizontal, 16)
+                            // ⚠️ The same branch the main transcript makes. A synthetic stub is a
+                            // `sender: .user` row nobody typed, so without this the panel draws it
+                            // as a user bubble — the one rendering that is outright wrong. This
+                            // panel shows the SAME conversations as the main window, so a stub
+                            // reaching it is ordinary, not an edge case.
+                            if message.isSyntheticPrompt {
+                                BackgroundTaskDividerView(message: message)
+                                    .id(message.id)
+                                    .padding(.horizontal, 16)
+                            } else {
+                                ChatBubbleView(message: message)
+                                    .id(message.id)
+                                    .padding(.horizontal, 16)
+                            }
                         }
                     }
                     .frame(maxWidth: expandedInputAreaMaxAllowedWidth)

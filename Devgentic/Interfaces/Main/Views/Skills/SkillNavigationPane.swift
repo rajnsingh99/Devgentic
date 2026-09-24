@@ -374,52 +374,36 @@ struct SkillNavigationPane: View {
                         )
                         .frame(width: 3)
                         .padding(.vertical, isSelected ? 2 : 5)
-                        .padding(.trailing, 4)
+                        .padding(.trailing, 5)
                         .shadow(color: isSelected ? theme.accentColor.opacity(0.4) : .clear, radius: 4)
                         .transition(.opacity.combined(with: .scale))
                 } else {
-                    Spacer().frame(width: 7)
+                    Spacer().frame(width: 8)
                 }
 
-                HStack(spacing: 10) {
-                    // Leading Icon Badge
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill((skill.isDraft ? Color.orange : theme.accentColor).opacity(0.12))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .strokeBorder((skill.isDraft ? Color.orange : theme.accentColor).opacity(0.25), lineWidth: 0.5)
-                            )
-                        Image(systemName: "puzzlepiece")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(skill.isDraft ? Color.orange : theme.accentColor)
-                    }
-                    .frame(width: 26, height: 26)
+                // Text
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(skill.displayName)
+                        .font(theme.fontFootnote.weight(isSelected ? .semibold : .medium))
+                        .foregroundColor(theme.primaryText)
+                        .lineLimit(1)
 
-                    // Text
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(skill.displayName)
-                            .font(theme.fontFootnote.weight(isSelected ? .semibold : .medium))
-                            .foregroundColor(theme.primaryText)
-                            .lineLimit(1)
+                    Text(subtitle(for: skill))
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.secondaryText)
+                        .lineLimit(1)
+                }
 
-                        Text(subtitle(for: skill))
-                            .font(theme.fontCaption2)
-                            .foregroundColor(theme.secondaryText)
-                            .lineLimit(1)
-                    }
+                Spacer(minLength: 4)
 
-                    Spacer(minLength: 4)
-
-                    // Draft Pill Badge
-                    if skill.isDraft {
-                        Text("Draft")
-                            .font(theme.fontCodeCaption.weight(.medium))
-                            .foregroundColor(.orange)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(.orange.opacity(0.12), in: Capsule())
-                    }
+                // Draft Pill Badge
+                if skill.isDraft {
+                    Text("Draft")
+                        .font(theme.fontCodeCaption.weight(.medium))
+                        .foregroundColor(.orange)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(.orange.opacity(0.12), in: Capsule())
                 }
             }
             .padding(.horizontal, 6)

@@ -632,22 +632,44 @@ final class MainApplicationViewModel {
 
     // MARK: - Code Session
 
-    /// Late-injected by DevgenticApp after init (avoids init-order dependency).
+    /// Late-injected by DevgenticApp from `body` (NOT from `init()` — see the note there).
+    ///
+    /// ⚠️ The identity check is a TRIPWIRE, not bookkeeping. Binding the wrong instance here is
+    /// silent by construction: everything still compiles, the UI still works, and the only symptom
+    /// is that the Code system prompt quietly stops being applied. If this ever logs a swap after
+    /// the first bind, that defect is back.
     func configureCodeSession(_ manager: CodeSessionManager) {
+        if let existing = codeSessionManager, existing !== manager {
+            logger.error("[CODE] configureCodeSession REPLACED the bound manager (\(ObjectIdentifier(existing).debugDescription) → \(ObjectIdentifier(manager).debugDescription)). CONSEQUENCE: more than one CodeSessionManager is live, so the instance the views mutate may not be the one the send path reads — which silently drops the Code system prompt. Find the second construction site.")
+        }
         self.codeSessionManager = manager
     }
 
     /// Refreshes the code profile's instructions and sets it as the selected profile for send.
     /// Called before each send when `interfaceMode == .code`.
     /// Visibility: needed by `MessagingCoordinator` for its code-mode branch.
-    func prepareCodeProfileForSend() {
-        guard let csm = codeSessionManager, csm.isConfigured else {
-            logger.warning("[CODE] prepareCodeProfileForSend: CodeSessionManager not configured")
-            return
+    /// - Returns: `false` when the session is not ready, so the caller can REFUSE the send.
+    ///
+    /// ⚠️⚠️ This used to return `Void` and simply log on the unconfigured path — and the send
+    /// carried on regardless. That is how a wrong-instance bind became a silent prompt loss: the
+    /// Code system prompt was skipped, the profile kept whatever instructions it already had
+    /// (none), and the model ran against the generic assistant fallback with no project root. A
+    /// Code send that cannot be prepared must not proceed; the reason has to reach the user, not
+    /// just the log.
+    @discardableResult
+    func prepareCodeProfileForSend() -> Bool {
+        guard let csm = codeSessionManager else {
+            logger.error("[CODE] prepareCodeProfileForSend: no CodeSessionManager bound. CONSEQUENCE: the send is refused — without it there is no project root and no Code system prompt, so the model would run as a generic assistant over the whole filesystem.")
+            return false
+        }
+        guard csm.isConfigured else {
+            logger.error("[CODE] prepareCodeProfileForSend: session not configured (model: '\(csm.modelName.isEmpty ? "none" : csm.modelName)', folder: \(csm.projectPath?.path ?? "none")). CONSEQUENCE: the send is refused. Previously it proceeded without the Code system prompt, leaving the model with no project root.")
+            return false
         }
         csm.refreshInstructionsOnProfile()
         backendConfiguration.selectedProfileID = csm.codeProfileID
         logger.info("[CODE] Code profile prepared for send (profile ID: \(csm.codeProfileID?.uuidString ?? "nil"))")
+        return true
     }
 
     // MARK: - ChatOps Lifecycle (forwards to ChatOpsCoordinator)

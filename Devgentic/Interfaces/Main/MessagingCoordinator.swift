@@ -177,7 +177,21 @@ final class MessagingCoordinator {
         if vm.interfaceMode == .code {
             logger.info("[CODE] ────────── Code mode send initiated ──────────")
             logger.info("[CODE] Query preview: \(String(plainUserQueryFromEditor.prefix(120)))")
-            vm.prepareCodeProfileForSend()
+            // ⚠️ The return value is LOAD-BEARING. This call used to be fire-and-forget: when it
+            // could not prepare the profile it logged a warning and the send continued, shipping
+            // the model a profile with no Code system prompt and no project root. Refusing here is
+            // the only choke point that covers every send entry, not just the composer's own
+            // guard in `ChatInputAreaView.attemptSend`.
+            //
+            // No user-facing message from here: the composer's own guard
+            // (`ChatInputAreaView.attemptSend`) intercepts an unconfigured session first and opens
+            // the model or folder picker, which is the actionable response. This is the backstop
+            // for every OTHER entry point — ChatOps, scheduler, resume — where silently running a
+            // Code profile with no project root is the worse outcome.
+            guard vm.prepareCodeProfileForSend() else {
+                logger.error("[CODE] Send DROPPED — the Code session could not be prepared (see the [CODE] line above for which of model/folder is missing). CONSEQUENCE: no message was persisted and no stream started; the user's typed text is left in the composer because this returns before the input is cleared, so nothing they wrote is lost.")
+                return
+            }
         }
 
         guard let config = backendConfiguration.getRequestConfig() else {

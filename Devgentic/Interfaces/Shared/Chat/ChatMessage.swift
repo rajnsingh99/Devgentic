@@ -187,6 +187,64 @@ extension ToolExecutionData: Codable {
     }
 }
 
+/// How a background task ended, on the wire.
+///
+/// ⚠️ A FLAT `String` rawValue, deliberately, rather than mirroring
+/// `BackgroundProcessRegistry.Status` — which carries `exited(code:)` as an associated value. A
+/// nested enum's rawValue changing is one of the documented corruption classes that used to lose a
+/// whole run's timeline; the exit code rides alongside in its own field instead.
+///
+/// `interrupted` exists from day one although nothing sets it yet: quit KILLS every background
+/// task, so a persisted `running` is a lie the moment the app restarts and reload has to be able
+/// to say so. Adding the case later would be a wire-format change; adding it now is free.
+enum BackgroundTaskStatus: String, Codable, Equatable {
+    case running
+    case exited
+    case timedOut
+    case stopped
+    case interrupted
+
+    var isTerminal: Bool { self != .running }
+}
+
+/// A `batch_command(background:)` task, as the timeline sees it.
+///
+/// ⚠️⚠️ `outputTail` IS BOUNDED AND THAT IS THE POINT. The full log lives in a FILE (`logPath`);
+/// this carries only its last few KB. `preWriteContent` / `postWriteContent` on
+/// `ToolExecutionData` are excluded from persistence for exactly this reason — *"up to a megabyte
+/// of file content per write into the message's timeline blob — which is re-encoded whole on every
+/// flush and decoded eagerly on every conversation load"*. A real build log is 375 KB, and a LIVE
+/// task would re-encode that blob on every output tick. The UI reads `logPath` directly when it
+/// wants the whole thing.
+struct BackgroundTaskData: Codable, Equatable, Identifiable {
+    /// Timeline identity. Distinct from `taskID`: this keys SwiftUI's `ForEach` and must stay
+    /// stable across every in-place update of the row.
+    let id: UUID
+    /// The registry's handle — `bg_1`. What `command_output` / `command_stop` take.
+    let taskID: String
+    /// What the model called this task, when it said. Optional on the wire, so a row written
+    /// before this existed still decodes; every surface falls back to the command.
+    var name: String?
+    let command: String
+    let workingDirectory: String
+    let startedAt: Date
+    var finishedAt: Date?
+    var status: BackgroundTaskStatus
+    /// Set only for `.exited`. A signal number is NOT an exit code — see the registry's `Status`.
+    var exitCode: Int32?
+    let logPath: String
+    /// The last `maxOutputTail` characters of the log. Never the whole log.
+    var outputTail: String
+    /// Characters the log holds in total, so the UI can say how much is not shown here.
+    var logCharacterCount: Int
+
+    /// Small enough that a handful of tasks cannot bloat the message blob, large enough to carry a
+    /// build's verdict — the last ~200 chars of an xcodebuild log.
+    static let maxOutputTail = 4_000
+
+    var elapsed: TimeInterval { (finishedAt ?? Date()).timeIntervalSince(startedAt) }
+}
+
 enum TimelineEvent: Codable, Equatable, Identifiable {
     /// Generic thinking / narration — extended thinking traces (step.thought), capability
     /// progress, executor status. The source is typically the system rather than the model's
@@ -197,6 +255,13 @@ enum TimelineEvent: Codable, Equatable, Identifiable {
     /// can differentiate model-authored prose from system narration.
     case reasoning(id: UUID, text: String)
     case toolExecution(ToolExecutionData)
+    /// A `batch_command(background:)` task, which OUTLIVES the tool call that started it.
+    ///
+    /// ⚠️ Deliberately NOT a `toolExecution` with `isExecuting: true`. That flag means "the ReAct
+    /// loop is blocked here", and every consumer reads it that way — `ActiveStreamManager` finds
+    /// the live entry BY it. A background task's tool call has already returned; the task is what
+    /// is still running. Overloading the flag would make the loop look stuck on a finished call.
+    case backgroundTask(BackgroundTaskData)
     case mediaGeneration(id: UUID, toolName: String, artifact: MediaArtifact?, isComplete: Bool)
 
     // Capability milestones
@@ -231,6 +296,7 @@ enum TimelineEvent: Codable, Equatable, Identifiable {
         case .thought(let id, _): return id
         case .reasoning(let id, _): return id
         case .toolExecution(let data): return data.id
+        case .backgroundTask(let data): return data.id
         case .mediaGeneration(let id, _, _, _): return id
         case .capabilityMilestone(let id, _, _): return id
         case .warning(let id, _, _): return id
@@ -255,6 +321,11 @@ enum TimelineEvent: Codable, Equatable, Identifiable {
     var isCapabilityCard: Bool {
         switch self {
         case .planExecution, .reflectionRun: return true
+        // A background task's row is the ONLY record of a live process: its id, its log path, and
+        // the handle the UI polls. Evicting it while the task runs leaves a process nothing can
+        // name. Safe to protect absolutely because there are a handful per conversation, not
+        // hundreds — unlike the narrative events this cap exists to bound.
+        case .backgroundTask: return true
         default: return false
         }
     }
@@ -307,6 +378,7 @@ private enum KnownTimelineEvent: Codable {
     case thought(id: UUID, text: String)
     case reasoning(id: UUID, text: String)
     case toolExecution(ToolExecutionData)
+    case backgroundTask(BackgroundTaskData)
     case mediaGeneration(id: UUID, toolName: String, artifact: MediaArtifact?, isComplete: Bool)
     case capabilityMilestone(id: UUID, kind: CapabilityMilestoneKind, detail: String)
     case warning(id: UUID, category: WarningCategory, text: String)
@@ -322,6 +394,7 @@ extension TimelineEvent {
             case .thought(let id, let text):        self = .thought(id: id, text: text)
             case .reasoning(let id, let text):      self = .reasoning(id: id, text: text)
             case .toolExecution(let data):          self = .toolExecution(data)
+            case .backgroundTask(let data):         self = .backgroundTask(data)
             case .mediaGeneration(let id, let toolName, let artifact, let isComplete):
                 self = .mediaGeneration(id: id, toolName: toolName, artifact: artifact, isComplete: isComplete)
             case .capabilityMilestone(let id, let kind, let detail):
@@ -351,6 +424,7 @@ extension TimelineEvent {
         case .thought(let id, let text):        known = .thought(id: id, text: text)
         case .reasoning(let id, let text):      known = .reasoning(id: id, text: text)
         case .toolExecution(let data):          known = .toolExecution(data)
+        case .backgroundTask(let data):         known = .backgroundTask(data)
         case .mediaGeneration(let id, let toolName, let artifact, let isComplete):
             known = .mediaGeneration(id: id, toolName: toolName, artifact: artifact, isComplete: isComplete)
         case .capabilityMilestone(let id, let kind, let detail):
@@ -764,18 +838,54 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     var profileType: ProfileType?
 
     /// Where this message originated from (local Mac UI, Telegram, Discord, Orb, QuickAccess,
-    /// a scheduled task).
+    /// a scheduled task, a finished background task).
     ///
-    /// ⚠️ TRANSIENT — no column, and `ChatMessageSD.toChatMessage()` does not restore it, so every
-    /// reloaded row reads `.localUI` whatever it was sent as. Anything that needs durable
-    /// attribution needs a different mechanism; do not add a claim here that survives a relaunch.
+    /// ⚠️ DURABLE AS OF 2026-09-23 — `messageSourceRaw` on `ChatMessageSD`, restored by
+    /// `toChatMessage()`. This comment previously said the opposite ("TRANSIENT — no column …
+    /// do not add a claim here that survives a relaunch") and that was correct for what the
+    /// field was then: nothing but log interpolation read it, so persisting it would have been
+    /// storage nobody spent. The column was added deliberately when the UI began to branch on
+    /// it — an unprompted `.backgroundTask` report renders differently from a typed reply, and a
+    /// difference that evaporates on relaunch is worse than no difference at all, because the
+    /// same message changes appearance depending on when you look at it.
     ///
-    /// ⚠️ This said "Used by RemoteMirrorService to decide whether to mirror stream events to a
-    /// remote transport". `RemoteMirrorService` contains no reference to it (checked 2026-09-07).
-    /// The live readers are two log interpolations in `ActiveStreamManager` (`[HISTORY]` and
-    /// `[STREAM_START]`, naming the surface that started a run) and `OrbAmbientRunWatcher`,
-    /// which reads it off the AGENT message to decide whether to announce a finished run.
+    /// ⚠️ Rows written before the column decode as `.localUI`, which is the pre-existing
+    /// behaviour and the only honest answer — those rows never recorded a source.
+    ///
+    /// ⚠️ It is NOT the same question as `sender`. `sender` is who spoke; a woken report is
+    /// genuinely `.agent`, written by the agent from the conversation's own profile. This says
+    /// what CAUSED the turn, which is why the two must not be collapsed — see `SenderRole`.
+    ///
+    /// Readers: two log interpolations in `ActiveStreamManager` (`[HISTORY]`, `[STREAM_START]`),
+    /// `OrbAmbientRunWatcher` (whether to announce a finished run), and — since the column —
+    /// `AgentMessageActionsView` and the timeline divider.
     var messageSource: MessageSource = .localUI
+
+    /// Machine-authored scaffolding: a turn nobody typed, written so the exchange PAIRS.
+    ///
+    /// ⚠️⚠️ THIS EXISTS BECAUSE AN UNPAIRED ASSISTANT MESSAGE IS SILENTLY DISCARDED. Both
+    /// `NativeHistoryConverter.buildPairs` and `EpisodicHistoryFormatter.pairTurns` walk the
+    /// history as `user → agent` couples, binding `pendingUser` on a user row and consuming it
+    /// on the next agent row. An agent row with no user row in front of it fails the
+    /// `let userTurn = pendingUser` binding and is dropped — no warning, no log.
+    ///
+    /// A woken background-task report was exactly that shape: `BackgroundTaskWakeCoordinator`
+    /// built a user message and handed it to `startMessageStream` WITHOUT persisting it, so the
+    /// store held `user, agent, agent(orphan), user…` and every report the agent delivered was
+    /// gone from its own history by the next turn. The agent told the user a build had finished
+    /// and then had no record of having said so.
+    ///
+    /// The stub closes that. It is deliberately SHORT — unlike the wake prompt it replaces, it
+    /// is carried in the prompt on every subsequent turn, so the ~1KB of raw task output the
+    /// wake sends this turn (via `promptOverride`) must not be what persists. What persists is
+    /// the stub plus the model's report; the report IS the compression.
+    ///
+    /// ⚠️ NOT a hidden row. It renders as a centered system divider — see
+    /// `BackgroundTaskDividerView`. A store that holds a message the screen denies is a
+    /// divergence nobody can reason about later; the divider is the honest form of the same
+    /// information, and it carries the authoritative status (id, exit code) read from the
+    /// snapshot rather than from the model's prose, which a small local model can get wrong.
+    var isSyntheticPrompt: Bool = false
     
     var content: MessageContent
     var agentResponse: AgentResponse?
